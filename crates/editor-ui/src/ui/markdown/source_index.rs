@@ -28,12 +28,8 @@ impl MarkdownIndex {
     pub(crate) fn build(source: &str) -> Result<Self, MarkdownIndexError> {
         Ok(Self(artisan_markdown_index::MarkdownIndex::build(source)?))
     }
-    pub(crate) fn extend(
-        self,
-        previous: &str,
-        source: &str,
-    ) -> Result<(Self, usize), MarkdownIndexError> {
-        let (index, kept) = self.0.extend(previous, source)?;
+    pub(crate) fn append(self, source: &str) -> Result<(Self, usize), MarkdownIndexError> {
+        let (index, kept) = self.0.append(source)?;
         Ok((Self(index), kept))
     }
     pub(crate) fn resident_bytes(&self) -> usize {

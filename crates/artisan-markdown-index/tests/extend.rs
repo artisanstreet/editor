@@ -36,11 +36,10 @@ fn records(index: &MarkdownIndex) -> Vec<serde_json::Value> {
 fn extending_a_streamed_reply_indexes_it_exactly_as_a_full_build() {
     let mut reused = 0;
     for reply in REPLIES {
-        let mut previous = String::new();
         let mut index = MarkdownIndex::build("").expect("index");
         for end in (1..=reply.len()).filter(|end| reply.is_char_boundary(*end)) {
             let source = reply.get(..end).expect("a char boundary");
-            let (extended, kept) = index.extend(&previous, source).expect("index");
+            let (extended, kept) = index.append(source).expect("index");
             let full = MarkdownIndex::build(source).expect("index");
             let (extended_records, full_records) = (records(&extended), records(&full));
             assert_eq!(extended_records.len(), full_records.len(), "{source:?}");
@@ -52,7 +51,6 @@ fn extending_a_streamed_reply_indexes_it_exactly_as_a_full_build() {
             }
             reused += kept;
             index = extended;
-            source.clone_into(&mut previous);
         }
     }
     assert!(reused > 0, "streaming reuses the settled leaves");
@@ -60,15 +58,13 @@ fn extending_a_streamed_reply_indexes_it_exactly_as_a_full_build() {
 
 fn reparsed_share(reply: &str) -> (usize, usize) {
     let mut index = MarkdownIndex::build("").expect("index");
-    let mut previous = String::new();
     let (mut reparsed, mut total) = (0, 0);
     for end in (1..=reply.len()).filter(|end| reply.is_char_boundary(*end)) {
         let source = reply.get(..end).expect("a char boundary");
-        let (extended, kept) = index.extend(&previous, source).expect("index");
+        let (extended, kept) = index.append(source).expect("index");
         reparsed += extended.leaves().len() - kept;
         total += extended.leaves().len();
         index = extended;
-        source.clone_into(&mut previous);
     }
     (reparsed, total)
 }
@@ -100,19 +96,4 @@ fn long_lists_quotes_and_fenced_brackets_stream_without_reparsing_from_the_start
             reply.get(..40)
         );
     }
-}
-
-#[test]
-fn a_rewritten_reply_is_indexed_from_scratch() {
-    let (index, _) = MarkdownIndex::build("First.\n\nSecond.\n")
-        .expect("index")
-        .extend("First.\n\nSecond.\n", "Other.\n\nSecond.\n")
-        .expect("index")
-        .0
-        .extend("Other.\n\nSecond.\n", "Other.\n\nSecond.\n\nThird")
-        .expect("index");
-    assert_eq!(
-        records(&index),
-        records(&MarkdownIndex::build("Other.\n\nSecond.\n\nThird").expect("index"))
-    );
 }

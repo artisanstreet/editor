@@ -84,6 +84,26 @@ fn rich_kinds(presenter: &MarkdownPresenter) -> Vec<Option<(String, bool)>> {
 }
 
 #[test]
+fn a_rewritten_reply_is_prepared_from_scratch() {
+    let engine = MarkdownEngine::new().expect("engine");
+    let mut rewritten = MarkdownPresenter::default();
+    for source in [
+        "First.\n\n- one\n- two\n",
+        "Other.\n\n- one\n- two\n",
+        "Other.\n\n- one\n- two\n\n  three\n",
+    ] {
+        rewritten.prepare(&engine, source).expect("prepared");
+        let mut whole = MarkdownPresenter::default();
+        whole.prepare(&engine, source).expect("prepared");
+        assert_eq!(
+            prepared_rows(&rewritten),
+            prepared_rows(&whole),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
 fn a_reply_prepared_delta_by_delta_matches_one_prepared_whole() {
     let reply = "# Report\n\nThe heatmap below is **hot**.\n\n```artisan-heatmap\n{\"values\":[[1,2],[3,4]]}\n```\n\n- one\n- two with `code`\n\n```rust\nfn main() {\n\n    paint();\n}\n```\n\nBetween fences.\n\n```artisan-callout\n{\"kind\":\"warning\",\"title\":\"Stale\",\"body\":\"Regenerate it.\"}\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nDone.\n";
     let engine = MarkdownEngine::new().expect("engine");

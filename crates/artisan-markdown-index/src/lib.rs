@@ -184,13 +184,6 @@ impl MarkdownIndex {
         build::build(source)
     }
 
-    pub fn extend(self, previous: &str, source: &str) -> Result<(Self, usize), BuildIndexError> {
-        if self.source_bytes != previous.len() || !source.starts_with(previous) {
-            return Ok((Self::build(source)?, 0));
-        }
-        self.append(source)
-    }
-
     pub fn append(self, source: &str) -> Result<(Self, usize), BuildIndexError> {
         let Some(previous) = source
             .get(..self.source_bytes)

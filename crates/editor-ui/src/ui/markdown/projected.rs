@@ -114,23 +114,37 @@ pub struct ShapedSource {
 impl ShapedSource {
     pub fn new(source: &str, command: Option<&str>) -> Result<Self, MarkdownIndexError> {
         let index = MarkdownIndex::build(source)?;
-        Self::shaped(index, 0, &[], source, command)
+        Self::shaped(index, 0, &[], source.to_owned(), command.map(str::to_owned))
     }
 
     pub fn extend(self, source: &str, command: Option<&str>) -> Result<Self, MarkdownIndexError> {
-        if self.command.as_deref() != command {
-            return Self::new(source, command);
+        match source.strip_prefix(self.source.as_str()) {
+            Some(appended) if self.command.as_deref() == command => self.append(appended),
+            Some(_) | None => Self::new(source, command),
         }
-        let (index, kept) = self.index.extend(&self.source, source)?;
-        Self::shaped(index, kept, &self.signatures[..kept], source, command)
+    }
+
+    pub fn append(mut self, appended: &str) -> Result<Self, MarkdownIndexError> {
+        if appended.is_empty() {
+            return Ok(self);
+        }
+        self.source.push_str(appended);
+        let (index, kept) = self.index.append(&self.source)?;
+        Self::shaped(
+            index,
+            kept,
+            &self.signatures[..kept],
+            self.source,
+            self.command,
+        )
     }
 
     fn shaped(
         index: MarkdownIndex,
         kept: usize,
         settled: &[u64],
-        source: &str,
-        command: Option<&str>,
+        source: String,
+        command: Option<String>,
     ) -> Result<Self, MarkdownIndexError> {
         let mut signatures = Vec::with_capacity(index.leaves().len());
         signatures.extend_from_slice(settled);
@@ -139,16 +153,16 @@ impl ShapedSource {
                 .context(ordinal)
                 .ok_or(MarkdownIndexError::InvalidShape)?;
             signatures.push(leaf_signature(
-                source,
+                &source,
                 &index.leaves()[ordinal].source_range(),
                 context,
                 table_continues(&index, ordinal, context),
-                command.filter(|_| ordinal == 0),
+                command.as_deref().filter(|_| ordinal == 0),
             ));
         }
         Ok(Self {
-            source: source.to_owned(),
-            command: command.map(str::to_owned),
+            source,
+            command,
             index,
             signatures: signatures.into(),
         })
@@ -205,15 +219,14 @@ impl ProjectedDocument {
         Self::projected(index, Vec::new(), engine, source, command, memo)
     }
 
-    pub(super) fn extend(
+    pub(super) fn append(
         self,
         engine: &MarkdownEngine,
-        previous: &str,
         source: &str,
         command: Option<&str>,
         memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<(Self, usize), MarkdownIndexError> {
-        let (index, kept) = self.index.extend(previous, source)?;
+        let (index, kept) = self.index.append(source)?;
         let mut leaves = self.leaves;
         leaves.truncate(kept);
         Ok((

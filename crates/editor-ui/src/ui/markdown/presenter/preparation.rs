@@ -1,7 +1,6 @@
 use super::super::{CodeFence, MarkdownEngine};
 use super::{MarkdownPresenter, PreparationProof, PresenterError, RetainedRich, fence_key};
 use crate::ui::rich::{self, RichFence};
-use crate::ui::text::slice::slice;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
@@ -26,40 +25,63 @@ impl MarkdownPresenter {
         self.prepare_with(engine, source, command)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one preparation pass rebuilding the document, projection, rich fences and proofs together"
-    )]
+    fn prepare_appended(
+        &mut self,
+        engine: &MarkdownEngine,
+        appended: &str,
+    ) -> Result<PreparationProof, PresenterError> {
+        let Some(previous) = self.projected.take() else {
+            return Err(PresenterError::Unavailable("unprepared"));
+        };
+        if appended.is_empty() {
+            self.projected = Some(previous);
+            return Ok(PreparationProof(Arc::clone(&self.proof)));
+        }
+        self.proof = Arc::new(());
+        self.document = None;
+        self.source.push_str(appended);
+        let (projected, kept) = previous.append(
+            engine,
+            &self.source,
+            self.command.as_deref(),
+            &mut self.fence_tokens,
+        )?;
+        Ok(self.retain_prepared(projected, kept))
+    }
+
     fn prepare_with(
         &mut self,
         engine: &MarkdownEngine,
         source: &str,
         command: Option<String>,
     ) -> Result<PreparationProof, PresenterError> {
-        if self.projected.is_some() && self.source == source && self.command == command {
-            return Ok(PreparationProof(Arc::clone(&self.proof)));
+        if self.projected.is_some() && self.command == command {
+            match source.strip_prefix(self.source.as_str()) {
+                Some("") => return Ok(PreparationProof(Arc::clone(&self.proof))),
+                Some(appended) => return self.prepare_appended(engine, appended),
+                None => {}
+            }
         }
         self.proof = Arc::new(());
         self.document = None;
-        let extendable = self.command == command && source.starts_with(self.source.as_str());
-        let (projected, kept) = match self.projected.take() {
-            Some(previous) if extendable => previous.extend(
-                engine,
-                &self.source,
-                source,
-                command.as_deref(),
-                &mut self.fence_tokens,
-            )?,
-            _ => (
-                super::super::projected::ProjectedDocument::new(
-                    engine,
-                    source,
-                    command.as_deref(),
-                    &mut self.fence_tokens,
-                )?,
-                0,
-            ),
-        };
+        self.projected = None;
+        let projected = super::super::projected::ProjectedDocument::new(
+            engine,
+            source,
+            command.as_deref(),
+            &mut self.fence_tokens,
+        )?;
+        self.source.clear();
+        self.source.push_str(source);
+        self.command = command;
+        Ok(self.retain_prepared(projected, 0))
+    }
+
+    fn retain_prepared(
+        &mut self,
+        projected: super::super::projected::ProjectedDocument,
+        kept: usize,
+    ) -> PreparationProof {
         if kept == 0 {
             self.fence_tokens.finish();
         }
@@ -152,15 +174,8 @@ impl MarkdownPresenter {
                 }
             })
             .collect();
-        if kept > 0 {
-            self.source.push_str(slice(source, self.source.len()..));
-        } else {
-            self.source.clear();
-            self.source.push_str(source);
-        }
-        self.command = command;
         self.projected = Some(projected);
-        Ok(PreparationProof(Arc::clone(&self.proof)))
+        PreparationProof(Arc::clone(&self.proof))
     }
 
     pub fn prepare_document(&mut self, engine: &MarkdownEngine) -> Result<(), PresenterError> {
