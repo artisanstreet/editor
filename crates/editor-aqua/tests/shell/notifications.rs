@@ -124,26 +124,117 @@ fn coalescing_notifications_never_drops_the_underlying_text_appends() {
 }
 
 #[test]
-fn signing_out_clears_the_badge_and_disowns_old_notifications() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "one notify-then-sign-out scenario walked step by step"
+)]
+fn signing_out_clears_the_badge_and_withdraws_the_notifications_it_posted() {
+    use artisan_api::{
+        EngineConfig, EngineId, Event, ProjectId, Run, RunId, RunOutcome, RunState, Thread, Usage,
+    };
     use editor_aqua::core::{Attention, EntryGate, Screen};
     use editor_aqua::shell::native_notifications::activation;
     use editor_aqua::shell::notifications::tag;
+    use test_support::editor::forge::{StubForge, empty_state};
     use test_support::editor::shell::{Motion, ThreadShell};
 
+    let thread_id = ThreadId("notified-thread".into());
+    let thread = Thread {
+        id: thread_id.clone(),
+        project_id: ProjectId::scratch(),
+        title: Some("Fix the build".into()),
+        config: EngineConfig::new(EngineId::Claude),
+        activity_seq: 2,
+        activity_at: 0,
+        read_seq: 1,
+        marked_unread: false,
+        settled_seq: 0,
+        seq: 2,
+        created_at: 0,
+        updated_at: 0,
+        archived: false,
+        parent_thread_id: None,
+        spawned_by: None,
+        parked_until: None,
+    };
+    let run = Run {
+        config: None,
+        id: RunId("notified-run".into()),
+        thread_id: thread_id.clone(),
+        engine: EngineId::Claude,
+        model: None,
+        input_cutoff: 0,
+        state: RunState::Running,
+        usage: Usage::default(),
+        session_id: None,
+        seq: 2,
+        started_at: 0,
+        continuation: None,
+    };
+    let mut state = empty_state();
+    state.threads.push(thread.clone());
+    state.runs.push(run.clone());
+    state.head = 2;
+    let forge = editor_aqua::core::runtime::runtime()
+        .block_on(StubForge::serve(state, axum::Router::new()));
     let ThreadShell {
-        mut shell,
-        host,
-        thread,
-        ..
-    } = ThreadShell::open("notified-host", "notified-thread", Motion::Reduced);
-    let posted = tag(&host.id, &thread);
+        mut shell, host, ..
+    } = ThreadShell::open_stubbed(&forge, "notified-host", "notified-thread", Motion::Reduced);
+    let workspace = shell
+        .entry
+        .workspace_mut()
+        .expect("a signed-in shell shows a workspace");
+    workspace.handle_event(&shell.core, &CoreEvent::HostsChanged, false);
+
+    forge.publish(Event::Thread {
+        thread: Thread {
+            activity_seq: 3,
+            seq: 3,
+            ..thread
+        },
+    });
+    forge.publish(Event::Run {
+        run: Run {
+            state: RunState::Finished {
+                outcome: RunOutcome::Done,
+                error: None,
+                ended_at: 0,
+            },
+            seq: 4,
+            ..run
+        },
+    });
+    let mut shown = Vec::new();
+    test_support::wait::wait_until(
+        "the finished thread to be notified",
+        std::time::Duration::from_secs(10),
+        || {
+            let workspace = shell
+                .entry
+                .workspace_mut()
+                .expect("a signed-in shell shows a workspace");
+            shell.core.drain_with(|core, event| {
+                shown.extend(
+                    workspace
+                        .handle_event(core, &event, false)
+                        .show
+                        .into_iter()
+                        .map(|notification| notification.tag),
+                );
+            });
+            !shown.is_empty()
+        },
+    );
+    let posted = tag(&host.id, &thread_id);
+    assert_eq!(shown, std::slice::from_ref(&posted));
     assert_eq!(
         activation(&shell, &posted),
         Some(Screen::Thread {
             host: host.id,
-            thread,
+            thread: thread_id,
         })
     );
+
     shell.core.account_mut().sign_out();
     test_support::wait::wait_until(
         "the account to sign out",
@@ -157,6 +248,11 @@ fn signing_out_clears_the_badge_and_disowns_old_notifications() {
         .entry
         .sync(&shell.core)
         .expect("leaving the account reports what to clean up");
+    assert_eq!(
+        effects.withdraw,
+        std::slice::from_ref(&posted),
+        "the signed-out session's notification is taken down"
+    );
     assert_eq!(effects.badge, Some(Attention::default()));
     assert!(effects.show.is_empty());
     assert_eq!(

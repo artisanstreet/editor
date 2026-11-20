@@ -691,7 +691,7 @@ fn a_quarantined_skill_being_installed_says_so_on_its_row() {
 }
 
 #[test]
-fn a_long_name_is_truncated_so_its_row_keeps_its_controls() {
+fn a_long_name_is_truncated_so_its_row_keeps_its_controls_and_shows_in_full_on_hover() {
     use std::rc::Rc;
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
@@ -701,7 +701,7 @@ fn a_long_name_is_truncated_so_its_row_keeps_its_controls() {
         name: long.clone(),
         target: "npx server".into(),
     })];
-    let app = marketplace_app(&controller, &core, Rc::new(|_| {}));
+    let mut app = marketplace_app(&controller, &core, Rc::new(|_| {}));
     let edit =
         test_support::editor::ui::node_with_key(&app, &format!("marketplace-server-{long}-edit"));
     let bounds = app.tree().rect(edit).unwrap();
@@ -723,6 +723,38 @@ fn a_long_name_is_truncated_so_its_row_keeps_its_controls() {
     assert!(
         painted.x + painted.w <= bounds.x,
         "the name ends before the Edit button: {painted:?} vs {bounds:?}"
+    );
+    let full_names = |app: &aqua::UiApp| {
+        app.tree()
+            .traverse()
+            .into_iter()
+            .filter(|node| {
+                app.tree().get(*node).is_some_and(|record| {
+                    matches!(&record.kind, aqua_ui::tree::NodeKind::Text(text) if text.text() == long)
+                })
+            })
+            .count()
+    };
+    assert_eq!(full_names(&app), 1, "no tooltip before the pointer rests");
+    app.handle_input(&aqua_core::InputEvent::PointerMove(
+        aqua_core::PointerEvent {
+            contact: 0,
+            kind: aqua_core::PointerKind::Mouse,
+            position: aqua_core::Point::new(
+                painted.w.mul_add(0.5, painted.x),
+                painted.h.mul_add(0.5, painted.y),
+            ),
+            buttons: 0,
+        },
+    ));
+    for frame in 1..=60_u32 {
+        app.advance_clock(f64::from(frame) * 0.016);
+        app.build_frame().unwrap();
+    }
+    assert_eq!(
+        full_names(&app),
+        2,
+        "resting on the cut-off name shows the whole name in a tooltip"
     );
 }
 

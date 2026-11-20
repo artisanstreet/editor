@@ -299,6 +299,37 @@ fn an_engine_without_models_offers_its_settings_and_a_signed_out_one_asks_to_sig
 }
 
 #[test]
+fn an_engine_whose_model_discovery_failed_says_so_and_offers_its_settings() {
+    let theme = ArtisanTheme::resolved();
+    for discovery in [
+        r#"{"state":"unavailable","error":"codex exited with status 1"}"#,
+        r#"{"state":"stale","last_success_at":0,"error":"codex exited with status 1"}"#,
+    ] {
+        let failed = engine(r#"{"state":"signed_in","account":null}"#, discovery);
+        let mut mounted = Mounted::new(|dispatch| {
+            model_gate_row(&theme, failed.engine, gate(&failed).unwrap(), &dispatch)
+        });
+        let said = mounted.said();
+        assert!(
+            said.iter()
+                .any(|text| text == "Codex is not ready: model discovery failed."),
+            "{discovery}: {said:?}"
+        );
+        assert!(
+            said.iter().any(|text| text == "Open Codex settings"),
+            "{discovery}: {said:?}"
+        );
+        assert_eq!(
+            mounted.press("composer-engine-gate-codex"),
+            [ComposerAction::OpenEngineSettings(
+                artisan_api::EngineId::Codex
+            )],
+            "{discovery}"
+        );
+    }
+}
+
+#[test]
 fn a_gated_engine_explains_itself_on_keyboard_focus_and_to_assistive_tech() {
     use super::model_menu::{engine_reason, engine_tab};
     let signed_out = engine(

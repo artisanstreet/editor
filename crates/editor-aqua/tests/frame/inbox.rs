@@ -227,3 +227,119 @@ fn an_empty_inbox_moves_from_loading_to_a_new_thread_prompt() {
     let (_app, texts, _) = rendered(&sidebar, &forge.core);
     assert_eq!(texts, ["No threads yet.", "New thread"]);
 }
+
+#[test]
+fn a_failed_project_icon_offers_try_again_which_downloads_it_again() {
+    use artisan_api::{BlobHash, BlobRef, Project, ProjectId};
+    use axum::http::StatusCode;
+    use editor_aqua::core::BlobImage;
+    use editor_aqua::sidebar::{
+        controller::Sidebar,
+        view::{ViewAction, dispatch},
+    };
+    let project = ProjectId("project".into());
+    let icon = BlobHash("icon".into());
+    let mut state = empty_state();
+    state.projects.push(Project {
+        id: project.clone(),
+        path: "/work/project".into(),
+        name: "project".into(),
+        seq: 1,
+        created_at: 0,
+        removed: false,
+    });
+    let mut forge = StubbedHost::start(state, axum::Router::new());
+    forge
+        .core
+        .set_image_assets(aqua::images::ImageAssets::default());
+    let mut sidebar = Sidebar::new(false);
+    sidebar.sync(&forge.core, 0);
+    forge.host_mut().load_project_icon(&project);
+    forge
+        .take("GET", "/projects/project/icon")
+        .respond(Some(BlobRef {
+            hash: icon.clone(),
+            bytes: 64,
+        }));
+    forge.take("GET", "/blobs/icon").fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "connection reset",
+    );
+    forge.settle("the icon image fails", |core, host| {
+        core.host(host)
+            .and_then(|data| data.image(&icon))
+            .is_some_and(|image| matches!(image, BlobImage::Failed(_)))
+    });
+
+    let (mut app, texts, actions) = rendered(&sidebar, &forge.core);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "Some project icons didn't load."),
+        "the failed icon is explained: {texts:?}"
+    );
+    test_support::editor::ui::click(&mut app, "sidebar-metadata-retry");
+    let retry = actions
+        .borrow_mut()
+        .pop()
+        .expect("Try again emits an action");
+    assert!(matches!(retry, ViewAction::RetryProjectIcons));
+    dispatch(&mut sidebar, &mut forge.core, retry);
+
+    let (_app, texts, _) = rendered(&sidebar, &forge.core);
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text == "Some project icons didn't load."),
+        "the notice leaves once the icon is downloading again: {texts:?}"
+    );
+    forge
+        .take("GET", "/blobs/icon")
+        .respond_bytes("image/png", test_support::editor::forge::png(10));
+    forge.settle("the icon shows", |core, host| {
+        core.host(host)
+            .is_some_and(|data| data.project_icon(&project).is_some())
+    });
+}
+
+#[test]
+fn a_sidebar_error_stays_until_dismissed() {
+    use editor_aqua::sidebar::{
+        controller::Sidebar,
+        view::{ViewAction, dispatch},
+    };
+    let mut forge = live_forge();
+    let mut sidebar = Sidebar::new(false);
+    sidebar.sync(&forge.core, 0);
+    sidebar.error = Some(editor_aqua::core::Problem::new(
+        "Couldn't rename the thread.",
+    ));
+
+    let (mut app, texts, actions) = rendered(&sidebar, &forge.core);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "Couldn't rename the thread."),
+        "{texts:?}"
+    );
+    sidebar.sync(&forge.core, 0);
+    assert!(
+        rendered(&sidebar, &forge.core)
+            .1
+            .iter()
+            .any(|text| text == "Couldn't rename the thread."),
+        "the error doesn't vanish on its own"
+    );
+    test_support::editor::ui::click(&mut app, "sidebar-error-dismiss");
+    let dismiss = actions.borrow_mut().pop().expect("Dismiss emits an action");
+    assert!(matches!(dismiss, ViewAction::DismissError));
+    dispatch(&mut sidebar, &mut forge.core, dismiss);
+    let (_app, texts, _) = rendered(&sidebar, &forge.core);
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text == "Couldn't rename the thread."),
+        "{texts:?}"
+    );
+}
