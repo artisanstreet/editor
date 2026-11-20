@@ -884,6 +884,7 @@ pub(crate) enum Installed {
 pub(crate) enum InstalledVersion {
     Known(String),
     Missing,
+    Unreadable { path: PathBuf, kind: io::ErrorKind },
 }
 
 impl Installed {
@@ -899,7 +900,7 @@ impl std::fmt::Display for InstalledVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Known(version) => f.write_str(version),
-            Self::Missing => f.write_str("unknown version"),
+            Self::Missing | Self::Unreadable { .. } => f.write_str("unknown version"),
         }
     }
 }
@@ -914,13 +915,6 @@ pub(crate) enum InstalledError {
     },
     #[error("check whether {} is installed at {}", app.display_name(), path.display())]
     Binary {
-        app: App,
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("read which {} version is installed from {}", app.display_name(), path.display())]
-    Version {
         app: App,
         path: PathBuf,
         #[source]
@@ -951,7 +945,10 @@ pub(crate) fn installed(app: App) -> Result<Installed, InstalledError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             Ok(Installed::Present(InstalledVersion::Missing))
         }
-        Err(source) => Err(InstalledError::Version { app, path, source }),
+        Err(error) => Ok(Installed::Present(InstalledVersion::Unreadable {
+            path,
+            kind: error.kind(),
+        })),
     }
 }
 
@@ -1370,9 +1367,10 @@ fn remembered_origin() -> Result<Origin, RememberedFeedError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let ours = match installed(App::Ae)? {
                 Installed::Present(InstalledVersion::Known(version)) => version,
-                Installed::Present(InstalledVersion::Missing) | Installed::Absent => {
-                    env!("CARGO_PKG_VERSION").to_owned()
-                }
+                Installed::Present(
+                    InstalledVersion::Missing | InstalledVersion::Unreadable { .. },
+                )
+                | Installed::Absent => env!("CARGO_PKG_VERSION").to_owned(),
             };
             Ok(Origin::Feed(release::feed_for(&ours).to_owned()))
         }
@@ -2029,7 +2027,7 @@ pub(crate) fn update(yes: bool) -> Result<(), UpdateError> {
     }
     let behind = |current: &InstalledVersion| match current {
         InstalledVersion::Known(current) => release::newer(&version, current),
-        InstalledVersion::Missing => true,
+        InstalledVersion::Missing | InstalledVersion::Unreadable { .. } => true,
     };
     let outdated = components.iter().any(|(_, current)| behind(current));
     let lines: Vec<String> = components

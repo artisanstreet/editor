@@ -432,6 +432,48 @@ mod tests {
         assert!(sandbox.listening(), "the updated Forge serves: {said}");
     }
 
+    #[test]
+    fn a_version_file_that_cannot_be_read_neither_blocks_repairing_nor_uninstalling_forge() {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+        let version = forge.join("version");
+        std::fs::create_dir(&version).expect("leave a version that doesn't read as a file");
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
+        test_support::executable::install(&forge_binary(), &stage.join(App::Forge.binary_name()));
+
+        let repaired = sandbox.ae(&[
+            "install",
+            "--editor",
+            "none",
+            "--forge",
+            "keep",
+            "--yes",
+            "--from",
+            &sandbox.root.path().join("stage").to_string_lossy(),
+        ]);
+
+        assert!(
+            repaired.status.success(),
+            "{}",
+            String::from_utf8_lossy(&repaired.stderr)
+        );
+        assert!(version.is_file(), "the repair wrote Forge's version");
+
+        std::fs::remove_file(&version).expect("drop the repaired version");
+        std::fs::create_dir(&version).expect("leave a version that doesn't read as a file");
+        let removed = sandbox.ae(&["uninstall", "forge", "--yes"]);
+
+        assert!(
+            removed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&removed.stderr)
+        );
+        assert!(!sandbox.installed.exists(), "Forge was uninstalled");
+    }
+
     fn ae_only_stage(sandbox: &Sandbox) -> String {
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");

@@ -183,11 +183,16 @@ fn local() -> Report {
             }
         };
         present.push(app);
-        match version {
+        match &version {
             install::InstalledVersion::Known(_) => {}
             install::InstalledVersion::Missing => problems.push(format!(
                 "{} has no version file; run `ae install` to repair it",
                 app.id()
+            )),
+            install::InstalledVersion::Unreadable { path, kind } => problems.push(format!(
+                "{}'s version file {} can't be read ({kind}); run `ae install` to repair it",
+                app.id(),
+                path.display()
             )),
         }
         match app.dir() {
