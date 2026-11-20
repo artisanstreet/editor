@@ -107,7 +107,7 @@ pub enum MaterializeError {
     Prompt {
         engine: EngineId,
         #[source]
-        source: ApplyPromptError,
+        source: Box<ApplyPromptError>,
     },
     #[error("preparing the skills for {engine}")]
     Wanted {
@@ -141,7 +141,12 @@ pub(crate) fn materialize(
                 Some(Ok((prompt::Reconciled::Drifted, _))) => {
                     tracing::info!(%engine, file = %paths.prompt.display(), "the global prompt was edited outside Artisan; leaving it until the user decides");
                 }
-                Some(Err(source)) => return Err(MaterializeError::Prompt { engine, source }),
+                Some(Err(source)) => {
+                    return Err(MaterializeError::Prompt {
+                        engine,
+                        source: Box::new(source),
+                    });
+                }
                 Some(Ok((prompt::Reconciled::Synced, _))) | None => {}
             }
         }

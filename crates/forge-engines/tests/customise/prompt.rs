@@ -34,8 +34,8 @@ fn a_prompt_that_cannot_be_written_fails_the_launch() {
             &launched,
             Err(MaterializeError::Prompt {
                 engine: EngineId::Claude,
-                source: ApplyPromptError::Read { .. },
-            })
+                source,
+            }) if matches!(**source, ApplyPromptError::Read { .. })
         ),
         "{launched:?}"
     );

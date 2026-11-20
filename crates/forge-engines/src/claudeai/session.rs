@@ -32,7 +32,7 @@ pub enum SaveSessionError {
     Write {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: crate::home::WriteError,
     },
 }
 
