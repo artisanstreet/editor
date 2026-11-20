@@ -86,7 +86,11 @@ fn a_failed_image_offers_a_keyboard_reachable_retry_button() {
     use aqua_text::{SharedFonts, SharedRuns};
     use std::cell::RefCell;
     let fetcher = MediaFetcher::new("test", |_| {
-        Box::pin(async { Err(crate::ui::media::source::MediaFailure::ForgeUnreachable) })
+        Box::pin(async {
+            Err(crate::ui::media::source::MediaFailure::ForgeUnreachable(
+                Arc::new(std::io::Error::other("Forge did not answer")),
+            ))
+        })
     })
     .owned_by(&[1], 1);
     let block: ImageBlock = serde_json::from_str(r#"{"src":"chart.png","alt":"Chart"}"#).unwrap();

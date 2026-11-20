@@ -23,7 +23,13 @@ impl Fixture {
         let fetcher = MediaFetcher::new("forge", move |_| {
             let (reply, receive) = oneshot::channel();
             calls.send(reply).unwrap();
-            Box::pin(async move { receive.await.unwrap_or(Err(MediaFailure::Unreadable)) })
+            Box::pin(async move {
+                receive
+                    .await
+                    .unwrap_or(Err(MediaFailure::Unreadable(std::sync::Arc::new(
+                        std::io::Error::other("unreadable"),
+                    ))))
+            })
         })
         .owned_by(&[7], 1);
         let assets = ModelAssets::new();

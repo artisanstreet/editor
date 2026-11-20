@@ -126,7 +126,7 @@ impl ImageState {
         let Some(source) = self.sources.get(index) else {
             return false;
         };
-        if !matches!(self.loaded[index], Loaded::Failed(error) if error.retryable()) {
+        if !matches!(&self.loaded[index], Loaded::Failed(error) if error.retryable()) {
             return false;
         }
         let key = cache_key(&self.fetcher, source, &format!("image-{index}"));

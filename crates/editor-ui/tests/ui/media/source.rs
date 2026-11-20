@@ -47,12 +47,14 @@ async fn a_remote_image_cannot_redirect_into_this_machine_or_its_network() {
         );
         let source = MediaSource::from(format!("http://127.0.0.1:{outer}/pixel.png"));
         let result = load_image_bytes(&source, None, &http).await;
+        let Err(MediaLoadError::Fetch(failure @ MediaFailure::ServerUnreachable(_))) = &result
+        else {
+            panic!("following {target} gave {result:?}");
+        };
         assert!(
-            matches!(
-                result,
-                Err(MediaLoadError::Fetch(MediaFailure::ServerUnreachable))
-            ),
-            "following {target}"
+            ::diagnostics::chain(failure).contains("which is not on the public internet"),
+            "the failure keeps why the redirect was refused: {}",
+            ::diagnostics::chain(failure)
         );
         assert_eq!(outer_hits.load(Ordering::SeqCst), 1);
     }
@@ -60,5 +62,27 @@ async fn a_remote_image_cannot_redirect_into_this_machine_or_its_network() {
         inner_hits.load(Ordering::SeqCst),
         0,
         "a redirect reached a local service"
+    );
+}
+
+#[tokio::test]
+async fn an_image_server_error_keeps_its_status_as_the_cause() {
+    let (port, _hits) = serve(|| {
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_owned()
+    })
+    .await;
+    let http =
+        editor_core::media_http::MediaHttpClient::new(test_support::editor::media::LoopbackStubs(
+            vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))],
+        ));
+    let source = MediaSource::from(format!("http://127.0.0.1:{port}/pixel.png"));
+    let result = load_image_bytes(&source, None, &http).await;
+    let Err(MediaLoadError::Fetch(failure @ MediaFailure::Unreadable(_))) = &result else {
+        panic!("a 503 gave {result:?}");
+    };
+    assert_eq!(
+        ::diagnostics::chain(failure),
+        "the file could not be read: the web server answered 503"
     );
 }

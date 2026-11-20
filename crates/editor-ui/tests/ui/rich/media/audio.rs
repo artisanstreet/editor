@@ -30,7 +30,9 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
             if up {
                 Err(MediaFailure::Missing)
             } else {
-                Err(MediaFailure::ForgeUnreachable)
+                Err(MediaFailure::ForgeUnreachable(Arc::new(
+                    std::io::Error::other("Forge did not answer"),
+                )))
             }
         })
     })

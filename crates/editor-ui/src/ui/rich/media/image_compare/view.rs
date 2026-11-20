@@ -25,7 +25,7 @@ pub(crate) enum Side {
     After,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Failure {
     NeedsConsent,
     Invalid,
@@ -35,18 +35,18 @@ pub(crate) enum Failure {
 }
 
 impl Failure {
-    const fn retryable(self) -> bool {
+    const fn retryable(&self) -> bool {
         matches!(self, Self::Fetch(_) | Self::Undecodable)
     }
 
-    fn title(self) -> &'static str {
+    fn title(&self) -> &'static str {
         match self {
             Self::NeedsConsent => "Remote image",
             Self::Invalid => "Not a valid image path",
             Self::Fetch(MediaFailure::Missing) => "File not found",
-            Self::Fetch(MediaFailure::ForgeUnreachable) => "Forge didn't answer",
-            Self::Fetch(MediaFailure::ServerUnreachable) => "The image's server didn't answer",
-            Self::Fetch(MediaFailure::Unreadable) => "Couldn't read the file",
+            Self::Fetch(MediaFailure::ForgeUnreachable(_)) => "Forge didn't answer",
+            Self::Fetch(MediaFailure::ServerUnreachable(_)) => "The image's server didn't answer",
+            Self::Fetch(MediaFailure::Unreadable(_)) => "Couldn't read the file",
             Self::Undecodable => "Not a supported image",
             Self::TooLarge => "Too large to preview",
         }
@@ -147,7 +147,7 @@ impl CompareState {
     fn failure(&self, side: Side) -> Option<Failure> {
         match &self.images[Self::index(side)] {
             ImageState::Loading => None,
-            ImageState::Failed(failure) => Some(*failure),
+            ImageState::Failed(failure) => Some(failure.clone()),
             ImageState::Decoding(image) => match image.status() {
                 ImageStatus::Ready { .. } | ImageStatus::Pending => None,
                 ImageStatus::Failed(_) | ImageStatus::Cancelled => Some(Failure::Undecodable),
@@ -156,7 +156,7 @@ impl CompareState {
     }
 
     fn retry(&mut self, side: Side) -> bool {
-        if !self.failure(side).is_some_and(Failure::retryable) {
+        if !self.failure(side).as_ref().is_some_and(Failure::retryable) {
             return false;
         }
         let key = cache_key(&self.fetcher, self.source(side), Self::part(side));
@@ -540,42 +540,39 @@ impl CompareState {
         height: f32,
         emit: &Rc<dyn Fn(Action)>,
     ) -> aqua_ui::element::Element {
-        let retry = self
-            .failure(side)
-            .filter(|failure| failure.retryable())
-            .map(|_| {
-                let retry = Rc::clone(emit);
-                let part = Self::part(side);
-                aqua_ui::element::Box::new()
-                    .child(
-                        Button::text(
-                            format!("{id}-retry-{part}"),
-                            *theme,
-                            ButtonTone::Neutral,
-                            "Try again",
-                        )
-                        .size(ButtonSize::Sm)
-                        .on_activate(move |_| retry(Action::Retry(side)))
-                        .build(),
+        let retry = self.failure(side).filter(Failure::retryable).map(|_| {
+            let retry = Rc::clone(emit);
+            let part = Self::part(side);
+            aqua_ui::element::Box::new()
+                .child(
+                    Button::text(
+                        format!("{id}-retry-{part}"),
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Try again",
                     )
-                    .build()
-                    .on_input(
-                        InputKind::PointerDown,
-                        aqua_ui::input::EventPhase::Bubble,
-                        |_| InputResponse {
-                            stop_propagation: true,
-                            ..InputResponse::default()
-                        },
-                    )
-                    .on_input(
-                        InputKind::KeyDown,
-                        aqua_ui::input::EventPhase::Bubble,
-                        |_| InputResponse {
-                            stop_propagation: true,
-                            ..InputResponse::default()
-                        },
-                    )
-            });
+                    .size(ButtonSize::Sm)
+                    .on_activate(move |_| retry(Action::Retry(side)))
+                    .build(),
+                )
+                .build()
+                .on_input(
+                    InputKind::PointerDown,
+                    aqua_ui::input::EventPhase::Bubble,
+                    |_| InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::default()
+                    },
+                )
+                .on_input(
+                    InputKind::KeyDown,
+                    aqua_ui::input::EventPhase::Bubble,
+                    |_| InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::default()
+                    },
+                )
+        });
         image_layer(
             &self.images[Self::index(side)],
             theme,
@@ -602,7 +599,7 @@ fn image_layer(
     };
     let status = match image {
         ImageState::Loading => None,
-        ImageState::Failed(error) => Some(*error),
+        ImageState::Failed(error) => Some(error.clone()),
         ImageState::Decoding(image) => match image.status() {
             ImageStatus::Ready { .. } => {
                 return Media::new(image.clone())

@@ -21,7 +21,13 @@ impl Fixture {
         let fetcher = MediaFetcher::new("forge", move |_| {
             let (reply, receive) = oneshot::channel();
             calls.send(reply).expect("the test listens for fetches");
-            Box::pin(async move { receive.await.unwrap_or(Err(MediaFailure::Unreadable)) })
+            Box::pin(async move {
+                receive
+                    .await
+                    .unwrap_or(Err(MediaFailure::Unreadable(Arc::new(
+                        std::io::Error::other("unreadable"),
+                    ))))
+            })
         })
         .owned_by(&[7], 1);
         let assets = AudioAssets::new();
@@ -83,11 +89,13 @@ fn a_missing_track_says_the_file_does_not_exist() {
 fn an_unreachable_host_is_told_apart_from_a_missing_file() {
     let fixture = Fixture::new();
     assert!(fixture.request("tracks/outro.ogg").is_none());
-    fixture.reply(Err(MediaFailure::ForgeUnreachable));
+    fixture.reply(Err(MediaFailure::ForgeUnreachable(Arc::new(
+        std::io::Error::other("Forge did not answer"),
+    ))));
     assert_eq!(
         fixture.request("tracks/outro.ogg"),
         Some(Err(AudioLoadError::Load(MediaLoadError::Fetch(
-            MediaFailure::ForgeUnreachable
+            MediaFailure::ForgeUnreachable(Arc::new(std::io::Error::other("Forge did not answer")))
         ))))
     );
 }

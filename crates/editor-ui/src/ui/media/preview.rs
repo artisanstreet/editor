@@ -288,7 +288,7 @@ impl Preview {
                 self.failure = None;
                 true
             }
-            Some(Err(error)) => self.failure.replace(error) != Some(error),
+            Some(Err(error)) => self.failure.replace(error.clone()) != Some(error),
             None => false,
         }
     }
@@ -397,7 +397,7 @@ impl Preview {
         else {
             return false;
         };
-        if !self.failure.is_some_and(ImageError::retryable) {
+        if !self.failure.as_ref().is_some_and(ImageError::retryable) {
             return false;
         }
         let key = cache_key(fetcher, &sources[*index], &format!("image-{index}"));
@@ -565,23 +565,30 @@ impl Preview {
                     TextRole::Label
                         .text(
                             theme,
-                            self.failure.map_or("Loading image…", ImageError::summary),
+                            self.failure
+                                .as_ref()
+                                .map_or("Loading image…", ImageError::summary),
                         )
                         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                         .build(),
                 )
-                .children(self.failure.filter(|error| error.retryable()).map(|_| {
-                    let retry = Rc::clone(&emit);
-                    Button::text(
-                        "image-preview-retry",
-                        *theme,
-                        ButtonTone::Neutral,
-                        "Try again",
-                    )
-                    .size(ButtonSize::Sm)
-                    .on_activate(move |_| retry(Action::Retry))
-                    .build()
-                }))
+                .children(
+                    self.failure
+                        .as_ref()
+                        .filter(|error| error.retryable())
+                        .map(|_| {
+                            let retry = Rc::clone(&emit);
+                            Button::text(
+                                "image-preview-retry",
+                                *theme,
+                                ButtonTone::Neutral,
+                                "Try again",
+                            )
+                            .size(ButtonSize::Sm)
+                            .on_activate(move |_| retry(Action::Retry))
+                            .build()
+                        }),
+                )
                 .build()
         });
         if let Some((image, started, forward)) = &self.outgoing {

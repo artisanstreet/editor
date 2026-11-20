@@ -12,7 +12,7 @@ impl ResourceLoader for Loader {
     type Output = Result<Arc<[u8]>, MediaLoadError>;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AudioLoadError {
     #[error("only local audio files play here")]
     Remote,

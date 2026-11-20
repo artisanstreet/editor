@@ -112,7 +112,9 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
             if up {
                 Err(MediaFailure::Missing)
             } else {
-                Err(MediaFailure::ForgeUnreachable)
+                Err(MediaFailure::ForgeUnreachable(Arc::new(
+                    std::io::Error::other("Forge did not answer"),
+                )))
             }
         })
     })
@@ -185,7 +187,9 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
     );
     assert_eq!(
         state.failure(Side::Before),
-        Some(Failure::Fetch(MediaFailure::ForgeUnreachable))
+        Some(Failure::Fetch(MediaFailure::ForgeUnreachable(Arc::new(
+            std::io::Error::other("Forge did not answer")
+        ))))
     );
 }
 

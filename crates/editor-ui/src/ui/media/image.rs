@@ -9,7 +9,7 @@ use super::{
 };
 use editor_core::{delivery::Delivery, media_http, runtime};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImageError {
     NeedsConsent,
     Load(MediaLoadError),
@@ -18,19 +18,19 @@ pub enum ImageError {
 
 impl ImageError {
     #[must_use]
-    pub(crate) const fn summary(self) -> &'static str {
+    pub(crate) const fn summary(&self) -> &'static str {
         match self {
             Self::NeedsConsent => "Remote image",
             Self::Load(MediaLoadError::Invalid) => "Not a valid image path",
             Self::Load(MediaLoadError::TooLarge) => "Too large to preview",
             Self::Load(MediaLoadError::Fetch(source::MediaFailure::Missing)) => "File not found",
-            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ForgeUnreachable)) => {
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ForgeUnreachable(_))) => {
                 "Forge didn't answer"
             }
-            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ServerUnreachable)) => {
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ServerUnreachable(_))) => {
                 "The image's server didn't answer"
             }
-            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Unreadable)) => {
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Unreadable(_))) => {
                 "Couldn't read the file"
             }
             Self::Decode => "Not a supported image",
@@ -38,7 +38,7 @@ impl ImageError {
     }
 
     #[must_use]
-    pub(crate) const fn retryable(self) -> bool {
+    pub(crate) const fn retryable(&self) -> bool {
         matches!(self, Self::Load(MediaLoadError::Fetch(_)) | Self::Decode)
     }
 }

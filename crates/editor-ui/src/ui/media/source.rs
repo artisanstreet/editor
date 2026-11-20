@@ -15,19 +15,35 @@ pub struct MediaRequest {
     pub item: Option<Arc<str>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, thiserror::Error)]
+pub type MediaCause = Arc<dyn std::error::Error + Send + Sync>;
+
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum MediaFailure {
     #[error("the file does not exist")]
     Missing,
     #[error("Forge did not answer")]
-    ForgeUnreachable,
+    ForgeUnreachable(#[source] MediaCause),
     #[error("the web server did not answer")]
-    ServerUnreachable,
+    ServerUnreachable(#[source] MediaCause),
     #[error("the file could not be read")]
-    Unreadable,
+    Unreadable(#[source] MediaCause),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+impl PartialEq for MediaFailure {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+impl Eq for MediaFailure {}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the web server answered {status}")]
+pub struct ServerStatus {
+    status: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MediaLoadError {
     #[error("the path is not valid")]
     Invalid,
@@ -411,13 +427,15 @@ pub async fn load_image_bytes(
     let bytes = match &source.parsed() {
         Parsed::Url(url) => {
             let response = http.get(url, true).await.map_err(|error| {
-                tracing::warn!(%url, %error, "fetch image");
-                MediaLoadError::Fetch(MediaFailure::ServerUnreachable)
+                tracing::warn!(%url, error = %::diagnostics::chain(&error), "fetch image");
+                MediaLoadError::Fetch(MediaFailure::ServerUnreachable(Arc::new(error)))
             })?;
             match response.status.as_u16() {
                 200..=299 => Ok(response.body.into()),
                 404 | 410 => Err(MediaLoadError::Fetch(MediaFailure::Missing)),
-                _ => Err(MediaLoadError::Fetch(MediaFailure::Unreadable)),
+                status => Err(MediaLoadError::Fetch(MediaFailure::Unreadable(Arc::new(
+                    ServerStatus { status },
+                )))),
             }
         }
         Parsed::Data(payload) => Ok(Arc::clone(&payload.bytes)),
@@ -431,7 +449,14 @@ pub async fn load_image_bytes(
                     item: fetcher.item.clone(),
                 })
                 .await
-                .map_err(MediaLoadError::Fetch)
+                .map_err(|failure| {
+                    tracing::warn!(
+                        path,
+                        error = %::diagnostics::chain(&failure),
+                        "fetch media from Forge"
+                    );
+                    MediaLoadError::Fetch(failure)
+                })
         }
         Parsed::Invalid => Err(MediaLoadError::Invalid),
     }?;
