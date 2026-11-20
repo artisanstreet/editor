@@ -436,6 +436,11 @@ impl Generation {
         });
     }
 
+    pub(crate) fn drained(&self) {
+        self.overlap
+            .send_modify(|overlap| overlap.phase = Phase::Draining);
+    }
+
     #[must_use]
     pub fn watch(&self) -> watch::Receiver<Overlap> {
         self.overlap.subscribe()
@@ -490,6 +495,19 @@ impl Generation {
             peer.holds = holds;
             changed
         });
+    }
+
+    pub(crate) fn reported_if_reporting(&self, generation: &str, threads: BTreeSet<ThreadId>) {
+        self.overlap
+            .send_if_modified(|overlap| match overlap.peers.get_mut(generation) {
+                Some(peer) if matches!(peer.holds, Holds::Reported(_)) => {
+                    let holds = Holds::Reported(threads);
+                    let changed = peer.holds != holds;
+                    peer.holds = holds;
+                    changed
+                }
+                Some(_) | None => false,
+            });
     }
 
     pub(crate) fn forget(&self, generation: &str) -> BTreeSet<ThreadId> {

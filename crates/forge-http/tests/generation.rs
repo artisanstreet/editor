@@ -583,3 +583,24 @@ async fn continue_pressed_on_the_new_generation_reaches_the_one_winding_down_the
         .await
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_the_old_generation_finishes_stops_showing_as_working_on_the_new_one() {
+    let overlap = overlap(&["hold"]).await;
+    let thread = &overlap.threads[0];
+    let mut watching = overlap.new.generation().unwrap().watch();
+    assert!(overlap.new.is_live(thread));
+
+    overlap.old.cancel(thread).await.unwrap();
+
+    test_support::wait::within(
+        "the new generation to see the old one let go of the thread",
+        test_support::wait::LIVENESS,
+        async {
+            while overlap.new.is_live(thread) {
+                watching.changed().await.unwrap();
+            }
+        },
+    )
+    .await;
+}

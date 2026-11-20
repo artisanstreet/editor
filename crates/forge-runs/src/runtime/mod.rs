@@ -482,11 +482,27 @@ impl crate::Hub {
     }
 
     async fn drain(&self) -> Result<Vec<ThreadId>, ControlError> {
-        self.generation()
-            .ok_or(ControlError::Unmanaged)?
-            .set_phase(Phase::Draining);
+        self.generation().ok_or(ControlError::Unmanaged)?.drained();
         let _admission = self.inner.admission.lock().await;
         Ok(self.owned_thread_ids())
+    }
+
+    #[must_use]
+    pub fn watch_held(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.lock().watch_held()
+    }
+
+    #[must_use]
+    pub fn draining_holds(&self) -> Option<BTreeSet<ThreadId>> {
+        self.generation()
+            .filter(|generation| generation.draining())
+            .map(|_| self.owned_thread_ids().into_iter().collect())
+    }
+
+    pub fn peer_holds(&self, generation: &str, threads: BTreeSet<ThreadId>) {
+        if let Some(own) = self.generation() {
+            own.reported_if_reporting(generation, threads);
+        }
     }
 
     pub async fn follow_peers(&self) -> Result<(), FollowPeersError> {

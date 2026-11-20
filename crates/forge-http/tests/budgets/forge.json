@@ -2,5 +2,13 @@
   "idle_wakeups_per_ten_minutes": {
     "limit": 30,
     "reason": "no timer fires in ten idle minutes: MCP servers are probed when a turn starts, engine usage is re-read only when a reading falls due (never without an installed engine), parked turns sleep until the earliest due time, and the hourly source/blob collection and inactive-thread sweep fall outside the window; measured 5 to 18, all late completions of startup work (store reads, engine reconciling, trace pruning) landing after the measurement starts, so any new timer of 20 s or shorter breaks the budget"
+  },
+  "overlap_wakeups_per_ten_minutes": {
+    "limit": 300,
+    "reason": "two generations overlapping during an upgrade, both quiet, act only on a peer's commit or holds frame, a peer list or phase change, or a relay ending: no timer fires; measured 15 to 145 (late startup work of two Forges), while the old 50 ms to 5 s store poll with a registry scan and drain request per pass measured about 1,310"
+  },
+  "unreachable_generation_wakeups_per_ten_minutes": {
+    "limit": 1500,
+    "reason": "following a listed generation whose live events can't be fetched retries after 100 ms, doubling to one try every 10 s; each try re-reads the registry, so about 66 tries measured 645 to 743 wakeups, while retrying every 100 ms measured about 24,700"
   }
 }

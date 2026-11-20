@@ -14,7 +14,11 @@ use forge_runs::{
     },
 };
 use futures::StreamExt as _;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{net::TcpListener, sync::Notify};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -130,26 +134,108 @@ async fn control(
     .into_response()
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+enum Frame {
+    Live {
+        envelope: Box<Envelope>,
+    },
+    Committed,
+    Holds {
+        threads: BTreeSet<artisan_api::ThreadId>,
+    },
+}
+
+struct Following {
+    live: forge_store::Subscription,
+    durable: forge_store::Subscription,
+    commits: u64,
+    held: tokio::sync::watch::Receiver<u64>,
+    overlap: tokio::sync::watch::Receiver<Overlap>,
+    holds: Option<BTreeSet<artisan_api::ThreadId>>,
+    hub: Hub,
+}
+
+impl Following {
+    fn holds_changed(&mut self) -> Option<Frame> {
+        let holds = self.hub.draining_holds();
+        if holds == self.holds {
+            return None;
+        }
+        self.holds.clone_from(&holds);
+        holds.map(|threads| Frame::Holds { threads })
+    }
+
+    async fn next(&mut self) -> Option<Frame> {
+        if let Some(frame) = self.holds_changed() {
+            return Some(frame);
+        }
+        loop {
+            tokio::select! {
+                received = self.live.recv() => return Some(Frame::Live {
+                    envelope: Box::new(match received {
+                        Ok(envelope) => envelope,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Envelope {
+                            seq: None,
+                            live_revision: 0,
+                            event: artisan_api::Event::Reset,
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }),
+                }),
+                received = self.durable.recv() => {
+                    let durable = match received {
+                        Ok(envelope) => envelope.seq.is_some(),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    };
+                    let commits = self.hub.store().commits();
+                    if durable && commits != self.commits {
+                        self.commits = commits;
+                        return Some(Frame::Committed);
+                    }
+                }
+                changed = self.held.changed() => {
+                    changed.ok()?;
+                    if let Some(frame) = self.holds_changed() {
+                        return Some(frame);
+                    }
+                }
+                changed = self.overlap.changed() => {
+                    changed.ok()?;
+                    if let Some(frame) = self.holds_changed() {
+                        return Some(frame);
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn live(State(service): State<Service>, headers: HeaderMap) -> Response {
+    let Some(generation) = service.hub.generation().cloned() else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     if !authorized(&service, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let receiver = service.hub.store().subscribe_local_live();
-    let stream = futures::stream::unfold(receiver, |mut receiver| async move {
-        let envelope = match receiver.recv().await {
-            Ok(envelope) => envelope,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Envelope {
-                seq: None,
-                live_revision: 0,
-                event: artisan_api::Event::Reset,
-            },
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-        };
-        let bytes = serde_json::to_vec(&envelope).map(|mut bytes| {
+    let store = service.hub.store();
+    let following = Following {
+        live: store.subscribe_local_live(),
+        durable: store.subscribe(),
+        commits: store.commits(),
+        held: service.hub.watch_held(),
+        overlap: generation.watch(),
+        holds: None,
+        hub: service.hub.clone(),
+    };
+    let stream = futures::stream::unfold(following, |mut following| async move {
+        let frame = following.next().await?;
+        let bytes = serde_json::to_vec(&frame).map(|mut bytes| {
             bytes.push(b'\n');
             bytes
         });
-        Some((bytes, receiver))
+        Some((bytes, following))
     });
     Body::from_stream(stream).into_response()
 }
@@ -182,6 +268,17 @@ pub(crate) fn start(
     tasks.spawn(synchronize(hub.clone(), stop.clone(), tasks.clone()));
 }
 
+#[derive(Default)]
+struct Wake {
+    committed: Notify,
+    peers: Notify,
+}
+
+enum Cause {
+    Committed,
+    Peers,
+}
+
 async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
     let Some(generation) = hub.generation().cloned() else {
         return;
@@ -189,24 +286,22 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
     let mut overlap = generation.watch();
     let mut cursor = hub.store().head();
     let mut peers = HashSet::new();
-    let peer_active = Arc::new(Notify::new());
-    let mut quiet = 0_u32;
+    let wake = Arc::new(Wake::default());
     let mut last: Option<tokio::time::Instant> = None;
     loop {
-        if !overlap.borrow_and_update().overlapping() {
+        let cause = if overlap.borrow_and_update().overlapping() {
             tokio::select! {
                 () = stop.cancelled() => break,
-                watching = settled(&mut overlap, Overlap::overlapping) => if !watching { break },
+                () = wake.committed.notified() => Cause::Committed,
+                () = wake.peers.notified() => Cause::Peers,
+                changed = overlap.changed() => if changed.is_err() { break } else { Cause::Peers },
             }
-            quiet = 0;
-        } else if let Some(previous) = last {
+        } else {
             tokio::select! {
                 () = stop.cancelled() => break,
-                () = peer_active.notified() => {}
-                changed = overlap.changed() => if changed.is_err() { break },
-                () = tokio::time::sleep_until(previous + quiet_sync(quiet)) => {}
+                watching = settled(&mut overlap, Overlap::overlapping) => if watching { Cause::Peers } else { break },
             }
-        }
+        };
         if let Some(previous) = last {
             tokio::select! {
                 () = stop.cancelled() => break,
@@ -214,7 +309,6 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
             }
         }
         last = Some(tokio::time::Instant::now());
-        let before = cursor;
         if let Err(error) = hub.store().synchronize(&mut cursor).await {
             tracing::warn!(
                 generation = %generation.member().id,
@@ -222,66 +316,67 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
                 "synchronize generation store"
             );
         }
-        if let Err(error) = hub.follow_peers().await {
-            tracing::warn!(
+        if matches!(cause, Cause::Peers) {
+            follow(&hub, &generation, &mut peers, &wake, &stop, &tasks).await;
+        }
+        hub.runtime_changed();
+    }
+}
+
+async fn follow(
+    hub: &Hub,
+    generation: &forge_runs::runtime::Generation,
+    peers: &mut HashSet<String>,
+    wake: &Arc<Wake>,
+    stop: &CancellationToken,
+    tasks: &TaskTracker,
+) {
+    if let Err(error) = hub.follow_peers().await {
+        tracing::warn!(
+            generation = %generation.member().id,
+            error = diagnostics::chain(&error),
+            "follow the other generations"
+        );
+    }
+    let members = match generation.registry().list_peers().await {
+        Ok(members) => members,
+        Err(error) => {
+            tracing::debug!(
                 generation = %generation.member().id,
                 error = diagnostics::chain(&error),
-                "follow the other generations"
+                "list the generations to relay"
             );
+            return;
         }
-        quiet = if cursor == before {
-            quiet.saturating_add(1)
-        } else {
-            0
-        };
-        hub.runtime_changed();
-        let members = match generation.registry().list_peers().await {
-            Ok(members) => members,
-            Err(error) => {
-                tracing::debug!(
-                    generation = %generation.member().id,
-                    error = diagnostics::chain(&error),
-                    "list the generations to relay"
-                );
-                continue;
-            }
-        };
-        peers.retain(|id| members.iter().any(|member| member.id == *id));
-        for member in members {
-            if member.id == generation.member().id || !peers.insert(member.id.clone()) {
-                continue;
-            }
-            tasks.spawn(relay_peer(
-                hub.clone(),
-                member,
-                stop.clone(),
-                Arc::clone(&peer_active),
-            ));
+    };
+    peers.retain(|id| members.iter().any(|member| member.id == *id));
+    for member in members {
+        if member.id == generation.member().id || !peers.insert(member.id.clone()) {
+            continue;
         }
+        tasks.spawn(relay_peer(
+            hub.clone(),
+            member,
+            stop.clone(),
+            Arc::clone(wake),
+        ));
     }
 }
 
 const SYNC_SOONEST: Duration = Duration::from_millis(50);
-const SYNC_QUIETEST: Duration = Duration::from_secs(5);
+const RELAY_RETRY_SOONEST: Duration = Duration::from_millis(100);
+const RELAY_RETRY_LATEST: Duration = Duration::from_secs(10);
 
-fn quiet_sync(quiet: u32) -> Duration {
-    SYNC_SOONEST
-        .saturating_mul(2_u32.saturating_pow(quiet.min(8)))
-        .min(SYNC_QUIETEST)
-}
-
-async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken, active: Arc<Notify>) {
+async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken, wake: Arc<Wake>) {
+    let mut retry = RELAY_RETRY_SOONEST;
     loop {
         tokio::select! {
             () = stop.cancelled() => break,
-            result = relay(&hub, &member, &active) => {
+            result = relay(&hub, &member, &wake, &mut retry) => {
                 if let Err(error) = result { tracing::debug!(generation = %member.id, error = diagnostics::chain(&error), "live relay"); }
             }
         }
-        tokio::select! {
-            () = stop.cancelled() => break,
-            () = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
+        wake.peers.notify_one();
         let Some(generation) = hub.generation() else {
             break;
         };
@@ -293,6 +388,11 @@ async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken, active: A
         {
             break;
         }
+        tokio::select! {
+            () = stop.cancelled() => break,
+            () = tokio::time::sleep(retry) => {}
+        }
+        retry = retry.saturating_mul(2).min(RELAY_RETRY_LATEST);
     }
 }
 
@@ -390,7 +490,12 @@ enum RelayLiveError {
     },
 }
 
-async fn relay(hub: &Hub, member: &Member, active: &Notify) -> Result<(), RelayLiveError> {
+async fn relay(
+    hub: &Hub,
+    member: &Member,
+    wake: &Wake,
+    retry: &mut Duration,
+) -> Result<(), RelayLiveError> {
     let generation = || member.id.clone();
     let reach = |source| RelayLiveError::Reach {
         generation: generation(),
@@ -411,9 +516,11 @@ async fn relay(hub: &Hub, member: &Member, active: &Notify) -> Result<(), RelayL
         .map_err(reach)?
         .error_for_status()
         .map_err(reach)?;
+    *retry = RELAY_RETRY_SOONEST;
     let mut stream = response.bytes_stream();
     let mut pending = Vec::new();
     hub.store().relay_live(artisan_api::Event::Reset);
+    wake.committed.notify_one();
     while let Some(chunk) = stream.next().await {
         pending.extend_from_slice(&chunk.map_err(|source| RelayLiveError::Read {
             generation: generation(),
@@ -426,14 +533,17 @@ async fn relay(hub: &Hub, member: &Member, active: &Notify) -> Result<(), RelayL
             });
         }
         while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-            let envelope: Envelope = serde_json::from_slice(&pending[..end]).map_err(|source| {
+            let frame: Frame = serde_json::from_slice(&pending[..end]).map_err(|source| {
                 RelayLiveError::Decode {
                     generation: generation(),
                     source,
                 }
             })?;
-            hub.store().relay_live(envelope.event);
-            active.notify_one();
+            match frame {
+                Frame::Live { envelope } => hub.store().relay_live(envelope.event),
+                Frame::Committed => wake.committed.notify_one(),
+                Frame::Holds { threads } => hub.peer_holds(&member.id, threads),
+            }
             pending.drain(..=end);
         }
     }

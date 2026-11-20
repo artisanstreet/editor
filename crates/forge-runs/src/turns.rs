@@ -136,10 +136,25 @@ pub(crate) enum Ended {
     },
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct Turns(HashMap<ThreadId, Turn>);
+#[derive(Debug)]
+pub(crate) struct Turns(HashMap<ThreadId, Turn>, watch::Sender<u64>);
+
+impl Default for Turns {
+    fn default() -> Self {
+        Self(HashMap::new(), watch::Sender::new(0))
+    }
+}
 
 impl Turns {
+    pub(crate) fn watch_held(&self) -> watch::Receiver<u64> {
+        self.1.subscribe()
+    }
+
+    fn held_changed(&self) {
+        self.1
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
+
     pub(crate) fn get(&self, thread: &ThreadId) -> Option<&LiveRun> {
         match self.0.get(thread)? {
             Turn::Live(run) => Some(run),
@@ -215,6 +230,7 @@ impl Turns {
             }
         };
         self.0.insert(thread, Turn::Live(start(retries)));
+        self.held_changed();
     }
 
     pub(crate) fn phase(&self, thread: &ThreadId, run: &RunId) -> Phase {
@@ -307,6 +323,7 @@ impl Turns {
                 self.0.insert(thread.clone(), Turn::Unsettled(settlement));
             }
         }
+        self.held_changed();
     }
 
     pub(crate) fn unsettled(&self) -> Vec<Settlement> {
@@ -326,6 +343,7 @@ impl Turns {
                 "invariant: only an unsettled run of thread {thread} settles later, not {other:?}"
             ),
         }
+        self.held_changed();
     }
 }
 
