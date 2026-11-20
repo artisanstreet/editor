@@ -406,6 +406,69 @@ async fn search_filters_items_by_the_engine_that_wrote_them() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stored_edit_list_that_no_longer_reads_is_left_out_and_the_rebuild_reaches_later_items() {
+    const NOTES: usize = 300;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let notes = thread(&store, EngineId::Claude, "Notes").await;
+    let changes = (0..=forge_content::INLINE_COLLECTION_ENTRIES)
+        .map(|number| FileChange {
+            path: format!("src/module_{number}.rs"),
+            op: FileOp::Modify,
+            diff: None,
+        })
+        .collect();
+    store
+        .upsert_item(item(
+            &notes,
+            Status::Done,
+            ItemKind::Tool {
+                tool: ToolKind::Edit {
+                    changes: Collection::Inline(changes),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        ))
+        .await
+        .expect("save an edit long enough to be stored as a collection");
+    let mut entries = Vec::with_capacity(NOTES);
+    for number in 0..NOTES {
+        entries.push(
+            store
+                .upsert_item(said(&notes, &ledger_entry(number)))
+                .await
+                .expect("save a ledger entry")
+                .id,
+        );
+    }
+    drop(store);
+    let raw = rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
+        .expect("open the database beside the store");
+    let damaged = raw
+        .execute(include_str!("recall/unreadable_records.sql"), [])
+        .expect("make the stored edit records unreadable without moving their bytes");
+    assert!(damaged > 0, "the edit list is stored in chunks");
+    raw.execute_batch(include_str!("recall/forget_index.sql"))
+        .expect("make the next start rebuild the recall index");
+    drop(raw);
+
+    let store = Store::open(dir.path()).expect("Forge starts despite the unreadable edit list");
+
+    assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
+    assert_eq!(
+        found(&store, &ledger_entry(0)).await,
+        vec![entries[0].clone()]
+    );
+    assert_eq!(
+        found(&store, &ledger_entry(NOTES - 1)).await,
+        vec![entries[NOTES - 1].clone()]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn forge_starts_with_a_damaged_item_and_still_finds_the_rest() {
     let dir = tempfile::tempdir().expect("create the test's temporary directory");
     let store = Store::open(dir.path()).expect("open the store");

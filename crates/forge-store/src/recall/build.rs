@@ -173,7 +173,17 @@ pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
         };
         match super::index(conn, &item) {
             Ok(()) => items += 1,
-            Err(ContentError::Storage(source)) => {
+            Err(ContentError::Storage(
+                source @ (StorageError::Open { .. }
+                | StorageError::WriterStopped
+                | StorageError::WriteDropped(_)
+                | StorageError::Announce(_)
+                | StorageError::AuthorizationDropped(_)
+                | StorageError::ReadSlot(_)
+                | StorageError::Task(_)
+                | StorageError::Sql { .. }
+                | StorageError::Encode { .. }),
+            )) => {
                 return Err(BuildIndexError::Index {
                     item: item.id,
                     source,
