@@ -37,6 +37,20 @@ fn ignore_missing(result: rustix::io::Result<()>) -> io::Result<()> {
     }
 }
 
+fn widened<Raw: Into<u32>>(raw: Raw) -> u32 {
+    raw.into()
+}
+
+fn narrowed<Raw: TryFrom<u32>>(bits: u32) -> Raw {
+    Raw::try_from(bits).unwrap_or_else(|_| {
+        unreachable!("invariant: permission bits {bits:o} fit this system's mode_t")
+    })
+}
+
+fn permissions(mode: u32) -> Mode {
+    Mode::from_raw_mode(narrowed(mode & PERMISSION_BITS))
+}
+
 fn too_deep() -> io::Error {
     io::Error::other(format!("nested over {MAX_DEPTH} folders deep"))
 }
@@ -59,7 +73,7 @@ impl Folder {
             }
             FileType::RegularFile => Found::File {
                 length: stat.st_size.unsigned_abs(),
-                mode: stat.st_mode & PERMISSION_BITS,
+                mode: widened(stat.st_mode) & PERMISSION_BITS,
             },
             FileType::Fifo
             | FileType::Socket
@@ -114,10 +128,11 @@ impl Folder {
     }
 
     pub(super) fn make_folder(&self, name: &OsStr) -> io::Result<Self> {
-        rustix::fs::mkdirat(&self.0, name, Mode::from_raw_mode(FOLDER_MODE))?;
+        rustix::fs::mkdirat(&self.0, name, permissions(FOLDER_MODE))?;
         self.open(name)
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn put_link(&self, name: &OsStr, target: &Path) -> io::Result<()> {
         let temporary = random_name(TEMPORARY_PREFIX)?;
         rustix::fs::symlinkat(target, &self.0, &temporary)?;
@@ -135,9 +150,9 @@ impl Folder {
             &self.0,
             &temporary,
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(mode),
+            permissions(mode),
         )?;
-        let written = rustix::fs::fchmod(&file, Mode::from_raw_mode(mode))
+        let written = rustix::fs::fchmod(&file, permissions(mode))
             .map_err(io::Error::from)
             .and_then(|()| fs::File::from(file).write_all(bytes))
             .and_then(|()| {
@@ -154,6 +169,7 @@ impl Folder {
         fs::File::from(file).write_all(bytes)
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn move_into_new(&self, name: &OsStr, into: &Self, to: &OsStr) -> io::Result<()> {
         rustix::fs::renameat_with(
             &self.0,
@@ -165,6 +181,7 @@ impl Folder {
         .map_err(io::Error::from)
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn move_to(&self, name: &OsStr, into: &Self, to: &OsStr) -> io::Result<()> {
         rustix::fs::renameat(&self.0, name, &into.0, to).map_err(io::Error::from)
     }
@@ -212,6 +229,7 @@ impl Folder {
         ignore_missing(rustix::fs::unlinkat(&self.0, name, AtFlags::REMOVEDIR))
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn copy_tree_to(&self, name: &OsStr, to: &Path, depth: usize) -> io::Result<()> {
         if depth == MAX_DEPTH {
             return Err(too_deep());

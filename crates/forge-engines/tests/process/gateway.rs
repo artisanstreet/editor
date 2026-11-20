@@ -21,6 +21,7 @@ fn claude_turn(home: &std::path::Path, permissions: artisan_api::Permissions) ->
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn line(process: &mut EngineProcess) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(5), process.next_line())
         .await

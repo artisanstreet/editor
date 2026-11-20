@@ -30,7 +30,7 @@ pub(crate) enum Sandbox {
 #[cfg(target_os = "linux")]
 pub(crate) mod guard;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) mod home;
 
 #[cfg(not(target_os = "linux"))]
@@ -45,7 +45,7 @@ pub(crate) mod guard {
             engine: EngineId,
             path: PathBuf,
             #[source]
-            source: Box<artisan_paths::private::PrivateFileError>,
+            source: std::io::Error,
         },
         #[error("read {engine}'s configuration {}", path.display())]
         Read {
@@ -95,18 +95,12 @@ pub(crate) mod guard {
         home: &Path,
         relative: &Path,
         bytes: &[u8],
-        _mode: u32,
+        mode: u32,
     ) -> Result<(), GuardError> {
-        let path = home.join(relative);
-        let written = if std::fs::read(&path).is_ok_and(|current| current == bytes) {
-            artisan_paths::private::restrict_file(&path)
-        } else {
-            artisan_paths::private::write_file(&path, bytes)
-        };
-        written.map_err(|source| GuardError::Write {
+        super::home::write(home, relative, bytes, mode).map_err(|source| GuardError::Write {
             engine,
-            path,
-            source: Box::new(source),
+            path: home.join(relative),
+            source,
         })
     }
 
@@ -122,18 +116,11 @@ pub(crate) mod guard {
         home: &Path,
         relative: &Path,
     ) -> Result<Editing, GuardError> {
-        let path = home.join(relative);
-        let base = match std::fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(source) => {
-                return Err(GuardError::Read {
-                    engine,
-                    path,
-                    source,
-                });
-            }
-        };
+        let base = super::home::read(home, relative).map_err(|source| GuardError::Read {
+            engine,
+            path: home.join(relative),
+            source,
+        })?;
         Ok(Editing {
             engine,
             home: home.to_path_buf(),
@@ -153,20 +140,15 @@ pub(crate) mod guard {
     }
 
     pub(crate) fn remove(engine: EngineId, home: &Path, relative: &Path) -> Result<(), GuardError> {
-        let path = home.join(relative);
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(GuardError::Remove {
-                engine,
-                path,
-                source,
-            }),
-        }
+        super::home::remove(home, relative).map_err(|source| GuardError::Remove {
+            engine,
+            path: home.join(relative),
+            source,
+        })
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
 pub(crate) mod home {
     use std::fs;
     use std::io;
