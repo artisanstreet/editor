@@ -145,7 +145,39 @@ pub struct MarkdownIndex {
     contexts: Vec<LeafContext>,
     decoded: Vec<Arc<str>>,
     source_bytes: usize,
+    definitions: bool,
+    items: Vec<ItemStart>,
+    lists: Vec<ListShape>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListMark {
+    start: Option<u64>,
+    source_start: usize,
+    ordinal: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ItemStart {
+    line_start: usize,
+    first_leaf: usize,
+    list: ListMark,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ListShape {
+    source_start: usize,
+    loose: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Resume {
+    Start,
+    After(BlockShape),
+    Item(ListMark),
+}
+
+const RESUME_ATTEMPTS: usize = 3;
 
 impl MarkdownIndex {
     pub fn build(source: &str) -> Result<Self, BuildIndexError> {
@@ -153,13 +185,56 @@ impl MarkdownIndex {
     }
 
     pub fn extend(self, previous: &str, source: &str) -> Result<(Self, usize), BuildIndexError> {
-        let Some((kept, boundary, shape)) = self.stable_prefix(previous, source) else {
+        if self.source_bytes != previous.len() || !source.starts_with(previous) {
+            return Ok((Self::build(source)?, 0));
+        }
+        self.append(source)
+    }
+
+    pub fn append(self, source: &str) -> Result<(Self, usize), BuildIndexError> {
+        let Some(previous) = source
+            .get(..self.source_bytes)
+            .filter(|_| !self.definitions)
+        else {
             return Ok((Self::build(source)?, 0));
         };
-        let suffix = build::build_from(source, boundary, Some(shape))?;
-        let mut merged = self;
-        merged.leaves.truncate(kept);
-        let mut pool: std::collections::HashMap<LeafContext, usize> = merged
+        let mut points = self.resume_points(previous);
+        points.sort_by_key(|(kept, _, _)| std::cmp::Reverse(*kept));
+        for (kept, boundary, resume) in points.into_iter().take(RESUME_ATTEMPTS) {
+            let suffix = build::build_from(source, boundary, resume)?;
+            if suffix.definitions {
+                break;
+            }
+            if let Resume::Item(mark) = resume
+                && !self.continues_alike(&suffix, mark)
+            {
+                continue;
+            }
+            return Ok((self.merge(kept, boundary, suffix, source.len())?, kept));
+        }
+        Ok((Self::build(source)?, 0))
+    }
+
+    fn continues_alike(&self, suffix: &Self, mark: ListMark) -> bool {
+        let loose = |index: &Self| {
+            index
+                .lists
+                .iter()
+                .find(|list| list.source_start == mark.source_start)
+                .and_then(|list| list.loose)
+        };
+        loose(self).is_some_and(|before| loose(suffix) == Some(before))
+    }
+
+    fn merge(
+        mut self,
+        kept: usize,
+        boundary: usize,
+        suffix: Self,
+        source_bytes: usize,
+    ) -> Result<Self, BuildIndexError> {
+        self.leaves.truncate(kept);
+        let mut pool: std::collections::HashMap<LeafContext, usize> = self
             .contexts
             .iter()
             .cloned()
@@ -169,49 +244,79 @@ impl MarkdownIndex {
         for mut leaf in suffix.leaves {
             let context = &suffix.contexts[leaf.context];
             leaf.context = *pool.entry(context.clone()).or_insert_with(|| {
-                merged.contexts.push(context.clone());
-                merged.contexts.len() - 1
+                self.contexts.push(context.clone());
+                self.contexts.len() - 1
             });
-            merged.leaves.push(leaf);
+            self.leaves.push(leaf);
         }
-        merged.decoded.extend(suffix.decoded);
-        merged.source_bytes = source.len();
-        if merged.resident_bytes() > INDEX_BYTES {
+        self.decoded.extend(suffix.decoded);
+        self.items.retain(|item| item.first_leaf < kept);
+        self.items
+            .extend(suffix.items.into_iter().map(|item| ItemStart {
+                first_leaf: item.first_leaf + kept,
+                ..item
+            }));
+        self.lists.retain(|list| list.source_start < boundary);
+        for list in suffix.lists {
+            if !self
+                .lists
+                .iter()
+                .any(|known| known.source_start == list.source_start)
+            {
+                self.lists.push(list);
+            }
+        }
+        self.source_bytes = source_bytes;
+        if self.resident_bytes() > INDEX_BYTES {
             return Err(BuildIndexError::IndexTooLarge);
         }
-        Ok((merged, kept))
+        Ok(self)
     }
 
-    fn stable_prefix(&self, previous: &str, source: &str) -> Option<(usize, usize, BlockShape)> {
-        if self.source_bytes != previous.len()
-            || !source.starts_with(previous)
-            || source.contains("]:")
-        {
-            return None;
-        }
-        (1..=self.leaves.len()).rev().find_map(|kept| {
-            let leaf = &self.leaves[kept - 1];
-            let context = &self.contexts[leaf.context];
-            if !context.lists.is_empty()
-                || context.quote_depth > 0
-                || context.table_source.is_some()
-            {
-                return None;
-            }
-            let shape = match (leaf.kind, leaf.events.first().map(|event| &event.token)) {
-                (Kind::Paragraph, _) => BlockShape::Paragraph,
-                (
-                    Kind::Heading,
-                    Some(Token::Structural(Event::Start(Tag::Heading { level, .. }))),
-                ) => BlockShape::Heading(*level as u8),
-                _ => return None,
-            };
-            let boundary = after_blank_line(previous, leaf.range.end)?;
+    fn resume_points(&self, previous: &str) -> Vec<(usize, usize, Resume)> {
+        let mut points = Vec::with_capacity(RESUME_ATTEMPTS + 1);
+        let follows = |kept: usize, boundary: usize| {
             self.leaves
                 .get(kept)
                 .is_none_or(|next| next.range.start >= boundary)
-                .then_some((kept, boundary, shape))
-        })
+        };
+        for quoted in [false, true] {
+            let point = (1..=self.leaves.len()).rev().find_map(|kept| {
+                let leaf = &self.leaves[kept - 1];
+                let context = &self.contexts[leaf.context];
+                if !context.lists.is_empty()
+                    || context.quote_depth != usize::from(quoted)
+                    || context.table_source.is_some()
+                {
+                    return None;
+                }
+                let shape = match (leaf.kind, leaf.events.first().map(|event| &event.token)) {
+                    (Kind::Paragraph, _) => BlockShape::Paragraph,
+                    (
+                        Kind::Heading,
+                        Some(Token::Structural(Event::Start(Tag::Heading { level, .. }))),
+                    ) => BlockShape::Heading(*level as u8),
+                    _ => return None,
+                };
+                let boundary = if quoted {
+                    after_quoted_blank_line(previous, leaf.range.end)?
+                } else {
+                    after_blank_line(previous, leaf.range.end)?
+                };
+                follows(kept, boundary).then_some((kept, boundary, Resume::After(shape)))
+            });
+            points.extend(point);
+        }
+        points.extend(
+            self.items
+                .iter()
+                .rev()
+                .filter(|item| item.list.ordinal > 0 && item.first_leaf > 0)
+                .filter(|item| follows(item.first_leaf, item.line_start))
+                .take(RESUME_ATTEMPTS)
+                .map(|item| (item.first_leaf, item.line_start, Resume::Item(item.list))),
+        );
+        points
     }
 
     pub fn record(&self, ordinal: usize) -> Option<LeafRecord> {
@@ -294,6 +399,32 @@ fn after_blank_line(text: &str, end: usize) -> Option<usize> {
     };
     let (line, next) = line_after(line_start)?;
     blank(line).then_some(next)
+}
+
+fn after_quoted_blank_line(text: &str, end: usize) -> Option<usize> {
+    let quoted = |line: &str, blank: bool| {
+        let line = line.trim_end_matches('\r');
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let rest = line.get(indent..)?.strip_prefix('>')?;
+        (indent <= 3 && rest.trim_matches([' ', '\t']).is_empty() == blank).then_some(())
+    };
+    let line_after = |start: usize| {
+        let rest = text.get(start..)?;
+        let newline = rest.find('\n')?;
+        Some((rest.get(..newline)?, start + newline + 1))
+    };
+    let line_start = if end > 0 && text.as_bytes().get(end - 1) != Some(&b'\n') {
+        line_after(end)
+            .filter(|(tail, _)| tail.trim_matches([' ', '\t', '\r']).is_empty())?
+            .1
+    } else {
+        end
+    };
+    let (blank, next) = line_after(line_start)?;
+    quoted(blank, true)?;
+    let (following, _) = line_after(next)?;
+    quoted(following, false)?;
+    Some(next)
 }
 
 fn resolve_text<'a>(

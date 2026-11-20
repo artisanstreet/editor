@@ -1,8 +1,8 @@
 use super::PARSE_OPTIONS;
 use super::{
-    Arc, BlockShape, BuildIndexError, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, Kind,
-    LeafContext, LeafSpacing, ListLevel, MarkdownIndex, SOURCE_BYTES, TableAlignment, Tag, TagEnd,
-    Text, Token, event_heap_bytes,
+    Arc, BlockShape, BuildIndexError, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, ItemStart,
+    Kind, LeafContext, LeafSpacing, ListLevel, ListMark, ListShape, MarkdownIndex, Resume,
+    SOURCE_BYTES, TableAlignment, Tag, TagEnd, Text, Token, event_heap_bytes,
 };
 use pulldown_cmark::Parser;
 use std::collections::{HashMap, HashSet};
@@ -12,6 +12,18 @@ struct OpenList {
     start: Option<u64>,
     source_start: usize,
     ordinal: u64,
+    top: bool,
+    loose: Option<bool>,
+}
+
+impl OpenList {
+    const fn mark(&self) -> ListMark {
+        ListMark {
+            start: self.start,
+            source_start: self.source_start,
+            ordinal: self.ordinal,
+        }
+    }
 }
 struct OpenItem {
     task: Option<bool>,
@@ -25,7 +37,7 @@ struct ActiveLeaf {
 }
 
 pub(crate) fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
-    build_from(source, 0, None)
+    build_from(source, 0, Resume::Start)
 }
 
 #[expect(
@@ -39,7 +51,7 @@ pub(crate) fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
 pub(crate) fn build_from(
     source: &str,
     start: usize,
-    previous: Option<BlockShape>,
+    resume: Resume,
 ) -> Result<MarkdownIndex, BuildIndexError> {
     if source.len() > SOURCE_BYTES {
         return Err(BuildIndexError::SourceTooLarge {
@@ -51,6 +63,9 @@ pub(crate) fn build_from(
         contexts: Vec::new(),
         decoded: Vec::new(),
         source_bytes: source.len(),
+        definitions: false,
+        items: Vec::new(),
+        lists: Vec::new(),
     };
     let mut contexts = HashMap::<LeafContext, usize>::new();
     let mut decoded = HashSet::<Arc<str>>::new();
@@ -58,7 +73,11 @@ pub(crate) fn build_from(
     let mut items = Vec::<OpenItem>::new();
     let mut alignments = Vec::<TableAlignment>::new();
     let mut quote_depth = 0;
-    let mut root_previous = previous;
+    let (mut root_previous, mut continued) = match resume {
+        Resume::Start => (None, None),
+        Resume::After(shape) => (Some(shape), None),
+        Resume::Item(mark) => (Some(BlockShape::List), Some(mark)),
+    };
     let mut spacing = Vec::new();
     let mut table_source = None;
     let mut depth = 0usize;
@@ -67,7 +86,9 @@ pub(crate) fn build_from(
     let suffix = source
         .get(start..)
         .expect("invariant: an index is rebuilt from a line boundary inside its source");
-    for (event, range) in Parser::new_ext(suffix, PARSE_OPTIONS)
+    let parser = Parser::new_ext(suffix, PARSE_OPTIONS);
+    result.definitions = parser.reference_definitions().iter().next().is_some();
+    for (event, range) in parser
         .into_offset_iter()
         .map(|(event, range)| (event, range.start + start..range.end + start))
     {
@@ -149,22 +170,47 @@ pub(crate) fn build_from(
         if active.is_none() {
             match &event {
                 Event::Start(Tag::List(start)) => {
-                    record_spacing(
-                        &mut root_previous,
-                        &mut items,
-                        &mut spacing,
-                        BlockShape::List,
+                    let top = lists.is_empty() && quote_depth == 0;
+                    let list = continued.take().filter(|_| top).map_or_else(
+                        || {
+                            record_spacing(
+                                &mut root_previous,
+                                &mut items,
+                                &mut spacing,
+                                BlockShape::List,
+                            );
+                            OpenList {
+                                start: *start,
+                                source_start: range.start,
+                                ordinal: 0,
+                                top,
+                                loose: None,
+                            }
+                        },
+                        |mark| OpenList {
+                            start: mark.start,
+                            source_start: mark.source_start,
+                            ordinal: mark.ordinal,
+                            top,
+                            loose: None,
+                        },
                     );
-                    lists.push(OpenList {
-                        start: *start,
-                        source_start: range.start,
-                        ordinal: 0,
-                    });
+                    lists.push(list);
                     continue;
                 }
                 Event::Start(Tag::Item) => {
                     if lists.last().is_some_and(|list| list.ordinal > 0) {
                         spacing.push(LeafSpacing::Item);
+                    }
+                    if let [list] = lists.as_slice()
+                        && list.top
+                        && let Some(line_start) = marker_line(source, range.start)
+                    {
+                        result.items.push(ItemStart {
+                            line_start,
+                            first_leaf: result.leaves.len(),
+                            list: list.mark(),
+                        });
                     }
                     items.push(OpenItem {
                         task: None,
@@ -182,7 +228,12 @@ pub(crate) fn build_from(
                     continue;
                 }
                 Event::End(TagEnd::List(_)) => {
-                    lists.pop();
+                    if let Some(list) = lists.pop().filter(|list| list.top) {
+                        result.lists.push(ListShape {
+                            source_start: list.source_start,
+                            loose: list.loose,
+                        });
+                    }
                     continue;
                 }
                 Event::Start(Tag::BlockQuote(_)) => {
@@ -266,6 +317,13 @@ pub(crate) fn build_from(
             );
             let implicit =
                 kind == Kind::Paragraph && !matches!(&event, Event::Start(Tag::Paragraph));
+            if kind == Kind::Paragraph
+                && quote_depth == 0
+                && items.len() == 1
+                && let [list] = lists.as_mut_slice()
+            {
+                list.loose.get_or_insert(!implicit);
+            }
             let mut leaf = IndexedLeaf {
                 range: range.clone(),
                 context: context_id,
@@ -370,6 +428,15 @@ pub(crate) fn build_from(
         return Err(BuildIndexError::IndexTooLarge);
     }
     Ok(result)
+}
+
+fn marker_line(source: &str, marker: usize) -> Option<usize> {
+    let before = source.get(..marker)?;
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    before
+        .get(line_start..)
+        .is_some_and(|indent| indent.len() <= 3 && indent.bytes().all(|byte| byte == b' '))
+        .then_some(line_start)
 }
 
 fn record_spacing(
