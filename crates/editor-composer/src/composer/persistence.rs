@@ -24,12 +24,19 @@ pub enum SessionEvent {
     ImageAdopted(BlobHash),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kept {
+    Nothing,
+    Recovered,
+    Unforgotten,
+}
+
 struct Shared {
     state: DraftSession,
     viewers: Vec<Weak<Viewer>>,
     timer: Option<tokio::task::AbortHandle>,
     version: u64,
-    recovered: bool,
+    kept: Kept,
 }
 
 struct Inner {
@@ -246,6 +253,7 @@ impl Drop for DraftSessions {
         let mut pending = pending_shutdown();
         pending.retain(|session| session.read(DraftSession::keepable));
         for session in self.sessions.values() {
+            session.forget_unforgotten();
             session.flush();
             if session.read(DraftSession::keepable) {
                 pending.push(session.clone());
@@ -320,9 +328,9 @@ impl DraftSessions {
                     "recovered a draft kept locally at shutdown"
                 );
                 state.recover(spooled.draft, images, damaged);
-                true
+                Kept::Recovered
             }
-            Some(Ok(None)) | None => false,
+            Some(Ok(None)) | None => Kept::Nothing,
             Some(Err(error)) => {
                 tracing::error!(
                     host = %host,
@@ -347,7 +355,7 @@ impl DraftSessions {
                         state.set_unrecovered(Unrecovered::Left(path));
                     }
                 }
-                false
+                Kept::Nothing
             }
         };
         let (changed, _) = watch::channel(0);
@@ -361,7 +369,7 @@ impl DraftSessions {
                 viewers: Vec::new(),
                 timer: None,
                 version: 0,
-                recovered,
+                kept: recovered,
             }),
             changed,
             cancelled: CancellationToken::new(),
@@ -460,21 +468,41 @@ impl DraftHandle {
     }
 
     fn forget_recovered(&self, shared: &mut Shared) {
-        if !shared.recovered || shared.state.keepable() {
+        if shared.kept == Kept::Recovered {
+            self.forget_acknowledged(shared);
+        }
+    }
+
+    fn forget_unforgotten(&self) {
+        let mut shared = self.0.shared();
+        if shared.kept != Kept::Nothing {
+            self.forget_acknowledged(&mut shared);
+        }
+    }
+
+    fn forget_acknowledged(&self, shared: &mut Shared) {
+        if !shared.state.settled_with_forge() {
             return;
         }
-        shared.recovered = false;
-        let scope = shared.state.scope();
         let Some(spool) = &self.0.spool else {
-            return;
-        };
-        if let Err(error) = spool.forget(&self.0.host, scope) {
-            tracing::error!(
-                host = %self.0.host,
-                %scope,
-                error = %::diagnostics::chain(&error),
-                "couldn't remove a recovered draft that Forge has saved"
+            unreachable!(
+                "invariant: draft {} on Forge {} was recovered from the device spool it still holds",
+                shared.state.scope(),
+                self.0.host
             );
+        };
+        let scope = shared.state.scope();
+        match spool.forget(&self.0.host, scope) {
+            Ok(()) => shared.kept = Kept::Nothing,
+            Err(error) => {
+                tracing::error!(
+                    host = %self.0.host,
+                    %scope,
+                    error = %::diagnostics::chain(&error),
+                    "couldn't remove a recovered draft that Forge has saved; trying again when the Editor closes"
+                );
+                shared.kept = Kept::Unforgotten;
+            }
         }
     }
 

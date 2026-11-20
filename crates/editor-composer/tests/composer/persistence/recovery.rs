@@ -117,3 +117,85 @@ fn an_unreadable_kept_draft_is_reported_and_left_for_the_user() {
         "the unreadable draft is kept where the notice says"
     );
 }
+
+#[test]
+fn signing_out_keeps_a_recovered_draft_forge_has_not_saved_yet() {
+    let mut device = Device::new();
+    device
+        .spool()
+        .keep(&device.host, "new", kept("not on Forge yet"), &[])
+        .unwrap();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    device.core.remove_host(&device.host).unwrap();
+    sessions.retain_hosts(&device.core);
+    assert!(lease.read(DraftSession::removed));
+    drop(lease);
+    drop(sessions);
+    let kept = device.spool().take(&device.host, "new").unwrap();
+    assert_eq!(
+        kept.map(|kept| kept.draft.body.text),
+        Some("not on Forge yet".to_owned()),
+        "signing back in brings the draft back"
+    );
+}
+
+fn saved_by_forge(device: &Device) -> DraftHandle {
+    let mut state = DraftSession::new("new".into());
+    assert!(matches!(state.next_operation(), Some(Operation::Load)));
+    state.loaded(Ok(artisan_api::DraftSnapshot::default()));
+    let (changed, _) = watch::channel(0);
+    DraftHandle(Arc::new(Inner {
+        host: device.host.clone(),
+        scope: "new".into(),
+        client: device.client.clone(),
+        spool: Some(device.spool()),
+        shared: Mutex::new(Shared {
+            state,
+            viewers: Vec::new(),
+            timer: None,
+            version: 0,
+            kept: Kept::Recovered,
+        }),
+        changed,
+        cancelled: CancellationToken::new(),
+    }))
+}
+
+#[test]
+fn a_recovered_draft_that_could_not_be_removed_once_saved_is_removed_on_closing() {
+    let device = Device::new();
+    device
+        .spool()
+        .keep(&device.host, "new", kept("saved since"), &[])
+        .unwrap();
+    let record = device.drafts().join("recovering-new.json");
+    let kept_record = std::fs::read(&record).unwrap();
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+    std::fs::write(record.join("blocker"), b"").unwrap();
+
+    let session = saved_by_forge(&device);
+    session.retry();
+    std::fs::remove_dir_all(&record).unwrap();
+    std::fs::write(&record, kept_record).unwrap();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    sessions
+        .sessions
+        .insert((device.host.clone(), instance, "new".into()), session);
+    drop(sessions);
+
+    assert!(
+        device.spool().take(&device.host, "new").unwrap().is_none(),
+        "the next start doesn't bring back a draft Forge already saved"
+    );
+}

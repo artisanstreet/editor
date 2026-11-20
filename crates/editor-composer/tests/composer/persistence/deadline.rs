@@ -30,7 +30,7 @@ fn pending_write() -> (DraftHandle, DraftBody) {
             viewers: Vec::new(),
             timer: None,
             version: 0,
-            recovered: false,
+            kept: Kept::Nothing,
         }),
         changed,
         cancelled: CancellationToken::new(),

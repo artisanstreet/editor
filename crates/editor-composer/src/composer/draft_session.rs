@@ -709,6 +709,12 @@ impl DraftSession {
         self.pending() || self.draft().is_some_and(|draft| !draft.lost.is_empty())
     }
 
+    pub(crate) fn settled_with_forge(&self) -> bool {
+        self.draft()
+            .is_some_and(|draft| matches!(draft.remote, Remote::Loaded(_)))
+            && !self.keepable()
+    }
+
     pub(crate) fn recover(
         &mut self,
         recovery: KeptDraft,
