@@ -2,6 +2,7 @@ pub mod browser;
 mod enrollment;
 mod frames;
 mod grant;
+mod machine_file;
 mod machine_proof;
 pub mod network;
 mod noise;
@@ -23,6 +24,7 @@ pub use grant::{
     UnverifiedGrantError, VerifyParams, cnf_public_key, is_account_id, is_machine_id,
     parse_and_verify_jwt, unverified_jti, unverified_kid,
 };
+pub use machine_file::{KeyProblem, MachineAccount, MachineFileError};
 pub use machine_proof::{
     MachineProof, MachineProofError, body_hash_hex, canonical_request, sign_proof,
     verify_machine_proof,

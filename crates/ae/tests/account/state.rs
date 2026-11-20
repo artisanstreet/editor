@@ -64,7 +64,7 @@ fn an_enrollment_without_its_key_is_not_reported_as_enrolled() {
     let loaded = load_account(&path);
 
     assert!(
-        matches!(&loaded, Err(AccountFileError::Inconsistent { fields, .. }) if fields == "machine_id, account_id"),
+        matches!(&loaded, Err(AccountFileError::Decode { source: MachineFileError::Inconsistent { fields }, .. }) if fields == "machine_id, account_id"),
         "{loaded:?}"
     );
 }
@@ -73,14 +73,20 @@ fn an_enrollment_without_its_key_is_not_reported_as_enrolled() {
 fn a_key_that_does_not_match_its_secret_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ast_account.json");
-    let mut file = enrolled().encode();
-    file.public_b64u = Some(MachineKeypair::generate().unwrap().public_b64u());
+    let mut file: serde_json::Value = serde_json::from_slice(&enrolled().encode()).unwrap();
+    file["public_b64u"] = MachineKeypair::generate().unwrap().public_b64u().into();
     std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
 
     let loaded = load_account(&path);
 
     assert!(
-        matches!(loaded, Err(AccountFileError::Key { .. })),
+        matches!(
+            loaded,
+            Err(AccountFileError::Decode {
+                source: MachineFileError::Key(artisan_account::KeyProblem::Mismatch),
+                ..
+            })
+        ),
         "{loaded:?}"
     );
 }

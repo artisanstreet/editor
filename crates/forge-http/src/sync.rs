@@ -317,20 +317,12 @@ pub enum MachineIdentityError {
         #[source]
         source: std::io::Error,
     },
-    #[error("parse {}", path.display())]
-    Parse {
+    #[error("read the machine account in {}", path.display())]
+    Decode {
         path: PathBuf,
         #[source]
-        source: serde_json::Error,
+        source: artisan_account::MachineFileError,
     },
-    #[error("read the machine secret in {}", path.display())]
-    Secret {
-        path: PathBuf,
-        #[source]
-        source: base64::DecodeError,
-    },
-    #[error("the machine secret in {} is {bytes} bytes, not 32", path.display())]
-    SecretLength { path: PathBuf, bytes: usize },
 }
 
 #[derive(serde::Deserialize)]
@@ -1102,7 +1094,7 @@ fn same_destination(previous: &artisan_api::McpServer, next: &artisan_api::McpSe
 #[derive(Clone)]
 pub struct MachineIdentity {
     pub machine_id: String,
-    pub account_id: Option<String>,
+    pub account_id: String,
     pub secret: [u8; 32],
 }
 
@@ -1119,45 +1111,29 @@ impl std::fmt::Debug for MachineIdentity {
 pub fn load_machine_identity(
     data_dir: &Path,
 ) -> Result<Option<MachineIdentity>, MachineIdentityError> {
-    use base64::Engine as _;
-    #[derive(serde::Deserialize)]
-    struct AccountFile {
-        #[serde(default)]
-        secret_b64u: Option<String>,
-        #[serde(default)]
-        machine_id: Option<String>,
-        #[serde(default)]
-        account_id: Option<String>,
-    }
     let path = data_dir.join("ast_account.json");
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(MachineIdentityError::Read { path, source }),
     };
-    let file: AccountFile = match serde_json::from_slice(&bytes) {
-        Ok(file) => file,
-        Err(source) => return Err(MachineIdentityError::Parse { path, source }),
-    };
-    let (Some(secret_b64u), Some(machine_id)) = (file.secret_b64u, file.machine_id) else {
-        return Ok(None);
-    };
-    let decoded =
-        match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(secret_b64u.as_bytes()) {
-            Ok(decoded) => decoded,
-            Err(source) => return Err(MachineIdentityError::Secret { path, source }),
-        };
-    let Ok(secret) = <[u8; 32]>::try_from(decoded.as_slice()) else {
-        return Err(MachineIdentityError::SecretLength {
-            path,
-            bytes: decoded.len(),
-        });
-    };
-    Ok(Some(MachineIdentity {
-        machine_id,
-        account_id: file.account_id,
-        secret,
-    }))
+    match artisan_account::MachineAccount::decode(&bytes) {
+        Ok(artisan_account::MachineAccount::Enrolled {
+            key,
+            machine_id,
+            account_id,
+        }) => Ok(Some(MachineIdentity {
+            machine_id,
+            account_id,
+            secret: *key.secret(),
+        })),
+        Ok(
+            artisan_account::MachineAccount::Unkeyed
+            | artisan_account::MachineAccount::Keyed { .. }
+            | artisan_account::MachineAccount::Pending { .. },
+        ) => Ok(None),
+        Err(source) => Err(MachineIdentityError::Decode { path, source }),
+    }
 }
 
 pub(crate) async fn run_config_loop(

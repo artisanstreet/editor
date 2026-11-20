@@ -37,9 +37,7 @@ pub(crate) async fn run(
             return;
         }
     };
-    let Some(account_id) = identity.account_id.clone() else {
-        return;
-    };
+    let account_id = identity.account_id.clone();
     tracing::info!(machine = %identity.machine_id, "account services starting");
     tasks.spawn(crate::sync::run_config_loop(
         data_dir,

@@ -1,11 +1,10 @@
 use crate::paths::{self, LocateError};
 use crate::service::RestartError;
 use crate::ui::AskError;
-use artisan_account::{MachineKeyError, MachineKeypair};
+use artisan_account::{MachineAccount, MachineFileError, MachineKeyError, MachineKeypair};
 use artisan_paths::App;
 use clap::{Args, Subcommand};
 use forge_http::core::{BuildCoreClientError, CoreCallError};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
@@ -59,52 +58,7 @@ pub(crate) enum AccountCommand {
     Sync,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct AccountFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    secret_b64u: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    public_b64u: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    enrollment_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    machine_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    account_id: Option<String>,
-}
-
-impl AccountFile {
-    fn present_fields(&self) -> String {
-        let fields: Vec<&str> = [
-            (self.secret_b64u.is_some(), "secret_b64u"),
-            (self.public_b64u.is_some(), "public_b64u"),
-            (self.enrollment_id.is_some(), "enrollment_id"),
-            (self.machine_id.is_some(), "machine_id"),
-            (self.account_id.is_some(), "account_id"),
-        ]
-        .into_iter()
-        .filter_map(|(present, name)| present.then_some(name))
-        .collect();
-        fields.join(", ")
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Account {
-    Unkeyed,
-    Keyed {
-        key: MachineKeypair,
-    },
-    Pending {
-        key: MachineKeypair,
-        enrollment_id: String,
-    },
-    Enrolled {
-        key: MachineKeypair,
-        machine_id: String,
-        account_id: String,
-    },
-}
+type Account = MachineAccount;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AccountFileError {
@@ -114,18 +68,11 @@ pub(crate) enum AccountFileError {
         #[source]
         source: std::io::Error,
     },
-    #[error("parse {}", path.display())]
-    Parse {
+    #[error("read the machine account in {}; if it is damaged, move it aside and enroll again", path.display())]
+    Decode {
         path: PathBuf,
         #[source]
-        source: serde_json::Error,
-    },
-    #[error("{} holds {fields}, which is not a state `ae account` writes; move it aside and enroll again", path.display())]
-    Inconsistent { path: PathBuf, fields: String },
-    #[error("{} holds an unusable machine key: {problem}", path.display())]
-    Key {
-        path: PathBuf,
-        problem: &'static str,
+        source: MachineFileError,
     },
     #[error("save {}", path.display())]
     Write {
@@ -133,78 +80,6 @@ pub(crate) enum AccountFileError {
         #[source]
         source: std::io::Error,
     },
-}
-
-impl Account {
-    fn decode(path: &Path, file: AccountFile) -> Result<Self, AccountFileError> {
-        let fields = file.present_fields();
-        let inconsistent = || AccountFileError::Inconsistent {
-            path: path.to_owned(),
-            fields: fields.clone(),
-        };
-        let AccountFile {
-            secret_b64u,
-            public_b64u,
-            enrollment_id,
-            machine_id,
-            account_id,
-        } = file;
-        let key = match (secret_b64u, public_b64u) {
-            (None, None) => None,
-            (Some(secret), Some(public)) => Some(decode_key(path, &secret, &public)?),
-            (Some(_), None) | (None, Some(_)) => return Err(inconsistent()),
-        };
-        match (key, enrollment_id, machine_id, account_id) {
-            (None, None, None, None) => Ok(Self::Unkeyed),
-            (Some(key), None, None, None) => Ok(Self::Keyed { key }),
-            (Some(key), Some(enrollment_id), None, None) => {
-                Ok(Self::Pending { key, enrollment_id })
-            }
-            (Some(key), None, Some(machine_id), Some(account_id)) => Ok(Self::Enrolled {
-                key,
-                machine_id,
-                account_id,
-            }),
-            (_, _, _, _) => Err(inconsistent()),
-        }
-    }
-
-    fn encode(&self) -> AccountFile {
-        use base64::Engine as _;
-        let keyed = |key: &MachineKeypair| AccountFile {
-            secret_b64u: Some(
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.secret()),
-            ),
-            public_b64u: Some(key.public_b64u()),
-            ..AccountFile::default()
-        };
-        match self {
-            Self::Unkeyed => AccountFile::default(),
-            Self::Keyed { key } => keyed(key),
-            Self::Pending { key, enrollment_id } => AccountFile {
-                enrollment_id: Some(enrollment_id.clone()),
-                ..keyed(key)
-            },
-            Self::Enrolled {
-                key,
-                machine_id,
-                account_id,
-            } => AccountFile {
-                machine_id: Some(machine_id.clone()),
-                account_id: Some(account_id.clone()),
-                ..keyed(key)
-            },
-        }
-    }
-
-    const fn key(&self) -> Option<&MachineKeypair> {
-        match self {
-            Self::Unkeyed => None,
-            Self::Keyed { key } | Self::Pending { key, .. } | Self::Enrolled { key, .. } => {
-                Some(key)
-            }
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -328,8 +203,6 @@ pub(crate) enum SyncError {
     Identity(#[source] forge_http::sync::MachineIdentityError),
     #[error("this Forge is not enrolled; run `ae account enroll` first")]
     NotEnrolled,
-    #[error("no account recorded; re-run `ae account confirm`")]
-    NoAccount,
     #[error("restart Forge to sync the account config")]
     Restart(#[source] RestartError),
     #[error(transparent)]
@@ -352,30 +225,6 @@ pub(crate) enum SyncError {
     },
 }
 
-fn decode_key(path: &Path, secret: &str, public: &str) -> Result<MachineKeypair, AccountFileError> {
-    use base64::Engine as _;
-    let problem = |problem| AccountFileError::Key {
-        path: path.to_owned(),
-        problem,
-    };
-    let secret: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(secret)
-        .map_err(|_encoding| problem("the secret is not base64url"))?
-        .try_into()
-        .map_err(|_length| problem("the secret is not 32 bytes"))?;
-    let public: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(public)
-        .map_err(|_encoding| problem("the public key is not base64url"))?
-        .try_into()
-        .map_err(|_length| problem("the public key is not 32 bytes"))?;
-    let key =
-        MachineKeypair::from_secret(secret).map_err(|_secret| problem("the secret is invalid"))?;
-    if key.public() != &public {
-        return Err(problem("the public key does not match the secret"));
-    }
-    Ok(key)
-}
-
 fn account_path() -> Result<PathBuf, LocateError> {
     Ok(paths::data(App::Forge)?.join("ast_account.json"))
 }
@@ -391,17 +240,14 @@ fn load_account(path: &Path) -> Result<Account, AccountFileError> {
             });
         }
     };
-    let file = serde_json::from_slice(&bytes).map_err(|source| AccountFileError::Parse {
+    Account::decode(&bytes).map_err(|source| AccountFileError::Decode {
         path: path.to_owned(),
         source,
-    })?;
-    Account::decode(path, file)
+    })
 }
 
 fn save_account(path: &Path, account: &Account) -> Result<(), AccountFileError> {
-    let bytes = serde_json::to_vec_pretty(&account.encode())
-        .expect("invariant: an account file of strings always serializes");
-    write_private(path, &bytes).map_err(|source| AccountFileError::Write {
+    write_private(path, &account.encode()).map_err(|source| AccountFileError::Write {
         path: path.to_owned(),
         source,
     })
@@ -750,9 +596,6 @@ fn sync_config_now(core: Option<&str>) -> Result<(), SyncError> {
     else {
         return Err(SyncError::NotEnrolled);
     };
-    if identity.account_id.is_none() {
-        return Err(SyncError::NoAccount);
-    }
     if crate::service::is_running().map_err(SyncError::Running)? {
         crate::service::restart().map_err(SyncError::Restart)?;
         crate::ui::success("Restarted Forge; it syncs the account config on startup.");

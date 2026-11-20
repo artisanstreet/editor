@@ -584,13 +584,17 @@ async fn synced_servers_keep_credentials_only_while_their_destination_is_unchang
 
 #[test]
 fn a_logged_machine_identity_never_shows_its_key() {
-    use base64::Engine as _;
     let dir = tempfile::tempdir().unwrap();
-    let key = [0x5a_u8; 32];
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key);
+    let key = artisan_account::MachineKeypair::from_secret([0x5a_u8; 32]).unwrap();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.secret());
     std::fs::write(
         dir.path().join("ast_account.json"),
-        serde_json::json!({ "secret_b64u": encoded, "machine_id": "machine-1" }).to_string(),
+        artisan_account::MachineAccount::Enrolled {
+            key,
+            machine_id: "machine-1".to_owned(),
+            account_id: "account-1".to_owned(),
+        }
+        .encode(),
     )
     .unwrap();
     let identity = load_machine_identity(dir.path()).unwrap().unwrap();
@@ -598,4 +602,28 @@ fn a_logged_machine_identity_never_shows_its_key() {
     assert!(logged.contains("machine-1"), "{logged}");
     assert!(!logged.contains("90, 90"), "{logged}");
     assert!(!logged.contains(&encoded), "{logged}");
+}
+
+#[test]
+fn a_partly_written_machine_account_is_refused_instead_of_read_as_unenrolled() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ast_account.json");
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x5a_u8; 32]);
+    for partial in [
+        serde_json::json!({ "secret_b64u": secret, "machine_id": "machine-1" }),
+        serde_json::json!({ "machine_id": "machine-1", "account_id": "account-1" }),
+    ] {
+        std::fs::write(&path, partial.to_string()).unwrap();
+        let loaded = load_machine_identity(dir.path());
+        assert!(
+            matches!(
+                loaded,
+                Err(MachineIdentityError::Decode {
+                    source: artisan_account::MachineFileError::Inconsistent { .. },
+                    ..
+                })
+            ),
+            "{partial}: {loaded:?}"
+        );
+    }
 }
