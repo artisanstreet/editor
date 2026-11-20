@@ -1855,9 +1855,11 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
     let fixture = fixture(Arc::new(|turn, mut io| {
         Box::pin(async move {
             assert_eq!(turn.input.text, "one delivery");
-            tokio::time::timeout(Duration::from_millis(20), io.inbox.recv())
-                .await
-                .unwrap_err();
+            let next = io.inbox.recv().await;
+            assert!(
+                matches!(next, Some(Input::ClearGoal)),
+                "the claimed input arrived again as a steer: {next:?}"
+            );
             Outcome::done()
         })
     }))
@@ -1884,6 +1886,7 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         ))
         .await
         .unwrap();
+    sender.send(Input::ClearGoal).await.unwrap();
     let run_id = RunId::new();
     let stop = turns::StopSignal::default();
     fixture
