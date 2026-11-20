@@ -212,6 +212,11 @@ fn stream(editor: &mut Editor, ledger: &mut Ledger) {
         finished.most_published(),
         "",
     );
+    ledger.measure(
+        "finish_allocated_kib_per_frame",
+        finished.most_allocated() / 1024,
+        "",
+    );
 }
 
 fn scroll(editor: &mut Editor, ledger: &mut Ledger) {
@@ -264,6 +269,11 @@ fn a_long_thread_stays_within_its_performance_budgets() {
         Heap::now().retained_since(heap) / 1024,
         "",
     );
+    ledger.measure(
+        "open_allocated_kib",
+        (editor.started() + opened.allocated()) / 1024,
+        "",
+    );
     let idle = editor.idle(IDLE_FRAMES);
     ledger.measure(
         "idle_window_rebuilds",
@@ -276,6 +286,11 @@ fn a_long_thread_stays_within_its_performance_budgets() {
         "",
     );
     ledger.measure("idle_access_nodes_published", idle.published(), "");
+    ledger.measure(
+        "idle_allocated_kib_per_frame",
+        idle.most_allocated() / 1024,
+        "",
+    );
     ledger.measure("rest_access_nodes", idle.most_examined(), "");
     stream(&mut editor, &mut ledger);
     scroll(&mut editor, &mut ledger);

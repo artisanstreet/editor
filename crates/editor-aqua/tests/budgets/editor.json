@@ -11,6 +11,10 @@
     "limit": 10000,
     "reason": "launching into a 400-item thread retains about 6.9 MiB of heap (Editor plus the in-process Forge); the rest is headroom for allocator and font differences between machines"
   },
+  "open_allocated_kib": {
+    "limit": 480000,
+    "reason": "launching into a 400-item thread allocates about 350 to 410 MiB on the UI thread (resources, fonts, the first realization and every frame until the landing settles); it varies with how many frames run before Forge answers, so the limit carries that spread"
+  },
   "idle_window_rebuilds": {
     "limit": 0,
     "reason": "a settled thread with no input and no new items must not rebuild or refresh anything"
@@ -22,6 +26,10 @@
   "idle_access_nodes_published": {
     "limit": 0,
     "reason": "a connected screen reader must receive nothing while the window is unchanged"
+  },
+  "idle_allocated_kib_per_frame": {
+    "limit": 256,
+    "reason": "a settled frame with nothing to rebuild still drains the host and builds an empty scene; measured 224"
   },
   "rest_access_nodes": {
     "limit": 850,
@@ -50,6 +58,10 @@
   "finish_access_nodes_published_per_frame": {
     "limit": 1500,
     "reason": "swapping the live text for the stored text redraws the realized window once; measured 1299"
+  },
+  "finish_allocated_kib_per_frame": {
+    "limit": 16384,
+    "reason": "swapping the live text for the stored text realizes the reply's blocks once; measured about 15100"
   },
   "scroll_window_rebuilds": {
     "limit": 3,

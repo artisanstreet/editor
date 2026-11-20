@@ -1,3 +1,4 @@
+use crate::allocator::allocated_here;
 use aqua::prelude::{AquaWindowId, ObservedWindowState, WindowOptions};
 use aqua::{Application, Aqua, AquaConfig};
 use aqua_a11y_uia::A11yBridge;
@@ -28,6 +29,7 @@ pub(crate) struct Frame {
     animating: bool,
     access_examined: u64,
     access_published: u64,
+    allocated: u64,
 }
 
 impl Frame {
@@ -90,6 +92,14 @@ impl Span {
         self.most(|frame| frame.access_published)
     }
 
+    pub(crate) fn allocated(&self) -> u64 {
+        self.frames.iter().map(|frame| frame.allocated).sum()
+    }
+
+    pub(crate) fn most_allocated(&self) -> u64 {
+        self.most(|frame| frame.allocated)
+    }
+
     pub(crate) fn extend(&mut self, other: Self) {
         self.frames.extend(other.frames);
     }
@@ -105,6 +115,7 @@ pub(crate) struct Editor {
     changes: forge_store::Subscription,
     bridge: Arc<A11yBridge>,
     sequence: u64,
+    started: u64,
     _directory: tempfile::TempDir,
 }
 
@@ -170,6 +181,7 @@ impl Editor {
         } = seeded;
         let changes = forge.store().subscribe();
         take_tally();
+        let before = allocated_here();
         let mut core = test_support::editor::core::test_core(&files.dir);
         core.navigate(Screen::Thread {
             host: host.clone(),
@@ -190,6 +202,7 @@ impl Editor {
         aqua.add_headless_window(observed.clone());
         aqua.dispatch_start(&mut app, id);
         aqua.dispatch_input(&mut app, id, &InputEvent::Focused(true));
+        let started = allocated_here() - before;
         let bridge = A11yBridge::new(Arc::new(|| {}));
         bridge.connect();
         Self {
@@ -202,17 +215,20 @@ impl Editor {
             changes,
             bridge,
             sequence: 0,
+            started,
             _directory: directory,
         }
     }
 
     fn frame(&mut self) -> Frame {
         let requested = self.aqua.scheduler().stats().requested;
+        let before = allocated_here();
         self.aqua.dispatch_wake(&mut self.app, self.id);
         let now = self.aqua.clock();
         self.app.prepare_accessibility(&self.observed, now);
         let deadline = self.app.build_scene(&self.observed, now);
         self.aqua.flush_output(&mut self.app, self.id);
+        let built = allocated_here();
         let (root, focus, nodes) = self
             .app
             .a11y_nodes_for(self.id)
@@ -222,9 +238,11 @@ impl Editor {
             .bridge
             .snapshot(&update)
             .map_or(0, |changed| changed.nodes.len());
+        let completing = allocated_here();
         self.sequence += 1;
         self.aqua
             .dispatch_frame_completed(&mut self.app, self.id, self.sequence);
+        let allocated = built - before + (allocated_here() - completing);
         let tally = take_tally();
         let refreshes = ["section_refresh", "transcript_subtree"]
             .iter()
@@ -238,7 +256,12 @@ impl Editor {
             animating: deadline.is_some(),
             access_examined: update.nodes.len() as u64,
             access_published: published as u64,
+            allocated,
         }
+    }
+
+    pub(crate) const fn started(&self) -> u64 {
+        self.started
     }
 
     pub(crate) fn store(&self) -> &forge_store::Store {
