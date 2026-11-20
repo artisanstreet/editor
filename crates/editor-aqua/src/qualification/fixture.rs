@@ -559,7 +559,7 @@ fn checkpoint_database(root: &Path) -> Result<(), CheckpointError> {
         .busy_timeout(Duration::ZERO)
         .map_err(checkpoint)?;
     let (busy, _, _): (i64, i64, i64) = connection
-        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        .query_row(include_str!("fixture/checkpoint.sql"), [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .map_err(checkpoint)?;
@@ -567,7 +567,7 @@ fn checkpoint_database(root: &Path) -> Result<(), CheckpointError> {
         return Err(CheckpointError::Busy { path });
     }
     connection
-        .execute_batch("BEGIN EXCLUSIVE; COMMIT;")
+        .execute_batch(include_str!("fixture/exclusive.sql"))
         .map_err(checkpoint)?;
     drop(connection);
     let wal = root.join("forge.sqlite3-wal");
