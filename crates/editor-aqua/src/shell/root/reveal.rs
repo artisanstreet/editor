@@ -160,7 +160,7 @@ fn shown_match(
 
 impl RootViews {
     pub(super) fn advance_reveal(&mut self, shell: &mut Shell, ui: &mut UiApp) -> Progress {
-        let Some(reveal) = self.reveal.as_mut() else {
+        let Some(reveal) = self.navigation_views.reveal.as_mut() else {
             return Progress::Idle;
         };
         let now = shell.core.clock().now();
@@ -170,7 +170,7 @@ impl RootViews {
                 item = %reveal.hit.item,
                 "gave up selecting a search hit in the transcript"
             );
-            self.reveal = None;
+            self.navigation_views.reveal = None;
             return Progress::Idle;
         }
         let core = &shell.core;
@@ -201,7 +201,7 @@ impl RootViews {
         }
         if let Some((node, range)) = shown_match(ui, conversation, &reveal.hit, &reveal.needle) {
             return if ui.select_text(node, range) {
-                self.reveal = None;
+                self.navigation_views.reveal = None;
                 Progress::Acted
             } else {
                 Progress::Waiting

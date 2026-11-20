@@ -47,21 +47,26 @@ impl RootViews {
         } = pass;
         let scope = PresentationScope::capture(&workspace.conversation, core)
             .ok_or(BuildError::ConversationGone)?;
-        if self.rows.as_ref().is_none_or(|rows| rows.scope() != &scope) {
-            if let Some(token) = self.row_token.take() {
+        if self
+            .transcript
+            .rows
+            .as_ref()
+            .is_none_or(|rows| rows.scope() != &scope)
+        {
+            if let Some(token) = self.transcript.row_token.take() {
                 token.set(false);
             }
-            self.row_settled.borrow_mut().clear();
-            self.observations.clear();
-            self.navigation.dispose();
-            self.transcript_viewport = None;
-            self.mounted_reveals.borrow_mut().rebind(None);
-            self.row_cache.borrow_mut().rebind(None);
+            self.transcript.row_settled.borrow_mut().clear();
+            self.transcript.observations.clear();
+            self.navigation_views.navigation.dispose();
+            self.scroll.transcript_viewport = None;
+            self.transcript.mounted_reveals.borrow_mut().rebind(None);
+            self.transcript.row_cache.borrow_mut().rebind(None);
             self.retained_rows = None;
-            self.smooth_scroll.cancel();
-            self.scroll_request = None;
-            self.wheel.cancel_transcript();
-            self.row_motion = Rc::default();
+            self.scroll.smooth_scroll.cancel();
+            self.scroll.scroll_request = None;
+            self.scroll.wheel.cancel_transcript();
+            self.transcript.row_motion = Rc::default();
         }
         workspace
             .markdown
@@ -73,13 +78,13 @@ impl RootViews {
         workspace
             .conversation
             .advance_disclosure_frame(core, now, reduced_motion);
-        if self.media.as_ref().is_none_or(|media| {
+        if self.media_views.media.as_ref().is_none_or(|media| {
             media.host != scope.host
                 || media.instance != scope.instance
                 || media.thread != scope.thread
         }) {
-            drop(self.media.take());
-            self.observations.clear();
+            drop(self.media_views.media.take());
+            self.transcript.observations.clear();
             let client = core
                 .host_if_instance(&scope.host, scope.instance)
                 .ok_or_else(|| BuildError::HostGone {
@@ -107,7 +112,7 @@ impl RootViews {
                     })
                 },
             );
-            self.media = Some(ConversationMedia {
+            self.media_views.media = Some(ConversationMedia {
                 host: scope.host.clone(),
                 instance: scope.instance,
                 thread: scope.thread.clone(),
@@ -118,7 +123,7 @@ impl RootViews {
                 index: None,
             });
         }
-        let Some(media) = self.media.as_mut() else {
+        let Some(media) = self.media_views.media.as_mut() else {
             unreachable!(
                 "invariant: media for thread {} on {} was bound above",
                 scope.thread, scope.host
@@ -132,7 +137,10 @@ impl RootViews {
                 .iter()
                 .map(|(row, _)| row.key())
                 .collect();
-            self.row_cache.borrow_mut().retain_rows(&row_keys);
+            self.transcript
+                .row_cache
+                .borrow_mut()
+                .retain_rows(&row_keys);
             self.retained_rows = Some(rows_epoch);
         }
         let items_revision = workspace
@@ -141,6 +149,7 @@ impl RootViews {
             .as_ref()
             .map(|view| (view.items.revision(), view.context.revision()));
         let preview = self
+            .media_views
             .image_preview
             .as_ref()
             .and_then(|preview| preview.owner.as_ref())
@@ -161,13 +170,13 @@ impl RootViews {
             providers
         };
         let images = workspace.images.as_ref().clone();
-        let media_actions = Rc::clone(&self.conversation_actions);
+        let media_actions = Rc::clone(&self.transcript.conversation_actions);
         let media_scope = scope.clone();
         let sender = core.wake_mailbox().sender();
         let wake: aqua::mailbox::Wake = std::sync::Arc::new(move || {
             let _queued = sender.send(());
         });
-        let actions = Rc::clone(&self.row_actions);
+        let actions = Rc::clone(&self.transcript.row_actions);
         let dispatch = crate::conversation::view::scoped_dispatch(
             &workspace.conversation,
             Rc::new(move |action| actions.borrow_mut().push_back(action)),
@@ -179,7 +188,8 @@ impl RootViews {
         let (on_link, on_color) = self.conversation_callbacks(scope.clone());
         let invalidated = Rc::clone(&self.rows_invalidated);
         let row_token = Rc::clone(
-            self.row_token
+            self.transcript
+                .row_token
                 .get_or_insert_with(|| Rc::new(Cell::new(true))),
         );
         let style = (
@@ -188,15 +198,15 @@ impl RootViews {
             swift,
             media_resources.scale.to_bits(),
         );
-        if self.row_style != Some(style) {
-            self.row_style = Some(style);
-            self.row_style_epoch += 1;
-            self.row_settled.borrow_mut().clear();
+        if self.transcript.row_style != Some(style) {
+            self.transcript.row_style = Some(style);
+            self.transcript.row_style_epoch += 1;
+            self.transcript.row_settled.borrow_mut().clear();
         }
-        let settled = Rc::clone(&self.row_settled);
-        let invalidate_settled = Rc::clone(&self.row_settled);
+        let settled = Rc::clone(&self.transcript.row_settled);
+        let invalidate_settled = Rc::clone(&self.transcript.row_settled);
         let seconds = now
-            .saturating_duration_since(*self.motion_epoch.get_or_insert(now))
+            .saturating_duration_since(*self.transcript.motion_epoch.get_or_insert(now))
             .as_secs_f64();
         let host_gone = || BuildError::HostGone {
             host: scope.host.clone(),
@@ -208,9 +218,9 @@ impl RootViews {
         let provider = core
             .source_provider(&scope.host, scope.instance)
             .ok_or_else(host_gone)?;
-        let blob_actions = Rc::clone(&self.conversation_actions);
+        let blob_actions = Rc::clone(&self.transcript.conversation_actions);
         let blob_scope = scope.clone();
-        let source_actions = Rc::clone(&self.conversation_actions);
+        let source_actions = Rc::clone(&self.transcript.conversation_actions);
         let services = crate::conversation::view::factory::RowServices::new(
             &scope,
             crate::conversation::view::factory::RowServiceParts {
@@ -221,7 +231,7 @@ impl RootViews {
                         .borrow_mut()
                         .push_back(ConversationAction::Source(action));
                 }),
-                stored: Rc::clone(&self.stored),
+                stored: Rc::clone(&self.transcript.stored),
                 images: blob_images,
                 on_blob: Rc::new(move |item, revision, action| {
                     blob_actions
@@ -256,7 +266,7 @@ impl RootViews {
                 workspace.code_action_emit(),
                 Rc::clone(&dispatch),
                 crate::conversation::view::factory::WorkResources {
-                    motion: Rc::clone(&self.row_motion),
+                    motion: Rc::clone(&self.transcript.row_motion),
                     names: crate::conversation::adapter::agent_names(&workspace.conversation),
                     seconds,
                     timestamp: core.clock().timestamp(),
@@ -264,10 +274,10 @@ impl RootViews {
                 services,
             )
             .with_active(row_token)
-            .with_settled(settled, self.row_style_epoch)
-            .with_row_cache(Rc::clone(&self.row_cache))
+            .with_settled(settled, self.transcript.row_style_epoch)
+            .with_row_cache(Rc::clone(&self.transcript.row_cache))
             .with_copy({
-                let copy_actions = Rc::clone(&self.conversation_actions);
+                let copy_actions = Rc::clone(&self.transcript.conversation_actions);
                 let copy_scope = scope.clone();
                 Rc::new(move |source| {
                     copy_actions
@@ -280,12 +290,12 @@ impl RootViews {
             .with_reveals(
                 &workspace.conversation,
                 core,
-                Rc::clone(&self.mounted_reveals),
+                Rc::clone(&self.transcript.mounted_reveals),
                 swift,
             )
             .map_err(BuildError::Rows)?
-            .with_observations(self.observations.clone())
-            .with_engine(Rc::clone(&self.markdown_engine))
+            .with_observations(self.transcript.observations.clone())
+            .with_engine(Rc::clone(&self.transcript.markdown_engine))
             .with_media(Rc::new(move |key, width| {
                 let (fetcher, revision) = providers.get(&key.item)?;
                 let revision = *revision;
@@ -315,7 +325,7 @@ impl RootViews {
             })),
         );
         let viewport = factory.viewport_callback().map_err(BuildError::Rows)?;
-        self.transcript_landing = Some(workspace.conversation.is_landing());
+        self.navigation_views.transcript_landing = Some(workspace.conversation.is_landing());
         if transcript_only {
             let heights = workspace.conversation.row_heights.clone();
             let revisions = Rc::clone(&factory);
@@ -327,10 +337,10 @@ impl RootViews {
                 viewport,
                 Rc::new(move |_, key| heights.get(key).copied().unwrap_or(24.0)),
             );
-            self.replace_rows(Some(factory));
+            self.transcript.replace_rows(Some(factory));
             return Ok(list);
         }
-        self.latest.show(
+        self.navigation_views.latest.show(
             crate::shell::thread_navigation::latest_visible(
                 &workspace.conversation,
                 core,
@@ -339,8 +349,8 @@ impl RootViews {
             now,
             reduced_motion,
         );
-        let presence = self.latest.value(now);
-        let jump = (self.latest.shown() || presence > 0.0).then(|| {
+        let presence = self.navigation_views.latest.value(now);
+        let jump = (self.navigation_views.latest.shown() || presence > 0.0).then(|| {
             crate::shell::thread_navigation::jump_to_latest(theme, presence, Rc::clone(&dispatch))
         });
         let unavailable = workspace
@@ -362,7 +372,7 @@ impl RootViews {
             )
             .over(theme.colors.background);
             if matches!(unavailable, crate::core::ThreadUnavailable::Failed(_)) {
-                let actions = Rc::clone(&self.conversation_actions);
+                let actions = Rc::clone(&self.transcript.conversation_actions);
                 let scope = scope.clone();
                 notice = notice.action(
                     crate::ui::kit::Button::text(
@@ -388,7 +398,7 @@ impl RootViews {
                 .and_then(|host| host.thread_summary(&scope.thread))
                 .and_then(|summary| summary.error.as_ref())
         {
-            let actions = Rc::clone(&self.conversation_actions);
+            let actions = Rc::clone(&self.transcript.conversation_actions);
             let scope = scope.clone();
             let retry = crate::ui::kit::Button::text(
                 "retry-thread-controls",
@@ -419,7 +429,7 @@ impl RootViews {
                 crate::ui::kit::ProblemNotice::new("transcript-problem", *theme, failure.problem())
                     .over(theme.colors.background);
             if failure.retryable() {
-                let actions = Rc::clone(&self.conversation_actions);
+                let actions = Rc::clone(&self.transcript.conversation_actions);
                 let scope = scope.clone();
                 notice = notice.action(
                     crate::ui::kit::Button::text(
@@ -460,7 +470,7 @@ impl RootViews {
             attachments,
             mention_overlay: None,
             thread_error: None,
-            shift: self.composer_glide.shift(now),
+            shift: self.navigation_views.composer_glide.shift(now),
             measurement: Rc::clone(&self.composer_measurement),
             above: above_composer,
         };
@@ -494,7 +504,8 @@ impl RootViews {
         } else {
             self.thread_loading.reset();
             let mut overlays = vec![
-                self.transcript_edges
+                self.scroll
+                    .transcript_edges
                     .band(
                         "conversation-edge-top",
                         crate::ui::scroll_edge::Edge::Top,
@@ -503,7 +514,8 @@ impl RootViews {
                     .style(view::conversation_edge_style(
                         crate::ui::scroll_edge::Edge::Top,
                     )),
-                self.transcript_edges
+                self.scroll
+                    .transcript_edges
                     .band(
                         "conversation-edge-bottom",
                         crate::ui::scroll_edge::Edge::Bottom,
@@ -513,8 +525,8 @@ impl RootViews {
                         crate::ui::scroll_edge::Edge::Bottom,
                     )),
             ];
-            let drawer = self.transcript_viewport.and_then(|viewport| {
-                self.navigation.build(
+            let drawer = self.scroll.transcript_viewport.and_then(|viewport| {
+                self.navigation_views.navigation.build(
                     &workspace.conversation,
                     core,
                     viewport,
@@ -567,7 +579,7 @@ impl RootViews {
                 parts,
             )?
         };
-        self.replace_rows(Some(factory));
+        self.transcript.replace_rows(Some(factory));
         Ok(center)
     }
 
@@ -575,8 +587,8 @@ impl RootViews {
         &self,
         scope: crate::conversation::presentation::PresentationScope,
     ) -> ConversationCallbacks {
-        let links = Rc::clone(&self.conversation_actions);
-        let colors = Rc::clone(&self.conversation_actions);
+        let links = Rc::clone(&self.transcript.conversation_actions);
+        let colors = Rc::clone(&self.transcript.conversation_actions);
         let link_scope = scope.clone();
         (
             Rc::new(move |action| {

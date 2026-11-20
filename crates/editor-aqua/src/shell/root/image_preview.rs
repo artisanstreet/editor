@@ -6,7 +6,8 @@ use aqua::{AppCtx, UiApp};
 
 impl RootViews {
     pub(super) fn image_preview_stale(&self, shell: &Shell) -> bool {
-        self.image_preview
+        self.media_views
+            .image_preview
             .as_ref()
             .is_some_and(|preview| match &preview.origin {
                 PreviewOrigin::Conversation(scope) => {
@@ -48,17 +49,17 @@ impl RootViews {
         let Some((host, instance, image, opener_key)) = opened else {
             return false;
         };
-        self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.media_views.preview_generation = self.media_views.preview_generation.wrapping_add(1);
         let view = crate::ui::media::preview::Preview::from_ready(
-            self.preview_generation,
+            self.media_views.preview_generation,
             host,
             instance,
             image,
             opener_key,
             shell.core.clock().now(),
         );
-        self.dispose_color_menu(ui);
-        self.image_preview = Some(ImagePreview {
+        self.menus.dispose(ui);
+        self.media_views.image_preview = Some(ImagePreview {
             origin: PreviewOrigin::Composer,
             owner: None,
             view,
@@ -68,13 +69,13 @@ impl RootViews {
     }
 
     pub(super) fn close_image_preview(&mut self, ui: &mut UiApp, restore_focus: bool) {
-        if let Some(preview) = self.image_preview.take()
+        if let Some(preview) = self.media_views.image_preview.take()
             && restore_focus
             && let Some(key) = preview.view.opener_key()
         {
             ui.focus_key(key.to_owned());
         }
-        self.preview_actions.borrow_mut().clear();
+        self.media_views.preview_actions.borrow_mut().clear();
     }
 
     pub(super) fn preview_root(ui: &UiApp) -> Option<aqua_core::NodeId> {
@@ -128,10 +129,10 @@ impl RootViews {
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let now = shell.core.clock().now();
-        let events = std::mem::take(&mut *self.preview_actions.borrow_mut());
+        let events = std::mem::take(&mut *self.media_views.preview_actions.borrow_mut());
         let mut changed = false;
         for (generation, action) in events {
-            let Some(preview) = &mut self.image_preview else {
+            let Some(preview) = &mut self.media_views.image_preview else {
                 continue;
             };
             if generation != preview.view.generation() {
@@ -145,7 +146,7 @@ impl RootViews {
                     .dispatch(generation, action, &shell.core, now, reduced);
             }
         }
-        let Some(preview) = &mut self.image_preview else {
+        let Some(preview) = &mut self.media_views.image_preview else {
             return changed;
         };
         ctx.bind_mailbox(window, preview.view.wake_mailbox());

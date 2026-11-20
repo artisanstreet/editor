@@ -22,13 +22,13 @@ impl RootViews {
         if self.image_preview_stale(shell) {
             self.close_image_preview(ui, false);
         }
-        if self.color_scope.as_ref().is_some_and(|scope| {
+        if self.menus.color_scope.as_ref().is_some_and(|scope| {
             !shell
                 .entry
                 .workspace()
                 .is_some_and(|workspace| scope.current(&workspace.conversation, &shell.core))
         }) {
-            self.dispose_color_menu(ui);
+            self.menus.dispose(ui);
         }
         let viewport = layout::Size {
             width: crate::measure::narrow(window.inner_size.width),
@@ -44,7 +44,7 @@ impl RootViews {
             self.thread_landing.reset();
             shell.failures.close(ui);
             self.workspace_key = None;
-            self.settings_panel = None;
+            self.dialogs.settings_panel = None;
             return Ok(entry);
         }
         let app_media = Self::app_media(shell, window);
@@ -64,10 +64,12 @@ impl RootViews {
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let size = aqua_core::Size::new(viewport.width, viewport.height);
         let now = shell.core.clock().now();
-        self.sidebar.fit(viewport.width, now, reduced);
+        self.sidebar_views.sidebar.fit(viewport.width, now, reduced);
         aqua_core::checkpoint::reach();
-        let card_width =
-            (viewport.width - self.sidebar.width(now) - crate::frame::view::SHEET_PADDING).max(0.0);
+        let card_width = (viewport.width
+            - self.sidebar_views.sidebar.width(now)
+            - crate::frame::view::SHEET_PADDING)
+            .max(0.0);
         self.resize_key = Some(ResizeKey::of(&screen, card_width, viewport));
         let lift = crate::conversation::view::composer_lift(card_width);
         let sent = workspace.take_sent_new_thread();
@@ -78,10 +80,12 @@ impl RootViews {
                 Route::Elsewhere
             }
         };
-        self.composer_glide.follow(route, lift, now, reduced);
+        self.navigation_views
+            .composer_glide
+            .follow(route, lift, now, reduced);
         let sky = view::Sky {
-            opacity: self.composer_glide.sky_opacity(now),
-            transform: self.composer_glide.sky_transform(now),
+            opacity: self.navigation_views.composer_glide.sky_opacity(now),
+            transform: self.navigation_views.composer_glide.sky_transform(now),
         };
         let mut connection_held = false;
         let center = match &screen {
@@ -110,7 +114,7 @@ impl RootViews {
                         },
                     )?
                 } else {
-                    self.replace_rows(None);
+                    self.transcript.replace_rows(None);
                     if let Screen::Thread { host, thread } = &screen {
                         self.connection
                             .hold(Some(crate::shell::connection::Owner::Thread(
@@ -153,13 +157,19 @@ impl RootViews {
                             attachments,
                             mention_overlay: None,
                             thread_error: None,
-                            shift: self.composer_glide.shift(now),
+                            shift: self.navigation_views.composer_glide.shift(now),
                             measurement: Rc::clone(&self.composer_measurement),
                             above: None,
                         },
                         reduced,
-                        self.composer_glide.launched().then_some(card_width),
-                        self.composer_glide.sky_shown(now).then_some(&sky),
+                        self.navigation_views
+                            .composer_glide
+                            .launched()
+                            .then_some(card_width),
+                        self.navigation_views
+                            .composer_glide
+                            .sky_shown(now)
+                            .then_some(&sky),
                     )?
                 }
             }
@@ -172,7 +182,10 @@ impl RootViews {
                 &theme,
                 Rc::clone(&self.composer_measurement),
                 reduced,
-                self.composer_glide.sky_setting(now).then_some(&sky),
+                self.navigation_views
+                    .composer_glide
+                    .sky_setting(now)
+                    .then_some(&sky),
                 center,
             ),
             Screen::Home
@@ -194,42 +207,43 @@ impl RootViews {
         };
         aqua_core::checkpoint::reach();
         if !matches!(screen, Screen::Thread { .. }) {
-            self.replace_rows(None);
-            self.stored.borrow_mut().drain_cleanup(ui);
-            self.observations.clear();
-            self.navigation.dispose();
-            self.transcript_viewport = None;
-            self.mounted_reveals.borrow_mut().rebind(None);
-            self.row_cache.borrow_mut().rebind(None);
+            self.transcript.replace_rows(None);
+            self.transcript.stored.borrow_mut().drain_cleanup(ui);
+            self.transcript.observations.clear();
+            self.navigation_views.navigation.dispose();
+            self.scroll.transcript_viewport = None;
+            self.transcript.mounted_reveals.borrow_mut().rebind(None);
+            self.transcript.row_cache.borrow_mut().rebind(None);
             workspace.markdown.borrow_mut().rebind(ui, None);
             workspace.conversation_selection.rebind(ui, None);
-            drop(self.media.take());
+            drop(self.media_views.media.take());
             self.thread_loading.reset();
             self.thread_landing.reset();
-            self.smooth_scroll.cancel();
-            self.scroll_request = None;
+            self.scroll.smooth_scroll.cancel();
+            self.scroll.scroll_request = None;
         }
         if !connection_held {
             self.connection.hold(None);
         }
         if let Some(palette) = &workspace.palette {
-            if self.palette.is_none() {
-                self.palette = Some(crate::shell::palette::view::PaletteView::new(
+            if self.dialogs.palette.is_none() {
+                self.dialogs.palette = Some(crate::shell::palette::view::PaletteView::new(
                     self.palette_emit(),
                 ));
             }
-            self.palette_content = self
+            self.dialogs.palette_content = self
+                .dialogs
                 .palette
                 .as_ref()
                 .map(|view| view.content(palette, &theme, self.palette_emit()));
         } else {
-            self.close_palette(ui);
+            self.dialogs.close_palette(ui);
         }
         if let Some(preview) = &workspace.resource_preview {
             let generation = workspace.resource_preview_generation();
-            if self.resource.as_ref().map(|(current, _)| *current) != Some(generation) {
-                self.close_resource(ui);
-                self.resource = Some((
+            if self.dialogs.resource.as_ref().map(|(current, _)| *current) != Some(generation) {
+                self.dialogs.close_resource(ui);
+                self.dialogs.resource = Some((
                     generation,
                     crate::shell::resource_preview::view::ViewState::new(
                         generation,
@@ -239,7 +253,7 @@ impl RootViews {
                 ));
             }
             let emit = self.resource_emit();
-            if let Some((_, state)) = &mut self.resource {
+            if let Some((_, state)) = &mut self.dialogs.resource {
                 state
                     .prepare(preview, ui)
                     .map_err(|source| BuildError::Selection {
@@ -249,13 +263,13 @@ impl RootViews {
                 let content = state
                     .content(preview, &theme, viewport.height, &emit)
                     .map_err(BuildError::ResourcePreview)?;
-                self.resource_content = Some((content, preview.path().to_owned()));
+                self.dialogs.resource_content = Some((content, preview.path().to_owned()));
             }
         } else {
-            self.close_resource(ui);
+            self.dialogs.close_resource(ui);
         }
         let settings_open = matches!(shell.core.screen(), Screen::Settings(_));
-        self.settings_panel = settings_open.then(|| {
+        self.dialogs.settings_panel = settings_open.then(|| {
             let settings_layout = layout::settings_layout(viewport);
             let nav = workspace.settings_sidebar_view(
                 &shell.core,
@@ -265,7 +279,7 @@ impl RootViews {
                 now,
             );
             let page = workspace.settings_view(&shell.core, &theme, &shell.build, size, true);
-            let dismissed = Rc::clone(&self.settings_dismissed);
+            let dismissed = Rc::clone(&self.dialogs.settings_dismissed);
             let dismiss: Rc<dyn Fn()> = Rc::new(move || dismissed.set(true));
             let panel = view::settings_panel(&theme, viewport, nav, page, &dismiss);
             (panel, settings_layout.size.width)
@@ -311,7 +325,10 @@ impl RootViews {
         workspace
             .inspector
             .follow(&shell.core, &workspace.conversation, ui);
-        let outline = self.navigation.chevron(shell.core.clock().now());
+        let outline = self
+            .navigation_views
+            .navigation
+            .chevron(shell.core.clock().now());
         let navigation = workspace
             .sidebar
             .host
@@ -365,8 +382,12 @@ impl RootViews {
                     reduced,
                     &self.tree_emit(workspace),
                 );
-                let strip =
-                    crate::frame::strip::strip(&theme, &tabs, reduced, &self.sidebar.emit());
+                let strip = crate::frame::strip::strip(
+                    &theme,
+                    &tabs,
+                    reduced,
+                    &self.sidebar_views.sidebar.emit(),
+                );
                 (tree, strip)
             });
         let (tree, strip) = match navigation {
@@ -387,7 +408,7 @@ impl RootViews {
                 &workspace.inspector_emit(),
                 &crate::frame::overview::OverviewPanel::in_window(
                     viewport.height,
-                    &self.overview_edges,
+                    &self.scroll.overview_edges,
                 ),
             ),
             (true, crate::shell::workspace::SidePanel::Inspector) => {
@@ -406,8 +427,8 @@ impl RootViews {
         };
         aqua_core::checkpoint::reach();
         let titlebar = shell.titlebar.workspace(&theme, window, strip, None, None);
-        let image_preview = self.image_preview.as_ref().map(|preview| {
-            let events = Rc::clone(&self.preview_actions);
+        let image_preview = self.media_views.image_preview.as_ref().map(|preview| {
+            let events = Rc::clone(&self.media_views.preview_actions);
             preview.view.view(
                 &theme,
                 aqua_core::Size::new(viewport.width, viewport.height),
@@ -442,7 +463,7 @@ impl RootViews {
                     .build(),
             ],
             crate::frame::seam::Seam {
-                motion: Rc::clone(&self.seam),
+                motion: Rc::clone(&self.sidebar_views.seam),
                 clock: shell.core.clock().clone(),
             },
             reduced,
@@ -470,20 +491,21 @@ impl RootViews {
     ) {
         self.sync_account_menu(shell, ui, ctx, window);
         self.sync_sign_in(shell, ui, ctx, window);
-        if self.sidebar.take_search_focus() {
+        if self.sidebar_views.sidebar.take_search_focus() {
             ui.focus_key(crate::frame::search::QUERY);
         }
-        self.source_dialogs
+        self.dialogs
+            .source_dialogs
             .retain(|export| Self::source_export_is_current(shell, export));
         self.bind_row_sources(ui, ctx, window);
         (|| {
-            let Some((panel, width)) = self.settings_panel.take() else {
-                if let Some(dialog) = self.settings.take() {
+            let Some((panel, width)) = self.dialogs.settings_panel.take() else {
+                if let Some(dialog) = self.dialogs.settings.take() {
                     dialog.dispose(ui);
                 }
                 return;
             };
-            if let Some(dialog) = &self.settings {
+            if let Some(dialog) = &self.dialogs.settings {
                 if dialog.is_open(ui) {
                     dialog.set_theme(shell.preferences.theme());
                     if let Err(error) = dialog.refresh_content(ui, panel) {
@@ -491,12 +513,12 @@ impl RootViews {
                     }
                     return;
                 }
-                self.settings = None;
+                self.dialogs.settings = None;
             }
             let Some(owner) = ui.find_debug_selector("workspace-root") else {
                 return;
             };
-            let dismissed = Rc::clone(&self.settings_dismissed);
+            let dismissed = Rc::clone(&self.dialogs.settings_dismissed);
             let dialog = crate::ui::dialog::Dialog::new(
                 "settings-dialog",
                 shell.preferences.theme(),
@@ -508,7 +530,7 @@ impl RootViews {
             .max_width(width)
             .on_dismiss(move |_| dismissed.set(true));
             match crate::ui::dialog::DialogHost::open(ui, owner, dialog) {
-                Ok(dialog) => self.settings = Some(dialog),
+                Ok(dialog) => self.dialogs.settings = Some(dialog),
                 Err(error) => tracing::warn!(%error, "could not open settings dialog"),
             }
         })();
@@ -517,7 +539,7 @@ impl RootViews {
         shell.failures.mount(ui, &shell.preferences.theme());
         if self.sync_image_preview(shell, ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_preview");
-            self.conversation_invalidated.set(true);
+            self.transcript.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
         self.sync_resource_jump(ui, ctx, window);
@@ -531,14 +553,15 @@ impl RootViews {
         };
         if navigation_changed {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_fc");
-            self.navigation_invalidated.set(true);
+            self.navigation_views.navigation_invalidated.set(true);
         }
         if self.sync_sidebar(shell, ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_sidebar_a");
-            self.conversation_invalidated.set(true);
+            self.transcript.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
         if self
+            .dialogs
             .resource
             .as_ref()
             .is_some_and(|(_, state)| state.pending_jump().is_some())

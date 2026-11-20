@@ -98,7 +98,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         3,
         action(BlobHash("other".into()))
     ));
-    assert!(root.image_preview.is_none());
+    assert!(root.media_views.image_preview.is_none());
     assert!(root.dispatch_blob(
         &mut shell,
         &mut resources.ui,
@@ -107,12 +107,12 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         3,
         action(hash.clone())
     ));
-    let preview = root.image_preview.take().unwrap();
+    let preview = root.media_views.image_preview.take().unwrap();
     assert_eq!(preview.view.opener_key(), Some("image-opener"));
     assert!(preview.owner.is_none());
     shell.core.remove_host(&config.id).unwrap();
     test_support::editor::core::connect_client(&mut shell.core, &config, client);
     assert!(!root.dispatch_blob(&mut shell, &mut resources.ui, scope, &id, 3, action(hash)));
-    assert!(root.image_preview.is_none());
+    assert!(root.media_views.image_preview.is_none());
     assert!(!preview.view.is_live(&shell.core));
 }

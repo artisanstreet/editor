@@ -56,9 +56,11 @@ impl RootViews {
             measured_row_count: conversation.row_heights.len(),
             prepared_inline_prose,
             visible_row_start: self
+                .scroll
                 .transcript_viewport
                 .map(|viewport| viewport.visible.start),
             scroll_y_bits: self
+                .scroll
                 .transcript_viewport
                 .map(|viewport| viewport.scroll_y.to_bits()),
             transcript_bounds_bits: bounds("conversation-transcript"),

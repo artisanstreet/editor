@@ -58,7 +58,8 @@ impl RootViews {
                 if !Self::source_export_is_current(shell, &export) {
                     return false;
                 }
-                self.source_dialogs
+                self.dialogs
+                    .source_dialogs
                     .open(*export, ctx, &shell.dialogs, window);
                 false
             }
@@ -67,14 +68,14 @@ impl RootViews {
 
     pub(super) fn bind_row_sources(&self, ui: &mut UiApp, ctx: &AppCtx<'_>, window: AquaWindowId) {
         let _tm = crate::shell::application::Tm::new("v.bind_sources");
-        self.stored.borrow().bind(ctx, window);
-        self.stored.borrow_mut().drain_cleanup(ui);
-        let owners = self.row_cache.borrow().live_owners();
+        self.transcript.stored.borrow().bind(ctx, window);
+        self.transcript.stored.borrow_mut().drain_cleanup(ui);
+        let owners = self.transcript.row_cache.borrow().live_owners();
         for owner in owners.into_iter().filter_map(|owner| owner.upgrade()) {
             owner.bind_sources(ctx, window);
         }
-        self.row_cache.borrow().drain_cleanup(ui);
-        self.source_dialogs.bind(ctx, window);
+        self.transcript.row_cache.borrow().drain_cleanup(ui);
+        self.dialogs.source_dialogs.bind(ctx, window);
     }
 
     pub(super) fn drain_row_sources(
@@ -98,7 +99,7 @@ impl RootViews {
         let Some(view) = &workspace.conversation.view else {
             return false;
         };
-        let owners = self.row_cache.borrow().live_owners();
+        let owners = self.transcript.row_cache.borrow().live_owners();
         let mut changed = false;
         let mut effects = Vec::new();
         for owner in owners.into_iter().filter_map(|owner| owner.upgrade()) {
@@ -165,17 +166,18 @@ impl RootViews {
             BlobAction::Open {
                 image, opener_key, ..
             } => {
-                self.preview_generation = self.preview_generation.wrapping_add(1);
+                self.media_views.preview_generation =
+                    self.media_views.preview_generation.wrapping_add(1);
                 let view = crate::ui::media::preview::Preview::from_ready(
-                    self.preview_generation,
+                    self.media_views.preview_generation,
                     scope.host.clone(),
                     scope.instance,
                     image,
                     opener_key,
                     shell.core.clock().now(),
                 );
-                self.dispose_color_menu(ui);
-                self.image_preview = Some(ImagePreview {
+                self.menus.dispose(ui);
+                self.media_views.image_preview = Some(ImagePreview {
                     origin: PreviewOrigin::Conversation(scope),
                     owner: None,
                     view,

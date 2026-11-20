@@ -12,7 +12,7 @@ impl RootViews {
         now: std::time::Instant,
     ) -> bool {
         let _tm = crate::shell::application::Tm::new("v.navigation");
-        let frame = self.navigation.sync(ui, now);
+        let frame = self.navigation_views.navigation.sync(ui, now);
         if frame.changed || frame.animating {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
@@ -27,14 +27,14 @@ impl RootViews {
             return outlined;
         };
         let core = &mut shell.core;
-        for command in self.sidebar.take_commands() {
+        for command in self.sidebar_views.sidebar.take_commands() {
             match command {
                 Command::Open(thread) => workspace.sidebar.open_thread(core, thread),
                 Command::New => workspace.sidebar.new_thread(core, None),
                 Command::Project(project) => workspace.sidebar.new_thread(core, Some(project)),
                 Command::Agent(agent) => workspace.conversation.open_agent(core, agent),
                 Command::Outline => {
-                    self.navigation.toggle(now, reduced);
+                    self.navigation_views.navigation.toggle(now, reduced);
                     outlined = true;
                 }
                 Command::OpenUrl(url) => {
@@ -66,7 +66,7 @@ impl RootViews {
                 }
             }
         }
-        if !self.sidebar.refresh_due(now) {
+        if !self.sidebar_views.sidebar.refresh_due(now) {
             return outlined;
         }
         let open_project = workspace.sidebar.open.as_ref().and_then(|thread| {

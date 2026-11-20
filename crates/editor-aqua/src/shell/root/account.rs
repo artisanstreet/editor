@@ -52,7 +52,7 @@ impl RootViews {
         reduced: bool,
     ) {
         use crate::ui::chrome::menu::Effect;
-        for effect in self.sidebar.take_effects() {
+        for effect in self.sidebar_views.sidebar.take_effects() {
             match effect {
                 Effect::FlipTheme => {
                     let dark = !shell.preferences.theme().colors.mode.is_dark();
@@ -74,7 +74,7 @@ impl RootViews {
             }
         }
         if self.apply_navigation(shell, reduced) {
-            self.navigation_invalidated.set(true);
+            self.navigation_views.navigation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
     }
@@ -87,7 +87,9 @@ impl RootViews {
         } else {
             None
         };
-        self.avatar.want(url, shell.core.clock().now());
+        self.sidebar_views
+            .avatar
+            .want(url, shell.core.clock().now());
         self.account_snapshot(shell)
     }
 
@@ -105,7 +107,7 @@ impl RootViews {
                 &profile.email,
                 profile.username.as_deref(),
             ),
-            avatar: self.avatar.image(),
+            avatar: self.sidebar_views.avatar.image(),
             limits: crate::ui::chrome::limits::resolve(
                 shell.core.active_host().into_iter().flat_map(|host| {
                     host.engines.values().filter_map(|status| {
@@ -123,16 +125,16 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) {
-        if let Some(mailbox) = self.avatar.mailbox() {
+        if let Some(mailbox) = self.sidebar_views.avatar.mailbox() {
             ctx.bind_mailbox(window, mailbox);
         }
         let theme = shell.preferences.theme();
         let Some(account) = self.account(shell) else {
-            self.account_popup.dispose(ui);
+            self.sidebar_views.account_popup.dispose(ui);
             return;
         };
-        let menu = *self.sidebar.menu();
-        let emit = self.sidebar.emit();
+        let menu = *self.sidebar_views.sidebar.menu();
+        let emit = self.sidebar_views.sidebar.emit();
         let dismissed = Rc::clone(&emit);
         let width = crate::frame::sidebar::OPEN_WIDTH
             - crate::frame::view::FOOTER_LEFT
@@ -149,7 +151,7 @@ impl RootViews {
                 },
             )
         };
-        if let Err(error) = self.account_popup.sync(
+        if let Err(error) = self.sidebar_views.account_popup.sync(
             ui,
             menu.open(),
             content,
@@ -162,7 +164,11 @@ impl RootViews {
         ) {
             tracing::warn!(%error, "could not open the account menu");
         }
-        match self.account_popup.advance(ui, ctx.now().as_secs_f64()) {
+        match self
+            .sidebar_views
+            .account_popup
+            .advance(ui, ctx.now().as_secs_f64())
+        {
             Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not animate the account menu"),

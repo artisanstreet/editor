@@ -22,45 +22,47 @@ impl RootViews {
         use crate::ui::markdown::visual::LinkAction;
         let _tm = crate::shell::application::Tm::new("v.dispatch_conv");
         self.connection.dispatch(&mut shell.core);
-        let invalidated = self.conversation_invalidated.replace(false);
+        let invalidated = self.transcript.conversation_invalidated.replace(false);
         let mut changed = self.noted.note(Cause::ConversationInvalidated, invalidated);
         let rows_invalidated = self.rows_invalidated.replace(false);
         self.noted.note(Cause::RowsInvalidated, rows_invalidated);
-        if self.navigation_invalidated.replace(false) {
+        if self.navigation_views.navigation_invalidated.replace(false) {
             let navigated = self.refresh_navigation(shell, ui, ctx, window);
             changed |= self.noted.note(Cause::Navigation, navigated);
         }
         self.bind_row_sources(ui, ctx, window);
         if let Some(workspace) = shell.entry.workspace_mut() {
             let published = self
+                .transcript
                 .stored
                 .borrow_mut()
                 .drain_publish(&mut workspace.conversation, &shell.core);
             self.noted.note(Cause::StoredRows, published);
         }
-        self.stored.borrow_mut().drain_cleanup(ui);
+        self.transcript.stored.borrow_mut().drain_cleanup(ui);
         let sourced = self.drain_row_sources(shell, ctx, window);
         self.noted.note(Cause::RowSources, sourced);
-        self.source_dialogs
+        self.dialogs
+            .source_dialogs
             .retain(|export| Self::source_export_is_current(shell, export));
-        for (export, result) in self.source_dialogs.drain() {
+        for (export, result) in self.dialogs.source_dialogs.drain() {
             changed |= Self::finish_source_dialog(shell, export, result);
         }
-        let row_actions = std::mem::take(&mut *self.row_actions.borrow_mut());
+        let row_actions = std::mem::take(&mut *self.transcript.row_actions.borrow_mut());
         if let Some(workspace) = shell.entry.workspace_mut() {
             let reduced =
                 ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
             for action in row_actions {
                 changed |= action.dispatch(
                     &mut workspace.conversation,
-                    &mut self.stored.borrow_mut(),
+                    &mut self.transcript.stored.borrow_mut(),
                     &shell.core,
                     reduced,
                     shell.core.clock().now(),
                 );
             }
         }
-        let actions = std::mem::take(&mut *self.conversation_actions.borrow_mut());
+        let actions = std::mem::take(&mut *self.transcript.conversation_actions.borrow_mut());
         for action in actions {
             let scope = match &action {
                 ConversationAction::Source(action) => &action.scope,
@@ -114,17 +116,18 @@ impl RootViews {
                     match effect {
                         crate::ui::media::preview::Effect::Open(request) => {
                             let owner = std::sync::Arc::clone(request.fetcher.owner());
-                            self.preview_generation = self.preview_generation.wrapping_add(1);
+                            self.media_views.preview_generation =
+                                self.media_views.preview_generation.wrapping_add(1);
                             if let Some(view) = crate::ui::media::preview::Preview::from_request(
-                                self.preview_generation,
+                                self.media_views.preview_generation,
                                 scope.host.clone(),
                                 scope.instance,
                                 workspace.images.as_ref().clone(),
                                 request,
                                 shell.core.clock().now(),
                             ) {
-                                self.dispose_color_menu(ui);
-                                self.image_preview = Some(ImagePreview {
+                                self.menus.dispose(ui);
+                                self.media_views.image_preview = Some(ImagePreview {
                                     origin: PreviewOrigin::Conversation(scope),
                                     owner: Some(owner),
                                     view,
@@ -199,9 +202,9 @@ impl RootViews {
                     }
                 }
                 ConversationAction::Color(scope, request) => {
-                    self.dispose_color_menu(ui);
+                    self.menus.dispose(ui);
                     if let Some(owner) = ui.find_debug_selector("workspace-root") {
-                        let effects = Rc::clone(&self.color_effects);
+                        let effects = Rc::clone(&self.menus.color_effects);
                         let reduced = ui.host().motion().reduced_motion()
                             == aqua_ui::motion::ReducedMotion::Reduce;
                         match crate::ui::color_copy_menu::ColorCopyMenuHost::open(
@@ -215,8 +218,8 @@ impl RootViews {
                             move |effect| effects.borrow_mut().push_back(effect),
                         ) {
                             Ok(menu) => {
-                                self.color_scope = menu.as_ref().map(|_| scope);
-                                self.color_menu = menu;
+                                self.menus.color_scope = menu.as_ref().map(|_| scope);
+                                self.menus.color_menu = menu;
                             }
                             Err(error) => tracing::warn!(%error, "could not open color copy menu"),
                         }
@@ -228,7 +231,7 @@ impl RootViews {
         changed |= self.noted.note(Cause::ImagePreview, previewed);
         self.warm_browser(shell);
         changed |= self.open_selection_menu(shell, ui, ctx);
-        let effects = std::mem::take(&mut *self.color_effects.borrow_mut());
+        let effects = std::mem::take(&mut *self.menus.color_effects.borrow_mut());
         for effect in effects {
             match effect {
                 ColorCopyEffect::Clipboard(text) => {
@@ -239,6 +242,7 @@ impl RootViews {
                 }
                 ColorCopyEffect::Search(text) => {
                     let browser = self
+                        .browser_lookup
                         .browser
                         .as_ref()
                         .and_then(|resolved| resolved.browser.as_ref());
@@ -258,8 +262,8 @@ impl RootViews {
                     ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
                 }
                 ColorCopyEffect::Dismissed => {
-                    self.color_menu = None;
-                    self.color_scope = None;
+                    self.menus.color_menu = None;
+                    self.menus.color_scope = None;
                 }
             }
         }

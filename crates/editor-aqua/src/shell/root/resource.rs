@@ -13,7 +13,7 @@ impl RootViews {
         window: AquaWindowId,
     ) {
         let _tm = crate::shell::application::Tm::new("v.resource_jump");
-        let Some((_, state)) = &mut self.resource else {
+        let Some((_, state)) = &mut self.dialogs.resource else {
             return;
         };
         if state.pending_jump().is_none() {
@@ -25,19 +25,8 @@ impl RootViews {
         }
     }
 
-    pub(super) fn close_resource(&mut self, ui: &mut UiApp) {
-        if let Some(dialog) = self.resource_dialog.take() {
-            dialog.dispose(ui);
-        }
-        if let Some((_, mut resource)) = self.resource.take() {
-            resource.release(ui);
-        }
-        self.resource_content = None;
-        self.resource_events.borrow_mut().clear();
-    }
-
     pub(super) fn resource_emit(&self) -> Rc<dyn Fn(crate::shell::resource_preview::view::Action)> {
-        let events = Rc::clone(&self.resource_events);
+        let events = Rc::clone(&self.dialogs.resource_events);
         Rc::new(move |event| events.borrow_mut().push_back(event))
     }
 
@@ -48,7 +37,7 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
     ) -> bool {
         use crate::shell::resource_preview::view::Action;
-        let events = std::mem::take(&mut *self.resource_events.borrow_mut());
+        let events = std::mem::take(&mut *self.dialogs.resource_events.borrow_mut());
         let mut changed = false;
         for event in events {
             let generation = match &event {
@@ -57,7 +46,7 @@ impl RootViews {
                 | Action::Dismiss { generation }
                 | Action::Retry { generation } => *generation,
             };
-            if self.resource.as_ref().map(|(current, _)| *current) != Some(generation)
+            if self.dialogs.resource.as_ref().map(|(current, _)| *current) != Some(generation)
                 || !shell.entry.workspace().is_some_and(|workspace| {
                     workspace.resource_preview.is_some()
                         && workspace.resource_preview_generation() == generation
@@ -79,7 +68,7 @@ impl RootViews {
                     }
                 }
                 Action::Dismiss { .. } => {
-                    self.close_resource(ui);
+                    self.dialogs.close_resource(ui);
                     shell.dismiss_reference();
                     changed = true;
                 }
@@ -90,10 +79,10 @@ impl RootViews {
     }
 
     pub(super) fn mount_resource(&mut self, shell: &Shell, ui: &mut UiApp) {
-        let Some((content, title)) = self.resource_content.take() else {
+        let Some((content, title)) = self.dialogs.resource_content.take() else {
             return;
         };
-        if let Some(dialog) = &self.resource_dialog {
+        if let Some(dialog) = &self.dialogs.resource_dialog {
             if dialog.is_open(ui) {
                 dialog.set_theme(shell.preferences.theme());
                 if let Err(error) = dialog.refresh_content(ui, content) {
@@ -101,14 +90,18 @@ impl RootViews {
                 }
                 return;
             }
-            self.resource_dialog = None;
+            self.dialogs.resource_dialog = None;
         }
         let Some(owner) = ui.find_debug_selector("workspace-root") else {
-            self.resource_content = Some((content, title));
+            self.dialogs.resource_content = Some((content, title));
             return;
         };
         let emit = self.resource_emit();
-        let generation = self.resource.as_ref().map(|(generation, _)| *generation);
+        let generation = self
+            .dialogs
+            .resource
+            .as_ref()
+            .map(|(generation, _)| *generation);
         let dialog = crate::ui::dialog::Dialog::new(
             "resource-preview",
             shell.preferences.theme(),
@@ -122,7 +115,7 @@ impl RootViews {
             }
         });
         match crate::ui::dialog::DialogHost::open(ui, owner, dialog) {
-            Ok(dialog) => self.resource_dialog = Some(dialog),
+            Ok(dialog) => self.dialogs.resource_dialog = Some(dialog),
             Err(error) => tracing::warn!(%error, "could not open resource preview"),
         }
     }

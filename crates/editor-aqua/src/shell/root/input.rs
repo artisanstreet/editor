@@ -13,29 +13,29 @@ impl RootViews {
         now: aqua::Instant,
     ) -> Option<bool> {
         if let InputEvent::PointerDown(pointer, _) = input
-            && self.navigation.dismiss(
+            && self.navigation_views.navigation.dismiss(
                 ui,
                 pointer.position,
                 shell.core.clock().now(),
                 Self::reduced(ui),
             )
         {
-            self.navigation_invalidated.set(true);
+            self.navigation_views.navigation_invalidated.set(true);
         }
         if let InputEvent::PointerDown(pointer, aqua_core::PointerButton::Secondary) = input
-            && self.image_preview.is_none()
+            && self.media_views.image_preview.is_none()
             && ui
                 .selection_rects()
                 .iter()
                 .any(|rect| rect.contains(pointer.position))
             && let Some(text) = ui.selected_text().filter(|text| !text.trim().is_empty())
         {
-            self.selection_menu = Some((pointer.position, text));
+            self.menus.selection_menu = Some((pointer.position, text));
             return Some(true);
         }
-        match self.account_popup.dismiss(ui, input) {
+        match self.sidebar_views.account_popup.dismiss(ui, input) {
             Ok(true) => {
-                (self.sidebar.emit())(crate::frame::sidebar::Event::Account(
+                (self.sidebar_views.sidebar.emit())(crate::frame::sidebar::Event::Account(
                     crate::ui::chrome::menu::Event::Dismissed,
                 ));
                 return Some(true);
@@ -45,7 +45,9 @@ impl RootViews {
         }
         let dismissal = {
             let _tm = crate::shell::application::Tm::new("pre.overlays");
-            self.sidebar_overlays.request_dismissal(ui, input)
+            self.sidebar_views
+                .sidebar_overlays
+                .request_dismissal(ui, input)
         };
         match dismissal {
             Ok(true) => return Some(true),
@@ -53,6 +55,7 @@ impl RootViews {
             Err(error) => tracing::warn!(%error, "could not dismiss sidebar overlay"),
         }
         let intercepted = self
+            .menus
             .color_menu
             .as_mut()
             .map_or(Ok(false), |menu| menu.intercept(ui, input));
@@ -62,13 +65,13 @@ impl RootViews {
             Err(error) => tracing::warn!(%error, "could not close color copy menu"),
         }
         if let InputEvent::KeyDown(event) = input
-            && self.palette_dialog.is_none()
-            && self.resource_dialog.is_none()
-            && self.settings.is_none()
-            && self.image_preview.is_none()
-            && self.navigation.key(event)
+            && self.dialogs.palette_dialog.is_none()
+            && self.dialogs.resource_dialog.is_none()
+            && self.dialogs.settings.is_none()
+            && self.media_views.image_preview.is_none()
+            && self.navigation_views.navigation.key(event)
         {
-            self.navigation_invalidated.set(true);
+            self.navigation_views.navigation_invalidated.set(true);
             return Some(true);
         }
         let cycled = {
@@ -79,7 +82,7 @@ impl RootViews {
             return Some(true);
         }
         let _tm = crate::shell::application::Tm::new("pre.wheel");
-        self.wheel.offer(ui, input, now).map(|_| true)
+        self.scroll.wheel.offer(ui, input, now).map(|_| true)
     }
 
     #[expect(
@@ -98,28 +101,30 @@ impl RootViews {
         self.sync_context(shell, ui, ctx, window);
         if self.sync_navigation(ui, ctx, window, shell.core.clock().now()) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_input");
-            self.navigation_invalidated.set(true);
+            self.navigation_views.navigation_invalidated.set(true);
         }
         if let InputEvent::Scroll { at, delta } = input
-            && self.image_preview.is_none()
+            && self.media_views.image_preview.is_none()
             && (delta.x != 0.0 || delta.y != 0.0)
             && crate::shell::wheel::keyed_node(ui, "conversation-transcript")
                 .and_then(|node| ui.tree().visual_rect(node))
                 .is_some_and(|clip| clip.contains(*at))
         {
-            self.observations.note_reader_move();
+            self.transcript.observations.note_reader_move();
             if delta.y != 0.0 {
-                self.observations.note_reader_direction(delta.y > 0.0);
+                self.transcript
+                    .observations
+                    .note_reader_direction(delta.y > 0.0);
             }
-            self.smooth_scroll.cancel();
+            self.scroll.smooth_scroll.cancel();
             if delta.y < 0.0 {
                 crate::conversation::scroll::pause_tail(ui);
             }
         }
-        if let Some(dialog) = &self.palette_dialog {
+        if let Some(dialog) = &self.dialogs.palette_dialog {
             dialog.sync(ui);
         }
-        if let Some(dialog) = &self.resource_dialog {
+        if let Some(dialog) = &self.dialogs.resource_dialog {
             dialog.sync(ui);
         }
         let wheel_changed = {
@@ -142,14 +147,14 @@ impl RootViews {
             | self.noted.note(Cause::PaletteInput, palette)
             | self.noted.note(Cause::ConversationInput, conversation)
             | self.noted.note(Cause::SidebarInput, sidebar);
-        if let Some(dialog) = &self.settings {
+        if let Some(dialog) = &self.dialogs.settings {
             dialog.sync(ui);
         }
-        if self.settings_dismissed.replace(false) {
+        if self.dialogs.settings_dismissed.replace(false) {
             shell.core.close_settings();
             return true;
         }
-        if consumed || self.image_preview.is_some() {
+        if consumed || self.media_views.image_preview.is_some() {
             return palette_changed;
         }
         let InputEvent::KeyDown(event) = input else {
@@ -172,10 +177,11 @@ impl RootViews {
         if modifiers.is_empty()
             && event.key == aqua_core::Key::Named(aqua_core::NamedKey::Escape)
             && self
+                .navigation_views
                 .navigation
                 .close(shell.core.clock().now(), Self::reduced(ui))
         {
-            self.navigation_invalidated.set(true);
+            self.navigation_views.navigation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
             return true;
         }
@@ -197,7 +203,7 @@ impl RootViews {
                 }
             }
             aqua_core::Key::Char('b' | 'B') if !alt => {
-                (self.sidebar.emit())(crate::frame::sidebar::Event::Toggle);
+                (self.sidebar_views.sidebar.emit())(crate::frame::sidebar::Event::Toggle);
                 ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
                 return true;
             }
@@ -232,7 +238,7 @@ impl RootViews {
         }
         if self.sync_navigation(ui, ctx, window, shell.core.clock().now()) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_a");
-            self.navigation_invalidated.set(true);
+            self.navigation_views.navigation_invalidated.set(true);
         }
         let palette_changed = self.dispatch_palette(shell, ui)
             | self.dispatch_resource(shell, ui, ctx)
@@ -249,7 +255,7 @@ impl RootViews {
             }
             None => false,
         };
-        if self.settings_dismissed.replace(false) {
+        if self.dialogs.settings_dismissed.replace(false) {
             shell.core.close_settings();
             true
         } else {

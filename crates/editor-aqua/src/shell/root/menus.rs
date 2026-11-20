@@ -12,6 +12,7 @@ impl RootViews {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
         if self
+            .browser_lookup
             .browser
             .as_ref()
             .is_some_and(|resolved| resolved.preferred == preferred)
@@ -19,6 +20,7 @@ impl RootViews {
             return;
         }
         let pending = self
+            .browser_lookup
             .browser_task
             .as_ref()
             .filter(|(wanted, _)| *wanted == preferred)
@@ -41,8 +43,8 @@ impl RootViews {
                         }
                     }
                 });
-                self.browser_task = None;
-                self.browser = Some(ResolvedBrowser {
+                self.browser_lookup.browser_task = None;
+                self.browser_lookup.browser = Some(ResolvedBrowser {
                     preferred,
                     browser,
                     icon,
@@ -50,8 +52,8 @@ impl RootViews {
             }
             Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {}
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
-                self.browser_task = None;
-                self.browser = Some(ResolvedBrowser {
+                self.browser_lookup.browser_task = None;
+                self.browser_lookup.browser = Some(ResolvedBrowser {
                     preferred,
                     browser: None,
                     icon: None,
@@ -72,7 +74,7 @@ impl RootViews {
                         }
                     });
                 match spawned {
-                    Ok(_) => self.browser_task = Some((preferred, receiver)),
+                    Ok(_) => self.browser_lookup.browser_task = Some((preferred, receiver)),
                     Err(error) => tracing::warn!(%error, "could not start the browser lookup"),
                 }
             }
@@ -86,19 +88,21 @@ impl RootViews {
         ctx: &AppCtx<'_>,
     ) -> bool {
         use crate::ui::rich::actions::{CopyEntry, ShowCopyMenu};
-        let Some((position, text)) = self.selection_menu.take() else {
+        let Some((position, text)) = self.menus.selection_menu.take() else {
             return false;
         };
-        self.dispose_color_menu(ui);
+        self.menus.dispose(ui);
         let Some(owner) = ui.find_debug_selector("workspace-root") else {
             return false;
         };
         self.warm_browser(shell);
         let icon = self
+            .browser_lookup
             .browser
             .as_ref()
             .and_then(|resolved| resolved.icon.clone());
         let browser = self
+            .browser_lookup
             .browser
             .as_ref()
             .and_then(|resolved| resolved.browser.as_ref());
@@ -107,7 +111,7 @@ impl RootViews {
                 CopyEntry::search(format!("Search with {}", browser.name), text.clone())
             }))
             .collect();
-        let effects = Rc::clone(&self.color_effects);
+        let effects = Rc::clone(&self.menus.color_effects);
         match crate::ui::color_copy_menu::ColorCopyMenuHost::open(
             ui,
             owner,
@@ -119,7 +123,7 @@ impl RootViews {
             move |effect| effects.borrow_mut().push_back(effect),
         ) {
             Ok(menu) => {
-                self.color_menu = menu;
+                self.menus.color_menu = menu;
                 true
             }
             Err(error) => {
@@ -127,13 +131,5 @@ impl RootViews {
                 false
             }
         }
-    }
-
-    pub(super) fn dispose_color_menu(&mut self, ui: &mut UiApp) {
-        if let Some(menu) = self.color_menu.take() {
-            menu.dispose(ui);
-        }
-        self.color_effects.borrow_mut().clear();
-        self.color_scope = None;
     }
 }

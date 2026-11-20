@@ -69,14 +69,15 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        let (Some(workspace), Some(viewport)) = (shell.entry.workspace(), self.transcript_viewport)
+        let (Some(workspace), Some(viewport)) =
+            (shell.entry.workspace(), self.scroll.transcript_viewport)
         else {
             return false;
         };
         Rail {
-            navigation: &mut self.navigation,
-            marker: &mut self.navigation_marker,
-            transcript_viewport: self.transcript_viewport,
+            navigation: &mut self.navigation_views.navigation,
+            marker: &mut self.navigation_views.navigation_marker,
+            transcript_viewport: self.scroll.transcript_viewport,
         }
         .refresh_in_place(
             ui,

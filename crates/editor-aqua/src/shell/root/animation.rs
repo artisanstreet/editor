@@ -67,19 +67,19 @@ impl RootViews {
         if signing_in && shell.entry.sign_in.animating() {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
-        let sidebar_resizing = self.sidebar.resizing();
+        let sidebar_resizing = self.sidebar_views.sidebar.resizing();
         let revealing = self.advance_reveal(shell, ui);
         if revealing != reveal::Progress::Idle {
             ctx.request_animation_deadline(window, ctx.now() + reveal::POLL);
         }
         if revealing == reveal::Progress::Acted {
-            self.conversation_invalidated.set(true);
+            self.transcript.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
-        let sidebar_events = self.sidebar.take_events(now, reduced);
+        let sidebar_events = self.sidebar_views.sidebar.take_events(now, reduced);
         let clock = self.tick_work_clock(shell, ctx, window, now);
-        let sidebar_moved = self.sidebar.tick(now, reduced);
-        let sidebar = match (sidebar_resizing, self.sidebar.resizing()) {
+        let sidebar_moved = self.sidebar_views.sidebar.tick(now, reduced);
+        let sidebar = match (sidebar_resizing, self.sidebar_views.sidebar.resizing()) {
             (true, false) => Cause::SidebarSettled,
             (true | false, true) => Cause::SidebarResize,
             (false, false) => Cause::SidebarAnimation,
@@ -99,11 +99,15 @@ impl RootViews {
             changed |= self.noted.note(cause, fired);
         }
         self.apply_account_effects(shell, ctx, window, reduced);
-        if self.sidebar.menu().open() && sidebar_moved {
+        if self.sidebar_views.sidebar.menu().open() && sidebar_moved {
             self.sync_account_menu(shell, ui, ctx, window);
         }
 
-        match self.account_popup.advance(ui, ctx.now().as_secs_f64()) {
+        match self
+            .sidebar_views
+            .account_popup
+            .advance(ui, ctx.now().as_secs_f64())
+        {
             Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not animate the account menu"),

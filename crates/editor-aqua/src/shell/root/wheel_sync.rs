@@ -9,7 +9,7 @@ impl RootViews {
         conversation: &mut crate::conversation::controller::Conversation,
     ) {
         if let Some(latest) = conversation.scroll_actions().pop() {
-            self.scroll_request = Some(latest);
+            self.scroll.scroll_request = Some(latest);
         }
     }
 
@@ -20,7 +20,7 @@ impl RootViews {
     ) {
         use crate::conversation::adapter::{ScrollDirective, ScrollResolution, resolve_scroll};
         self.take_scroll_request(conversation);
-        let Some(action) = &self.scroll_request else {
+        let Some(action) = &self.scroll.scroll_request else {
             return;
         };
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
@@ -28,7 +28,7 @@ impl RootViews {
         let directive = match resolve_scroll(conversation, action, reduced) {
             ScrollResolution::Ready(directive @ ScrollDirective::FollowEnd) => directive,
             ScrollResolution::Cancelled => {
-                self.scroll_request = None;
+                self.scroll.scroll_request = None;
                 return;
             }
             ScrollResolution::Ready(ScrollDirective::EaseToEnd | ScrollDirective::ToRow { .. })
@@ -36,7 +36,7 @@ impl RootViews {
         };
         if crate::conversation::scroll::apply_directive(
             ui,
-            &mut self.smooth_scroll,
+            &mut self.scroll.smooth_scroll,
             &directive,
             conversation.clock().now(),
             0.0,
@@ -44,9 +44,9 @@ impl RootViews {
         .is_some()
         {
             if landing {
-                self.wheel.cancel_transcript();
+                self.scroll.wheel.cancel_transcript();
             }
-            self.scroll_request = None;
+            self.scroll.scroll_request = None;
         }
     }
 
@@ -57,9 +57,9 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        let advance = self.wheel.advance(ui, ctx.now());
+        let advance = self.scroll.wheel.advance(ui, ctx.now());
         if advance.transcript_moved {
-            self.observations.note_reader_move();
+            self.transcript.observations.note_reader_move();
         }
         if advance.threads_moved
             && let Some(workspace) = shell.entry.workspace_mut()
@@ -81,7 +81,7 @@ impl RootViews {
         if let Some(workspace) = shell.entry.workspace_mut() {
             self.follow_tail_early(&mut workspace.conversation, ui);
         }
-        let advance = self.wheel.advance(ui, now);
+        let advance = self.scroll.wheel.advance(ui, now);
         if advance.threads_moved
             && let Some(workspace) = shell.entry.workspace_mut()
         {

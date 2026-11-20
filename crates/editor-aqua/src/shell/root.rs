@@ -9,11 +9,7 @@ use crate::shell::{
 use aqua::prelude::{AquaWindowId, InputEvent, ObservedWindowState};
 use aqua::{AppCtx, UiApp};
 use aqua_ui::element::Element;
-use std::{
-    cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
-    rc::Rc,
-};
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 mod account;
 mod animation;
@@ -25,6 +21,7 @@ mod input;
 mod menus;
 mod navigation;
 mod open_thread;
+mod owners;
 mod palette;
 #[cfg(feature = "qualification")]
 mod qualification;
@@ -134,78 +131,29 @@ pub struct RootViews {
     motion_rebuilt: Cell<Option<std::time::Instant>>,
     #[cfg(feature = "qualification")]
     qualification_paint: crate::qualification::observation::PaintCollector,
-    settings: Option<crate::ui::dialog::DialogHost>,
-    settings_panel: Option<(Element, f32)>,
-    settings_dismissed: Rc<Cell<bool>>,
     workspace_key: Option<u64>,
-    palette: Option<crate::shell::palette::view::PaletteView>,
-    palette_dialog: Option<crate::ui::dialog::DialogHost>,
-    palette_content: Option<Element>,
-    palette_events: Rc<RefCell<VecDeque<crate::shell::palette::view::Event>>>,
-    resource: Option<(u64, crate::shell::resource_preview::view::ViewState)>,
-    resource_dialog: Option<crate::ui::dialog::DialogHost>,
-    resource_content: Option<(Element, String)>,
-    resource_events: Rc<RefCell<VecDeque<crate::shell::resource_preview::view::Action>>>,
-    rows: Option<Rc<crate::conversation::view::factory::RowFactory>>,
-    row_actions: Rc<RefCell<VecDeque<crate::conversation::adapter::ScopedAction>>>,
-    observations: crate::conversation::view::transcript::TranscriptObservations,
-    mounted_reveals: Rc<RefCell<crate::conversation::view::reveal::MountedReveals>>,
-    row_cache: Rc<RefCell<crate::conversation::view::row_cache::RowCache>>,
-    stored: Rc<RefCell<crate::conversation::stored::StoredConversation>>,
-    source_dialogs: crate::shell::source::RowSourceDialogs,
-    row_motion: Rc<RefCell<crate::conversation::view::motion::RowMotion>>,
-    markdown_engine: Rc<RefCell<Option<crate::ui::markdown::MarkdownEngine>>>,
-    conversation_invalidated: Rc<Cell<bool>>,
     rows_invalidated: Rc<Cell<bool>>,
     retained_rows: Option<u64>,
-    navigation_invalidated: Rc<Cell<bool>>,
-    row_token: Option<Rc<Cell<bool>>>,
-    row_settled: Rc<RefCell<HashMap<crate::conversation::fold::RowKey, u64>>>,
-    row_style: Option<(crate::ui::theme::ArtisanTheme, bool, bool, u32)>,
-    row_style_epoch: u64,
-    media: Option<ConversationMedia>,
-    image_preview: Option<ImagePreview>,
-    preview_generation: u64,
-    preview_actions: Rc<RefCell<VecDeque<(u64, crate::ui::media::preview::Action)>>>,
-    motion_epoch: Option<std::time::Instant>,
     ui_now: aqua::Instant,
-    sidebar: crate::frame::sidebar::Sidebar,
-    seam: Rc<RefCell<crate::frame::seam::motion::Motion>>,
-    avatar: crate::frame::avatar::Avatar,
     sign_in_dirty: bool,
     work_clock: Option<std::time::Instant>,
-    account_popup: crate::frame::popup::Popup,
-    sidebar_overlays: crate::sidebar::overlay::SidebarOverlays,
-    sidebar_drag: Option<crate::sidebar::drag_preview::DragPreviewHost>,
-    drag_position: Option<aqua_core::Point>,
-    navigation: crate::shell::thread_navigation::ThreadNavigation,
-    composer_glide: crate::shell::composer_glide::ComposerGlide,
-    latest: crate::shell::thread_navigation::LatestPresence,
-    transcript_viewport: Option<aqua_ui::collection_runtime::CollectionViewport>,
-    navigation_marker: Option<usize>,
     context_reading: Option<crate::shell::context_meter::ContextReading>,
     connection: crate::shell::connection::ConnectionPresenter,
     thread_loading: crate::shell::connection::WordmarkLoader,
     thread_landing: crate::shell::connection::WordmarkLoader,
-    smooth_scroll: crate::conversation::scroll::SmoothScroll,
-    wheel: crate::shell::wheel::WheelGlides,
     pending_stall: PendingStall,
     read_watch: Option<read_watch::ReadWatch>,
-    transcript_edges: crate::ui::scroll_edge::ScrollEdges,
-    overview_edges: crate::ui::scroll_edge::ScrollEdges,
-    scroll_request: Option<crate::conversation::controller::ScrollAction>,
     composer_measurement: Rc<Cell<Option<f32>>>,
     composer_height: Option<f32>,
-    conversation_actions: Rc<RefCell<VecDeque<ConversationAction>>>,
-    color_menu: Option<crate::ui::color_copy_menu::ColorCopyMenuHost>,
-    selection_menu: Option<(aqua_core::Point, String)>,
-    browser: Option<ResolvedBrowser>,
-    browser_task: Option<(Option<String>, BrowserLookup)>,
-    reveal: Option<reveal::Reveal>,
-    color_scope: Option<crate::conversation::presentation::PresentationScope>,
-    color_effects: Rc<RefCell<VecDeque<crate::ui::color_copy_menu::ColorCopyEffect>>>,
     resize_key: Option<ResizeKey>,
-    transcript_landing: Option<bool>,
+    dialogs: owners::DialogHosts,
+    transcript: owners::TranscriptViews,
+    media_views: owners::MediaViews,
+    sidebar_views: owners::SidebarViews,
+    scroll: owners::ScrollState,
+    menus: owners::Menus,
+    browser_lookup: owners::BrowserResolver,
+    navigation_views: owners::NavigationViews,
 }
 
 impl std::fmt::Debug for RootViews {
@@ -258,7 +206,7 @@ impl SectionViews for RootViews {
             return false;
         };
         let width = (crate::measure::narrow(window.inner_size.width)
-            - self.sidebar.width(shell.core.clock().now())
+            - self.sidebar_views.sidebar.width(shell.core.clock().now())
             - crate::frame::view::SHEET_PADDING)
             .max(0.0);
         let element = match self.thread_content(
@@ -391,21 +339,21 @@ impl SectionViews for RootViews {
             return true;
         }
         let quiet = matches!(shell.core.screen(), Screen::Thread { .. })
-            && self.transcript_viewport.is_some()
-            && self.image_preview.is_none()
-            && self.settings.is_none()
-            && self.palette.is_none()
-            && self.palette_dialog.is_none()
-            && self.resource.is_none()
-            && self.resource_dialog.is_none()
-            && self.color_menu.is_none()
-            && self.sidebar_drag.is_none();
+            && self.scroll.transcript_viewport.is_some()
+            && self.media_views.image_preview.is_none()
+            && self.dialogs.settings.is_none()
+            && self.dialogs.palette.is_none()
+            && self.dialogs.palette_dialog.is_none()
+            && self.dialogs.resource.is_none()
+            && self.dialogs.resource_dialog.is_none()
+            && self.menus.color_menu.is_none()
+            && self.sidebar_views.sidebar_drag.is_none();
         let viewport = layout::Size {
             width: crate::measure::narrow(window.inner_size.width),
             height: crate::measure::narrow(window.inner_size.height),
         };
         let card_width = (viewport.width
-            - self.sidebar.width(shell.core.clock().now())
+            - self.sidebar_views.sidebar.width(shell.core.clock().now())
             - crate::frame::view::SHEET_PADDING)
             .max(0.0);
         let key = ResizeKey::of(shell.core.workspace_screen(), card_width, viewport);
@@ -417,7 +365,7 @@ impl SectionViews for RootViews {
     }
 
     fn glide_active(&self) -> bool {
-        self.wheel.active()
+        self.scroll.wheel.active()
     }
 
     fn open_composer_images(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
@@ -432,10 +380,14 @@ impl SectionViews for RootViews {
         window: AquaWindowId,
     ) -> bool {
         let changed = self
+            .sidebar_views
             .sidebar
             .take_events(shell.core.clock().now(), Self::reduced(ui));
         self.apply_account_effects(shell, ctx, window, Self::reduced(ui));
-        let pictured = self.avatar.drain(shell.images(), shell.core.clock().now());
+        let pictured = self
+            .sidebar_views
+            .avatar
+            .drain(shell.images(), shell.core.clock().now());
         self.schedule_sidebar(ctx, window, shell.core.clock().now());
         changed | pictured
     }
@@ -455,8 +407,8 @@ impl SectionViews for RootViews {
     }
 
     fn reader_moved_transcript(&mut self) {
-        self.observations.note_reader_move();
-        self.smooth_scroll.cancel();
+        self.transcript.observations.note_reader_move();
+        self.scroll.smooth_scroll.cancel();
     }
     fn pre_input(
         &mut self,

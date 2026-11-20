@@ -4,28 +4,17 @@ use aqua::UiApp;
 use std::rc::Rc;
 
 impl RootViews {
-    pub(super) fn close_palette(&mut self, ui: &mut UiApp) {
-        if let Some(dialog) = self.palette_dialog.take() {
-            dialog.dispose(ui);
-        }
-        if let Some(palette) = self.palette.take() {
-            palette.close();
-        }
-        self.palette_content = None;
-        self.palette_events.borrow_mut().clear();
-    }
-
     pub(super) fn palette_emit(&self) -> Rc<dyn Fn(crate::shell::palette::view::Event)> {
-        let events = Rc::clone(&self.palette_events);
+        let events = Rc::clone(&self.dialogs.palette_events);
         Rc::new(move |event| events.borrow_mut().push_back(event))
     }
 
     pub(super) fn dispatch_palette(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
         use crate::shell::palette::view::Effect;
-        let events = std::mem::take(&mut *self.palette_events.borrow_mut());
+        let events = std::mem::take(&mut *self.dialogs.palette_events.borrow_mut());
         let mut changed = false;
         for event in events {
-            let outcome = match (self.palette.as_ref(), shell.entry.workspace_mut()) {
+            let outcome = match (self.dialogs.palette.as_ref(), shell.entry.workspace_mut()) {
                 (Some(view), Some(workspace)) => match workspace.palette.as_mut() {
                     Some(palette) => view.dispatch(palette, event),
                     None => continue,
@@ -41,7 +30,7 @@ impl RootViews {
                     }
                 }
                 Effect::Close(screen) => {
-                    self.close_palette(ui);
+                    self.dialogs.close_palette(ui);
                     shell.dismiss_palette();
                     if let Some(screen) = screen {
                         shell.navigate(screen);
@@ -53,10 +42,10 @@ impl RootViews {
     }
 
     pub(super) fn mount_palette(&mut self, shell: &Shell, ui: &mut UiApp) {
-        let Some(content) = self.palette_content.take() else {
+        let Some(content) = self.dialogs.palette_content.take() else {
             return;
         };
-        if let Some(dialog) = &self.palette_dialog {
+        if let Some(dialog) = &self.dialogs.palette_dialog {
             if dialog.is_open(ui) {
                 dialog.set_theme(shell.preferences.theme());
                 if let Err(error) = dialog.refresh_content(ui, content) {
@@ -64,14 +53,15 @@ impl RootViews {
                 }
                 return;
             }
-            self.palette_dialog = None;
+            self.dialogs.palette_dialog = None;
         }
         let Some(owner) = ui.find_debug_selector("workspace-root") else {
-            self.palette_content = Some(content);
+            self.dialogs.palette_content = Some(content);
             return;
         };
         let emit = self.palette_emit();
         let session = self
+            .dialogs
             .palette
             .as_ref()
             .map(super::super::palette::view::PaletteView::session);
@@ -91,8 +81,8 @@ impl RootViews {
         });
         match crate::ui::dialog::DialogHost::open(ui, owner, dialog) {
             Ok(dialog) => {
-                self.palette_dialog = Some(dialog);
-                if let Some(view) = &self.palette {
+                self.dialogs.palette_dialog = Some(dialog);
+                if let Some(view) = &self.dialogs.palette {
                     view.sync_query(ui);
                     view.focus_query(ui);
                 }
