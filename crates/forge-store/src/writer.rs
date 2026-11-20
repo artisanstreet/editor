@@ -703,16 +703,24 @@ impl Tx<'_> {
             return Ok(());
         };
         let mut configs = self.object_setting(artisan_api::MODEL_CONFIGS_KEY)?;
+        let key = artisan_api::model_config_key(config.engine, model);
+        if let Some(kept) = configs.get(&key)
+            && let Err(error) = serde_json::from_value::<artisan_api::EngineConfig>(kept.clone())
+        {
+            tracing::warn!(
+                key,
+                %error,
+                "a remembered model config doesn't read here, so it is kept and this choice isn't remembered"
+            );
+            return Ok(());
+        }
         configs.retain(|_, value| {
             match serde_json::from_value::<artisan_api::EngineConfig>(value.clone()) {
                 Ok(saved) => saved.engine != config.engine || saved.model.as_ref() != Some(model),
                 Err(_kept_unread) => true,
             }
         });
-        configs.insert(
-            artisan_api::model_config_key(config.engine, model),
-            to_value(config)?,
-        );
+        configs.insert(key, to_value(config)?);
         self.save_setting(
             artisan_api::MODEL_CONFIGS_KEY.into(),
             serde_json::Value::Object(configs),

@@ -135,3 +135,43 @@ async fn choosing_a_model_uses_its_remembered_config_and_keeps_one_this_forge_ca
         .expect("the configs are saved");
     assert_eq!(remembered["a-newer-engine/x"], unreadable);
 }
+
+#[tokio::test]
+async fn choosing_a_model_keeps_its_remembered_config_that_this_forge_cannot_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let newer = serde_json::json!({
+        "engine": "claude",
+        "model": "opus",
+        "effort": null,
+        "permissions": "a-newer-permission-mode",
+    });
+    store
+        .set_setting(
+            artisan_api::MODEL_CONFIGS_KEY.into(),
+            serde_json::json!({ "claude/opus": newer.clone() }),
+        )
+        .await
+        .unwrap();
+
+    store
+        .set_model_config(
+            artisan_api::EngineConfig::new(artisan_api::EngineId::Claude),
+            &artisan_api::Model {
+                id: "opus".into(),
+                ..artisan_api::Model::default()
+            },
+        )
+        .await
+        .expect("the choice applies even though it isn't remembered");
+
+    let remembered = store
+        .setting(artisan_api::MODEL_CONFIGS_KEY)
+        .await
+        .unwrap()
+        .expect("the configs are still saved");
+    assert_eq!(
+        remembered["claude/opus"], newer,
+        "the config a newer Forge remembered for this model is not overwritten"
+    );
+}
