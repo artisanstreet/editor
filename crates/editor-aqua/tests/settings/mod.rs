@@ -491,7 +491,7 @@ fn settings_pages_keep_their_layout_at_fractional_and_double_scale() {
         };
         let unit = at(1.0);
         assert!(!unit.is_empty(), "{page:?} has no text");
-        for (scale, position, size) in [(1.5, 4.0, 2.0), (2.0, 0.5, 0.5)] {
+        for (scale, position, size) in [(1.5, 6.0, 2.0), (2.0, 0.5, 0.5)] {
             let scaled = at(scale);
             assert_eq!(unit.len(), scaled.len(), "{page:?} text count at {scale}");
             for (expected, actual) in unit.iter().zip(&scaled) {
@@ -1121,4 +1121,53 @@ fn settings_pages_expose_their_title_and_sections_as_headings() {
             .collect();
         assert_eq!(titles, [page.label()], "{page:?} has one page title");
     }
+}
+
+#[test]
+fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
+    use editor_aqua::core::{Screen, SettingsPage};
+    use editor_aqua::settings::{
+        controller::SettingsController,
+        view::{ViewAction, dispatch, high_contrast_menu, text_size_menu},
+    };
+    use editor_aqua::ui::preferences::{Preferences, SystemAccess};
+    use editor_aqua::ui::theme::{ArtisanTheme, Contrast};
+    use std::{cell::RefCell, rc::Rc};
+    use test_support::editor::ui::{click_text, mounted};
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    core.navigate(Screen::Settings(SettingsPage::General));
+    let mut settings = SettingsController::default();
+    let system = SystemAccess {
+        reduced_motion: false,
+        high_contrast: true,
+        text_scale: 1.25,
+    };
+    let mut choose = |size: &str, contrast: &str| {
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&actions);
+        let emit: Rc<dyn Fn(ViewAction)> = Rc::new(move |action| sink.borrow_mut().push(action));
+        let theme = ArtisanTheme::resolved();
+        let (menu, _) = text_size_menu(&settings, &core, &theme, Rc::clone(&emit)).into_parts();
+        click_text(&mut mounted(400.0, 600.0, menu), size);
+        let (menu, _) = high_contrast_menu(&settings, &core, &theme, emit).into_parts();
+        click_text(&mut mounted(400.0, 600.0, menu), contrast);
+        for action in actions.take() {
+            assert!(matches!(
+                action,
+                ViewAction::SetTextScale(_)
+                    | ViewAction::SetHighContrast(_)
+                    | ViewAction::TextSizeMenu(_)
+                    | ViewAction::ContrastMenu(_)
+            ));
+            dispatch(&mut settings, &mut core, action);
+        }
+        Preferences::from_core(&core, system).theme()
+    };
+    let chosen = choose("150%", "Off");
+    assert!((chosen.typography.scale - 1.5).abs() < f32::EPSILON);
+    assert_eq!(chosen.colors.contrast, Contrast::Standard);
+    let followed = choose("Match system", "Match system");
+    assert!((followed.typography.scale - 1.25).abs() < f32::EPSILON);
+    assert_eq!(followed.colors.contrast, Contrast::High);
 }

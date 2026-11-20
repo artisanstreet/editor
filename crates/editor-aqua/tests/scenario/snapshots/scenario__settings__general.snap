@@ -53,6 +53,16 @@ Dialog "Settings"
       Label "Choose the fonts Artisan Editor uses."
       ComboBox "Fonts" value="Spline" [collapsed]
         Label "Spline"
+    Group "Text size"
+      Label "Text size"
+      Label "How large the Editor draws its text. Match system follows the system text size."
+      ComboBox "Text size" value="Match system" [collapsed]
+        Label "Match system"
+    Group "High contrast"
+      Label "High contrast"
+      Label "Draw text, borders and focus rings with stronger contrast. Match system follows the system's contrast setting."
+      ComboBox "High contrast" value="Match system" [collapsed]
+        Label "Match system"
     Group "Outline text rendering"
       Label "Outline text rendering"
       Label "Unhinted grayscale glyphs with no gamma or contrast correction, so letters keep their designed shapes. Turn off if text looks too soft or thin."

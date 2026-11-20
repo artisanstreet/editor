@@ -50,11 +50,26 @@ pub enum ClaudeAiSignInError {
     },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct OpenMenus {
-    pub(crate) font: bool,
-    pub(crate) streaming: bool,
-    pub(crate) retention: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Menu {
+    Font,
+    Streaming,
+    Retention,
+    TextSize,
+    Contrast,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OpenMenus(std::collections::BTreeSet<Menu>);
+
+impl OpenMenus {
+    pub(crate) fn report(&mut self, menu: Menu, open: bool) {
+        if open {
+            self.0.insert(menu);
+        } else {
+            self.0.remove(&menu);
+        }
+    }
 }
 
 pub struct SettingsController {
@@ -64,6 +79,8 @@ pub struct SettingsController {
     pub retention_select: Rc<RefCell<editor_ui::select::SelectState<Option<u32>>>>,
     pub font_select: Rc<RefCell<editor_ui::select::SelectState<&'static str>>>,
     pub streaming_select: Rc<RefCell<editor_ui::select::SelectState<&'static str>>>,
+    pub text_size_select: Rc<RefCell<editor_ui::select::SelectState<Option<u32>>>>,
+    pub contrast_select: Rc<RefCell<editor_ui::select::SelectState<Option<bool>>>>,
     pub sign_in: super::sign_in::SignInForm,
     pub(crate) forge_code: Rc<RefCell<Editor>>,
     pub(crate) archive: ArchiveForm,
@@ -94,6 +111,12 @@ impl Default for SettingsController {
                 std::time::Instant::now(),
             ))),
             streaming_select: Rc::new(RefCell::new(editor_ui::select::SelectState::new(
+                std::time::Instant::now(),
+            ))),
+            text_size_select: Rc::new(RefCell::new(editor_ui::select::SelectState::new(
+                std::time::Instant::now(),
+            ))),
+            contrast_select: Rc::new(RefCell::new(editor_ui::select::SelectState::new(
                 std::time::Instant::now(),
             ))),
             sign_in: super::sign_in::SignInForm::default(),

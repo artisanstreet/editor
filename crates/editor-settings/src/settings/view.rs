@@ -8,7 +8,7 @@ use aqua_ui::{
 
 use super::{
     about::BuildInfo,
-    controller::SettingsController,
+    controller::{Menu, OpenMenus, SettingsController},
     page,
     preferences::SettingKey,
     ui::{self, Ink},
@@ -82,6 +82,10 @@ pub enum ViewAction {
     SetOutlineText(bool),
     SetShowAllModels(bool),
     SetHideBadModelOptions(bool),
+    SetHighContrast(Option<bool>),
+    TextSizeMenu(bool),
+    ContrastMenu(bool),
+    SetTextScale(Option<u32>),
     StreamingMenu(bool),
     SetStreaming(&'static str),
     SetFrameRate(bool),
@@ -185,7 +189,7 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         ViewAction::ForgeConfirm => core.account_mut().confirm_forge(),
         ViewAction::ForgeRefresh => core.account_mut().refresh_local_forge(),
         ViewAction::ForgeClaim => controller.claim_forge(core),
-        ViewAction::RetentionMenu(open) => controller.reported_menus.retention = open,
+        ViewAction::RetentionMenu(open) => controller.reported_menus.report(Menu::Retention, open),
         ViewAction::SetRetention(host, instance, days) => controller.set_host_setting_for(
             core,
             host,
@@ -233,8 +237,10 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
                 host.load_prompt(true);
             }
         }
-        ViewAction::FontMenu(open) => controller.reported_menus.font = open,
-        ViewAction::StreamingMenu(open) => controller.reported_menus.streaming = open,
+        ViewAction::FontMenu(open) => controller.reported_menus.report(Menu::Font, open),
+        ViewAction::StreamingMenu(open) => controller.reported_menus.report(Menu::Streaming, open),
+        ViewAction::TextSizeMenu(open) => controller.reported_menus.report(Menu::TextSize, open),
+        ViewAction::ContrastMenu(open) => controller.reported_menus.report(Menu::Contrast, open),
         ViewAction::SetFont(font) => controller.set_editor_setting(core, "font_set", font.into()),
         ViewAction::SetDarkMode(enabled) => {
             controller.set_editor_setting(core, "dark_mode", enabled.into());
@@ -250,6 +256,20 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
                 core,
                 artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY,
                 enabled.into(),
+            );
+        }
+        ViewAction::SetHighContrast(choice) => {
+            controller.set_editor_setting(
+                core,
+                "high_contrast",
+                choice.map_or(serde_json::Value::Null, serde_json::Value::Bool),
+            );
+        }
+        ViewAction::SetTextScale(percent) => {
+            controller.set_editor_setting(
+                core,
+                "text_scale",
+                percent.map_or(serde_json::Value::Null, serde_json::Value::from),
             );
         }
         ViewAction::SetStreaming(mode) => {
@@ -1271,13 +1291,9 @@ fn appearance(
     .on_open_change(move |open_state| open(ViewAction::FontMenu(open_state)))
     .build();
     let fonts = ui::fixed(fonts);
-    let checked = core
-        .settings()
-        .get("outline_text")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
     let show_models = Rc::clone(&emit);
     let hide_options = Rc::clone(&emit);
+    let [text_size, high_contrast] = access_rows(controller, theme, core, &emit);
     let hide_bad = Switch::new(
         "settings-switch-hide-bad-model-options",
         *theme,
@@ -1303,7 +1319,10 @@ fn appearance(
     let outline = Switch::new(
         "settings-switch-outline-text",
         *theme,
-        checked,
+        core.settings()
+            .get("outline_text")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
         "Outline text rendering",
     )
     .on_change(move |enabled| emit(ViewAction::SetOutlineText(enabled)))
@@ -1321,6 +1340,8 @@ fn appearance(
             "Choose the fonts Artisan Editor uses.",
             Some(fonts),
         ),
+        text_size,
+        high_contrast,
         ui::row(
             theme,
             "Outline text rendering",
@@ -1347,6 +1368,162 @@ fn appearance(
         ui::section(theme, "Appearance", None, None, ui::card(theme, rows)),
         include_header,
     )
+}
+
+fn access_rows(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> [Element; 2] {
+    let preferences = editor_ui::preferences::Preferences::from_core(
+        core,
+        editor_ui::preferences::SystemAccess::default(),
+    );
+    [
+        ui::row(
+            theme,
+            "Text size",
+            "How large the Editor draws its text. Match system follows the system text size.",
+            Some(ui::fixed(text_size(
+                controller,
+                theme,
+                preferences.text_scale,
+                Rc::clone(emit),
+            ))),
+        ),
+        ui::row(
+            theme,
+            "High contrast",
+            "Draw text, borders and focus rings with stronger contrast. Match system follows the system's contrast setting.",
+            Some(ui::fixed(high_contrast(
+                controller,
+                theme,
+                preferences.high_contrast,
+                Rc::clone(emit),
+            ))),
+        ),
+    ]
+}
+
+const TEXT_SIZES: [u32; 6] = [100, 125, 150, 175, 200, 225];
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the stored scale is clamped to 1..=2.25"
+)]
+fn percent(scale: f32) -> u32 {
+    (scale * 100.0).round() as u32
+}
+
+fn text_size_entries(chosen: Option<u32>) -> Vec<SelectEntry<Option<u32>>> {
+    let mut sizes: Vec<u32> = TEXT_SIZES.into_iter().chain(chosen).collect();
+    sizes.sort_unstable();
+    sizes.dedup();
+    std::iter::once(SelectEntry::item(None, "Match system"))
+        .chain(
+            sizes
+                .into_iter()
+                .map(|percent| SelectEntry::item(Some(percent), format!("{percent}%"))),
+        )
+        .collect()
+}
+
+pub fn text_size_menu(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> SelectMenu<Option<u32>> {
+    let chosen = editor_ui::preferences::Preferences::from_core(
+        core,
+        editor_ui::preferences::SystemAccess::default(),
+    )
+    .text_scale
+    .map(percent);
+    let change = Rc::clone(&emit);
+    SelectMenu::new(
+        *theme,
+        Some(chosen),
+        text_size_entries(chosen),
+        Rc::clone(&controller.text_size_select),
+        ui::CONTROL_WIDTH,
+    )
+    .on_change(move |percent| change(ViewAction::SetTextScale(percent)))
+    .on_open_change(move |open| emit(ViewAction::TextSizeMenu(open)))
+}
+
+fn text_size(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    scale: Option<f32>,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let chosen = scale.map(percent);
+    let change = Rc::clone(&emit);
+    Select::new(
+        "settings-text-size",
+        *theme,
+        Some(chosen),
+        text_size_entries(chosen),
+        Rc::clone(&controller.text_size_select),
+    )
+    .label("Text size")
+    .on_change(move |percent| change(ViewAction::SetTextScale(percent)))
+    .on_open_change(move |open| emit(ViewAction::TextSizeMenu(open)))
+    .build()
+}
+
+fn high_contrast_entries() -> Vec<SelectEntry<Option<bool>>> {
+    vec![
+        SelectEntry::item(None, "Match system"),
+        SelectEntry::item(Some(true), "On"),
+        SelectEntry::item(Some(false), "Off"),
+    ]
+}
+
+pub fn high_contrast_menu(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> SelectMenu<Option<bool>> {
+    let chosen = editor_ui::preferences::Preferences::from_core(
+        core,
+        editor_ui::preferences::SystemAccess::default(),
+    )
+    .high_contrast;
+    let change = Rc::clone(&emit);
+    SelectMenu::new(
+        *theme,
+        Some(chosen),
+        high_contrast_entries(),
+        Rc::clone(&controller.contrast_select),
+        ui::CONTROL_WIDTH,
+    )
+    .on_change(move |choice| change(ViewAction::SetHighContrast(choice)))
+    .on_open_change(move |open| emit(ViewAction::ContrastMenu(open)))
+}
+
+fn high_contrast(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    chosen: Option<bool>,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let change = Rc::clone(&emit);
+    Select::new(
+        "settings-high-contrast",
+        *theme,
+        Some(chosen),
+        high_contrast_entries(),
+        Rc::clone(&controller.contrast_select),
+    )
+    .label("High contrast")
+    .on_change(move |choice| change(ViewAction::SetHighContrast(choice)))
+    .on_open_change(move |open| emit(ViewAction::ContrastMenu(open)))
+    .build()
 }
 
 fn section_page(
@@ -1391,7 +1568,7 @@ struct ViewSnapshot {
     prompt: (bool, bool, bool, bool, Option<Problem>),
     forge_code: String,
     second_factor: String,
-    menus: (bool, bool, bool),
+    menus: OpenMenus,
 }
 
 impl ViewSnapshot {
@@ -1424,6 +1601,8 @@ impl ViewSnapshot {
                 Some(serde_json::json!(preferences.theme.is_dark())),
                 Some(serde_json::json!(preferences.fonts.key())),
                 Some(serde_json::json!(preferences.outline_text)),
+                Some(serde_json::json!(preferences.text_scale)),
+                Some(serde_json::json!(preferences.high_contrast)),
                 Some(serde_json::json!(matches!(
                     preferences.streaming,
                     editor_ui::preferences::StreamingMode::Swift
@@ -1517,11 +1696,7 @@ impl ViewSnapshot {
             ),
             forge_code: controller.forge_code.borrow().text().to_owned(),
             second_factor: controller.sign_in.second_factor.borrow().text().to_owned(),
-            menus: (
-                controller.reported_menus.font,
-                controller.reported_menus.streaming,
-                controller.reported_menus.retention,
-            ),
+            menus: controller.reported_menus.clone(),
         }
     }
 }

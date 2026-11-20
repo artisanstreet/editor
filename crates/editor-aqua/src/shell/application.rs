@@ -165,6 +165,8 @@ pub struct ShellApplication<V> {
     pub mounted: bool,
     pub font_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     pub streaming_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub text_size_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub contrast_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     pub retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     pub usage_deadline: Option<Instant>,
     pub fit_launch: bool,
@@ -244,6 +246,8 @@ impl<V: SectionViews> ShellApplication<V> {
         for popup in [
             &mut self.font_popup,
             &mut self.streaming_popup,
+            &mut self.text_size_popup,
+            &mut self.contrast_popup,
             &mut self.retention_popup,
         ]
         .into_iter()
@@ -324,6 +328,8 @@ impl<V: SectionViews> ShellApplication<V> {
             mounted: false,
             font_popup: None,
             streaming_popup: None,
+            text_size_popup: None,
+            contrast_popup: None,
             retention_popup: None,
             usage_deadline: None,
             fit_launch: false,
@@ -652,6 +658,8 @@ impl<V: SectionViews> ShellApplication<V> {
         let Some(workspace) = self.shell.entry.workspace() else {
             close_popup(self.ui.ui_mut(), &mut self.font_popup);
             close_popup(self.ui.ui_mut(), &mut self.streaming_popup);
+            close_popup(self.ui.ui_mut(), &mut self.text_size_popup);
+            close_popup(self.ui.ui_mut(), &mut self.contrast_popup);
             close_popup(self.ui.ui_mut(), &mut self.retention_popup);
             return;
         };
@@ -659,6 +667,9 @@ impl<V: SectionViews> ShellApplication<V> {
         let font_open = settings_open && workspace.settings.font_select.borrow().is_open();
         let streaming_open =
             settings_open && workspace.settings.streaming_select.borrow().is_open();
+        let text_size_open =
+            settings_open && workspace.settings.text_size_select.borrow().is_open();
+        let contrast_open = settings_open && workspace.settings.contrast_select.borrow().is_open();
         let retention_open =
             settings_open && workspace.settings.retention_select.borrow().is_open();
         let theme = self.shell.preferences.theme();
@@ -680,6 +691,24 @@ impl<V: SectionViews> ShellApplication<V> {
             )
             .into_parts()
         });
+        let text_size = text_size_open.then(|| {
+            crate::settings::view::text_size_menu(
+                &workspace.settings,
+                &self.shell.core,
+                &theme,
+                workspace.settings_emit(),
+            )
+            .into_parts()
+        });
+        let contrast = contrast_open.then(|| {
+            crate::settings::view::high_contrast_menu(
+                &workspace.settings,
+                &self.shell.core,
+                &theme,
+                workspace.settings_emit(),
+            )
+            .into_parts()
+        });
         let retention = if retention_open {
             self.shell.core.active_host().map(|host| {
                 crate::settings::archive_view::retention_menu(
@@ -693,27 +722,24 @@ impl<V: SectionViews> ShellApplication<V> {
         } else {
             None
         };
-        sync_popup(
-            self.ui.ui_mut(),
-            &mut self.font_popup,
-            "settings-font-set",
-            font,
-            now,
-        );
-        sync_popup(
-            self.ui.ui_mut(),
-            &mut self.streaming_popup,
-            "settings-streaming-mode",
-            streaming,
-            now,
-        );
-        sync_popup(
-            self.ui.ui_mut(),
-            &mut self.retention_popup,
-            "settings-thread-retention",
-            retention,
-            now,
-        );
+        let ui = self.ui.ui_mut();
+        for (popup, key, content) in [
+            (&mut self.font_popup, "settings-font-set", font),
+            (
+                &mut self.streaming_popup,
+                "settings-streaming-mode",
+                streaming,
+            ),
+            (&mut self.text_size_popup, "settings-text-size", text_size),
+            (&mut self.contrast_popup, "settings-high-contrast", contrast),
+            (
+                &mut self.retention_popup,
+                "settings-thread-retention",
+                retention,
+            ),
+        ] {
+            sync_popup(ui, popup, key, content, now);
+        }
     }
 
     #[expect(
@@ -1155,6 +1181,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         for popup in [
             &mut self.font_popup,
             &mut self.streaming_popup,
+            &mut self.text_size_popup,
+            &mut self.contrast_popup,
             &mut self.retention_popup,
         ]
         .into_iter()

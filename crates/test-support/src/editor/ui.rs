@@ -38,10 +38,35 @@ pub fn node_with_key(app: &UiApp, key: &str) -> NodeId {
 
 pub fn click(app: &mut UiApp, key: &str) {
     let node = node_with_key(app, key);
+    click_node(app, node, key);
+}
+
+pub fn click_text(app: &mut UiApp, text: &str) {
+    let root = app.tree().root().expect("a mounted tree has a root");
+    let node = text_under(app, root, text).unwrap_or_else(|| panic!("{text:?} is not shown"));
+    click_node(app, node, text);
+}
+
+fn text_under(app: &UiApp, under: NodeId, text: &str) -> Option<NodeId> {
+    let tree = app.tree();
+    let mut pending = vec![under];
+    while let Some(node) = pending.pop() {
+        let record = tree
+            .get(node)
+            .unwrap_or_else(|| panic!("invariant: traversed node {node:?} exists"));
+        if matches!(&record.kind, NodeKind::Text(content) if content.text() == text) {
+            return Some(node);
+        }
+        pending.extend(record.children.iter().copied());
+    }
+    None
+}
+
+fn click_node(app: &mut UiApp, node: NodeId, name: &str) {
     let bounds = app
         .tree()
         .visual_rect(node)
-        .unwrap_or_else(|| panic!("the node keyed {key:?} has no bounds"));
+        .unwrap_or_else(|| panic!("{name:?} has no bounds"));
     let down = PointerEvent {
         contact: 1,
         kind: PointerKind::Mouse,
