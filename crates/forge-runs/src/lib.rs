@@ -59,7 +59,6 @@ use artisan_api::{
 };
 use forge_engines::{Engines, Harness, Input};
 use forge_store::Store;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
@@ -89,10 +88,7 @@ struct Inner {
     data_dir: PathBuf,
     harness_for: HarnessFor,
     turns: Mutex<turns::Turns>,
-    suggestions: Mutex<HashMap<ThreadId, Suggested>>,
-    attention: Mutex<HashMap<ThreadId, side::Attention>>,
-    untitled: Mutex<std::collections::HashSet<ThreadId>>,
-    title_queries: Mutex<std::collections::HashSet<ThreadId>>,
+    side: side::SideQueries,
     extensions: Extensions,
     mcp: Mcp,
     shutdown: CancellationToken,
@@ -100,10 +96,9 @@ struct Inner {
     harness_slots: Arc<Semaphore>,
     dispatch: Notify,
     admission: tokio::sync::Mutex<()>,
-    gateway: Mutex<gateway::Gateway>,
-    agents_changed: tokio::sync::watch::Sender<u64>,
-    agent_waiters: Mutex<HashMap<ItemId, usize>>,
-    approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
+    gateway: gateway::Gateway,
+    agents: agents::AgentWatch,
+    approvals: approvals::OwnApprovals,
     disk: disk::Probe,
     sandbox: sandbox::Host,
     stop_deadline: std::time::Duration,
@@ -213,13 +208,6 @@ impl LiveRun {
     }
 }
 
-#[derive(Debug)]
-struct Suggested {
-    run: RunId,
-    cancel: CancellationToken,
-    text: Option<String>,
-}
-
 #[derive(Debug, Default)]
 struct LivePreview {
     text: String,
@@ -285,6 +273,7 @@ impl Hub {
         } = surroundings;
         let extensions = Extensions::new(store.clone(), engines.clone(), data_dir.clone());
         let mcp = Mcp::new(store.clone());
+        let side = side::SideQueries::new(store.clone());
         let hub = Self {
             inner: Arc::new(Inner {
                 generation,
@@ -293,10 +282,7 @@ impl Hub {
                 data_dir,
                 harness_for,
                 turns: Mutex::new(turns::Turns::default()),
-                suggestions: Mutex::new(HashMap::new()),
-                attention: Mutex::new(HashMap::new()),
-                untitled: Mutex::new(std::collections::HashSet::new()),
-                title_queries: Mutex::new(std::collections::HashSet::new()),
+                side,
                 extensions,
                 mcp,
                 shutdown: CancellationToken::new(),
@@ -304,10 +290,9 @@ impl Hub {
                 harness_slots: Arc::new(Semaphore::new(RUN_CAPACITY)),
                 dispatch: Notify::new(),
                 admission: tokio::sync::Mutex::new(()),
-                gateway: Mutex::new(gateway::Gateway::default()),
-                agents_changed: tokio::sync::watch::channel(0).0,
-                agent_waiters: Mutex::new(HashMap::new()),
-                approvals: Mutex::new(HashMap::new()),
+                gateway: gateway::Gateway::default(),
+                agents: agents::AgentWatch::default(),
+                approvals: approvals::OwnApprovals::default(),
                 disk,
                 sandbox,
                 stop_deadline,
@@ -687,7 +672,7 @@ impl Hub {
             .await?
             .map(|thread| thread.config.permissions);
         if update.title.is_some() {
-            self.untitled_lock().remove(thread_id);
+            self.inner.side.titled(thread_id);
         }
         let thread = self.store().update_thread(thread_id, update).await?;
         if let Some(thread) = &thread
@@ -1025,11 +1010,10 @@ impl Hub {
     #[must_use]
     #[expect(
         clippy::significant_drop_tightening,
-        reason = "both locks are held so the snapshot matches its revision"
+        reason = "the turns stay locked so the snapshot matches its revision"
     )]
     fn live_snapshot(&self) -> (u64, Vec<Event>) {
         let live = self.lock();
-        let suggestions = self.suggestions_lock();
         let mut snapshot: Vec<_> = live
             .iter()
             .flat_map(|(thread_id, run)| {
@@ -1042,81 +1026,17 @@ impl Hub {
                 })
             })
             .collect();
-        snapshot.extend(suggestions.iter().filter_map(|(thread_id, suggested)| {
-            suggested.text.clone().map(|text| Event::Suggestion {
-                thread_id: thread_id.clone(),
-                text: Some(text),
-            })
-        }));
-        snapshot.extend(self.pending_editor_calls());
-        sort_snapshot(&mut snapshot);
-        (self.inner.store.live_revision(), snapshot)
-    }
-
-    fn open_suggestion(&self, thread_id: &ThreadId, run: &RunId) {
-        let cancel = self.inner.shutdown.child_token();
-        let previous = self.suggestions_lock().insert(
-            thread_id.clone(),
-            Suggested {
-                run: run.clone(),
-                cancel,
-                text: None,
-            },
-        );
-        if let Some(previous) = previous {
-            previous.cancel.cancel();
-            if previous.text.is_some() {
-                self.inner.store.publish_live(Event::Suggestion {
-                    thread_id: thread_id.clone(),
-                    text: None,
-                });
-            }
-        }
-    }
-
-    fn suggestion_slot(&self, thread_id: &ThreadId, run: &RunId) -> Option<CancellationToken> {
-        self.suggestions_lock()
-            .get(thread_id)
-            .filter(|suggested| &suggested.run == run && !suggested.cancel.is_cancelled())
-            .map(|suggested| suggested.cancel.clone())
-    }
-
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "published under the lock, so a newer run's withdrawal follows it"
-    )]
-    fn offer_suggestion(&self, thread_id: &ThreadId, run: &RunId, text: String) {
-        let mut suggestions = self.suggestions_lock();
-        let Some(suggested) = suggestions
-            .get_mut(thread_id)
-            .filter(|suggested| &suggested.run == run && !suggested.cancel.is_cancelled())
-        else {
-            return;
-        };
-        suggested.text = Some(text.clone());
-        self.inner.store.publish_live(Event::Suggestion {
-            thread_id: thread_id.clone(),
-            text: Some(text),
-        });
+        self.inner.side.with_suggestions(|suggestions| {
+            snapshot.extend(suggestions);
+            snapshot.extend(self.pending_editor_calls());
+            sort_snapshot(&mut snapshot);
+            (self.inner.store.live_revision(), snapshot)
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, turns::Turns> {
         self.inner
             .turns
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn suggestions_lock(&self) -> std::sync::MutexGuard<'_, HashMap<ThreadId, Suggested>> {
-        self.inner
-            .suggestions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn attention_lock(&self) -> std::sync::MutexGuard<'_, HashMap<ThreadId, side::Attention>> {
-        self.inner
-            .attention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
@@ -1148,13 +1068,6 @@ impl Hub {
         }
         self.resume_pending();
         settled
-    }
-
-    fn untitled_lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<ThreadId>> {
-        self.inner
-            .untitled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn start_dispatcher(&self) {

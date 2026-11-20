@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 const ANSWER_WITHIN: Duration = Duration::from_mins(9);
 
 #[derive(Debug)]
-pub(crate) struct OwnApproval {
+struct OwnApproval {
     thread: ThreadId,
     permission: bool,
     answer: oneshot::Sender<Decision>,
@@ -205,7 +205,34 @@ impl Hub {
     }
 
     pub(crate) fn answer_own_approval(&self, item: &ItemId, decision: Decision) -> bool {
-        let Some(card) = self.approvals_lock().remove(item) else {
+        self.inner.approvals.answer(item, decision)
+    }
+
+    pub(crate) fn allow_own_approvals(&self, thread: &ThreadId) {
+        self.inner.approvals.allow_permissions(thread);
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct OwnApprovals(std::sync::Mutex<std::collections::HashMap<ItemId, OwnApproval>>);
+
+impl OwnApprovals {
+    fn cards(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<ItemId, OwnApproval>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn open(&self, id: ItemId, card: OwnApproval) {
+        self.cards().insert(id, card);
+    }
+
+    fn withdraw(&self, id: &ItemId) {
+        drop(self.cards().remove(id));
+    }
+
+    fn answer(&self, item: &ItemId, decision: Decision) -> bool {
+        let Some(card) = self.cards().remove(item) else {
             return false;
         };
         if card.answer.send(decision).is_err() {
@@ -214,29 +241,20 @@ impl Hub {
         true
     }
 
-    pub(crate) fn allow_own_approvals(&self, thread: &ThreadId) {
-        let mut approvals = self.approvals_lock();
-        let waiting: Vec<ItemId> = approvals
+    fn allow_permissions(&self, thread: &ThreadId) {
+        let mut cards = self.cards();
+        let waiting: Vec<ItemId> = cards
             .iter()
             .filter(|(_, card)| card.permission && card.thread == *thread)
             .map(|(id, _)| id.clone())
             .collect();
         for id in waiting {
-            if let Some(card) = approvals.remove(&id)
+            if let Some(card) = cards.remove(&id)
                 && card.answer.send(Decision::AllowOnce).is_err()
             {
                 tracing::debug!(item = %id, "the asker stopped waiting; the card is allowed anyway");
             }
         }
-    }
-
-    fn approvals_lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<ItemId, OwnApproval>> {
-        self.inner
-            .approvals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -276,7 +294,7 @@ struct Waiting {
 
 impl Waiting {
     fn register(hub: &Hub, id: ItemId, card: OwnApproval) -> Self {
-        hub.approvals_lock().insert(id.clone(), card);
+        hub.inner.approvals.open(id.clone(), card);
         Self {
             hub: hub.clone(),
             id,
@@ -290,13 +308,13 @@ impl Waiting {
 
     fn settled(&mut self) {
         self.abandoned = None;
-        self.hub.approvals_lock().remove(&self.id);
+        self.hub.inner.approvals.withdraw(&self.id);
     }
 }
 
 impl Drop for Waiting {
     fn drop(&mut self) {
-        self.hub.approvals_lock().remove(&self.id);
+        self.hub.inner.approvals.withdraw(&self.id);
         let Some(card) = self.abandoned.take() else {
             return;
         };

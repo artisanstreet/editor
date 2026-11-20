@@ -5308,7 +5308,12 @@ async fn an_approval_whose_asker_went_away_is_withdrawn() {
         },
     )
     .await;
-    assert!(fixture.hub.inner.approvals.lock().unwrap().is_empty());
+    assert!(
+        !fixture
+            .hub
+            .answer_own_approval(&card.id, Decision::AllowOnce),
+        "the withdrawn card can no longer be answered"
+    );
     fixture.hub.shutdown();
 }
 
@@ -6086,13 +6091,7 @@ async fn a_late_background_title_preserves_a_manual_rename() {
     harness.release_title.notify_one();
     tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
-            let querying = fixture
-                .hub
-                .inner
-                .title_queries
-                .lock()
-                .unwrap()
-                .contains(&fixture.thread_id);
+            let querying = fixture.hub.inner.side.is_titling(&fixture.thread_id);
             if !querying {
                 break;
             }

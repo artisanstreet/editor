@@ -80,7 +80,7 @@ struct CallGuard {
 
 impl Drop for CallGuard {
     fn drop(&mut self) {
-        self.hub.gateway_lock().calls.remove(&self.id);
+        drop(self.hub.inner.gateway.close_call(&self.id));
     }
 }
 
@@ -162,7 +162,7 @@ struct Credential {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct Gateway {
+struct Routes {
     base: Option<String>,
     computer: bool,
     holders: HashMap<String, ThreadId>,
@@ -187,39 +187,115 @@ impl GatewayPass {
 
 impl Drop for GatewayPass {
     fn drop(&mut self) {
-        if let Some((thread, pass)) = &self.held
-            && let Some(credential) = self.hub.gateway_lock().credentials.get_mut(thread)
-        {
-            credential.activity.release(*pass);
+        if let Some((thread, pass)) = &self.held {
+            self.hub.inner.gateway.release(thread, *pass);
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Gateway(std::sync::Mutex<Routes>);
+
+impl Gateway {
+    fn routes(&self) -> std::sync::MutexGuard<'_, Routes> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set(&self, base: String, computer: bool) {
+        let mut routes = self.routes();
+        routes.base = Some(base);
+        routes.computer = computer;
+    }
+
+    fn address(&self) -> Option<(String, bool)> {
+        let routes = self.routes();
+        routes.base.clone().map(|base| (base, routes.computer))
+    }
+
+    fn caller(&self, token: &str) -> Result<(ThreadId, CancellationToken), GatewayRefusal> {
+        let routes = self.routes();
+        let thread = routes.holders.get(token).ok_or(GatewayRefusal::Unknown)?;
+        let credential = routes.credentials.get(thread).unwrap_or_else(|| {
+            unreachable!(
+                "invariant: thread {thread} holds a gateway address it has no credential for"
+            )
+        });
+        match &credential.activity {
+            Activity::Idle => Err(GatewayRefusal::Idle {
+                thread: thread.clone(),
+            }),
+            Activity::Live { ended, .. } => Ok((thread.clone(), ended.clone())),
+        }
+    }
+
+    fn revoke(&self, thread: &ThreadId) {
+        let mut routes = self.routes();
+        if let Some(credential) = routes.credentials.remove(thread) {
+            routes.holders.remove(&credential.token);
+            credential.activity.end();
+        }
+    }
+
+    fn admit(&self, thread: &ThreadId) -> Result<(Secret, u64), GatewayError> {
+        let mut routes = self.routes();
+        let routes = &mut *routes;
+        let credential = match routes.credentials.entry(thread.clone()) {
+            std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+            std::collections::hash_map::Entry::Vacant(free) => {
+                let mut bytes = [0_u8; 24];
+                getrandom::fill(&mut bytes).map_err(|source| GatewayError::Token {
+                    thread: thread.clone(),
+                    source,
+                })?;
+                let token = hex::encode(bytes);
+                routes.holders.insert(token.clone(), thread.clone());
+                free.insert(Credential {
+                    token,
+                    activity: Activity::Idle,
+                })
+            }
+        };
+        let pass = routes.next_pass;
+        routes.next_pass += 1;
+        credential.activity.admit(pass);
+        Ok((Secret::from(credential.token.as_str()), pass))
+    }
+
+    fn release(&self, thread: &ThreadId, pass: u64) {
+        if let Some(credential) = self.routes().credentials.get_mut(thread) {
+            credential.activity.release(pass);
+        }
+    }
+
+    fn open_call(&self, id: String, pending: PendingCall) {
+        self.routes().calls.insert(id, pending);
+    }
+
+    fn close_call(&self, id: &str) -> Option<PendingCall> {
+        self.routes().calls.remove(id)
+    }
+
+    fn pending_calls(&self) -> Vec<Event> {
+        self.routes()
+            .calls
+            .iter()
+            .map(|(id, pending)| Event::EditorCall {
+                id: id.clone(),
+                call: pending.call.clone(),
+            })
+            .collect()
     }
 }
 
 impl Hub {
     pub fn set_gateway(&self, base: String, computer: bool) {
-        let mut gateway = self.gateway_lock();
-        gateway.base = Some(base);
-        gateway.computer = computer;
+        self.inner.gateway.set(base, computer);
     }
 
     pub fn gateway_caller(&self, token: &str) -> Result<GatewayCaller, GatewayRefusal> {
-        let (thread, ended) = {
-            let gateway = self.gateway_lock();
-            let thread = gateway.holders.get(token).ok_or(GatewayRefusal::Unknown)?;
-            let credential = gateway.credentials.get(thread).unwrap_or_else(|| {
-                unreachable!(
-                    "invariant: thread {thread} holds a gateway address it has no credential for"
-                )
-            });
-            match &credential.activity {
-                Activity::Idle => {
-                    return Err(GatewayRefusal::Idle {
-                        thread: thread.clone(),
-                    });
-                }
-                Activity::Live { ended, .. } => (thread.clone(), ended.clone()),
-            }
-        };
+        let (thread, ended) = self.inner.gateway.caller(token)?;
         let run_stopped = self.run_cancellation(&thread);
         Ok(GatewayCaller {
             thread,
@@ -234,22 +310,14 @@ impl Hub {
     }
 
     pub(crate) fn revoke_gateway_credential(&self, thread: &ThreadId) {
-        let mut gateway = self.gateway_lock();
-        if let Some(credential) = gateway.credentials.remove(thread) {
-            gateway.holders.remove(&credential.token);
-            credential.activity.end();
-        }
+        self.inner.gateway.revoke(thread);
     }
 
     pub(crate) async fn gateway_pass(
         &self,
         thread: &ThreadId,
     ) -> Result<GatewayPass, GatewayError> {
-        let (base, computer) = {
-            let gateway = self.gateway_lock();
-            (gateway.base.clone(), gateway.computer)
-        };
-        let Some(base) = base else {
+        let Some((base, computer)) = self.inner.gateway.address() else {
             return Ok(GatewayPass {
                 hub: self.clone(),
                 held: None,
@@ -257,7 +325,7 @@ impl Hub {
             });
         };
         let computer = computer && self.computer_use_on(thread).await?;
-        let (token, pass) = self.admit_pass(thread)?;
+        let (token, pass) = self.inner.gateway.admit(thread)?;
         let mut servers = vec![(
             forge_engines::ARTISAN_MCP.to_owned(),
             format!("{base}{}/{}", forge_engines::ARTISAN_MCP, token.expose()),
@@ -293,31 +361,6 @@ impl Hub {
         }
     }
 
-    fn admit_pass(&self, thread: &ThreadId) -> Result<(Secret, u64), GatewayError> {
-        let mut gateway = self.gateway_lock();
-        let gateway = &mut *gateway;
-        let credential = match gateway.credentials.entry(thread.clone()) {
-            std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
-            std::collections::hash_map::Entry::Vacant(free) => {
-                let mut bytes = [0_u8; 24];
-                getrandom::fill(&mut bytes).map_err(|source| GatewayError::Token {
-                    thread: thread.clone(),
-                    source,
-                })?;
-                let token = hex::encode(bytes);
-                gateway.holders.insert(token.clone(), thread.clone());
-                free.insert(Credential {
-                    token,
-                    activity: Activity::Idle,
-                })
-            }
-        };
-        let pass = gateway.next_pass;
-        gateway.next_pass += 1;
-        credential.activity.admit(pass);
-        Ok((Secret::from(credential.token.as_str()), pass))
-    }
-
     pub async fn call_editor(
         &self,
         call: EditorCall,
@@ -328,7 +371,7 @@ impl Hub {
             call: call.clone(),
             answer,
         };
-        self.gateway_lock().calls.insert(id.clone(), pending);
+        self.inner.gateway.open_call(id.clone(), pending);
         let guard = CallGuard {
             hub: self.clone(),
             id: id.clone(),
@@ -358,25 +401,11 @@ impl Hub {
     }
 
     pub(crate) fn answer_editor_call(&self, id: &str, reply: EditorReply) -> bool {
-        let pending = self.gateway_lock().calls.remove(id);
+        let pending = self.inner.gateway.close_call(id);
         pending.is_some_and(|pending| pending.answer.send(reply).is_ok())
     }
 
     pub(crate) fn pending_editor_calls(&self) -> Vec<Event> {
-        self.gateway_lock()
-            .calls
-            .iter()
-            .map(|(id, pending)| Event::EditorCall {
-                id: id.clone(),
-                call: pending.call.clone(),
-            })
-            .collect()
-    }
-
-    fn gateway_lock(&self) -> std::sync::MutexGuard<'_, Gateway> {
-        self.inner
-            .gateway
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner.gateway.pending_calls()
     }
 }

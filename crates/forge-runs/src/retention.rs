@@ -126,12 +126,7 @@ impl Hub {
 
     pub(crate) async fn forget_removed_thread(&self, thread: Thread) {
         self.revoke_gateway_credential(&thread.id);
-        let suggested = self.suggestions_lock().remove(&thread.id);
-        if let Some(suggested) = suggested {
-            suggested.cancel.cancel();
-        }
-        self.attention_lock().remove(&thread.id);
-        self.untitled_lock().remove(&thread.id);
+        self.inner.side.forget(&thread.id);
         if !thread.project_id.is_scratch() {
             return;
         }

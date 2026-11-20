@@ -973,7 +973,7 @@ impl Hub {
         }
         let _waiting = Waiting::new(self, found.iter().map(|(item, _)| item.id.clone()));
         let deadline = tokio::time::Instant::now() + timeout.min(LONGEST_WAIT);
-        let mut changes = self.inner.agents_changed.subscribe();
+        let mut changes = self.inner.agents.subscribe();
         loop {
             changes.borrow_and_update();
             let mut agents = Vec::new();
@@ -1089,10 +1089,7 @@ impl Hub {
             .latest_run(thread)
             .await?
             .is_some_and(|run| run.seq > item.seq);
-        let waited = self
-            .waiters_lock()
-            .get(agent)
-            .is_some_and(|count| *count > 0);
+        let waited = self.inner.agents.awaited(agent);
         let reports = background
             && !waited
             && !item.status.is_terminal()
@@ -1180,14 +1177,63 @@ impl Hub {
     }
 
     pub(crate) fn agents_moved(&self) {
-        self.inner.agents_changed.send_modify(|count| *count += 1);
+        self.inner.agents.moved();
     }
+}
 
-    fn waiters_lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<ItemId, usize>> {
-        self.inner
-            .agent_waiters
+#[derive(Debug)]
+pub(crate) struct AgentWatch {
+    changed: tokio::sync::watch::Sender<u64>,
+    waiters: std::sync::Mutex<std::collections::HashMap<ItemId, usize>>,
+}
+
+impl Default for AgentWatch {
+    fn default() -> Self {
+        Self {
+            changed: tokio::sync::watch::channel(0).0,
+            waiters: std::sync::Mutex::default(),
+        }
+    }
+}
+
+impl AgentWatch {
+    fn waiters(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<ItemId, usize>> {
+        self.waiters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn moved(&self) {
+        self.changed.send_modify(|count| *count += 1);
+    }
+
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    pub(crate) fn awaited(&self, agent: &ItemId) -> bool {
+        self.waiters().contains_key(agent)
+    }
+
+    fn await_all(&self, agents: &[ItemId]) {
+        let mut waiters = self.waiters();
+        for agent in agents {
+            *waiters.entry(agent.clone()).or_default() += 1;
+        }
+    }
+
+    fn stop_awaiting(&self, agents: &[ItemId]) {
+        let mut waiters = self.waiters();
+        for agent in agents {
+            if let std::collections::hash_map::Entry::Occupied(mut count) =
+                waiters.entry(agent.clone())
+            {
+                *count.get_mut() -= 1;
+                if *count.get() == 0 {
+                    count.remove();
+                }
+            }
+        }
     }
 }
 
@@ -1222,26 +1268,14 @@ struct Waiting<'h> {
 impl<'h> Waiting<'h> {
     fn new(hub: &'h Hub, agents: impl Iterator<Item = ItemId>) -> Self {
         let agents: Vec<_> = agents.collect();
-        let mut waiters = hub.waiters_lock();
-        for agent in &agents {
-            *waiters.entry(agent.clone()).or_default() += 1;
-        }
-        drop(waiters);
+        hub.inner.agents.await_all(&agents);
         Self { hub, agents }
     }
 }
 
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        let mut waiters = self.hub.waiters_lock();
-        for agent in &self.agents {
-            if let Some(count) = waiters.get_mut(agent) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    waiters.remove(agent);
-                }
-            }
-        }
+        self.hub.inner.agents.stop_awaiting(&self.agents);
     }
 }
 

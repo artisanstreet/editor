@@ -1,4 +1,5 @@
 use crate::Hub;
+use artisan_api::Event;
 use artisan_api::{
     EngineId, FileOp, ItemId, ItemKind, NoticeKind, Phase, RunId, Status, ThreadId, ToolKind,
 };
@@ -7,7 +8,8 @@ use forge_store::{
     LatestRunError, NewItem, ReadThreadError, ReplaceTitleError, ResolveTextError, UpsertItemError,
 };
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use tokio_util::sync::CancellationToken;
 
 pub const SUGGESTIONS_KEY: &str = "suggestions";
@@ -118,7 +120,7 @@ const BAR: f32 = 6.0;
 const MAX_BAR: f32 = 48.0;
 
 #[derive(Debug)]
-pub(crate) struct Attention {
+struct Attention {
     score: f32,
     bar: f32,
     seen: HashSet<String>,
@@ -135,7 +137,7 @@ impl Default for Attention {
 }
 
 impl Attention {
-    pub(crate) fn add(&mut self, work: &Work) {
+    fn add(&mut self, work: &Work) {
         self.score += work.score;
         for directory in &work.directories {
             if self.seen.insert(directory.clone()) {
@@ -270,27 +272,174 @@ fn changes_state(command: &str) -> bool {
     CHANGES.iter().any(|change| command.contains(change))
 }
 
+#[derive(Debug)]
+struct Suggested {
+    run: RunId,
+    cancel: CancellationToken,
+    text: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SideQueries {
+    store: forge_store::Store,
+    suggestions: Mutex<HashMap<ThreadId, Suggested>>,
+    attention: Mutex<HashMap<ThreadId, Attention>>,
+    untitled: Mutex<HashSet<ThreadId>>,
+    titling: Mutex<HashSet<ThreadId>>,
+}
+
+fn held<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl SideQueries {
+    pub(crate) fn new(store: forge_store::Store) -> Self {
+        Self {
+            store,
+            suggestions: Mutex::default(),
+            attention: Mutex::default(),
+            untitled: Mutex::default(),
+            titling: Mutex::default(),
+        }
+    }
+
+    pub(crate) fn open_suggestion(
+        &self,
+        thread: &ThreadId,
+        run: &RunId,
+        cancel: CancellationToken,
+    ) {
+        let previous = held(&self.suggestions).insert(
+            thread.clone(),
+            Suggested {
+                run: run.clone(),
+                cancel,
+                text: None,
+            },
+        );
+        if let Some(previous) = previous {
+            previous.cancel.cancel();
+            if previous.text.is_some() {
+                self.store.publish_live(Event::Suggestion {
+                    thread_id: thread.clone(),
+                    text: None,
+                });
+            }
+        }
+    }
+
+    fn suggestion_slot(&self, thread: &ThreadId, run: &RunId) -> Option<CancellationToken> {
+        held(&self.suggestions)
+            .get(thread)
+            .filter(|suggested| &suggested.run == run && !suggested.cancel.is_cancelled())
+            .map(|suggested| suggested.cancel.clone())
+    }
+
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "published under the lock, so a newer run's withdrawal follows it"
+    )]
+    fn offer_suggestion(&self, thread: &ThreadId, run: &RunId, text: String) {
+        let mut suggestions = held(&self.suggestions);
+        let Some(suggested) = suggestions
+            .get_mut(thread)
+            .filter(|suggested| &suggested.run == run && !suggested.cancel.is_cancelled())
+        else {
+            return;
+        };
+        suggested.text = Some(text.clone());
+        self.store.publish_live(Event::Suggestion {
+            thread_id: thread.clone(),
+            text: Some(text),
+        });
+    }
+
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the lock is held while the reader finishes, so no offer lands between the shown suggestions and the revision"
+    )]
+    pub(crate) fn with_suggestions<R>(&self, read: impl FnOnce(Vec<Event>) -> R) -> R {
+        let suggestions = held(&self.suggestions);
+        let shown = suggestions
+            .iter()
+            .filter_map(|(thread, suggested)| {
+                suggested.text.clone().map(|text| Event::Suggestion {
+                    thread_id: thread.clone(),
+                    text: Some(text),
+                })
+            })
+            .collect();
+        read(shown)
+    }
+
+    pub(crate) fn forget(&self, thread: &ThreadId) {
+        let suggested = held(&self.suggestions).remove(thread);
+        if let Some(suggested) = suggested {
+            suggested.cancel.cancel();
+        }
+        held(&self.attention).remove(thread);
+        held(&self.untitled).remove(thread);
+    }
+
+    pub(crate) fn weigh(&self, thread: &ThreadId, work: &Work) {
+        held(&self.attention)
+            .entry(thread.clone())
+            .or_default()
+            .add(work);
+    }
+
+    fn attention_due(&self, thread: &ThreadId) -> bool {
+        held(&self.attention)
+            .entry(thread.clone())
+            .or_default()
+            .due()
+    }
+
+    fn attention_checked(&self, thread: &ThreadId, found: bool) {
+        held(&self.attention)
+            .entry(thread.clone())
+            .or_default()
+            .checked(found);
+    }
+
+    pub(crate) fn untitled(&self, thread: &ThreadId) {
+        held(&self.untitled).insert(thread.clone());
+    }
+
+    pub(crate) fn titled(&self, thread: &ThreadId) {
+        held(&self.untitled).remove(thread);
+    }
+
+    fn is_untitled(&self, thread: &ThreadId) -> bool {
+        held(&self.untitled).contains(thread)
+    }
+
+    fn start_titling(&self, thread: &ThreadId) {
+        held(&self.titling).insert(thread.clone());
+    }
+
+    fn stop_titling(&self, thread: &ThreadId) {
+        held(&self.titling).remove(thread);
+    }
+
+    pub(crate) fn is_titling(&self, thread: &ThreadId) -> bool {
+        held(&self.titling).contains(thread)
+    }
+}
+
 impl Hub {
     pub(crate) fn start_title(
         &self,
         thread: artisan_api::Thread,
         messages: Vec<artisan_api::Item>,
     ) {
-        self.inner
-            .title_queries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(thread.id.clone());
+        self.inner.side.start_titling(&thread.id);
         let hub = self.clone();
         self.inner.tasks.spawn(async move {
             if let Err(error) = hub.name_thread(&thread, messages).await {
                 tracing::warn!(thread = %thread.id, "generating an early title: {}", diagnostics::chain(&error));
             }
-            hub.inner
-                .title_queries
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&thread.id);
+            hub.inner.side.stop_titling(&thread.id);
         });
     }
 
@@ -374,7 +523,7 @@ impl Hub {
         title: String,
     ) -> Result<(), SaveTitleError> {
         if self.enabled(SUMMARY_TITLES_KEY).await
-            && self.untitled_lock().contains(&thread.id)
+            && self.inner.side.is_untitled(&thread.id)
             && let Some(named) = self
                 .store()
                 .replace_thread_title(&thread.id, thread.title.clone(), title)
@@ -384,7 +533,7 @@ impl Hub {
                     source,
                 })?
         {
-            self.untitled_lock().remove(&thread.id);
+            self.inner.side.titled(&thread.id);
             self.sync_title(&named)
                 .await
                 .map_err(SaveTitleError::Sync)?;
@@ -445,24 +594,14 @@ impl Hub {
     }
 
     pub(crate) async fn after_turn(&self, thread_id: ThreadId, run_id: RunId) {
-        let Some(cancel) = self.suggestion_slot(&thread_id, &run_id) else {
+        let Some(cancel) = self.inner.side.suggestion_slot(&thread_id, &run_id) else {
             return;
         };
         let suggest = self.enabled(SUGGESTIONS_KEY).await;
-        let note = self.enabled(YOU_SHOULD_KNOW_KEY).await
-            && self
-                .attention_lock()
-                .entry(thread_id.clone())
-                .or_default()
-                .due();
-        let naming = self
-            .inner
-            .title_queries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(&thread_id);
-        let title = !naming
-            && self.untitled_lock().contains(&thread_id)
+        let note =
+            self.enabled(YOU_SHOULD_KNOW_KEY).await && self.inner.side.attention_due(&thread_id);
+        let title = !self.inner.side.is_titling(&thread_id)
+            && self.inner.side.is_untitled(&thread_id)
             && self.enabled(SUMMARY_TITLES_KEY).await;
         if !suggest && !note && !title {
             return;
@@ -493,16 +632,15 @@ impl Hub {
                     tracing::warn!(thread = %thread_id, run = %run_id, "storing a generated title: {}", diagnostics::chain(&error));
                 }
                 if note {
-                    self.attention_lock()
-                        .entry(thread_id.clone())
-                        .or_default()
-                        .checked(answer.note.is_some());
+                    self.inner
+                        .side
+                        .attention_checked(&thread_id, answer.note.is_some());
                 }
                 if cancel.is_cancelled() {
                     return;
                 }
                 if suggest && let Some(text) = answer.suggestion {
-                    self.offer_suggestion(&thread_id, &run_id, text);
+                    self.inner.side.offer_suggestion(&thread_id, &run_id, text);
                 }
                 if let Some(found) = answer.note
                     && let Err(error) = self.store_note(&thread_id, &run_id, found).await

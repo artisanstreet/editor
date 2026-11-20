@@ -318,7 +318,9 @@ pub(crate) async fn drive(
         .as_deref()
         .map(forge_engines::claudeai::Session::state);
     let mut items = Work::new(hub, &thread, first_run, &pending);
-    hub.open_suggestion(thread_id, &run_id);
+    hub.inner
+        .side
+        .open_suggestion(thread_id, &run_id, hub.inner.shutdown.child_token());
     let adapter_cancel = cancel.child_token();
     items.binary = hub.engines().lease(engine);
     let ending = match Box::pin(execute(
@@ -344,10 +346,7 @@ pub(crate) async fn drive(
         Err(error) => Ending::Finished(Outcome::failed(diagnostics::chain(&error))),
     };
     adapter_cancel.cancel();
-    hub.attention_lock()
-        .entry(thread_id.clone())
-        .or_default()
-        .add(&items.weighed);
+    hub.inner.side.weigh(thread_id, &items.weighed);
     let attempted = pending.iter().map(|item| item.id.clone()).collect();
     let status = conclude(hub, &mut run, &items, ending, attempted).await;
     if let Some(home) = &claude_ai_home
@@ -1229,7 +1228,7 @@ impl Work {
         messages: &[artisan_api::Item],
     ) -> Self {
         let early_title = first.then(|| {
-            hub.untitled_lock().insert(thread.id.clone());
+            hub.inner.side.untitled(&thread.id);
             Box::new((thread.clone(), messages.to_vec()))
         });
         Self {
@@ -1495,7 +1494,7 @@ async fn apply(
         EngineEvent::Title { title } => {
             let title = title.trim().to_owned();
             if !title.is_empty() {
-                hub.untitled_lock().remove(&thread_id);
+                hub.inner.side.titled(&thread_id);
             }
             if !title.is_empty() && hub.enabled(crate::SUMMARY_TITLES_KEY).await {
                 store

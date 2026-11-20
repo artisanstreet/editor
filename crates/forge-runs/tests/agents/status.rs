@@ -113,7 +113,7 @@ async fn an_agent_stopped_before_its_first_run_reports_cancelled_to_its_waiter()
     test_support::wait::eventually(
         "the waiter to register",
         test_support::wait::LIVENESS,
-        || async { !fixture.hub.inner.agent_waiters.lock().unwrap().is_empty() },
+        || async { fixture.hub.inner.agents.awaited(&agent) },
     )
     .await;
 
