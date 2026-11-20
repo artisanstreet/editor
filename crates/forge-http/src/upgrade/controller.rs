@@ -485,41 +485,38 @@ pub(super) enum ConnectionError {
     Active(#[source] RegistryFileError),
     #[error("no generation is active")]
     NoActive,
-    #[error("connect to generation {backend} at {address}")]
-    Connect {
-        backend: String,
-        address: SocketAddr,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("forward a connection to generation {backend}")]
     Forward {
         backend: String,
         #[source]
-        source: std::io::Error,
+        source: crate::forwarded::ForwardError,
     },
 }
 
-async fn forward(registry: Registry, mut client: TcpStream) -> Result<(), ConnectionError> {
+impl ConnectionError {
+    const fn reached_backend(&self) -> bool {
+        match self {
+            Self::Forward { source, .. } => source.reached_backend(),
+            Self::Active(_) | Self::NoActive => false,
+        }
+    }
+}
+
+async fn forward(
+    registry: Registry,
+    client: TcpStream,
+    peer: SocketAddr,
+) -> Result<(), ConnectionError> {
     let active = registry
         .active()
         .map_err(ConnectionError::Active)?
         .ok_or(ConnectionError::NoActive)?;
-    let mut backend =
-        TcpStream::connect(active.address)
-            .await
-            .map_err(|source| ConnectionError::Connect {
-                backend: active.id.clone(),
-                address: active.address,
-                source,
-            })?;
-    tokio::io::copy_bidirectional(&mut client, &mut backend)
+    crate::forwarded::forward(client, peer, active.address)
         .await
         .map_err(|source| ConnectionError::Forward {
             backend: active.id,
             source,
-        })?;
-    Ok(())
+        })
 }
 
 fn report(
@@ -529,7 +526,7 @@ fn report(
 ) {
     match finished {
         Ok(Ok(())) => {}
-        Ok(Err(error @ ConnectionError::Forward { .. })) => {
+        Ok(Err(error @ ConnectionError::Forward { .. })) if error.reached_backend() => {
             tracing::debug!(
                 gateway,
                 error = diagnostics::chain(&error),
@@ -539,7 +536,7 @@ fn report(
         Ok(Err(
             error @ (ConnectionError::Active(_)
             | ConnectionError::NoActive
-            | ConnectionError::Connect { .. }),
+            | ConnectionError::Forward { .. }),
         )) => {
             tracing::warn!(
                 gateway,
@@ -672,10 +669,16 @@ pub(super) async fn serve(
             ()=&mut stop=>break false,
             ()=stop_token.cancelled()=>break false,
             ()=replaced.notified()=>break true,
-            accepted=tcp.accept()=>{
-                let (client, _) = accepted.map_err(|source| ServeError::Accept { gateway: id.clone(), source })?;
-                connections.spawn(forward(registry.clone(), client));
-            }
+            accepted=tcp.accept()=>match accepted {
+                Ok((client, peer)) => {
+                    connections.spawn(forward(registry.clone(), client, peer));
+                }
+                Err(source) => {
+                    let error = ServeError::Accept { gateway: id.clone(), source };
+                    tracing::warn!(gateway = %id, error = diagnostics::chain(&error), "the gateway keeps serving");
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                }
+            },
             Some(finished)=connections.join_next(),if !connections.is_empty()=>report(&id, &wake, finished),
         }
     };
@@ -702,6 +705,8 @@ pub(super) async fn serve(
 }
 
 const RETRY_AFTER: Duration = Duration::from_secs(10);
+
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 enum Backend {
     Serving(Exited),

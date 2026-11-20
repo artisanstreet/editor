@@ -150,9 +150,29 @@ async fn generation(
     .await
     .unwrap();
     let hub = server.hub().clone();
-    let address = server.local_addr().unwrap();
+    let backend = server.local_addr().unwrap();
     tokio::spawn(server.run());
-    (hub, address)
+    (hub, gateway(backend))
+}
+
+#[cfg(unix)]
+fn gateway(backend: std::net::SocketAddr) -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let gateway = tokio::net::TcpListener::from_std(listener).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (client, peer) = gateway.accept().await.unwrap();
+            tokio::spawn(crate::forwarded::forward(client, peer, backend));
+        }
+    });
+    address
+}
+
+#[cfg(not(unix))]
+const fn gateway(backend: std::net::SocketAddr) -> std::net::SocketAddr {
+    backend
 }
 
 #[tokio::test(flavor = "multi_thread")]

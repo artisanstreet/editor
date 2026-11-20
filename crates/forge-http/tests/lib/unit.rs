@@ -831,18 +831,145 @@ async fn a_client_that_never_finishes_tls_is_dropped_and_frees_its_slot() {
     let handshakes = handshakes::Handshakes::new(1, 1);
     let peer: SocketAddr = "192.0.2.7:50000".parse().unwrap();
     let (_silent_client, socket) = tokio::io::duplex(4096);
+    let dir = tempfile::tempdir().unwrap();
     let connection = serve_connection(
         socket,
         peer,
         acceptor,
         handshakes.admit(peer.ip()).unwrap(),
         axum::Router::new(),
+        Store::open(dir.path()).unwrap(),
         CancellationToken::new(),
     );
     tokio::time::timeout(Duration::from_secs(600), connection)
         .await
         .expect("a silent client held its TLS handshake open forever");
     handshakes.admit(peer.ip()).unwrap();
+}
+
+struct Served {
+    _dir: tempfile::TempDir,
+    store: Store,
+    handshakes: handshakes::Handshakes,
+    peer: SocketAddr,
+    device: Identity,
+    connection: tokio::task::JoinHandle<()>,
+}
+
+impl Served {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        Self {
+            _dir: dir,
+            store,
+            handshakes: handshakes::Handshakes::new(1, 1),
+            peer: "192.0.2.7:50000".parse().unwrap(),
+            device: Identity::generate("artisan-editor").unwrap(),
+            connection: tokio::spawn(async {}),
+        }
+    }
+
+    async fn pair(&self) {
+        self.store
+            .add_device(
+                "editor".to_owned(),
+                forge_store::DeviceCertificate::from_der(
+                    self.device.certificate_der().unwrap().as_ref(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn connect(&mut self) -> tokio_rustls::client::TlsStream<tokio::io::DuplexStream> {
+        use tokio_rustls::rustls::pki_types::ServerName;
+        let forge = Identity::generate("artisan-forge").unwrap();
+        let acceptor =
+            tokio_rustls::TlsAcceptor::from(Arc::new(tls::server_config(&forge).unwrap()));
+        let (client, socket) = tokio::io::duplex(64 * 1024);
+        self.connection = tokio::spawn(serve_connection(
+            socket,
+            self.peer,
+            acceptor,
+            self.handshakes.admit(self.peer.ip()).unwrap(),
+            axum::Router::new(),
+            self.store.clone(),
+            CancellationToken::new(),
+        ));
+        let fingerprint = tls::fingerprint(forge.certificate_der().unwrap().as_ref());
+        let mut config = tls::client_config(&self.device, &fingerprint).unwrap();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from("localhost").unwrap(), client)
+            .await
+            .unwrap()
+    }
+
+    async fn ends(self) -> handshakes::Handshakes {
+        tokio::time::timeout(Duration::from_secs(600), self.connection)
+            .await
+            .expect("Forge kept the connection open forever")
+            .unwrap();
+        self.handshakes
+    }
+}
+
+async fn answered(stream: &mut tokio_rustls::client::TlsStream<tokio::io::DuplexStream>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    stream
+        .write_all(b"GET /nothing HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    while !answer.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).await.unwrap();
+        answer.extend_from_slice(&byte);
+    }
+    assert!(answer.starts_with(b"HTTP/1.1 404"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unpaired_device_is_disconnected_and_frees_its_slot_unless_it_pairs() {
+    let mut served = Served::new();
+    let mut stream = served.connect().await;
+    answered(&mut stream).await;
+    assert!(
+        served.handshakes.admit(served.peer.ip()).is_err(),
+        "an unpaired connection gave up its slot once its handshake finished"
+    );
+    let handshakes = served.ends().await;
+    handshakes.admit("192.0.2.7".parse().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_device_that_pairs_meanwhile_keeps_its_connection() {
+    let mut served = Served::new();
+    let mut stream = served.connect().await;
+    answered(&mut stream).await;
+    served.pair().await;
+    tokio::time::pause();
+    tokio::time::sleep(UNPAIRED_LIFETIME / 2).await;
+    answered(&mut stream).await;
+    tokio::time::sleep(UNPAIRED_LIFETIME / 2 + Duration::from_secs(1)).await;
+    answered(&mut stream).await;
+    served.handshakes.admit(served.peer.ip()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paired_device_that_stalls_inside_its_request_headers_is_disconnected() {
+    use tokio::io::AsyncWriteExt as _;
+    let mut served = Served::new();
+    served.pair().await;
+    let mut stream = served.connect().await;
+    answered(&mut stream).await;
+    served.handshakes.admit(served.peer.ip()).unwrap();
+    stream
+        .write_all(b"GET /nothing HTTP/1.1\r\nHost: loc")
+        .await
+        .unwrap();
+    served.ends().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

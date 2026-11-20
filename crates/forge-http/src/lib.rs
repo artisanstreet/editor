@@ -3,6 +3,8 @@ mod account_service;
 pub mod core;
 mod events;
 mod extensions;
+#[cfg(unix)]
+mod forwarded;
 mod gateway;
 mod generation;
 mod handshakes;
@@ -19,7 +21,7 @@ use artisan_api::Timestamp;
 use forge_engines::Engines;
 use forge_runs::Hub;
 use forge_store::Store;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -89,6 +91,89 @@ pub struct PairInvite {
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const UNPAIRED_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum Origin {
+    Direct,
+    Gateway,
+}
+
+#[cfg(unix)]
+const fn origin(behind_gateway: bool) -> Origin {
+    if behind_gateway {
+        Origin::Gateway
+    } else {
+        Origin::Direct
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Unadmitted {
+    #[cfg(unix)]
+    #[error(transparent)]
+    Forwarded(#[from] forwarded::ReadPeerError),
+    #[error(transparent)]
+    Refused(#[from] handshakes::Refused),
+}
+
+struct Admitted {
+    socket: tokio::net::TcpStream,
+    peer: SocketAddr,
+    handshake: handshakes::Slot,
+}
+
+#[cfg(unix)]
+async fn admit(
+    mut socket: tokio::net::TcpStream,
+    connected: SocketAddr,
+    origin: Origin,
+    handshakes: &handshakes::Handshakes,
+) -> Result<Admitted, Unadmitted> {
+    let peer = match origin {
+        Origin::Direct => connected,
+        Origin::Gateway => forwarded::read_peer(&mut socket).await?,
+    };
+    Ok(Admitted {
+        socket,
+        peer,
+        handshake: handshakes.admit(peer.ip())?,
+    })
+}
+
+#[cfg(not(unix))]
+fn admit(
+    socket: tokio::net::TcpStream,
+    connected: SocketAddr,
+    handshakes: &handshakes::Handshakes,
+) -> Result<Admitted, Unadmitted> {
+    Ok(Admitted {
+        socket,
+        peer: connected,
+        handshake: handshakes.admit(connected.ip())?,
+    })
+}
+
+enum Standing {
+    Paired,
+    Unpaired {
+        _slot: handshakes::Slot,
+        until: tokio::time::Instant,
+    },
+}
+
+impl Standing {
+    async fn expired(&self) {
+        match self {
+            Self::Paired => std::future::pending().await,
+            Self::Unpaired { until, .. } => tokio::time::sleep_until(*until).await,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
@@ -171,6 +256,8 @@ impl std::fmt::Debug for Server {
 
 pub struct Server {
     listener: TcpListener,
+    #[cfg(unix)]
+    origin: Origin,
     acceptor: tokio_rustls::TlsAcceptor,
     app: axum::Router,
     store: Store,
@@ -329,6 +416,8 @@ async fn start_mode(
     tracing::info!(%address, data = %config.data_dir.display(), "Forge is serving");
     let server = Server {
         listener,
+        #[cfg(unix)]
+        origin: origin(registry.is_some()),
         acceptor,
         app,
         store,
@@ -499,7 +588,7 @@ impl Server {
                 () = self.drain.cancelled() => break,
                 accepted = self.listener.accept() => accepted,
             };
-            let (socket, peer) = match accepted {
+            let (socket, connected) = match accepted {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     tracing::warn!("accept a connection: {error}");
@@ -507,19 +596,31 @@ impl Server {
                     continue;
                 }
             };
-            let handshake = match handshakes.admit(peer.ip()) {
-                Ok(handshake) => handshake,
-                Err(refused) => {
-                    tracing::debug!(%peer, "refused a connection: {refused}");
-                    drop(socket);
-                    continue;
-                }
-            };
             let acceptor = self.acceptor.clone();
             let app = self.app.clone();
             let drain = self.drain.clone();
+            let store = self.store.clone();
+            #[cfg(unix)]
+            let origin = self.origin;
+            let handshakes = handshakes.clone();
             connections.spawn(async move {
-                serve_connection(socket, peer, acceptor, handshake, app, drain).await;
+                #[cfg(unix)]
+                let admitted = admit(socket, connected, origin, &handshakes).await;
+                #[cfg(not(unix))]
+                let admitted = admit(socket, connected, &handshakes);
+                match admitted {
+                    Ok(Admitted {
+                        socket,
+                        peer,
+                        handshake,
+                    }) => {
+                        serve_connection(socket, peer, acceptor, handshake, app, store, drain)
+                            .await;
+                    }
+                    Err(refused) => {
+                        tracing::debug!(%connected, "refused a connection: {}", diagnostics::chain(&refused));
+                    }
+                }
             });
         }
         tracing::info!("stopping: settling live runs");
@@ -542,6 +643,7 @@ async fn serve_connection<Socket>(
     acceptor: tokio_rustls::TlsAcceptor,
     handshake: handshakes::Slot,
     app: axum::Router,
+    store: Store,
     drain: CancellationToken,
 ) where
     Socket: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -560,7 +662,6 @@ async fn serve_connection<Socket>(
             }
         }
     };
-    drop(handshake);
     let Some(certificate) = stream
         .get_ref()
         .1
@@ -572,19 +673,59 @@ async fn serve_connection<Socket>(
     let client = routes::Client {
         certificate: forge_store::DeviceCertificate::from_der(certificate.as_ref()),
     };
+    let mut standing = match store.is_authorized(&client.certificate).await {
+        Ok(Some(_)) => {
+            drop(handshake);
+            Standing::Paired
+        }
+        Ok(None) => Standing::Unpaired {
+            _slot: handshake,
+            until: tokio::time::Instant::now() + UNPAIRED_LIFETIME,
+        },
+        Err(error) => {
+            tracing::warn!(%peer, "check whether the connection's device is paired: {}", diagnostics::chain(&error));
+            return;
+        }
+    };
+    let certificate = client.certificate.clone();
     let service =
         hyper::service::service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
             request.extensions_mut().insert(client.clone());
             app.clone().call(request)
         });
-    let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
     let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
     tokio::pin!(connection);
-    tokio::select! {
-        result=&mut connection=>{if let Err(error)=result {tracing::debug!(%peer,"connection ended: {error}");}}
-        ()=drain.cancelled()=>{
-            connection.as_mut().graceful_shutdown();
-            if let Ok(Err(error))=tokio::time::timeout(STOP_GRACE,connection).await {tracing::debug!(%peer,"connection drain: {error}");}
+    loop {
+        tokio::select! {
+            result = &mut connection => {
+                if let Err(error) = result {
+                    tracing::debug!(%peer, "connection ended: {error}");
+                }
+                return;
+            }
+            () = drain.cancelled() => {
+                connection.as_mut().graceful_shutdown();
+                if let Ok(Err(error)) = tokio::time::timeout(STOP_GRACE, connection).await {
+                    tracing::debug!(%peer, "connection drain: {error}");
+                }
+                return;
+            }
+            () = standing.expired() => match store.is_authorized(&certificate).await {
+                Ok(Some(_)) => standing = Standing::Paired,
+                Ok(None) => {
+                    tracing::debug!(%peer, "closed a connection whose device did not pair within {UNPAIRED_LIFETIME:?}");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%peer, "check whether the connection's device paired: {}", diagnostics::chain(&error));
+                    return;
+                }
+            },
         }
     }
 }

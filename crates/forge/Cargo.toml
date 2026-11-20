@@ -41,7 +41,7 @@ build-info.workspace = true
 [dev-dependencies]
 flate2.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "net", "io-util"] }
 artisan-api = { workspace = true, features = ["tls"] }
 reqwest = { workspace = true, features = ["json"] }
 serde_json.workspace = true

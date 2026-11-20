@@ -229,6 +229,38 @@ async fn rejected_candidate_leaves_the_original_generation_and_connections_servi
     upgrade::stop(&running.data).await.unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lan_peer_stalling_handshakes_through_the_gateway_leaves_room_for_the_local_editor() {
+    use tokio::io::AsyncReadExt as _;
+    let (_directory, running, gateway) = start().await;
+    let mut stalled = tokio::task::JoinSet::new();
+    for _ in 0..32 {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+        let mut stream = socket.connect(gateway.address).await.unwrap();
+        stalled.spawn(async move {
+            let mut byte = [0_u8; 1];
+            let read = stream.read(&mut byte).await;
+            (read, stream)
+        });
+    }
+    let (refused, _closed) =
+        tokio::time::timeout(test_support::wait::LIVENESS, stalled.join_next())
+            .await
+            .expect("Forge admitted every stalled handshake from one peer")
+            .unwrap()
+            .unwrap();
+    assert!(
+        matches!(refused, Ok(0) | Err(_)),
+        "a connection past the peer's bound is closed: {refused:?}"
+    );
+    let client = device(&running.data, gateway.address).await;
+    let state = format!("https://localhost:{}/state", gateway.address.port());
+    assert_eq!(client.get(&state).send().await.unwrap().status(), 200);
+    drop(stalled);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_connection_the_gateway_cannot_hand_to_its_backend_is_logged_with_both_ids() {
     let (directory, running, gateway) = start().await;
