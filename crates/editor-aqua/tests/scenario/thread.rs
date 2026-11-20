@@ -159,3 +159,52 @@ fn an_approval_answered_in_the_thread_lets_the_turn_finish() {
         })
     );
 }
+
+#[test]
+fn a_screen_reader_scrolls_back_through_the_transcript_and_it_stays_there() {
+    use test_support::scenario::{Action, ActionData, Found};
+    let mut scenario = Scenario::replaying(EngineId::Claude, "reply").thread("thread-a", "Long");
+    for turn in 0..24 {
+        scenario = scenario.exchange(
+            "thread-a",
+            &format!("Question {turn}"),
+            &format!("Answer {turn}, long enough to fill a line of the transcript on its own."),
+        );
+    }
+    let mut editor = scenario.open(Opening::Thread("thread-a"));
+    editor.shows("Answer 23");
+    let transcript =
+        |view: &test_support::scenario::View<'_>| -> Option<Found> { view.scrollable(Role::List) };
+    let at_end = editor
+        .view(transcript)
+        .expect("the transcript is a scrollable list");
+    let end = at_end
+        .scroll
+        .expect("a scrollable list has a scroll position")
+        .y;
+    editor.assist(&at_end, Action::ScrollUp, None);
+    editor.settle(
+        "the transcript to stay where the screen reader scrolled it",
+        |view| {
+            transcript(view)
+                .and_then(|list| list.scroll)
+                .is_some_and(|scroll| scroll.y < end - 1.0)
+        },
+    );
+    let paged = editor
+        .view(transcript)
+        .expect("the transcript is still a list");
+    editor.assist(
+        &paged,
+        Action::SetScrollOffset,
+        Some(ActionData::SetScrollOffset(test_support::scenario::Point {
+            x: 0.0,
+            y: 0.0,
+        })),
+    );
+    editor.settle("the transcript to stay at its start", |view| {
+        transcript(view)
+            .and_then(|list| list.scroll)
+            .is_some_and(|scroll| scroll.y < 1.0)
+    });
+}

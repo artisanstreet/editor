@@ -15,7 +15,14 @@ pub struct Found {
     pub focused: bool,
     pub disabled: bool,
     pub bounds: Option<Rect>,
+    pub scroll: Option<Scrolled>,
     pub node: aqua_a11y_uia::accesskit::NodeId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scrolled {
+    pub y: f64,
+    pub y_max: f64,
 }
 
 fn found(node: &NodeRef<'_>) -> Found {
@@ -26,6 +33,11 @@ fn found(node: &NodeRef<'_>) -> Found {
         focused: node.is_focused(),
         disabled: node.is_disabled(),
         bounds: node.bounding_box(),
+        scroll: node
+            .data()
+            .scroll_y()
+            .zip(node.data().scroll_y_max())
+            .map(|(y, y_max)| Scrolled { y, y_max }),
         node: node.locate().0,
     }
 }
@@ -173,6 +185,15 @@ impl<'a> View<'a> {
             .iter()
             .find(|node| node.role() == role && node.label().as_deref() == Some(label))
             .map(found)
+    }
+
+    #[must_use]
+    pub fn scrollable(self, role: Role) -> Option<Found> {
+        self.nodes()
+            .iter()
+            .filter(|node| node.role() == role)
+            .map(found)
+            .find(|found| found.scroll.is_some_and(|scroll| scroll.y_max > 0.0))
     }
 
     #[must_use]

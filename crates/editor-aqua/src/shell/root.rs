@@ -454,6 +454,10 @@ impl SectionViews for RootViews {
         self.step_animation(shell, ui, ctx, window)
     }
 
+    fn reader_moved_transcript(&mut self) {
+        self.observations.note_reader_move();
+        self.smooth_scroll.cancel();
+    }
     fn pre_input(
         &mut self,
         shell: &Shell,

@@ -79,6 +79,7 @@ pub trait SectionViews {
     fn open_composer_images(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
         false
     }
+    fn reader_moved_transcript(&mut self) {}
     fn resize_needs_rebuild(&self, _shell: &Shell, _window: &ObservedWindowState) -> bool {
         true
     }
@@ -1270,7 +1271,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         id: AquaWindowId,
         request: &A11yActionRequest,
     ) {
+        let moves = moves_the_transcript(self.ui.ui(), request);
         self.ui.on_a11y_action(ctx, id, request);
+        if moves {
+            self.views.reader_moved_transcript();
+        }
         self.drain(ctx, id, false);
     }
     fn prepare_accessibility(
@@ -1329,6 +1334,30 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn reactive_runtime_for(&self, id: AquaWindowId) -> Option<&aqua_reactive::Runtime> {
         self.ui.reactive_runtime_for(id)
+    }
+}
+
+fn moves_the_transcript(ui: &UiApp, request: &A11yActionRequest) -> bool {
+    use aqua_protocol::A11yAction;
+    let Some(transcript) = crate::shell::wheel::keyed_node(ui, "conversation-transcript") else {
+        return false;
+    };
+    match request.action {
+        A11yAction::Scroll(_) | A11yAction::SetScrollOffset => request.node == transcript,
+        A11yAction::ScrollIntoView => {
+            std::iter::successors(Some(request.node), |node| ui.tree().get(*node)?.parent)
+                .any(|node| node == transcript)
+        }
+        A11yAction::Press
+        | A11yAction::Focus
+        | A11yAction::SetValue
+        | A11yAction::ReplaceSelectedText
+        | A11yAction::Expand
+        | A11yAction::Collapse
+        | A11yAction::Increment
+        | A11yAction::Decrement
+        | A11yAction::ShowContextMenu
+        | A11yAction::Other(_) => false,
     }
 }
 

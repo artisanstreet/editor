@@ -603,6 +603,16 @@ impl Editor {
         self.pump();
     }
 
+    pub fn assist(&mut self, target: &Found, action: Action, data: Option<ActionData>) {
+        self.bridge.native_action(&ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node: target.node,
+            data,
+        });
+        self.pump();
+    }
+
     #[track_caller]
     pub fn set_value(&mut self, role: Role, label: &str, value: &str) {
         let target = self.node(role, label);
