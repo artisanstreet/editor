@@ -78,7 +78,10 @@ fn replay(case: &str) -> Vec<Step> {
         for response in decoder.take_responses() {
             steps.push(Step::Response {
                 method: response.method,
-                result: response.result.map(|_| ()).map_err(|error| error.message),
+                result: response
+                    .result
+                    .map(|_| ())
+                    .map_err(|error| error.said().to_owned()),
             });
         }
         if let Some(outcome) = decoder.take_turn_end() {

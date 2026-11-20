@@ -144,7 +144,7 @@ impl Harness for CodexHarness {
                     tracing::error!(%thread, error, "Codex could not start");
                     return Outcome::failed(format!(
                         "Codex could not start: {}",
-                        diagnostics::chain(&failure)
+                        crate::rpc::told(&failure)
                     ));
                 }
             };
@@ -161,7 +161,7 @@ impl Harness for CodexHarness {
             let outcome = run.run(&turn).await.unwrap_or_else(|failure| {
                 let error: &dyn std::error::Error = &failure;
                 tracing::warn!(%thread, session = ?turn.session_id, error, "Codex run failed");
-                Outcome::failed(diagnostics::chain(&failure))
+                Outcome::failed(crate::rpc::told(&failure))
             });
             let events = run.decoder.finish();
             run.emit(events).await;
@@ -297,7 +297,7 @@ impl Run {
             Ok(Some(_)) => {}
             Ok(None) => return Ok(Outcome::Cancelled),
             Err(RequestError::Refused(source))
-                if source.message.contains(ACTIVE_WRITER)
+                if source.said().contains(ACTIVE_WRITER)
                     && let Some(session) = turn.session_id.clone() =>
             {
                 return Err(RunError::SessionBusy { session, source });

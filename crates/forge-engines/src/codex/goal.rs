@@ -24,8 +24,12 @@ pub enum CallError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Codex refused {method}: {error}")]
-    Refused { method: String, error: Value },
+    #[error("Codex refused {method}")]
+    Refused {
+        method: String,
+        #[source]
+        refusal: crate::rpc::RpcError,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,10 +114,10 @@ pub(super) async fn call(
             continue;
         }
         if frame.method.is_none() && frame.id == Some(json!(id)) {
-            if let Some(error) = frame.error {
+            if let Some(error) = &frame.error {
                 return Err(CallError::Refused {
                     method: method.to_owned(),
-                    error,
+                    refusal: crate::rpc::RpcError::refusal(error),
                 });
             }
             return Ok(frame.result.unwrap_or(Value::Null));

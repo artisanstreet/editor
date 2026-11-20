@@ -206,6 +206,14 @@ impl AppServer {
             .and_then(|items| items.iter().rev().find_map(|item| item["text"].as_str()))
             .unwrap_or_default()
             .to_owned();
+        if text == "refuse with a secret" {
+            refuse(
+                id,
+                -32000,
+                "bad request: sk-ant-api03-REFLECTED-SENTINEL in the prompt",
+            );
+            return;
+        }
         respond(id, &json!({ "turn": { "id": turn } }));
         self.exit_on_resume = text == "then exit on resume";
         match text.as_str() {

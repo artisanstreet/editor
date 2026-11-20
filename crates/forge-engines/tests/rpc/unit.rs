@@ -13,15 +13,34 @@ fn replies_correlate_out_of_order_and_unknown_ids_do_not_consume_requests() {
         "second"
     );
     let error = json!({ "message": "rejected", "data": { "message": "details" } });
-    assert_eq!(
-        state
-            .respond(&json!(first), None, Some(&error))
-            .unwrap()
-            .result,
-        Err(RpcError {
-            code: None,
-            message: "rejected: details".into()
-        })
-    );
+    let refused = state
+        .respond(&json!(first), None, Some(&error))
+        .unwrap()
+        .result
+        .unwrap_err();
+    assert_eq!(refused.said(), "rejected: details");
     assert!(state.requests.is_empty());
+}
+
+#[test]
+fn an_engine_refusal_logs_its_code_but_never_what_the_engine_wrote() {
+    let mut state = State::default();
+    let id = state.request("turn/start", json!({}));
+    let reflected = "sk-ant-api03-SENTINEL and the user's prompt";
+    let error =
+        json!({ "code": -32000, "message": "bad request", "data": { "message": reflected } });
+
+    let refused = state
+        .respond(&json!(id), None, Some(&error))
+        .unwrap()
+        .result
+        .unwrap_err();
+
+    let logged = format!("{refused} {refused:?}");
+    assert!(!logged.contains("SENTINEL"), "{logged}");
+    assert!(logged.contains("-32000"), "{logged}");
+    assert!(
+        told(&refused).contains(reflected),
+        "the run's failure no longer tells the user why Codex refused"
+    );
 }

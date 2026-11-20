@@ -27,8 +27,12 @@ pub(crate) enum CallError {
         #[source]
         source: serde_json::Error,
     },
-    #[error("{method} was refused: {error}")]
-    Refused { method: String, error: Value },
+    #[error("{method} was refused")]
+    Refused {
+        method: String,
+        #[source]
+        refusal: RpcError,
+    },
     #[error("the answer to {method} has no result")]
     NoResult { method: String },
     #[error("the engine closed stdout while answering {method}; {stderr}")]
@@ -110,10 +114,10 @@ impl Session {
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
-            if let Some(error) = message.get_mut("error") {
+            if let Some(error) = message.get("error") {
                 return Err(CallError::Refused {
                     method: method.to_owned(),
-                    error: error.take(),
+                    refusal: RpcError::refusal(error),
                 });
             }
             return message
@@ -136,19 +140,83 @@ pub(crate) struct Response {
     pub result: Result<Value, RpcError>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EngineText(String);
+
+impl std::fmt::Debug for EngineText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes the engine wrote>", self.0.len())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcError {
-    pub code: Option<i64>,
-    pub message: String,
+    code: Option<i64>,
+    said: EngineText,
+}
+
+impl RpcError {
+    pub(crate) fn refusal(error: &Value) -> Self {
+        let message = error["message"].as_str().unwrap_or_default();
+        let detail = error["data"]["message"]
+            .as_str()
+            .or_else(|| error["data"].as_str());
+        Self {
+            code: error["code"].as_i64(),
+            said: EngineText(match detail {
+                Some(detail) if detail.starts_with(message) => detail.to_owned(),
+                Some(detail) if message.is_empty() => detail.to_owned(),
+                Some(detail) => format!("{message}: {detail}"),
+                None => message.to_owned(),
+            }),
+        }
+    }
+
+    fn without_result() -> Self {
+        Self {
+            code: None,
+            said: EngineText(String::new()),
+        }
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> Option<i64> {
+        self.code
+    }
+
+    #[must_use]
+    pub fn said(&self) -> &str {
+        &self.said.0
+    }
 }
 
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        match (self.code, self.said.0.is_empty()) {
+            (_, true) => f.write_str("the engine answered without a result or a reason"),
+            (Some(code), false) => write!(f, "the engine refused with code {code}"),
+            (None, false) => f.write_str("the engine refused"),
+        }
     }
 }
 
 impl std::error::Error for RpcError {}
+
+#[must_use]
+pub(crate) fn told(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = diagnostics::chain(error);
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(refusal) = current.downcast_ref::<RpcError>()
+            && !refusal.said().is_empty()
+        {
+            text.push_str(". The engine said: ");
+            text.push_str(refusal.said());
+        }
+        cause = current.source();
+    }
+    text
+}
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -203,26 +271,8 @@ impl State {
             return None;
         };
         let result = error.map_or_else(
-            || {
-                result.ok_or_else(|| RpcError {
-                    code: None,
-                    message: "engine RPC response omitted result".to_owned(),
-                })
-            },
-            |error| {
-                let message = error["message"].as_str().unwrap_or("engine error");
-                let detail = error["data"]["message"]
-                    .as_str()
-                    .or_else(|| error["data"].as_str());
-                Err(RpcError {
-                    code: error["code"].as_i64(),
-                    message: match detail {
-                        Some(detail) if detail.starts_with(message) => detail.to_owned(),
-                        Some(detail) => format!("{message}: {detail}"),
-                        None => message.to_owned(),
-                    },
-                })
-            },
+            || result.ok_or_else(RpcError::without_result),
+            |error| Err(RpcError::refusal(error)),
         );
         Some(Response { id, method, result })
     }

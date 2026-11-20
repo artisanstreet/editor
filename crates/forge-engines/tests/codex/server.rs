@@ -203,3 +203,24 @@ async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply()
     );
     assert_eq!(streamed, 48 * 1024 * 1024, "every delta reaches the run");
 }
+
+#[tokio::test]
+async fn a_refused_turn_tells_the_user_why_but_keeps_codexs_words_out_of_the_log() {
+    let fixture = Fixture::new();
+    let (logs, _capturing) = test_support::logs::capture();
+
+    let (outcome, _) = run_steering(fixture.turn("refuse with a secret", None), &[]).await;
+
+    let failure = outcome.failure().map(|failure| failure.message.clone());
+    assert!(
+        failure
+            .as_deref()
+            .is_some_and(|message| message.contains("REFLECTED-SENTINEL")),
+        "the user isn't told why Codex refused the turn: {failure:?}"
+    );
+    let logged = logs.text();
+    assert!(
+        logged.contains("Codex run failed") && !logged.contains("REFLECTED-SENTINEL"),
+        "{logged}"
+    );
+}

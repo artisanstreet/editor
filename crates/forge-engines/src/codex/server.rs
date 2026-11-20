@@ -41,8 +41,8 @@ pub enum AttachError {
 pub enum ReleaseError {
     #[error("a run is still attached to the thread")]
     StillAttached,
-    #[error("Codex refused thread/unsubscribe: {response}")]
-    Refused { response: String },
+    #[error("Codex refused thread/unsubscribe")]
+    Refused(#[source] crate::rpc::RpcError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -71,8 +71,8 @@ pub enum InitializeError {
     Send(#[source] SendError),
     #[error("read the answer to initialize")]
     Read(#[source] ReadError),
-    #[error("Codex refused initialize: {error}")]
-    Refused { error: Value },
+    #[error("Codex refused initialize")]
+    Refused(#[source] crate::rpc::RpcError),
     #[error("Codex exited before answering initialize")]
     Exited,
 }
@@ -394,14 +394,14 @@ async fn initialize(process: &mut EngineProcess) -> Result<(), InitializeError> 
         .await
         .map_err(InitializeError::Send)?;
     while let Some(line) = process.next_line().await.map_err(InitializeError::Read)? {
-        let Ok(mut frame) = serde_json::from_str::<Value>(&line) else {
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         if frame.get("method").is_none() && frame["id"] == json!(0) {
-            if let Some(error) = frame.get_mut("error") {
-                return Err(InitializeError::Refused {
-                    error: error.take(),
-                });
+            if let Some(error) = frame.get("error") {
+                return Err(InitializeError::Refused(crate::rpc::RpcError::refusal(
+                    error,
+                )));
             }
             return process
                 .send(&json!({ "method": "initialized" }))
@@ -767,12 +767,12 @@ impl Actor {
                         let thread = release.thread.clone();
                         self.closed(&thread);
                     }
-                } else if frame.get("error").is_some()
+                } else if let Some(error) = frame.get("error")
                     && let Some(release) = self.releasing.remove(&id)
                 {
-                    let _requester_gone = release.reply.send(Err(ReleaseError::Refused {
-                        response: line.to_owned(),
-                    }));
+                    let _requester_gone = release.reply.send(Err(ReleaseError::Refused(
+                        crate::rpc::RpcError::refusal(error),
+                    )));
                 }
             }
             return;
