@@ -13,6 +13,25 @@ thread_local! {
     static CAUGHT: RefCell<Option<CaughtPanic>> = const { RefCell::new(None) };
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanicStrategy {
+    Abort,
+    Unwind,
+}
+
+impl PanicStrategy {
+    const BUILT: Self = if cfg!(panic = "abort") {
+        Self::Abort
+    } else {
+        Self::Unwind
+    };
+
+    #[must_use]
+    pub const fn catches(self, catching: usize) -> bool {
+        matches!(self, Self::Unwind) && catching > 0
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("panicked at {location}: {message}")]
 pub struct CaughtPanic {
@@ -135,7 +154,7 @@ impl CrashReporter {
     pub fn install(self) {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if CATCHING.with(Cell::get) > 0 {
+            if PanicStrategy::BUILT.catches(CATCHING.with(Cell::get)) {
                 CAUGHT.set(Some(CaughtPanic {
                     message: info
                         .payload_as_str()
@@ -155,6 +174,7 @@ impl CrashReporter {
                 Err(error) => eprintln!("{}", crate::chain(&error)),
             }
             previous(info);
+            std::process::abort();
         }));
     }
 

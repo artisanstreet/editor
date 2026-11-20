@@ -350,3 +350,62 @@ fn a_caught_panic_writes_no_report_and_a_later_crash_still_does() {
         reports[0]
     );
 }
+
+#[test]
+fn a_build_that_cannot_unwind_reports_a_panic_inside_catch_as_a_crash() {
+    use diagnostics::crash::PanicStrategy;
+    assert!(
+        !PanicStrategy::Abort.catches(1),
+        "an aborting build can't catch, so the panic must write its report"
+    );
+    assert!(PanicStrategy::Unwind.catches(1));
+    assert!(!PanicStrategy::Unwind.catches(0));
+}
+
+const THREAD_TEST: &str = "a_panic_on_another_thread_ends_the_process_after_writing_its_report";
+
+#[expect(clippy::panic, reason = "the worker crashes on purpose")]
+fn lose_the_worker() {
+    panic!("invariant: worker w-9 lost its queue")
+}
+
+#[test]
+fn a_panic_on_another_thread_ends_the_process_after_writing_its_report() {
+    if let Some(data) = std::env::var_os(CRASH_DATA) {
+        CrashReporter {
+            app: artisan_paths::App::Forge,
+            version: "9.9.9 (test)",
+            data: Path::new(&data).to_owned(),
+            recent: diagnostics::subscribe("info", std::io::sink).unwrap(),
+        }
+        .install();
+        let worker = std::thread::spawn(lose_the_worker).join();
+        assert!(worker.is_err(), "the worker panicked");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([THREAD_TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CRASH_DATA, directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "the process doesn't carry on without its worker"
+    );
+    let reports: Vec<_> = std::fs::read_dir(CrashReporter::folder(directory.path()))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(
+        reports.len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        reports[0].contains("message: invariant: worker w-9 lost its queue"),
+        "{}",
+        reports[0]
+    );
+}

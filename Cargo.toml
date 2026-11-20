@@ -221,7 +221,6 @@ debug = false
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 debug = "line-tables-only"
 split-debuginfo = "packed"
 strip = "none"
