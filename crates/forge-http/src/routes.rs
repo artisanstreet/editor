@@ -1004,8 +1004,11 @@ async fn agent_items(
 async fn inspector(
     AppState(app): AppState<App>,
     Path(id): Path<ThreadId>,
+    Query(query): Query<artisan_api::InspectorQuery>,
 ) -> Result<Json<artisan_api::InspectorSummary>> {
-    Ok(Json(app.hub.store().inspector(&id).await?))
+    Ok(Json(
+        app.hub.store().inspector_since(&id, query.outline).await?,
+    ))
 }
 
 async fn source_index(

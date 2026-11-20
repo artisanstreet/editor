@@ -2,5 +2,9 @@
   "transcript_rows_steps_across_hidden_work": {
     "limit": 400,
     "reason": "a transcript page reads its visible rows through the partial transcript-rows index and its collapsed work from the writer-kept work_spans table, so 2,000 hidden tool calls between two messages cost the same as two; measured 110 SQLite VM steps on a warm reader, where visiting every hidden row took about 23,000"
+  },
+  "inspector_refresh_steps_with_a_known_outline": {
+    "limit": 800,
+    "reason": "a refresh by an Editor that already holds the outline reads the outline revision instead of the outline, finds live terminals and workflows through the live-items index and the goal through the notice index, and takes the thread's latest seq from index maxima, so 600 earlier prompts cost nothing; measured 320 SQLite VM steps on a warm reader, where the uncapped outline and whole-thread scans took about 17,000"
   }
 }

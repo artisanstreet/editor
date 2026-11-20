@@ -4,5 +4,5 @@ SELECT json_object('id',id,'command',json_extract(body,'$.kind.tool.command'),
         OR (SELECT r.status FROM runs r WHERE r.id=items.run_id)!='running'
         THEN 'true' ELSE 'false' END),
     'watch',json(CASE WHEN COALESCE(json_extract(body,'$.kind.tool.watch'),0)
-        THEN 'true' ELSE 'false' END)) FROM items
+        THEN 'true' ELSE 'false' END)) FROM items INDEXED BY items_live_by_thread
  WHERE thread_id=?1 AND status IN ('running','awaiting_user') AND json_extract(body,'$.kind.tool.kind')='shell' ORDER BY position DESC

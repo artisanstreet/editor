@@ -12,6 +12,8 @@ mod database_rollback;
 mod host;
 #[path = "core/hosts.rs"]
 mod hosts;
+#[path = "core/host/inspector_outline.rs"]
+mod inspector_outline;
 #[path = "core/mcp_sign_in.rs"]
 mod mcp_sign_in;
 #[path = "core/media_http.rs"]

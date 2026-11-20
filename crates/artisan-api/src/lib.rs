@@ -62,10 +62,11 @@ pub use reassembly::{Reassembly, ReassemblyError};
 pub use request::{
     Account, Answer, BlobRef, CreateProject, CreateThread, DatabaseRollback, DirEntry, DirListing,
     DraftRevision, DraftSnapshot, DraftWriteResult, EditTotals, ErrorCode, InspectorAgent,
-    InspectorSummary, InspectorTerminal, InspectorWorkflow, ItemsPage, ItemsQuery, ModelGroup,
-    OutlineEntry, PairRequest, PairResponse, PendingItem, ProjectRepository, SendMessage,
-    SettleThread, Skill, State, ThreadCursor, ThreadGoal, ThreadGoalState, ThreadQuestionnaire,
-    ThreadWindow, ThreadsPage, ThreadsQuery, UpdateThread, WorkSpan, WriteDraft,
+    InspectorQuery, InspectorSummary, InspectorTerminal, InspectorWorkflow, ItemsPage, ItemsQuery,
+    ModelGroup, OutlineEntry, PairRequest, PairResponse, PendingItem, ProjectRepository,
+    SendMessage, SettleThread, Skill, State, ThreadCursor, ThreadGoal, ThreadGoalState,
+    ThreadQuestionnaire, ThreadWindow, ThreadsPage, ThreadsQuery, UpdateThread, WorkSpan,
+    WriteDraft,
 };
 pub use search::{TextHit, TextSearchQuery};
 pub use secret::Secret;

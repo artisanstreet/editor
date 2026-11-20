@@ -1,4 +1,7 @@
 DROP TRIGGER item_content_owner_delete;
+DROP TRIGGER outline_revision_insert;
+DROP TRIGGER outline_revision_update;
+DROP INDEX items_live_by_thread;
 DROP INDEX items_work_spans;
 DROP INDEX items_outline;
 ALTER TABLE items DROP COLUMN outline;
@@ -21,6 +24,7 @@ DROP TABLE content_chunks;
 DROP TABLE content;
 DROP TABLE content_diffs;
 DROP TABLE work_spans;
+DROP TABLE outline_revisions;
 DROP TABLE continues;
 DROP TABLE coordination_events;
 DROP TABLE coordination_records;

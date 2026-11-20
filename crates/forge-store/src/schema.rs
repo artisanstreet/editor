@@ -169,6 +169,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[sql!("migrations/v31.sql")],
     &[sql!("migrations/v32.sql")],
     &[sql!("migrations/v33.sql"), Step::Rust(backfill_work_spans)],
+    &[sql!("migrations/v34.sql")],
 ];
 
 pub(crate) const fn version() -> usize {
@@ -683,3 +684,7 @@ mod diff_totals_migration_tests;
 #[cfg(test)]
 #[path = "../tests/schema/work_spans_migration.rs"]
 mod work_spans_migration_tests;
+
+#[cfg(test)]
+#[path = "../tests/schema/outline_revision_migration.rs"]
+mod outline_revision_migration_tests;

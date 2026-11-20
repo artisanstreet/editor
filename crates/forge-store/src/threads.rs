@@ -325,9 +325,17 @@ impl Store {
         &self,
         thread: &ThreadId,
     ) -> Result<artisan_api::InspectorSummary, InspectorError> {
+        self.inspector_since(thread, None).await
+    }
+
+    pub async fn inspector_since(
+        &self,
+        thread: &ThreadId,
+        known_outline: Option<Seq>,
+    ) -> Result<artisan_api::InspectorSummary, InspectorError> {
         let id = thread.clone();
         let thread = thread.clone();
-        self.scan(move |conn| read::inspector(conn, &id))
+        self.scan(move |conn| read::inspector(conn, &id, known_outline))
             .await
             .map_err(|cause| InspectorError {
                 thread,

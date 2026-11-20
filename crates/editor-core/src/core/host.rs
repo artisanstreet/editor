@@ -760,6 +760,7 @@ impl HostData {
         state.view.loading = true;
         state.view.error = None;
         let minimum = state.minimum_revision;
+        let previous = state.view.value.clone();
         self.summary_generation = self.summary_generation.wrapping_add(1);
         let generation = self.summary_generation;
         state.generation = generation;
@@ -768,7 +769,7 @@ impl HostData {
         let thread = thread.clone();
         let task_thread = thread.clone();
         let task = crate::core::runtime::runtime().spawn(async move {
-            let result = client.inspector(&task_thread).await;
+            let result = client.inspector(&task_thread, previous.as_deref()).await;
             sender
                 .offer(HostCompletion::Summary(
                     task_thread,

@@ -438,9 +438,23 @@ impl ForgeClient {
     pub(crate) async fn inspector(
         &self,
         id: &ThreadId,
+        previous: Option<&artisan_api::InspectorSummary>,
     ) -> Result<artisan_api::InspectorSummary, CallError> {
-        self.call(self.request(reqwest::Method::GET, &format!("/threads/{id}/inspector")))
-            .await
+        let known = previous
+            .map(|summary| summary.outline_revision)
+            .filter(|revision| *revision > 0);
+        let mut summary: artisan_api::InspectorSummary = self
+            .call(
+                self.request(reqwest::Method::GET, &format!("/threads/{id}/inspector"))
+                    .query(&artisan_api::InspectorQuery { outline: known }),
+            )
+            .await?;
+        if let Some(previous) = previous
+            && known == Some(summary.outline_revision)
+        {
+            summary.outline.clone_from(&previous.outline);
+        }
+        Ok(summary)
     }
 
     #[expect(

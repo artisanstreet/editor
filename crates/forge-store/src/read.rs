@@ -754,9 +754,12 @@ pub(crate) fn changes_since(
     Ok(Some(envelopes))
 }
 
+const OUTLINE_ENTRIES: u32 = 1024;
+
 pub(crate) fn inspector(
     conn: &Connection,
     thread: &ThreadId,
+    known_outline: Option<Seq>,
 ) -> Result<artisan_api::InspectorSummary, ContentError> {
     use artisan_api::{InspectorSummary, InspectorTerminal, InspectorWorkflow};
     let snapshot =
@@ -803,8 +806,19 @@ pub(crate) fn inspector(
         )
         .optional()
         .at("inspector/edit_totals.sql")?;
-    let outline = outline(conn, thread)?;
-    snapshot.commit().at("inspector/edit_totals.sql")?;
+    let outline_revision: Seq = conn
+        .prepare_cached(include_str!("sql/inspector/outline_revision.sql"))
+        .at("inspector/outline_revision.sql")?
+        .query_row([thread.as_str()], |row| row.get(0))
+        .optional()
+        .at("inspector/outline_revision.sql")?
+        .unwrap_or(0);
+    let outline = if known_outline == Some(outline_revision) {
+        Vec::new()
+    } else {
+        outline(conn, thread)?
+    };
+    snapshot.commit().at("inspector/outline_revision.sql")?;
     Ok(InspectorSummary {
         goal,
         questions,
@@ -815,6 +829,7 @@ pub(crate) fn inspector(
         plan,
         edits,
         outline,
+        outline_revision,
     })
 }
 
@@ -949,8 +964,8 @@ fn outline(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::Outl
     let mut statement = conn
         .prepare_cached(include_str!("sql/inspector/outline.sql"))
         .at("inspector/outline.sql")?;
-    let entries = statement
-        .query_map([thread.as_str()], |row| {
+    let mut entries: Vec<artisan_api::OutlineEntry> = statement
+        .query_map(params![thread.as_str(), OUTLINE_ENTRIES], |row| {
             Ok(artisan_api::OutlineEntry {
                 id: ItemId(row.get(0)?),
                 position: row.get(1)?,
@@ -960,6 +975,7 @@ fn outline(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::Outl
         .at("inspector/outline.sql")?
         .collect::<rusqlite::Result<_>>()
         .at("inspector/outline.sql")?;
+    entries.reverse();
     Ok(entries)
 }
 

@@ -25,7 +25,7 @@
   "forge-store/text_search/missing_word": 212900,
   "forge-store/text_search/uppercase_phrase": 2207000.0,
   "forge-store/text_search/word_only_in_archived_threads": 473400,
-  "forge-store/transcript/inspector_refresh": 52570000,
+  "forge-store/transcript/inspector_refresh": 1000000,
   "forge-store/transcript/latest_transcript_page": 233000,
   "forge-store/transcript/page_across_hidden_work": 2000000
 }

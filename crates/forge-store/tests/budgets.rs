@@ -204,3 +204,39 @@ async fn collapsed_work_costs_the_same_however_much_of_it_is_hidden() {
     );
     report("transcript_rows_steps_across_hidden_work", steps, &budget);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_inspector_refresh_costs_the_same_however_many_prompts_came_before() {
+    const PROMPTS: usize = 600;
+    let budget = budget("inspector_refresh_steps_with_a_known_outline");
+    let counted = Counted::open();
+    let store = &counted.store;
+    let thread = thread(store).await;
+    let run = RunId::from("finished");
+    for index in 0..PROMPTS {
+        store
+            .upsert_item(item(&thread, &run, prompt(&format!("Prompt {index}"))))
+            .await
+            .expect("store a prompt");
+    }
+    let known = store
+        .inspector_since(&thread, None)
+        .await
+        .expect("read the full outline")
+        .outline_revision;
+    store
+        .upsert_item(item(&thread, &run, reply("Working")))
+        .await
+        .expect("store a reply");
+    let (steps, summary) = counted
+        .steps_of(store.inspector_since(&thread, Some(known)))
+        .await;
+    let summary = summary.expect("refresh the inspector");
+    assert_eq!(summary.outline_revision, known);
+    assert!(summary.outline.is_empty());
+    report(
+        "inspector_refresh_steps_with_a_known_outline",
+        steps,
+        &budget,
+    );
+}

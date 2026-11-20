@@ -317,6 +317,14 @@ pub struct InspectorSummary {
     pub edits: Option<EditTotals>,
     #[serde(default)]
     pub outline: Vec<OutlineEntry>,
+    #[serde(default)]
+    pub outline_revision: Seq,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Seq>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
