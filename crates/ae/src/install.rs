@@ -12,6 +12,9 @@ use crate::service::{AddressError, AutostartError, StartError, StopError};
 use crate::sys::{self, RemoveError, RunError, SpawnError};
 use crate::ui::{self, AskError};
 use crate::{service, wsl};
+use swap::{JournalError, ReplaceError, RestoreFailures, replace};
+
+mod swap;
 use artisan_paths::{App, ChooseRootError, EnvPathError, RootError};
 use clap::Args;
 use forge_store::admin::StorageVersion;
@@ -21,7 +24,6 @@ use std::process::ExitStatus;
 #[cfg(unix)]
 use std::time::Duration;
 
-const ASIDE_SLOTS: usize = 100;
 #[cfg(unix)]
 const SCHEMA_PROBE_DEADLINE: Duration = Duration::from_secs(30);
 const INSTALL_LOCK: &str = ".install.lock";
@@ -77,6 +79,8 @@ pub(crate) enum InstallError {
     HandOver(#[from] HandOverError),
     #[error(transparent)]
     Apply(#[from] ApplyError),
+    #[error(transparent)]
+    Recover(#[from] RecoverError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -269,13 +273,35 @@ pub(crate) enum InstallAppError {
         failed: Box<Self>,
         outcome: PutBack,
     },
+    #[error("the new files are in place, but the next install would put the previous ones back")]
+    Settle(#[source] JournalError),
+    #[error("{failed}; the next install would also put the previous files back: {}", diagnostics::chain(.settle))]
+    Unsettled {
+        #[source]
+        failed: Box<Self>,
+        settle: JournalError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RecoverError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    Lock(#[from] InstallLockError),
+    #[error("finish what an interrupted install of {} left behind", app.display_name())]
+    Interrupted {
+        app: App,
+        #[source]
+        source: Box<swap::RecoverError>,
+    },
 }
 
 #[derive(Debug)]
 pub(crate) enum PutBack {
     Restored,
     Restarted,
-    NotRestored(String),
+    NotRestored(Box<RestoreFailures>),
     DatabaseNotRestored(Box<RestoreDatabaseError>),
     NotRestarted(Box<StartError>),
 }
@@ -308,12 +334,11 @@ impl std::fmt::Display for PutBack {
         match self {
             Self::Restored => f.write_str("the previous version is back in place"),
             Self::Restarted => f.write_str("the previous Forge is back in place and running"),
-            Self::NotRestored(problems) => {
-                write!(
-                    f,
-                    "putting the previous version back also failed: {problems}"
-                )
-            }
+            Self::NotRestored(failures) => write!(
+                f,
+                "putting the previous version back also failed: {}",
+                diagnostics::chain(failures)
+            ),
             Self::DatabaseNotRestored(error) => write!(
                 f,
                 "the previous Forge is back in place but its database couldn't be put back, so it wasn't started: {}",
@@ -456,6 +481,8 @@ pub(crate) enum UpdateError {
     PlaceAe(#[from] PlaceAeError),
     #[error(transparent)]
     HandOver(#[from] HandOverError),
+    #[error(transparent)]
+    Recover(#[from] RecoverError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -483,6 +510,8 @@ pub(crate) enum UninstallError {
     Orphans,
     #[error(transparent)]
     Remove(#[from] RemoveChosenError),
+    #[error(transparent)]
+    Recover(#[from] RecoverError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -992,6 +1021,36 @@ fn install_lock() -> Result<std::fs::File, InstallLockError> {
     Ok(file)
 }
 
+fn recover_interrupted() -> Result<(), RecoverError> {
+    let mut interrupted = Vec::new();
+    for app in App::ALL {
+        let dir = paths::dir(app)?;
+        if swap::interrupted(&dir).map_err(|source| RecoverError::Interrupted {
+            app,
+            source: Box::new(source),
+        })? {
+            interrupted.push((app, dir));
+        }
+    }
+    if interrupted.is_empty() {
+        return Ok(());
+    }
+    let _installing = install_lock()?;
+    for (app, dir) in interrupted {
+        match swap::recover(&dir).map_err(|source| RecoverError::Interrupted {
+            app,
+            source: Box::new(source),
+        })? {
+            swap::Recovered::Nothing => {}
+            swap::Recovered::PutBack => ui::info(format!(
+                "Put back the {} files an interrupted install left half replaced",
+                app.display_name()
+            )),
+        }
+    }
+    Ok(())
+}
+
 fn staging_in(dir: &Path, prefix: &str) -> Result<tempfile::TempDir, StagingError> {
     std::fs::create_dir_all(dir).map_err(|source| StagingError::Create {
         path: dir.to_owned(),
@@ -1016,6 +1075,7 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
     if matches!(args.forge, Some(ForgePlace::Wsl(_))) && !cfg!(windows) {
         return Err(InstallError::ForgeWslOffWindows);
     }
+    recover_interrupted()?;
     let source = Source::new(args.from.as_deref(), args.version.as_deref(), args.apply)?;
     let runtime = tokio::runtime::Runtime::new().map_err(InstallError::Runtime)?;
     let carried = Carried {
@@ -1604,7 +1664,9 @@ fn put_in_place(
             let previous = match failed {
                 ReplaceError::Restore { .. } => Previous::Broken,
                 ReplaceError::Read { .. }
+                | ReplaceError::NotUnicode { .. }
                 | ReplaceError::NoAside { .. }
+                | ReplaceError::Journal(_)
                 | ReplaceError::Aside { .. }
                 | ReplaceError::Place { .. } => Previous::InPlace,
             };
@@ -1613,20 +1675,23 @@ fn put_in_place(
     };
     match finish(app, version, upgraded, replaceable, progress) {
         Ok(message) => {
-            replaced.keep();
+            replaced.keep().map_err(InstallAppError::Settle)?;
             Ok(message)
         }
-        Err(failed) if upgraded => {
-            replaced.keep();
-            Err(failed)
-        }
+        Err(failed) if upgraded => Err(match replaced.keep() {
+            Ok(()) => failed,
+            Err(settle) => InstallAppError::Unsettled {
+                failed: Box::new(failed),
+                settle,
+            },
+        }),
         Err(failed) => {
             progress.message("Putting the previous version back");
             match replaced.undo() {
                 Ok(()) => Err(put_back(stopped, failed, Previous::InPlace, progress)),
-                Err(problems) => Err(InstallAppError::PutBack {
+                Err(failures) => Err(InstallAppError::PutBack {
                     failed: Box::new(failed),
-                    outcome: PutBack::NotRestored(problems),
+                    outcome: PutBack::NotRestored(Box::new(failures)),
                 }),
             }
         }
@@ -1774,202 +1839,6 @@ fn write_beside(dir: &Path, name: &str, contents: &str) -> Result<(), InstallApp
     std::fs::write(&path, contents).map_err(|source| InstallAppError::Write { path, source })
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ReplaceError {
-    #[error("read {}", path.display())]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("no free name to move {} aside among {ASIDE_SLOTS}", path.display())]
-    NoAside { path: PathBuf },
-    #[error("move {} aside", path.display())]
-    Aside {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("put {} in place", path.display())]
-    Place {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("{failed}; restoring the previous files also failed: {restore}")]
-    Restore {
-        #[source]
-        failed: Box<Self>,
-        restore: String,
-    },
-}
-
-#[derive(Debug)]
-struct Swap {
-    target: PathBuf,
-    aside: Option<PathBuf>,
-    placed: bool,
-}
-
-#[derive(Debug)]
-#[must_use]
-struct Replaced {
-    swaps: Vec<Swap>,
-}
-
-impl Replaced {
-    fn keep(self) {
-        for swap in self.swaps {
-            if let Some(aside) = swap.aside {
-                discard(&aside);
-            }
-        }
-    }
-
-    fn undo(self) -> Result<(), String> {
-        let problems = restore(self.swaps, &|from: &Path, to: &Path| {
-            std::fs::rename(from, to)
-        });
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(problems.join("; "))
-        }
-    }
-}
-
-fn replace(dir: &Path, incoming: &Path) -> Result<Replaced, ReplaceError> {
-    replace_with(dir, incoming, |from, to| std::fs::rename(from, to))
-}
-
-fn replace_with(
-    dir: &Path,
-    incoming: &Path,
-    rename: impl Fn(&Path, &Path) -> io::Result<()>,
-) -> Result<Replaced, ReplaceError> {
-    let read = |source| ReplaceError::Read {
-        path: incoming.to_owned(),
-        source,
-    };
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(incoming).map_err(read)? {
-        names.push(entry.map_err(read)?.file_name());
-    }
-    names.sort();
-    let mut swaps = Vec::new();
-    for name in &names {
-        if let Err(error) = swap_in(dir, &incoming.join(name), name, &rename, &mut swaps) {
-            return Err(roll_back(swaps, error, &rename));
-        }
-    }
-    Ok(Replaced { swaps })
-}
-
-fn occupied(path: &Path) -> Result<bool, ReplaceError> {
-    match path.symlink_metadata() {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(ReplaceError::Read {
-            path: path.to_owned(),
-            source,
-        }),
-    }
-}
-
-fn swap_in(
-    dir: &Path,
-    new: &Path,
-    name: &std::ffi::OsStr,
-    rename: &impl Fn(&Path, &Path) -> io::Result<()>,
-    swaps: &mut Vec<Swap>,
-) -> Result<(), ReplaceError> {
-    let target = dir.join(name);
-    let aside = if occupied(&target)? {
-        let mut free = None;
-        for slot in 0..ASIDE_SLOTS {
-            let mut aside = std::ffi::OsString::from(format!(".old-{slot}-"));
-            aside.push(name);
-            let aside = dir.join(aside);
-            if !occupied(&aside)? {
-                free = Some(aside);
-                break;
-            }
-        }
-        let aside = free.ok_or_else(|| ReplaceError::NoAside {
-            path: target.clone(),
-        })?;
-        rename(&target, &aside).map_err(|source| ReplaceError::Aside {
-            path: target.clone(),
-            source,
-        })?;
-        Some(aside)
-    } else {
-        None
-    };
-    swaps.push(Swap {
-        target: target.clone(),
-        aside,
-        placed: false,
-    });
-    rename(new, &target).map_err(|source| ReplaceError::Place {
-        path: target.clone(),
-        source,
-    })?;
-    swaps
-        .last_mut()
-        .expect("invariant: the swap was just recorded")
-        .placed = true;
-    Ok(())
-}
-
-fn restore(swaps: Vec<Swap>, rename: &impl Fn(&Path, &Path) -> io::Result<()>) -> Vec<String> {
-    let mut problems = Vec::new();
-    for swap in swaps.into_iter().rev() {
-        if swap.placed
-            && let Err(error) = sys::remove(&swap.target)
-        {
-            problems.push(diagnostics::chain(&error));
-            continue;
-        }
-        if let Some(aside) = swap.aside
-            && let Err(error) = rename(&aside, &swap.target)
-        {
-            problems.push(format!(
-                "put {} back as {}: {error}",
-                aside.display(),
-                swap.target.display()
-            ));
-        }
-    }
-    problems
-}
-
-fn roll_back(
-    swaps: Vec<Swap>,
-    failed: ReplaceError,
-    rename: &impl Fn(&Path, &Path) -> io::Result<()>,
-) -> ReplaceError {
-    let problems = restore(swaps, rename);
-    if problems.is_empty() {
-        failed
-    } else {
-        ReplaceError::Restore {
-            failed: Box::new(failed),
-            restore: problems.join("; "),
-        }
-    }
-}
-
-fn discard(path: &Path) {
-    if let Err(error) = sys::remove(path) {
-        tracing::debug!(
-            path = %path.display(),
-            "the replaced file stays until the next install: {}",
-            diagnostics::chain(&error)
-        );
-    }
-}
-
 fn clear_leftovers(dir: &Path) -> Result<(), InstallAppError> {
     let read = |source| InstallAppError::Leftovers {
         path: dir.to_owned(),
@@ -1980,7 +1849,7 @@ fn clear_leftovers(dir: &Path) -> Result<(), InstallAppError> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with(".old-") || name.starts_with(".incoming-") {
-            discard(&entry.path());
+            swap::discard(&entry.path());
         }
     }
     Ok(())
@@ -2141,6 +2010,7 @@ fn install_in_windows(release: &Release, source: &Source) -> Result<(), InstallI
 
 pub(crate) fn update(yes: bool) -> Result<(), UpdateError> {
     ui::intro("Artisan update");
+    recover_interrupted()?;
     if !installed(App::Ae)?.is_present() {
         return Err(UpdateError::NothingInstalled);
     }
@@ -2221,6 +2091,7 @@ fn leaves_orphans(chosen: &[App], present: &[App]) -> bool {
 
 pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), UninstallError> {
     ui::intro("Artisan uninstall");
+    recover_interrupted()?;
     let mut present = Vec::new();
     let mut with_data = Vec::new();
     let mut hints = Vec::new();

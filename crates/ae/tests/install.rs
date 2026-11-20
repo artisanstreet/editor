@@ -386,6 +386,52 @@ mod tests {
         assert!(sandbox.listening(), "the updated Forge serves: {said}");
     }
 
+    #[test]
+    fn an_update_after_an_install_cut_short_between_its_renames_still_updates_forge() {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+        std::fs::rename(&sandbox.installed, forge.join(".old-0-forge"))
+            .expect("the cut-short install had moved Forge aside");
+        std::fs::write(
+            forge.join(".install-journal"),
+            r#"{"entries":[{"name":"forge","aside":".old-0-forge"}]}"#,
+        )
+        .expect("the cut-short install had recorded the move");
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
+        test_support::executable::install(&forge_binary(), &stage.join(App::Forge.binary_name()));
+
+        let update = sandbox.ae(&[
+            "install",
+            "--editor",
+            "none",
+            "--forge",
+            "keep",
+            "--yes",
+            "--from",
+            &sandbox.root.path().join("stage").to_string_lossy(),
+        ]);
+
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&update.stdout),
+            String::from_utf8_lossy(&update.stderr)
+        );
+        assert!(update.status.success(), "the update succeeds: {said}");
+        assert!(
+            said.contains("Put back the Forge files an interrupted install left half replaced"),
+            "{said}"
+        );
+        assert!(
+            forge.join("version").is_file(),
+            "Forge was updated, not dropped from the update: {said}"
+        );
+        assert!(!forge.join(".install-journal").exists());
+        assert!(sandbox.listening(), "the updated Forge serves: {said}");
+    }
+
     fn ae_only_stage(sandbox: &Sandbox) -> String {
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");
