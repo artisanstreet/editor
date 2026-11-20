@@ -16,6 +16,12 @@ FIXTURE_AE = b'#!/bin/sh\nprintf "%s\\n" "$*" > "$ARTISAN_TEST_MARKER"\n'
 TOOLS = ("uname", "mktemp", "rm", "cp", "grep", "head", "sed", "chmod", "sha256sum", "cut", "tr", "cat")
 
 
+def write_sbom(root, crate, version):
+    path = root / "crates" / crate / f"{crate}.cdx.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"bomFormat": "CycloneDX", "specVersion": "1.5", "metadata": {"component": {"name": crate, "version": version}}, "components": [{"name": "serde"}]}))
+
+
 def throwaway_key():
     key = subprocess.check_output(["openssl", "genpkey", "-algorithm", "ED25519"], text=True)
     public = subprocess.check_output(["openssl", "pkey", "-pubout", "-outform", "DER"], input=key.encode())[-32:].hex()
@@ -56,7 +62,7 @@ class Release(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.public_key(key)
 
-    def fixture(self, root, anchor=release.ANCHOR):
+    def fixture(self, root, anchor=release.ANCHOR, version="1.2.3"):
         (root / "scripts").mkdir(parents=True)
         (root / "bin").mkdir()
         installer = INSTALLER.read_text()
@@ -65,6 +71,8 @@ class Release(unittest.TestCase):
         (root / "scripts/install.sh").write_text(installer)
         (root / "bin/ae").write_bytes(FIXTURE_AE)
         (root / "bin/editor-aqua.exe").write_bytes(b"native fixture editor")
+        for crate in release.SBOMS:
+            write_sbom(root, crate, version)
 
     def signed_release(self, root):
         key, public = throwaway_key()
@@ -109,7 +117,7 @@ class Release(unittest.TestCase):
             release.assemble(root, root / "input", root / "dist", "1.2.3", "a" * 40, release.ANCHOR)
             manifest = json.loads((root / "dist/release.json").read_text())
             self.assertEqual(sorted(entry["file"] for entry in manifest["artifacts"]), ["Artisan-Editor-x86_64.exe", "ae-linux-aarch64", "ae-linux-x86_64", "ae-macos-aarch64"])
-            self.assertEqual(len((root / "dist/release.json").read_text().splitlines()), 6)
+            self.assertEqual(len((root / "dist/release.json").read_text().splitlines()), 10)
             self.assertIn(release.LATEST, (root / "dist/install.sh").read_text())
             with self.assertRaisesRegex(ValueError, "trust anchor"):
                 release.sign(root / "dist", key, "00" * 32)
@@ -129,7 +137,7 @@ class Release(unittest.TestCase):
     def test_a_release_lists_readable_names_and_takes_the_arm_editor_when_it_built(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self.fixture(root)
+            self.fixture(root, version="0.0.0-nightly.20261111220000+aaaaaaaaaaaa")
             for app, system, arch in release.EXPECTED | release.OPTIONAL:
                 release.package(root / "bin", root / "input", app, system, arch)
             release.assemble(root, root / "input", root / "dist", "0.0.0-nightly.20261111220000+aaaaaaaaaaaa", "a" * 40, release.ANCHOR)
@@ -138,12 +146,37 @@ class Release(unittest.TestCase):
             self.assertEqual(listed[str(root / "dist/Artisan-Editor-aarch64.exe")], "Artisan Editor for Windows (ARM64)")
             self.assertEqual(listed[str(root / "dist/ae-macos-aarch64")], "ae CLI for macOS (Apple Silicon)")
             self.assertEqual(listed[str(root / "dist/ae-linux-x86_64")], "ae CLI for Linux (x86_64)")
-            self.assertEqual(len(listed), 9)
+            self.assertEqual(listed[str(root / "dist/editor-aqua.cdx.json")], "Software bill of materials for Artisan Editor (CycloneDX)")
+            self.assertEqual(len(listed), 12)
             for path in listed:
                 self.assertTrue(path.endswith((".sig", ".sshsig")) or Path(path).is_file(), path)
             installer = (root / "dist/install.sh").read_text()
             self.assertIn(release.NIGHTLY, installer)
             self.assertNotIn(release.LATEST, installer)
+
+    def test_each_shipped_binary_has_an_sbom_for_the_release_that_the_signature_covers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            key, public = throwaway_key()
+            self.fixture(root, public)
+            for app, system, arch in release.EXPECTED:
+                release.package(root / "bin", root / "input", app, system, arch)
+            (root / "crates/forge/forge.cdx.json").unlink()
+            with self.assertRaisesRegex(ValueError, "no SBOM for forge"):
+                release.assemble(root, root / "input", root / "missing", "1.2.3", "a" * 40, public)
+            write_sbom(root, "forge", "1.2.2")
+            with self.assertRaisesRegex(ValueError, "does not describe forge 1.2.3"):
+                release.assemble(root, root / "input", root / "stale", "1.2.3", "a" * 40, public)
+            write_sbom(root, "forge", "1.2.3")
+            release.assemble(root, root / "input", root / "dist", "1.2.3", "a" * 40, public)
+            manifest = json.loads((root / "dist/release.json").read_text())
+            self.assertEqual([(entry["sbom"], entry["file"]) for entry in manifest["sboms"]], [("ae", "ae.cdx.json"), ("forge", "forge.cdx.json"), ("editor-aqua", "editor-aqua.cdx.json")])
+            self.assertEqual(manifest["sboms"][1]["sha256"], release.digest(root / "crates/forge/forge.cdx.json"))
+            release.sign(root / "dist", key, public)
+            release.verify(root / "dist", public, "a" * 40)
+            (root / "dist/editor-aqua.cdx.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError, "SBOM changed"):
+                release.verify(root / "dist", public, "a" * 40)
 
     def test_assembly_rejects_missing_and_duplicate_platforms(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -17,6 +17,7 @@ EXPECTED = {("ae", "linux", "x86_64"), ("ae", "linux", "aarch64"), ("ae", "macos
 OPTIONAL = {("editor", "windows", "aarch64")}
 SYSTEMS = {"linux": "Linux", "macos": "macOS", "windows": "Windows"}
 CHIPS = {("macos", "aarch64"): "Apple Silicon", ("linux", "aarch64"): "ARM64", ("windows", "aarch64"): "ARM64"}
+SBOMS = {"ae": "ae CLI", "forge": "Forge", "editor-aqua": "Artisan Editor"}
 SUPPORT = {"install.sh": "Install script for Linux and macOS", "release.json.sig": "Release manifest signature", "release.json.sshsig": "Release manifest signature for ssh-keygen", "release.json": "Signed release manifest"}
 STABLE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 NIGHTLY_VERSION = re.compile(r"0\.0\.0-nightly\.([0-9]{14})\+[0-9a-f]{12}")
@@ -156,6 +157,19 @@ def package(binaries, output, app, system, arch):
     return entry
 
 
+def bill(root, output, crate, version):
+    path = root / "crates" / crate / f"{crate}.cdx.json"
+    if not path.is_file():
+        raise ValueError(f"no SBOM for {crate}; run cargo cyclonedx first")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    component = document.get("metadata", {}).get("component", {})
+    if document.get("bomFormat") != "CycloneDX" or component.get("name") != crate or component.get("version") != version:
+        raise ValueError(f"the {crate} SBOM does not describe {crate} {version}")
+    name = f"{crate}.cdx.json"
+    shutil.copyfile(path, output / name)
+    return {"sbom": crate, "file": name, "sha256": digest(output / name)}
+
+
 def assemble(root, source, output, version, sha, anchor):
     tag_for(version)
     entries = []
@@ -176,8 +190,10 @@ def assemble(root, source, output, version, sha, anchor):
         entries.append(entry)
     if not EXPECTED <= seen:
         raise ValueError("release is missing platform artifacts")
+    bills = [bill(root, output, crate, version) for crate in SBOMS]
     lines = ",\n".join(json.dumps(entry, separators=(",", ":")) for entry in entries)
-    (output / "release.json").write_text(f'{{"version":"{version}","commit":"{sha}","artifacts":[\n{lines}\n]}}\n', encoding="utf-8")
+    sboms = ",\n".join(json.dumps(entry, separators=(",", ":")) for entry in bills)
+    (output / "release.json").write_text(f'{{"version":"{version}","commit":"{sha}","artifacts":[\n{lines}\n],"sboms":[\n{sboms}\n]}}\n', encoding="utf-8")
     installer = (root / "scripts/install.sh").read_text(encoding="utf-8")
     if LATEST not in installer:
         raise ValueError("install.sh does not name the release feed")
@@ -191,6 +207,7 @@ def assemble(root, source, output, version, sha, anchor):
 def assets(output):
     manifest_data = json.loads((output / "release.json").read_text(encoding="utf-8"))
     labelled = [(entry["file"], label(entry["app"], entry["os"], entry["arch"])) for entry in manifest_data["artifacts"]]
+    labelled += [(entry["file"], f"Software bill of materials for {SBOMS[entry['sbom']]} (CycloneDX)") for entry in manifest_data["sboms"]]
     return [f"{output / name}#{text}" for name, text in labelled + list(SUPPORT.items())]
 
 
@@ -206,6 +223,11 @@ def validate(output, sha=None):
         seen.add(identity)
     if not EXPECTED <= seen:
         raise ValueError("signed release is incomplete")
+    bills = manifest_data.get("sboms", [])
+    if sorted(entry["sbom"] for entry in bills) != sorted(SBOMS) or any(entry["file"] != f"{entry['sbom']}.cdx.json" for entry in bills):
+        raise ValueError("signed release does not carry one SBOM per shipped binary")
+    if any(digest(output / entry["file"]) != entry["sha256"] for entry in bills):
+        raise ValueError("SBOM changed before signing")
     if sha is not None and manifest_data.get("commit") != sha:
         raise ValueError("manifest commit differs from the release SHA")
     return manifest_data

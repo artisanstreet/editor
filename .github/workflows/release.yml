@@ -203,6 +203,15 @@ jobs:
         with:
           pattern: release-*
           path: downloads
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - name: Describe each shipped binary's dependencies
+        env:
+          RELEASE_VERSION: ${{ needs.select.outputs.version }}
+        run: |
+          python3 src/release.py stamp --version "$RELEASE_VERSION"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" cargo cyclonedx --format json --spec-version 1.5 --target all
       - name: Validate and assemble the complete release
         env:
           RELEASE_VERSION: ${{ needs.select.outputs.version }}
