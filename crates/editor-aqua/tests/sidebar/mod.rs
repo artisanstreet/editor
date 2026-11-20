@@ -737,6 +737,60 @@ fn message_search_results_do_not_follow_a_switch_to_another_host() {
     );
 }
 
+#[test]
+fn a_rename_failure_from_an_earlier_visit_to_the_same_host_is_not_shown_after_returning() {
+    use axum::http::StatusCode;
+    use editor_aqua::core::Screen;
+    use editor_aqua::sidebar::controller::Sidebar;
+    use test_support::editor::core::{Delivered, stub_host};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let first_forge = stub_forge();
+    let second_forge = stub_forge();
+    let first = stub_host("first", "first", &first_forge);
+    let second = stub_host("second", "second", &second_forge);
+    connect_live(&mut core, &first);
+    connect_live(&mut core, &second);
+    let visit = |core: &mut editor_aqua::core::Core, host: &editor_aqua::core::HostConfig| {
+        core.navigate(Screen::NewThread {
+            host: host.id.clone(),
+            project: None,
+        });
+    };
+    visit(&mut core, &first);
+    let instance = core.host(&first.id).unwrap().instance();
+    let mut sidebar = Sidebar::new(false);
+    sidebar.sync(&core, 0);
+    let thread = ThreadId::new();
+    sidebar.rename = Some(thread.clone());
+    editor_aqua::sidebar::view::dispatch(
+        &mut sidebar,
+        &mut core,
+        editor_aqua::sidebar::view::ViewAction::SubmitRename("Renamed".into()),
+    );
+    let late_rename = first_forge.take("PATCH", &format!("/threads/{thread}"));
+
+    visit(&mut core, &second);
+    sidebar.sync(&core, 0);
+    visit(&mut core, &first);
+    sidebar.sync(&core, 0);
+    assert_eq!(core.host(&first.id).unwrap().instance(), instance);
+
+    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
+    late_rename.fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "rename refused",
+    );
+    delivered.wait("the first visit's rename failure");
+    sidebar.drain(&mut core, 0);
+    assert_eq!(
+        sidebar.error, None,
+        "a failure from before the host switch must not appear on the return visit"
+    );
+}
+
 fn stub_forge() -> test_support::editor::forge::StubForge {
     editor_aqua::core::runtime::runtime().block_on(test_support::editor::forge::StubForge::serve(
         test_support::editor::forge::empty_state(),

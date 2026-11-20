@@ -28,7 +28,7 @@ pub use account::{
 pub use ae::{Ae, AeError, RunAe};
 pub use client::ForgeClient;
 pub use clock::{Clock, TimeSource};
-pub use completion::{CompletionKey, CompletionSlot};
+pub use completion::{CompletionKey, CompletionScope, CompletionSlot};
 pub use connection::ConnectionStatus;
 pub use host::{
     Attention, BlobImage, DEFAULT_ENGINE_CONFIG_KEY, HostData, HostEvent, HostInstance,

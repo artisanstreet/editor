@@ -74,3 +74,26 @@ impl CompletionSlot {
         key.is_live(core)
     }
 }
+
+#[derive(Debug, Default)]
+pub struct CompletionScope {
+    generation: u64,
+}
+
+impl CompletionScope {
+    pub fn key(&self, host: &HostId, instance: HostInstance) -> CompletionKey {
+        CompletionKey {
+            host: host.clone(),
+            instance,
+            generation: self.generation,
+        }
+    }
+
+    pub const fn renew(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub fn accepts(&self, core: &Core, key: &CompletionKey) -> bool {
+        key.generation == self.generation && key.is_live(core)
+    }
+}

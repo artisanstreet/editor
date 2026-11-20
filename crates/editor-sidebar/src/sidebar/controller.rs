@@ -5,7 +5,9 @@ use artisan_api::{DirListing, Project, ProjectId, ThreadId, Timestamp, UpdateThr
 use editor_core::client::CallError;
 use editor_core::delivery::Delivery;
 use editor_core::host::ThreadPageDirection;
-use editor_core::{CompletionKey, CompletionSlot, Core, HostId, HostInstance, Screen};
+use editor_core::{
+    CompletionKey, CompletionScope, CompletionSlot, Core, HostId, HostInstance, Screen,
+};
 
 use super::geometry::{
     HistoryPane, PageDirection, PageLoad, PageState, PaneDistances, PaneViewports, ThreadPane,
@@ -47,8 +49,7 @@ pub enum ThreadActionError {
 
 enum Completion {
     Action {
-        host: HostId,
-        instance: HostInstance,
+        key: CompletionKey,
         result: Result<(), ThreadActionError>,
     },
     Browse {
@@ -120,6 +121,7 @@ pub struct Sidebar {
     browse_generation: u64,
     browse_task: Option<tokio::task::JoinHandle<()>>,
     text_search: CompletionSlot,
+    actions: CompletionScope,
     text_results: TextResults,
     completions: Delivery<Completion>,
     workspace_background: bool,
@@ -234,6 +236,7 @@ impl Sidebar {
             browse_generation: 0,
             browse_task: None,
             text_search: CompletionSlot::default(),
+            actions: CompletionScope::default(),
             text_results: TextResults::Idle,
             completions: Delivery::new(
                 NonZeroUsize::new(64).expect("invariant: the completion capacity is non-zero"),
@@ -324,6 +327,7 @@ impl Sidebar {
             self.thread_viewports = PaneViewports::default();
             self.text_search.cancel();
             self.text_results = TextResults::Idle;
+            self.actions.renew();
         }
         let picker_alive = self
             .picker_host
@@ -381,15 +385,12 @@ impl Sidebar {
         for completion in self.completions.drain() {
             match completion {
                 Completion::Action {
-                    host,
-                    instance,
+                    key,
                     result: Err(error),
-                } if self.host.as_ref() == Some(&host)
-                    && self.host_instance == Some(instance)
-                    && core.host_if_instance(&host, instance).is_some() =>
-                {
+                } if self.actions.accepts(core, &key) => {
                     accepted = true;
                     let error = diagnostics::chain(&error);
+                    let host = key.host();
                     tracing::error!(%host, "couldn't {error}");
                     self.error = Some(format!("Couldn't {error}"));
                 }
@@ -519,19 +520,12 @@ impl Sidebar {
         else {
             return;
         };
-        let id = host.id.clone();
-        let instance = host.instance();
+        let key = self.actions.key(&host.id, host.instance());
         let client = host.client.clone();
         let sender = self.completions.sender();
         editor_core::runtime::runtime().spawn(async move {
             let result = operation(client).await;
-            sender
-                .offer(Completion::Action {
-                    host: id,
-                    instance,
-                    result,
-                })
-                .await;
+            sender.offer(Completion::Action { key, result }).await;
         });
     }
 
