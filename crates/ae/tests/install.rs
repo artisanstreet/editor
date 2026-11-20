@@ -432,6 +432,54 @@ mod tests {
         assert!(sandbox.listening(), "the updated Forge serves: {said}");
     }
 
+    fn said(output: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    fn install_from_nowhere(sandbox: &Sandbox) -> Output {
+        sandbox.ae(&[
+            "install",
+            "--editor",
+            "none",
+            "--forge",
+            "keep",
+            "--yes",
+            "--from",
+            &sandbox
+                .root
+                .path()
+                .join("no release here")
+                .to_string_lossy(),
+        ])
+    }
+
+    #[test]
+    fn a_record_of_an_interrupted_install_that_cannot_be_read_says_how_out_and_never_blocks_uninstalling()
+     {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::new(port.address());
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+        let journal = forge.join(".install-journal");
+        std::fs::write(&journal, "{\"entries\":[").expect("leave a record that doesn't read");
+
+        let blocked = install_from_nowhere(&sandbox);
+
+        let told = said(&blocked);
+        assert!(!blocked.status.success(), "{told}");
+        assert!(told.contains(&journal.display().to_string()), "{told}");
+        assert!(told.contains("ae uninstall forge"), "{told}");
+
+        let removed = sandbox.ae(&["uninstall", "forge", "--yes"]);
+
+        assert!(removed.status.success(), "{}", said(&removed));
+        assert!(!sandbox.installed.exists(), "Forge was uninstalled");
+        assert!(!journal.exists(), "the record went with it");
+    }
+
     #[test]
     fn a_version_file_that_cannot_be_read_neither_blocks_repairing_nor_uninstalling_forge() {
         let port = PortReservation::loopback();

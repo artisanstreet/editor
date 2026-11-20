@@ -289,9 +289,15 @@ pub(crate) enum RecoverError {
     Locate(#[from] LocateError),
     #[error(transparent)]
     Lock(#[from] InstallLockError),
-    #[error("finish what an interrupted install of {} left behind", app.display_name())]
+    #[error(
+        "finish what an interrupted install of {} left behind; to give up on it, run `ae uninstall {}`, or delete {} and install again",
+        app.display_name(),
+        app.id(),
+        journal.display()
+    )]
     Interrupted {
         app: App,
+        journal: PathBuf,
         #[source]
         source: Box<swap::RecoverError>,
     },
@@ -510,8 +516,6 @@ pub(crate) enum UninstallError {
     Orphans,
     #[error(transparent)]
     Remove(#[from] RemoveChosenError),
-    #[error(transparent)]
-    Recover(#[from] RecoverError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1024,6 +1028,7 @@ fn recover_interrupted() -> Result<(), RecoverError> {
         let dir = paths::dir(app)?;
         if swap::interrupted(&dir).map_err(|source| RecoverError::Interrupted {
             app,
+            journal: swap::journal(&dir),
             source: Box::new(source),
         })? {
             interrupted.push((app, dir));
@@ -1036,6 +1041,7 @@ fn recover_interrupted() -> Result<(), RecoverError> {
     for (app, dir) in interrupted {
         match swap::recover(&dir).map_err(|source| RecoverError::Interrupted {
             app,
+            journal: swap::journal(&dir),
             source: Box::new(source),
         })? {
             swap::Recovered::Nothing => {}
@@ -2089,9 +2095,18 @@ fn leaves_orphans(chosen: &[App], present: &[App]) -> bool {
             .any(|app| *app != App::Ae && !chosen.contains(app))
 }
 
+fn recover_before_uninstalling() {
+    if let Err(error) = recover_interrupted() {
+        ui::warning(format!(
+            "{}; uninstalling anyway",
+            diagnostics::chain(&error)
+        ));
+    }
+}
+
 pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), UninstallError> {
     ui::intro("Artisan uninstall");
-    recover_interrupted()?;
+    recover_before_uninstalling();
     let mut present = Vec::new();
     let mut with_data = Vec::new();
     let mut hints = Vec::new();

@@ -226,8 +226,12 @@ pub(super) fn replace_with(
     Ok(replaced)
 }
 
+pub(super) fn journal(dir: &Path) -> PathBuf {
+    dir.join(JOURNAL)
+}
+
 pub(super) fn recover(dir: &Path) -> Result<Recovered, RecoverError> {
-    let path = dir.join(JOURNAL);
+    let path = journal(dir);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Recovered::Nothing),
