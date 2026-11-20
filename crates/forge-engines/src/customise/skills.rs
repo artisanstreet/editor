@@ -731,13 +731,18 @@ pub(super) fn measure(folder: &Path) -> io::Result<(String, u32, u64)> {
     measure_inner(folder, false)
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(super) fn measure_cached(folder: &Path) -> io::Result<(String, u32, u64)> {
+    measure_inner(folder, true)
+}
+
 #[derive(Clone)]
 struct CachedMeasure {
     generation: Vec<(PathBuf, u64, std::time::SystemTime)>,
     value: (String, u32, u64),
 }
 
-pub(super) fn measure_inner(folder: &Path, cached: bool) -> io::Result<(String, u32, u64)> {
+fn measure_inner(folder: &Path, cached: bool) -> io::Result<(String, u32, u64)> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, CachedMeasure>>> =
         std::sync::OnceLock::new();
     use std::io::Read;

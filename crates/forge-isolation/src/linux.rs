@@ -600,7 +600,7 @@ fn populated(events: &str) -> Option<bool> {
 }
 
 impl RunGroup {
-    pub(crate) fn create() -> Result<Option<Self>, RunGroupError> {
+    fn create() -> Result<Option<Self>, RunGroupError> {
         match ENGINES_FOLDER.get() {
             Some(engines) => Self::create_in(engines).map(Some),
             None => Ok(None),
@@ -644,17 +644,17 @@ impl RunGroup {
         Ok(Self { folder, procs })
     }
 
-    pub(crate) fn kill_switch(&self) -> CString {
+    fn kill_switch(&self) -> CString {
         CString::new(self.folder.join("cgroup.kill").as_os_str().as_bytes()).expect(
             "invariant: a cgroup folder named without NUL bytes has a kill file named without them",
         )
     }
 
-    pub(crate) fn membership(&self) -> CString {
+    fn membership(&self) -> CString {
         self.procs.clone()
     }
 
-    pub(crate) fn end(&self) -> Result<(), EndRunError> {
+    fn end(&self) -> Result<(), EndRunError> {
         let kill = self.folder.join("cgroup.kill");
         match std::fs::write(&kill, b"1") {
             Ok(()) => {}

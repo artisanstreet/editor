@@ -93,12 +93,12 @@ impl EngineTree {
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn membership(&self) -> Option<std::ffi::CString> {
+    fn membership(&self) -> Option<std::ffi::CString> {
         self.cgroup.membership()
     }
 
     #[cfg(target_os = "linux")]
-    pub(crate) fn kill_switch(&self) -> Option<std::ffi::CString> {
+    fn kill_switch(&self) -> Option<std::ffi::CString> {
         self.cgroup.kill_switch()
     }
 

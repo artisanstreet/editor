@@ -164,7 +164,7 @@ impl Folder {
         written
     }
 
-    pub(super) fn append(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    fn append(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
         let file = self.open_file(name, OFlags::WRONLY | OFlags::APPEND)?;
         fs::File::from(file).write_all(bytes)
     }

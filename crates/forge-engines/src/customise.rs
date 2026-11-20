@@ -400,7 +400,7 @@ fn copied_skill_matches(link: &Path, target: &Path) -> io::Result<bool> {
     if marker.len() > 64 * 1024 {
         return Ok(false);
     }
-    let (digest, _, _) = skills::measure_inner(target, true)?;
+    let (digest, _, _) = skills::measure_cached(target)?;
     Ok(marker == format!("{}\n{digest}", target.display()))
 }
 

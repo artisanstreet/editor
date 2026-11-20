@@ -3,6 +3,7 @@
 use forge_isolation::{Coverage, EngineTree, Landlock, Reach, Support, contain, support};
 use std::path::Path;
 use std::process::Command;
+use test_support::SANDBOX_REQUIRED;
 
 const SCRIPT: &str = r#"
 echo inside > "$1/made"
@@ -16,8 +17,6 @@ mkdir "$2/folder"
 exit 0
 "#;
 
-const SANDBOX_REQUIRED: &str = "ARTISAN_SANDBOX_REQUIRED";
-
 fn guaranteed_abi() -> Option<i32> {
     std::env::var(SANDBOX_REQUIRED).ok().map(|abi| {
         abi.parse().unwrap_or_else(|error| {
@@ -26,10 +25,6 @@ fn guaranteed_abi() -> Option<i32> {
     })
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "a test the kernel can't run says so instead of passing silently"
-)]
 fn landlock() -> Option<Landlock> {
     match support() {
         Support::Enforced(landlock) => Some(landlock),
@@ -38,18 +33,14 @@ fn landlock() -> Option<Landlock> {
                 guaranteed_abi().is_none(),
                 "{SANDBOX_REQUIRED} is set, but this kernel can't enforce the sandbox ({reason:?})"
             );
-            eprintln!(
-                "SKIPPED: this kernel can't enforce the sandbox ({reason:?}), so a sandboxed child can't be exercised here"
-            );
+            test_support::skipped(format_args!(
+                "this kernel can't enforce the sandbox ({reason:?}), so a sandboxed child can't be exercised here"
+            ));
             None
         }
     }
 }
 
-#[expect(
-    clippy::print_stderr,
-    reason = "a test the kernel can't run says so instead of passing silently"
-)]
 fn lacks(landlock: Landlock, needed: i32, what: &str) -> bool {
     if landlock.abi() >= needed {
         return false;
@@ -59,10 +50,10 @@ fn lacks(landlock: Landlock, needed: i32, what: &str) -> bool {
         "{SANDBOX_REQUIRED} promises Landlock ABI {needed}, but the kernel has ABI {}",
         landlock.abi()
     );
-    eprintln!(
-        "SKIPPED: Landlock ABI {} can't {what}, and Forge reports that",
+    test_support::skipped(format_args!(
+        "Landlock ABI {} can't {what}, and Forge reports that",
         landlock.abi()
-    );
+    ));
     true
 }
 

@@ -370,7 +370,7 @@ impl vte::Perform for TerminalText {
     }
 }
 
-pub(crate) fn strip_ansi(text: &str) -> String {
+fn strip_ansi(text: &str) -> String {
     let mut parser = vte::Parser::new();
     let mut plain = TerminalText::default();
     parser.advance(&mut plain, text.as_bytes());
