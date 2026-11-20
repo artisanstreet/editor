@@ -7423,7 +7423,6 @@ Used by:
 - accesskit 0.25.2 <https://github.com/AccessKit/accesskit>
 - accesskit_consumer 0.39.2 <https://github.com/AccessKit/accesskit>
 - accesskit_windows 0.35.2 <https://github.com/AccessKit/accesskit>
-- anyhow 1.0.104 <https://github.com/dtolnay/anyhow>
 - arboard 3.7.0 <https://github.com/1Password/arboard>
 - atomig-macro 0.4.0 <https://github.com/LukasKalbertodt/atomig/>
 - color 0.3.3 <https://github.com/linebender/color>
