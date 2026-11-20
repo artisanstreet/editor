@@ -83,11 +83,11 @@ fn a_missing_track_says_the_file_does_not_exist() {
 fn an_unreachable_host_is_told_apart_from_a_missing_file() {
     let fixture = Fixture::new();
     assert!(fixture.request("tracks/outro.ogg").is_none());
-    fixture.reply(Err(MediaFailure::Unreachable));
+    fixture.reply(Err(MediaFailure::ForgeUnreachable));
     assert_eq!(
         fixture.request("tracks/outro.ogg"),
         Some(Err(AudioLoadError::Load(MediaLoadError::Fetch(
-            MediaFailure::Unreachable
+            MediaFailure::ForgeUnreachable
         ))))
     );
 }

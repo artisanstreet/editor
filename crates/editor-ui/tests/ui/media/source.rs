@@ -50,7 +50,7 @@ async fn a_remote_image_cannot_redirect_into_this_machine_or_its_network() {
         assert!(
             matches!(
                 result,
-                Err(MediaLoadError::Fetch(MediaFailure::Unreachable))
+                Err(MediaLoadError::Fetch(MediaFailure::ServerUnreachable))
             ),
             "following {target}"
         );

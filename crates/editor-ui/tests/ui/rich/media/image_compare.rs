@@ -112,7 +112,7 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
             if up {
                 Err(MediaFailure::Missing)
             } else {
-                Err(MediaFailure::Unreachable)
+                Err(MediaFailure::ForgeUnreachable)
             }
         })
     })
@@ -159,7 +159,7 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
         .collect();
     assert_eq!(
         said.iter()
-            .filter(|text| *text == "The host didn't answer")
+            .filter(|text| *text == "Forge didn't answer")
             .count(),
         2
     );
@@ -185,7 +185,7 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
     );
     assert_eq!(
         state.failure(Side::Before),
-        Some(Failure::Fetch(MediaFailure::Unreachable))
+        Some(Failure::Fetch(MediaFailure::ForgeUnreachable))
     );
 }
 

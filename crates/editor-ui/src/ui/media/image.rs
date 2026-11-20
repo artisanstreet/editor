@@ -24,8 +24,11 @@ impl ImageError {
             Self::Load(MediaLoadError::Invalid) => "Not a valid image path",
             Self::Load(MediaLoadError::TooLarge) => "Too large to preview",
             Self::Load(MediaLoadError::Fetch(source::MediaFailure::Missing)) => "File not found",
-            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Unreachable)) => {
-                "The host didn't answer"
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ForgeUnreachable)) => {
+                "Forge didn't answer"
+            }
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ServerUnreachable)) => {
+                "The image's server didn't answer"
             }
             Self::Load(MediaLoadError::Fetch(source::MediaFailure::Unreadable)) => {
                 "Couldn't read the file"

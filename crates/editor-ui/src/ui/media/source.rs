@@ -20,7 +20,9 @@ pub enum MediaFailure {
     #[error("the file does not exist")]
     Missing,
     #[error("Forge did not answer")]
-    Unreachable,
+    ForgeUnreachable,
+    #[error("the web server did not answer")]
+    ServerUnreachable,
     #[error("the file could not be read")]
     Unreadable,
 }
@@ -410,7 +412,7 @@ pub async fn load_image_bytes(
         Parsed::Url(url) => {
             let response = http.get(url, true).await.map_err(|error| {
                 tracing::warn!(%url, %error, "fetch image");
-                MediaLoadError::Fetch(MediaFailure::Unreachable)
+                MediaLoadError::Fetch(MediaFailure::ServerUnreachable)
             })?;
             match response.status.as_u16() {
                 200..=299 => Ok(response.body.into()),

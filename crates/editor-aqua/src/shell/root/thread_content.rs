@@ -608,6 +608,6 @@ fn media_failure(error: &crate::core::client::CallError) -> crate::ui::media::so
             },
         ) => MediaFailure::Missing,
         Some(_) => MediaFailure::Unreadable,
-        None => MediaFailure::Unreachable,
+        None => MediaFailure::ForgeUnreachable,
     }
 }
