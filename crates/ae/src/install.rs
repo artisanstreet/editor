@@ -1822,7 +1822,7 @@ fn settle(
             Err(error) => return Err(Box::new(error)),
             Ok(()) if undone.put_back_previous(&App::Forge.binary_name()) => {
                 progress.message("Starting the previous Forge again");
-                match service::start() {
+                match service::start(service::Readiness::Listening) {
                     Ok(_) => Settled::Restarted,
                     Err(error) => Settled::NotRestarted(Box::new(error)),
                 }
@@ -1902,7 +1902,7 @@ fn finish(
             progress.message("Starting Forge");
             let autostart = service::enable_autostart().map_err(InstallAppError::Autostart)?;
             if !upgraded {
-                service::start()?;
+                service::start(service::Readiness::Recorded)?;
             }
             format!(
                 "Forge {version} is running on {}; {autostart}",

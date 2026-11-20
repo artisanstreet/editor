@@ -324,7 +324,9 @@ fn forge_service(command: &ForgeCommand) -> Result<(), ForgeServiceError> {
                 ui::success(format!("Forge is already running on {address}"));
                 return Ok(());
             }
-            let pid = ui::task("Starting Forge", "Forge started", service::start)?;
+            let pid = ui::task("Starting Forge", "Forge started", || {
+                service::start(service::Readiness::Recorded)
+            })?;
             ui::success(started(pid));
             Ok(())
         }

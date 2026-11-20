@@ -95,3 +95,28 @@ fn a_start_that_keeps_logging_waits_and_a_silent_one_stalls() {
         Verdict::Exited
     );
 }
+
+#[test]
+fn an_open_port_counts_as_ready_only_when_restoring_a_forge_that_records_nothing() {
+    let open_port = || true;
+
+    assert_eq!(
+        judge(Readiness::Recorded, false, true, open_port),
+        Startup::Starting,
+        "a gateway that bound its port before its backend answered is still starting"
+    );
+    assert_eq!(
+        judge(Readiness::Listening, false, true, open_port),
+        Startup::Serving
+    );
+    assert_eq!(
+        judge(Readiness::Recorded, true, true, || unreachable!(
+            "a recorded Forge needs no port check"
+        )),
+        Startup::Ready
+    );
+    assert_eq!(
+        judge(Readiness::Listening, false, false, open_port),
+        Startup::Exited
+    );
+}

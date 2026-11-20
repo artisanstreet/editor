@@ -85,6 +85,33 @@ mod tests {
         fn listening(&self) -> bool {
             TcpStream::connect_timeout(&self.address, Duration::from_millis(250)).is_ok()
         }
+
+        fn start_released(&self) {
+            let data = self.installed.with_file_name("data");
+            let mut command = Command::new("sh");
+            command
+                .args([
+                    "-c",
+                    r#""$0" --log "$1" </dev/null >/dev/null 2>&1 & echo $!"#,
+                ])
+                .arg(&self.installed)
+                .arg(data.join("forge.log"));
+            isolate(&mut command, self.root.path());
+            let output = command.output().expect("start the released Forge");
+            let pid: u32 = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .expect("the shell names the released Forge's process");
+            let deadline = std::time::Instant::now() + test_support::wait::LIVENESS;
+            while !self.listening() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the released Forge never listened"
+                );
+            }
+            std::fs::write(data.join("forge.pid"), pid.to_string())
+                .expect("record the released Forge as the earlier ae did");
+        }
     }
 
     impl Drop for Sandbox {
@@ -175,12 +202,7 @@ mod tests {
             .read_to_end(&mut released)
             .expect("unpack the released database");
         std::fs::write(&database, released).expect("give the released Forge its database");
-        let started = sandbox.ae(&["forge", "start"]);
-        assert!(
-            started.status.success(),
-            "the released Forge starts: {}",
-            String::from_utf8_lossy(&started.stderr)
-        );
+        sandbox.start_released();
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");
         test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
@@ -312,12 +334,7 @@ mod tests {
             .read_to_end(&mut released)
             .expect("unpack the released database");
         std::fs::write(&database, released).expect("give the released Forge its database");
-        let started = sandbox.ae(&["forge", "start"]);
-        assert!(
-            started.status.success(),
-            "the released Forge starts: {}",
-            String::from_utf8_lossy(&started.stderr)
-        );
+        sandbox.start_released();
         std::fs::write(&database, "not a database").expect("damage the database file");
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");

@@ -465,12 +465,18 @@ fn operation_lock() -> Result<std::fs::File, OperationLockError> {
     Ok(file)
 }
 
-pub(crate) fn start() -> Result<Option<u32>, StartError> {
-    let _operation = operation_lock()?;
-    start_unlocked()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    Recorded,
+    Listening,
 }
 
-fn start_unlocked() -> Result<Option<u32>, StartError> {
+pub(crate) fn start(readiness: Readiness) -> Result<Option<u32>, StartError> {
+    let _operation = operation_lock()?;
+    start_unlocked(readiness)
+}
+
+fn start_unlocked(readiness: Readiness) -> Result<Option<u32>, StartError> {
     if uses_systemd()? {
         sys::run("systemctl", &["--user", "start", UNIT]).map_err(StartError::Systemctl)?;
         if !systemd_active().map_err(StartError::Systemctl)? {
@@ -505,7 +511,7 @@ fn start_unlocked() -> Result<Option<u32>, StartError> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
     )?;
-    match wait_ready(pid, address, &log) {
+    match wait_ready(pid, address, readiness, &log) {
         Ok(Ready::Recorded) => {}
         Ok(Ready::Serving) => {
             let recorded = pid_file()?;
@@ -579,16 +585,30 @@ impl StartWatch {
     }
 }
 
-fn startup(pid: u32, address: SocketAddr) -> Result<Startup, PidError> {
-    Ok(if recorded_pid()? == Some(pid) {
+fn judge(
+    readiness: Readiness,
+    recorded: bool,
+    alive: bool,
+    listening: impl FnOnce() -> bool,
+) -> Startup {
+    if recorded {
         Startup::Ready
-    } else if !process_exists(pid) {
+    } else if !alive {
         Startup::Exited
-    } else if listening(address) {
+    } else if readiness == Readiness::Listening && listening() {
         Startup::Serving
     } else {
         Startup::Starting
-    })
+    }
+}
+
+fn startup(pid: u32, address: SocketAddr, readiness: Readiness) -> Result<Startup, PidError> {
+    Ok(judge(
+        readiness,
+        recorded_pid()? == Some(pid),
+        process_exists(pid),
+        || listening(address),
+    ))
 }
 
 fn log_length(log: &Path) -> Result<u64, NotReadyError> {
@@ -602,11 +622,16 @@ fn log_length(log: &Path) -> Result<u64, NotReadyError> {
     }
 }
 
-fn wait_ready(pid: u32, address: SocketAddr, log: &Path) -> Result<Ready, NotReadyError> {
+fn wait_ready(
+    pid: u32,
+    address: SocketAddr,
+    readiness: Readiness,
+    log: &Path,
+) -> Result<Ready, NotReadyError> {
     let mut watch = StartWatch::new(log_length(log)?, Instant::now());
     loop {
-        let now =
-            startup(pid, address).map_err(|source| NotReadyError::Recorded { pid, source })?;
+        let now = startup(pid, address, readiness)
+            .map_err(|source| NotReadyError::Recorded { pid, source })?;
         match watch.observe(now, log_length(log)?, Instant::now()) {
             Verdict::Ready if now == Startup::Serving => return Ok(Ready::Serving),
             Verdict::Ready => return Ok(Ready::Recorded),
@@ -737,7 +762,7 @@ pub(crate) fn restart() -> Result<Option<u32>, RestartError> {
         return Ok(None);
     }
     stop_unlocked()?;
-    Ok(start_unlocked()?)
+    Ok(start_unlocked(Readiness::Recorded)?)
 }
 
 pub(crate) fn is_running() -> Result<bool, RunningError> {
