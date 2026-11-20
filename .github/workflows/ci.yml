@@ -89,6 +89,8 @@ jobs:
       actions: write
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CARGO_COMMAND: nix develop .#cargo-linux --command cargo
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -127,11 +129,13 @@ jobs:
         run: nix develop .#cargo-linux --command cargo build --locked -p ae -p forge
       - name: Tests
         run: nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'not binary(budgets) and not binary(contract)'
-      - name: Cgroup tests as the main process of a delegated service
+      - &delegated-cgroup-tests
+        name: Cgroup tests as the main process of a delegated service
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          nix develop .#cargo-linux --command cargo test --locked -p forge-isolation -p forge-engines --no-run --message-format=json \
+          $CARGO_COMMAND test --locked -p forge-isolation -p forge-engines --no-run --message-format=json \
             | jq -r 'select(.reason == "compiler-artifact" and .executable != null and .profile.test) | [.target.name, .executable, (.manifest_path | rtrimstr("/Cargo.toml"))] | @tsv' \
             > "$RUNNER_TEMP/cgroup-tests.tsv"
           test "$(cut -f1 "$RUNNER_TEMP/cgroup-tests.tsv" | grep -cxE 'forge_engines|unix|linux')" -eq 3
@@ -348,6 +352,8 @@ jobs:
         runner: [ubuntu-24.04-arm, windows-11-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      CARGO_COMMAND: cargo
     defaults:
       run:
         shell: bash
@@ -370,7 +376,9 @@ jobs:
         run: cargo build --locked -p ae -p forge
       - name: Engine, isolation and run tests on the shipped ARM target
         run: cargo nextest run --locked -p forge-engines -p forge-isolation -p forge-runs -p forge -p ae --no-fail-fast
+      - *delegated-cgroup-tests
       - *save-target
+      - *prune-target
       - *sccache-stats
   shipping:
     permissions:
