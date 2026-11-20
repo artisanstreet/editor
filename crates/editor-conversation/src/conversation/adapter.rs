@@ -1,5 +1,6 @@
 use super::controller::{Conversation, ScrollAction};
 use super::fold::{self, Row, RowKey, RunSummary};
+use super::shared::Shared;
 use super::thread::{AnswerState, ItemUi};
 use super::viewport::Input;
 use artisan_api::{Answer, Item, ItemId, LiveTarget, RunId, Seq};
@@ -185,9 +186,9 @@ pub struct RowModel {
 #[derive(Debug)]
 pub struct RowSnapshots {
     view: super::thread::ThreadView,
-    rows: Vec<(Row, u64)>,
-    runs: BTreeMap<RunId, RunSummary>,
-    turns: fold::Turns,
+    rows: Shared<Vec<(Row, u64)>>,
+    runs: Shared<BTreeMap<RunId, RunSummary>>,
+    turns: Shared<fold::Turns>,
     agent: bool,
     composer_height: Option<f32>,
 }

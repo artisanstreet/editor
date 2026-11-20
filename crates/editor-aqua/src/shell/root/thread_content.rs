@@ -5,6 +5,9 @@ use aqua::prelude::ObservedWindowState;
 use aqua_ui::element::Element;
 use std::{cell::Cell, collections::HashMap, rc::Rc};
 
+pub(super) type MediaProviders =
+    Rc<HashMap<artisan_api::ItemId, (crate::ui::media::source::MediaFetcher, artisan_api::Seq)>>;
+
 type ConversationCallbacks = (
     Rc<dyn Fn(crate::ui::markdown::visual::LinkAction)>,
     Rc<dyn Fn(crate::ui::rich::actions::ShowCopyMenu)>,
@@ -54,6 +57,7 @@ impl RootViews {
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
+            self.retained_rows = None;
             self.smooth_scroll.cancel();
             self.scroll_request = None;
             self.wheel.cancel_transcript();
@@ -111,6 +115,7 @@ impl RootViews {
                 owners: HashMap::new(),
                 models: media_resources.model_assets.clone(),
                 audio: media_resources.audio_assets.clone(),
+                index: None,
             });
         }
         let Some(media) = self.media.as_mut() else {
@@ -119,59 +124,42 @@ impl RootViews {
                 scope.thread, scope.host
             )
         };
-        let items: std::collections::BTreeMap<_, _> = workspace
+        let rows_epoch = workspace.conversation.rows_epoch();
+        if self.retained_rows != Some(rows_epoch) {
+            let row_keys: std::collections::HashSet<_> = workspace
+                .conversation
+                .rows
+                .iter()
+                .map(|(row, _)| row.key())
+                .collect();
+            self.row_cache.borrow_mut().retain_rows(&row_keys);
+            self.retained_rows = Some(rows_epoch);
+        }
+        let items_revision = workspace
             .conversation
             .view
-            .iter()
-            .flat_map(|view| view.items.values().chain(view.context.values()))
-            .map(|item| (item.id.clone(), item.seq))
-            .collect();
-        workspace
-            .markdown
-            .borrow_mut()
-            .retain(ui, |key| items.contains_key(&key.item));
-        workspace
-            .conversation_selection
-            .retain(ui, |key| items.contains_key(&key.item));
-        let row_keys: std::collections::HashSet<_> = workspace
-            .conversation
-            .rows
-            .iter()
-            .map(|(row, _)| row.key())
-            .collect();
-        self.row_cache.borrow_mut().retain_rows(&row_keys);
-        media.owners.retain(|item, _| items.contains_key(item));
-        for item in items.keys() {
-            media
-                .owners
-                .entry(item.clone())
-                .or_insert_with(|| workspace.selections.next_source().0);
-        }
-        let mut retained: Vec<_> = media.owners.values().map(|owner| vec![*owner]).collect();
-        if let Some(owner) = self
+            .as_ref()
+            .map(|view| (view.items.revision(), view.context.revision()));
+        let preview = self
             .image_preview
             .as_ref()
             .and_then(|preview| preview.owner.as_ref())
+            .map(|owner| owner.to_vec());
+        let providers = if let Some(index) = media
+            .index
+            .as_ref()
+            .filter(|index| index.items == items_revision && index.preview == preview)
         {
-            retained.push(owner.to_vec());
-        }
-        media.fetcher.retain_resources(&retained);
-        let providers: HashMap<_, _> = items
-            .into_iter()
-            .filter_map(|(item, revision)| {
-                Some((
-                    item.clone(),
-                    (
-                        media
-                            .fetcher
-                            .clone()
-                            .owned_by(&[*media.owners.get(&item)?], revision)
-                            .showing(item.as_str()),
-                        revision,
-                    ),
-                ))
-            })
-            .collect();
+            Rc::clone(&index.providers)
+        } else {
+            let providers = Rc::new(index_media(workspace, ui, media, preview.as_deref()));
+            media.index = Some(super::MediaIndex {
+                items: items_revision,
+                preview,
+                providers: Rc::clone(&providers),
+            });
+            providers
+        };
         let images = workspace.images.as_ref().clone();
         let media_actions = Rc::clone(&self.conversation_actions);
         let media_scope = scope.clone();
@@ -610,4 +598,52 @@ fn media_failure(error: &crate::core::client::CallError) -> crate::ui::media::so
         Some(_) => MediaFailure::Unreadable,
         None => MediaFailure::ForgeUnreachable,
     }
+}
+
+fn index_media(
+    workspace: &mut crate::shell::workspace::Workspace,
+    ui: &mut UiApp,
+    media: &mut ConversationMedia,
+    preview: Option<&[u64]>,
+) -> HashMap<artisan_api::ItemId, (crate::ui::media::source::MediaFetcher, artisan_api::Seq)> {
+    let items: std::collections::BTreeMap<_, _> = workspace
+        .conversation
+        .view
+        .iter()
+        .flat_map(|view| view.items.values().chain(view.context.values()))
+        .map(|item| (item.id.clone(), item.seq))
+        .collect();
+    workspace
+        .markdown
+        .borrow_mut()
+        .retain(ui, |key| items.contains_key(&key.item));
+    workspace
+        .conversation_selection
+        .retain(ui, |key| items.contains_key(&key.item));
+    media.owners.retain(|item, _| items.contains_key(item));
+    for item in items.keys() {
+        media
+            .owners
+            .entry(item.clone())
+            .or_insert_with(|| workspace.selections.next_source().0);
+    }
+    let mut retained: Vec<_> = media.owners.values().map(|owner| vec![*owner]).collect();
+    retained.extend(preview.map(<[u64]>::to_vec));
+    media.fetcher.retain_resources(&retained);
+    items
+        .into_iter()
+        .filter_map(|(item, revision)| {
+            Some((
+                item.clone(),
+                (
+                    media
+                        .fetcher
+                        .clone()
+                        .owned_by(&[*media.owners.get(&item)?], revision)
+                        .showing(item.as_str()),
+                    revision,
+                ),
+            ))
+        })
+        .collect()
 }

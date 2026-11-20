@@ -115,7 +115,7 @@ fn a_row_revision_is_stable_for_equal_inputs_and_tracks_every_input() {
     let versioned = [(Row::Gap, 1), entry(4)];
     let first = [entry(3)];
     let mut opened = view_with(Status::Done);
-    opened.ui.insert(
+    opened.ui.make_mut().insert(
         ItemId("tool".into()),
         ItemUi {
             expanded: Some(true),

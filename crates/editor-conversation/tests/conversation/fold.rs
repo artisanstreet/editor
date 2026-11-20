@@ -115,7 +115,9 @@ fn a_resumed_agent_shows_its_status_until_it_reports_again() {
         }
         let id = item.id.clone();
         let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
-        view.context.insert(id.clone(), std::sync::Arc::new(item));
+        view.context
+            .make_mut()
+            .insert(id.clone(), std::sync::Arc::new(item));
         fold(&view, None, Some(&id))
             .rows
             .into_iter()

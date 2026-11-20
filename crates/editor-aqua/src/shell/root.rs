@@ -76,6 +76,13 @@ struct ConversationMedia {
     owners: HashMap<artisan_api::ItemId, u64>,
     models: crate::ui::media::model::load::ModelAssets,
     audio: crate::ui::media::audio::AudioAssets,
+    index: Option<MediaIndex>,
+}
+
+struct MediaIndex {
+    items: Option<(u64, u64)>,
+    preview: Option<Vec<u64>>,
+    providers: thread_content::MediaProviders,
 }
 
 impl Drop for ConversationMedia {
@@ -150,6 +157,7 @@ pub struct RootViews {
     markdown_engine: Rc<RefCell<Option<crate::ui::markdown::MarkdownEngine>>>,
     conversation_invalidated: Rc<Cell<bool>>,
     rows_invalidated: Rc<Cell<bool>>,
+    retained_rows: Option<u64>,
     navigation_invalidated: Rc<Cell<bool>>,
     row_token: Option<Rc<Cell<bool>>>,
     row_settled: Rc<RefCell<HashMap<crate::conversation::fold::RowKey, u64>>>,

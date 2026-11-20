@@ -1,5 +1,6 @@
 use super::disclosure::DisclosureState;
 use super::fold::{self, Row, RowKey, RunSummary};
+use super::shared::Shared;
 use super::thread::{self, AnswerState, ThreadView};
 use super::viewport::{Effect, Fetch, Input, Jump};
 use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
@@ -119,11 +120,11 @@ pub struct Conversation {
     host_instance: Option<HostInstance>,
     pub agent: Option<ItemId>,
     pub view: Option<ThreadView>,
-    pub rows: Vec<(Row, u64)>,
+    pub rows: Shared<Vec<(Row, u64)>>,
     rows_epoch: u64,
     row_positions: RefCell<(u64, usize, HashMap<RowKey, usize>)>,
-    pub(crate) runs: BTreeMap<RunId, RunSummary>,
-    pub(crate) turns: fold::Turns,
+    pub(crate) runs: Shared<BTreeMap<RunId, RunSummary>>,
+    pub(crate) turns: Shared<fold::Turns>,
     pub disclosures: DisclosureState,
     pub question_pages: super::questions::QuestionPages,
     question_collection: super::questions::QuestionCollection,
@@ -203,11 +204,11 @@ impl Conversation {
             host_instance: None,
             agent: None,
             view: None,
-            rows: Vec::new(),
+            rows: Shared::default(),
             rows_epoch: next_rows_epoch(),
             row_positions: RefCell::new((0, 0, HashMap::new())),
-            runs: BTreeMap::new(),
-            turns: fold::Turns::default(),
+            runs: Shared::default(),
+            turns: Shared::default(),
             disclosures: DisclosureState::default(),
             question_pages: super::questions::QuestionPages::default(),
             question_collection: super::questions::QuestionCollection::default(),
@@ -488,8 +489,8 @@ impl Conversation {
                 host.observe_thread(None);
             }
             self.view = None;
-            self.rows.clear();
-            self.runs.clear();
+            self.rows = Shared::default();
+            self.runs = Shared::default();
         }
     }
 
@@ -682,14 +683,14 @@ impl Conversation {
                 |id, slot| shape_source(view, id, slot),
             );
             let rows = self.disclosures.retain_disclosure_rows(projected);
-            if rows != self.rows {
-                self.rows = rows;
+            if self.rows != rows {
+                self.rows = Shared::new(rows);
                 self.rows_epoch = next_rows_epoch();
                 self.retain_row_heights();
             }
             self.disclosures.index_disclosure_rows(&self.rows);
-            self.runs = folded.runs;
-            self.turns = folded.turns;
+            self.runs = Shared::new(folded.runs);
+            self.turns = Shared::new(folded.turns);
             super::open_timing::rebuilt(
                 caller_line,
                 fold_time,
@@ -699,11 +700,11 @@ impl Conversation {
             );
         } else {
             if !self.rows.is_empty() {
-                self.rows.clear();
+                self.rows = Shared::default();
                 self.rows_epoch = next_rows_epoch();
             }
-            self.runs.clear();
-            self.turns = fold::Turns::default();
+            self.runs = Shared::default();
+            self.turns = Shared::default();
         }
         self.follow_reply_tail(core);
     }
@@ -813,7 +814,7 @@ impl Conversation {
         let frame = self.disclosures.advance_disclosures(
             &self.rows,
             &self.row_heights,
-            self.view.as_ref().map(|view| (view, &self.turns)),
+            self.view.as_ref().map(|view| (view, &*self.turns)),
             now,
             reduce_motion,
         );
@@ -822,7 +823,7 @@ impl Conversation {
         }
         if !frame.changed.is_empty() {
             let changed: HashSet<_> = frame.changed.iter().collect();
-            for (row, version) in &mut self.rows {
+            for (row, version) in self.rows.make_mut() {
                 if changed.contains(&row.key()) {
                     *version = version.wrapping_add(1);
                 }
@@ -865,7 +866,7 @@ impl Conversation {
             .entry(binding.item.clone())
             .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(0, now));
         arrival.prepared(blocks.max(1), caught_up, fresh, now);
-        for (row, _) in &self.rows {
+        for (row, _) in self.rows.iter() {
             if self.mounted_rows.contains(&row.key())
                 && let Row::Text {
                     id,
@@ -1095,16 +1096,18 @@ impl Conversation {
             .and_then(|id| self.view.as_ref()?.shared_item(id));
         self.agent.clone_from(&agent);
         let effects = if let Some(view) = &mut self.view {
-            view.context.clear();
-            if let Some(item) = context {
-                view.context.insert(item.id.clone(), item);
-            }
+            view.context = Shared::new(
+                context
+                    .into_iter()
+                    .map(|item| (item.id.clone(), item))
+                    .collect(),
+            );
             view.reset()
         } else {
             Vec::new()
         };
-        self.rows.clear();
-        self.runs.clear();
+        self.rows = Shared::default();
+        self.runs = Shared::default();
         if let (Some(agent), Some((host, thread))) = (agent, self.open.as_ref()) {
             if let Some(host) = self
                 .host_instance
@@ -1232,7 +1235,7 @@ impl Conversation {
             }
         }
         if let Some(view) = &mut self.view {
-            view.work_open.insert(run.clone(), open);
+            view.work_open.make_mut().insert(run.clone(), open);
             self.rebuild(core);
         }
     }
@@ -1255,14 +1258,14 @@ impl Conversation {
             );
         }
         if let Some(view) = &mut self.view {
-            view.ui.entry(id.clone()).or_default().chain_open = Some(open);
+            view.ui.make_mut().entry(id.clone()).or_default().chain_open = Some(open);
             self.rebuild(core);
         }
     }
 
     pub(crate) fn toggle_item(&mut self, core: &Core, id: &ItemId, open: bool) {
         if let Some(view) = &mut self.view {
-            view.ui.entry(id.clone()).or_default().expanded = Some(open);
+            view.ui.make_mut().entry(id.clone()).or_default().expanded = Some(open);
             self.rebuild(core);
         }
     }
@@ -1288,7 +1291,9 @@ impl Conversation {
         }
         let request = AnswerRequest(self.next_answer);
         self.next_answer = self.next_answer.wrapping_add(1);
-        view.answers.insert(item.clone(), AnswerState::Sending);
+        view.answers
+            .make_mut()
+            .insert(item.clone(), AnswerState::Sending);
         let client = host.client.clone();
         let origin = Origin {
             host: host.id.clone(),
@@ -1583,7 +1588,7 @@ impl Conversation {
                     if let Some(view) = &mut self.view {
                         for (id, item) in context {
                             if view.context.get(&id).is_none_or(|old| old.seq < item.seq) {
-                                view.context.insert(id, item);
+                                view.context.make_mut().insert(id, item);
                                 changed = true;
                             }
                         }
@@ -1620,6 +1625,7 @@ impl Conversation {
                             }
                             Err(error) => {
                                 view.answers
+                                    .make_mut()
                                     .insert(item, AnswerState::Failed(answer_failure(&error)));
                             }
                         }

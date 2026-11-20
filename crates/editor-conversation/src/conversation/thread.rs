@@ -1,3 +1,4 @@
+use super::shared::Shared;
 use super::viewport::{Effect, Fetch, Input, Jump, State, Viewport};
 use artisan_api::{
     Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, ThreadId, WorkSpan,
@@ -53,34 +54,34 @@ impl ItemUi {
 #[derive(Debug, Clone)]
 pub struct ThreadView {
     pub(crate) thread: ThreadId,
-    pub context: HashMap<ItemId, Arc<Item>>,
-    pub items: BTreeMap<Seq, Arc<Item>>,
-    pub(crate) work: BTreeMap<Seq, WorkSpan>,
-    positions: HashMap<ItemId, Seq>,
+    pub context: Shared<HashMap<ItemId, Arc<Item>>>,
+    pub items: Shared<BTreeMap<Seq, Arc<Item>>>,
+    pub(crate) work: Shared<BTreeMap<Seq, WorkSpan>>,
+    positions: Shared<HashMap<ItemId, Seq>>,
     resident_bytes: usize,
-    pub(crate) live: HashMap<LiveTarget, Arc<ropey::Rope>>,
+    pub(crate) live: Shared<HashMap<LiveTarget, Arc<ropey::Rope>>>,
     pub viewport: Viewport,
-    pub ui: HashMap<ItemId, ItemUi>,
-    pub(crate) answers: HashMap<ItemId, AnswerState>,
-    pub(crate) work_open: HashMap<RunId, bool>,
-    pub runs: HashMap<RunId, Run>,
+    pub ui: Shared<HashMap<ItemId, ItemUi>>,
+    pub(crate) answers: Shared<HashMap<ItemId, AnswerState>>,
+    pub(crate) work_open: Shared<HashMap<RunId, bool>>,
+    pub runs: Shared<HashMap<RunId, Run>>,
 }
 
 impl ThreadView {
     pub fn open(thread: ThreadId) -> (Self, Vec<Effect>) {
         let mut view = Self {
             thread,
-            context: HashMap::new(),
-            items: BTreeMap::new(),
-            work: BTreeMap::new(),
-            positions: HashMap::new(),
+            context: Shared::default(),
+            items: Shared::default(),
+            work: Shared::default(),
+            positions: Shared::default(),
             resident_bytes: 0,
-            live: HashMap::new(),
+            live: Shared::default(),
             viewport: Viewport::default(),
-            ui: HashMap::new(),
-            answers: HashMap::new(),
-            work_open: HashMap::new(),
-            runs: HashMap::new(),
+            ui: Shared::default(),
+            answers: Shared::default(),
+            work_open: Shared::default(),
+            runs: Shared::default(),
         };
         let effects = view.handle(&Input::Open);
         (view, effects)
@@ -93,15 +94,15 @@ impl ThreadView {
     }
 
     pub(crate) fn reset(&mut self) -> Vec<Effect> {
-        self.items.clear();
-        self.work.clear();
-        self.positions.clear();
+        self.items = Shared::default();
+        self.work = Shared::default();
+        self.positions = Shared::default();
         self.resident_bytes = 0;
-        self.live.clear();
-        self.ui.clear();
-        self.answers.clear();
-        self.work_open.clear();
-        self.runs.clear();
+        self.live = Shared::default();
+        self.ui = Shared::default();
+        self.answers = Shared::default();
+        self.work_open = Shared::default();
+        self.runs = Shared::default();
         self.handle(&Input::Open)
     }
 
@@ -139,9 +140,9 @@ impl ThreadView {
 
     pub(crate) fn remember_run(&mut self, run: Run) {
         if run.thread_id == self.thread
-            && self.runs.get(&run.id).is_none_or(|old| old.seq <= run.seq)
+            && self.runs.get(&run.id).is_none_or(|old| old.seq < run.seq)
         {
-            self.runs.insert(run.id.clone(), run);
+            self.runs.make_mut().insert(run.id.clone(), run);
         }
     }
 
@@ -193,13 +194,15 @@ impl ThreadView {
                 Some(known) if known.seq > item.seq || *known == item => return false,
                 _ => {}
             }
-            if let Some(old) = self.items.remove(&position) {
+            if let Some(old) = self.items.make_mut().remove(&position) {
                 self.resident_bytes -= old.resident_bytes();
             }
         }
         self.resident_bytes += item.resident_bytes();
-        self.positions.insert(item.id.clone(), item.position);
-        self.items.insert(item.position, item);
+        self.positions
+            .make_mut()
+            .insert(item.id.clone(), item.position);
+        self.items.make_mut().insert(item.position, item);
         true
     }
 
@@ -220,7 +223,7 @@ impl ThreadView {
             {
                 return false;
             }
-            self.context.insert(item.id.clone(), item);
+            self.context.make_mut().insert(item.id.clone(), item);
             return true;
         }
         let known = self.positions.contains_key(&item.id);
@@ -238,7 +241,7 @@ impl ThreadView {
             return false;
         }
         if let Some(at) = arrived {
-            self.ui.entry(id).or_default().arrived = Some(at);
+            self.ui.make_mut().entry(id).or_default().arrived = Some(at);
         }
         self.trim_window(None);
         true
@@ -311,7 +314,7 @@ impl ThreadView {
             self.ui.retain(|id, _| self.positions.contains_key(id));
         }
         for span in page.work {
-            self.work.insert(span.first, span);
+            self.work.make_mut().insert(span.first, span);
         }
         for item in page.items {
             if item.thread_id == self.thread {
@@ -344,7 +347,7 @@ impl ThreadView {
     }
 
     pub(crate) fn apply_work(&mut self, first: Seq, page: ItemsPage) -> bool {
-        let Some(span) = self.work.get_mut(&first) else {
+        let Some(span) = self.work.make_mut().get_mut(&first) else {
             return false;
         };
         let oldest = page.items.first().map(|item| item.position);
@@ -357,7 +360,7 @@ impl ThreadView {
                     .max(1);
             }
             None => {
-                self.work.remove(&first);
+                self.work.make_mut().remove(&first);
             }
         }
         for run in page.runs {
@@ -495,16 +498,16 @@ impl ThreadView {
         };
         if !from_items {
             if older {
-                self.work.pop_first();
+                self.work.make_mut().pop_first();
             } else {
-                self.work.pop_last();
+                self.work.make_mut().pop_last();
             }
             return true;
         }
         let removed = if older {
-            self.items.pop_first()
+            self.items.make_mut().pop_first()
         } else {
-            self.items.pop_last()
+            self.items.make_mut().pop_last()
         };
         if let Some((_, item)) = removed {
             self.resident_bytes -= item.resident_bytes();
@@ -525,7 +528,7 @@ impl ThreadView {
             _ => {}
         }
         if let Some(text) = text {
-            self.live.insert(target.clone(), text);
+            self.live.make_mut().insert(target.clone(), text);
         } else {
             self.live.remove(target);
         }
@@ -548,7 +551,7 @@ impl ThreadView {
         {
             return false;
         }
-        self.live = live;
+        self.live = Shared::new(live);
         true
     }
 }

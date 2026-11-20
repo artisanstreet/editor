@@ -1,9 +1,9 @@
 {
   "artisan-mentions/mentions/compile_the_title_catalog": 1038000,
   "artisan-mentions/mentions/tokenize_a_mention_heavy_draft": 206300,
-  "editor-conversation/fold/clone_the_row_snapshot_of_a_full_window": 40890,
   "editor-conversation/fold/refold_continued_turns": 286200,
   "editor-conversation/fold/revise_every_row_of_continued_turns": 43790,
+  "editor-conversation/fold/snapshot_a_full_window_once_per_frame_for_a_minute": 95990,
   "editor-conversation/fold/space_every_row_of_continued_turns": 15840,
   "editor-core/pages/apply_a_burst_of_thread_updates": 77600,
   "editor-sidebar/pulses/retain_working_pulses": 5705,

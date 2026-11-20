@@ -52,6 +52,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         .as_mut()
         .unwrap()
         .context
+        .make_mut()
         .insert(
             id.clone(),
             Arc::new(Item {

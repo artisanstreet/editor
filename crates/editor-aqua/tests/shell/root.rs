@@ -20,7 +20,7 @@ fn replies(opened: &mut ThreadShell, count: u64) {
             index + 1,
             assistant_reply(format!("Reply {index}.")),
         ));
-        conversation.rows.push((
+        conversation.rows.make_mut().push((
             Row::Text {
                 id: reply.id.clone(),
                 slot: Slot::Prose,
@@ -34,6 +34,7 @@ fn replies(opened: &mut ThreadShell, count: u64) {
             .as_mut()
             .unwrap()
             .context
+            .make_mut()
             .insert(reply.id.clone(), reply);
     }
 }
@@ -79,7 +80,7 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
                     work: Vec::new(),
                 },
             );
-        workspace.conversation_mut().rows.push((
+        workspace.conversation_mut().rows.make_mut().push((
             Row::Text {
                 id: item.id.clone(),
                 slot: Slot::Text(editor_aqua::conversation::fold::TextSection::User),
@@ -242,7 +243,7 @@ fn mounted_root_prepares_only_realized_bodies_and_releases_sources_on_navigation
         .unwrap()
         .context
         .remove(&removed);
-    workspace.conversation_mut().rows.remove(0);
+    workspace.conversation_mut().rows.make_mut().remove(0);
     let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
     resources.ui.refresh(vec![element]).unwrap();
     resources.ui.layout().unwrap();
@@ -564,7 +565,7 @@ fn a_reveal_whose_row_disappeared_does_not_hold_back_jumping_to_the_latest_messa
     let conversation = shell.entry.workspace_mut().unwrap().conversation_mut();
     let last = conversation.rows[39].0.key();
     conversation.reveal_row(39);
-    conversation.rows.truncate(30);
+    conversation.rows.make_mut().truncate(30);
     assert_eq!(
         resolve_scroll(conversation, &ScrollAction::Row(last), true),
         ScrollResolution::Cancelled

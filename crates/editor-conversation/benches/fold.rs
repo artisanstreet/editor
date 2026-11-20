@@ -5,12 +5,14 @@ use artisan_api::{
 use editor_conversation::adapter::RowLayout;
 use editor_conversation::disclosure::RowDisclosure;
 use editor_conversation::fold::{expanded, fold};
+use editor_conversation::shared::Shared;
 use editor_conversation::thread::ThreadView;
 use editor_conversation::view::factory::RowFingerprint;
 
 const TURNS: u64 = 150;
 const RUNS_PER_TURN: u64 = 5;
 const TOOLS_PER_RUN: u64 = 3;
+const FRAMES_PER_MINUTE: usize = 3_600;
 
 fn main() {
     divan::main();
@@ -90,6 +92,7 @@ fn continued_turns() -> ThreadView {
                 RunStatus::Cancelled
             };
             view.runs
+                .make_mut()
                 .insert(id.clone(), run(&id, status, started, part > 0));
             if part == 0 {
                 position += 1;
@@ -141,11 +144,17 @@ fn refold_continued_turns(bencher: divan::Bencher<'_, '_>) {
 }
 
 #[divan::bench(sample_count = 20)]
-fn clone_the_row_snapshot_of_a_full_window(bencher: divan::Bencher<'_, '_>) {
+fn snapshot_a_full_window_once_per_frame_for_a_minute(bencher: divan::Bencher<'_, '_>) {
     let view = continued_turns();
     let folded = fold(&view, None, None);
-    let rows = expanded(&view, folded.rows, &folded.runs);
-    bencher.bench_local(|| (view.clone(), rows.clone(), folded.runs.clone()));
+    let rows = Shared::new(expanded(&view, folded.rows, &folded.runs));
+    let runs = Shared::new(folded.runs);
+    let turns = Shared::new(folded.turns);
+    bencher.bench_local(|| {
+        for _ in 0..FRAMES_PER_MINUTE {
+            divan::black_box((view.clone(), rows.clone(), runs.clone(), turns.clone()));
+        }
+    });
 }
 
 #[divan::bench(sample_count = 20)]

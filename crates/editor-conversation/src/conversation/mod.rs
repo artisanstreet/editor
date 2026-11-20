@@ -16,6 +16,7 @@ pub mod projection;
 pub mod questions;
 pub mod read;
 pub mod scroll;
+pub mod shared;
 pub mod stored;
 pub mod thread;
 pub mod view;

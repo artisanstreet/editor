@@ -7,6 +7,7 @@ use artisan_api::{RunId, ThreadId};
 use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::fold::Row;
 use editor_aqua::conversation::presentation::{MarkdownOwners, PresentationScope};
+use editor_aqua::conversation::shared::Shared;
 use editor_aqua::conversation::view::transcript::TranscriptObservations;
 use editor_aqua::conversation::viewport::{Fetch, Input};
 use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
@@ -40,10 +41,10 @@ fn a_work_only_tail_keeps_loading_history_without_waiting_for_text() {
             more: true,
         },
     );
-    conversation.rows = vec![
+    conversation.rows = Shared::new(vec![
         (Row::WorkHeader(RunId::from("done")), 1),
         (Row::Status(RunId::from("live")), 1),
-    ];
+    ]);
     assert!(!conversation.view.as_ref().unwrap().viewport.in_flight);
     let scope = PresentationScope::capture(&conversation, &core).unwrap();
     let app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());

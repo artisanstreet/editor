@@ -7,6 +7,7 @@ use editor_aqua::conversation::fold::Slot;
 use editor_aqua::conversation::presentation::{
     BodyKey, MarkdownOwners, MarkdownRender, PreparedElement, PresentationScope, SelectionOwners,
 };
+use editor_aqua::conversation::shared::Shared;
 use editor_aqua::core::Core;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -43,7 +44,7 @@ fn measured_heights_ignore_stale_rows_and_invalid_values() {
     let dir = tempfile::tempdir().unwrap();
     let core = test_core(dir.path());
     let mut conversation = Conversation::new(&core);
-    conversation.rows = vec![(Row::Gap, 7)];
+    conversation.rows = Shared::new(vec![(Row::Gap, 7)]);
     assert!(!apply_heights(
         &mut conversation,
         [height(6, 40.0), height(7, f32::NAN)]

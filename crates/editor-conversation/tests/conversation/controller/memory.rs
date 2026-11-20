@@ -49,7 +49,7 @@ fn a_parked_thread_counts_its_streaming_text() {
     finish_tail(&mut conversation, &mut core);
     let mut view = conversation.view.take().unwrap();
     let streamed = "token ".repeat(512 * 1024);
-    view.live.insert(
+    view.live.make_mut().insert(
         artisan_api::LiveTarget::Text {
             item_id: ItemId("current".into()),
         },

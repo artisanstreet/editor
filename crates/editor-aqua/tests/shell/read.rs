@@ -93,7 +93,7 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
                 work: Vec::new(),
             },
         );
-    workspace.conversation_mut().rows.push((
+    workspace.conversation_mut().rows.make_mut().push((
         Row::Text {
             id: reply.id,
             slot: Slot::Prose,
