@@ -326,6 +326,8 @@ jobs:
           tool: cargo-nextest@0.9.152
       - *restore-target-cargo
       - run: rustup show
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets
       - name: Build service integration fixtures
         run: cargo build --locked -p ae -p forge
       - name: Tests
