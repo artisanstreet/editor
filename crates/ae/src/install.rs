@@ -1501,10 +1501,10 @@ fn choose_editor(release: &Release, version: &str) -> Result<EditorPlace, Instal
     }
     if platform::has_desktop() && release.has(App::Editor, os()) {
         let label = if wsl {
-            format!(
-                "In {} (WSL)",
-                std::env::var("WSL_DISTRO_NAME").unwrap_or_default()
-            )
+            match std::env::var_os("WSL_DISTRO_NAME") {
+                Some(distro) => format!("In {} (WSL)", distro.to_string_lossy()),
+                None => "In WSL".to_owned(),
+            }
         } else {
             format!("On {}", this_machine())
         };
