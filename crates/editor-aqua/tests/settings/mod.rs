@@ -1058,3 +1058,67 @@ fn signed_in_account_page_opens_the_terms_and_privacy_policy() {
         assert_eq!(opened.borrow_mut().pop(), Some(link.url()), "{key}");
     }
 }
+
+#[test]
+fn settings_pages_expose_their_title_and_sections_as_headings() {
+    use aqua::UiApp;
+    use aqua_core::Role;
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::core::{Screen, SettingsPage};
+    use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view::build};
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::rc::Rc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let controller = SettingsController::default();
+    let mut headings = |page: SettingsPage| {
+        core.navigate(Screen::Settings(page));
+        let mut element = Some(build(
+            &controller,
+            &core,
+            &ArtisanTheme::resolved(),
+            &BuildInfo::default(),
+            aqua_core::Size::new(900.0, 2000.0),
+            true,
+            Rc::new(|_| {}),
+        ));
+        let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+        app.mount(move |_| element.take().expect("the page mounts once"))
+            .expect("the settings page mounts");
+        app.set_viewport(900.0, 2000.0, 1.0);
+        app.build_frame().expect("the settings page lays out");
+        app.tree()
+            .emit_semantics()
+            .into_iter()
+            .filter_map(|node| {
+                let Role::Heading(level) = node.role else {
+                    return None;
+                };
+                Some((level, node.label))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        headings(SettingsPage::General),
+        [
+            (1, "General".to_owned()),
+            (2, "Appearance".to_owned()),
+            (2, "Text Streaming".to_owned()),
+            (2, "Notifications".to_owned()),
+            (2, "Performance".to_owned()),
+        ]
+    );
+    for page in [
+        SettingsPage::About,
+        SettingsPage::Account,
+        SettingsPage::Hosts,
+    ] {
+        let titles: Vec<_> = headings(page)
+            .into_iter()
+            .filter(|(level, _)| *level == 1)
+            .map(|(_, title)| title)
+            .collect();
+        assert_eq!(titles, [page.label()], "{page:?} has one page title");
+    }
+}

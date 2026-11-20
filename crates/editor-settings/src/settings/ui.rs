@@ -117,7 +117,7 @@ pub(crate) fn button(
 
 pub(crate) fn header(theme: &ArtisanTheme, title: &str, description: &str) -> Element {
     stack(Space::S8)
-        .child(text(theme, TextRole::Heading, Ink::Plain, title))
+        .child(text(theme, TextRole::Heading, Ink::Plain, title).role(aqua_core::Role::Heading(1)))
         .child(text(theme, TextRole::Label, Ink::Muted, description))
         .build()
 }
@@ -131,7 +131,9 @@ pub(crate) fn section(
 ) -> Element {
     let mut heading = stack(Space::S4)
         .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-        .child(text(theme, TextRole::LabelStrong, Ink::Plain, title));
+        .child(
+            text(theme, TextRole::LabelStrong, Ink::Plain, title).role(aqua_core::Role::Heading(2)),
+        );
     if let Some(intro) = intro {
         heading = heading.child(text(theme, TextRole::Caption, Ink::Muted, intro));
     }

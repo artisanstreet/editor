@@ -3,7 +3,7 @@ source: crates/editor-aqua/tests/scenario/palette.rs
 expression: "editor.settle_part(\"the palette to open with its search focused\",\nRole::Dialog, Some(\"Search threads and commands\"), |view|\n{ view.focused().is_some_and(|focused| focused.role == Role::TextInput) })"
 ---
 Dialog "Search threads and commands"
-  Label "Search threads and commands"
+  Heading "Search threads and commands"
   Button "Close"
   TextInput "Search threads and commands" [focused]
   Button "New thread" [selected]

@@ -442,7 +442,12 @@ pub(crate) fn home(theme: &ArtisanTheme, forges: Element) -> Element {
         .layout("column")
         .spaced(Space::S8)
         .style(Style::new().align(AlignItems::CENTER))
-        .child(TextRole::Heading.text(theme, "Choose a Forge").build())
+        .child(
+            TextRole::Heading
+                .text(theme, "Choose a Forge")
+                .build()
+                .role(aqua_core::Role::Heading(1)),
+        )
         .child(
             UiBox::new()
                 .width(Length::Pct(100.0))

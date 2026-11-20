@@ -97,7 +97,7 @@ fn heading(theme: &ArtisanTheme, setup: &Setup) -> Element {
                 .min_width(Length::Pct(0.0))
                 .align(AlignItems::END),
         )
-        .child(wrapped(TextRole::Heading.text(theme, title)))
+        .child(wrapped(TextRole::Heading.text(theme, title)).role(aqua_core::Role::Heading(1)))
         .child(muted(theme, TextRole::Caption, &detail))
         .build()
 }

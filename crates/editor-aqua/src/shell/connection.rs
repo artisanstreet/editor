@@ -286,7 +286,12 @@ impl ConnectionPresenter {
                 .layout("column")
                 .style(Style::new().align(AlignItems::CENTER))
                 .spaced(Space::S8)
-                .child(TextRole::Heading.text(theme, title).build())
+                .child(
+                    TextRole::Heading
+                        .text(theme, title)
+                        .build()
+                        .role(Role::Heading(1)),
+                )
                 .child(
                     UiBox::new()
                         .style(Style::new().max_width(Length::Px(TEXT_WIDTH)))

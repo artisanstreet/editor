@@ -307,7 +307,8 @@ fn hero(
             TextRole::Heading
                 .text(theme, "Marketplace")
                 .wrap(false)
-                .build(),
+                .build()
+                .role(aqua_core::Role::Heading(1)),
         )
         .child(
             UiBox::new()

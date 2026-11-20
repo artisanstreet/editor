@@ -108,7 +108,8 @@ impl Dialog {
         let title = TextRole::Heading
             .text(&theme, self.title.clone())
             .style(Style::new().min_width(Length::Px(0.0)).flex_grow(1.0))
-            .build();
+            .build()
+            .role(Role::Heading(1));
         let mut close = IconButton::new(
             "dialog-close",
             theme,
