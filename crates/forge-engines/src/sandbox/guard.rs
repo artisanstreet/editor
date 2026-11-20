@@ -199,13 +199,6 @@ fn keep_copy(copies: &Path, bytes: &[u8]) -> io::Result<String> {
     Ok(named)
 }
 
-fn kept_copy(copies: &Path, digest: &str, relative: &Path) -> io::Result<Vec<u8>> {
-    match fs::read(copies.join(digest)) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::read(copies.join(relative)),
-        read => read,
-    }
-}
-
 fn unreferenced_copies(copies: &Path, manifest: &Manifest) -> io::Result<()> {
     let referenced: BTreeSet<&str> = manifest
         .values()
@@ -712,12 +705,10 @@ impl Walk<'_> {
                 ..
             }) => {
                 let copy = self.copies.join(wanted);
-                let bytes = kept_copy(self.copies, wanted, child).map_err(|source| {
-                    GuardError::Restore {
-                        engine: self.engine,
-                        path: copy.clone(),
-                        source,
-                    }
+                let bytes = fs::read(&copy).map_err(|source| GuardError::Restore {
+                    engine: self.engine,
+                    path: copy.clone(),
+                    source,
                 })?;
                 if digest(&bytes) != *wanted {
                     return Err(GuardError::CopyChanged {
@@ -889,7 +880,7 @@ fn trusted_copy(
     };
     let copies = snapshot.join(COPIES);
     let copy = copies.join(wanted);
-    let bytes = kept_copy(&copies, wanted, relative).map_err(|source| GuardError::Read {
+    let bytes = fs::read(&copy).map_err(|source| GuardError::Read {
         engine,
         path: copy.clone(),
         source,
