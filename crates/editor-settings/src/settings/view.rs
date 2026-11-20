@@ -668,11 +668,7 @@ fn notifications(
     emit: Rc<dyn Fn(ViewAction)>,
     include_header: bool,
 ) -> Element {
-    let enabled = core
-        .settings()
-        .get("notifications")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
+    let enabled = core.settings().preferences().notifications.on();
     let control = Switch::new("settings-switch-notify", *theme, enabled, "Notify me")
         .on_change(move |enabled| emit(ViewAction::SetNotifications(enabled)))
         .build();
@@ -1078,11 +1074,7 @@ fn performance(
     emit: Rc<dyn Fn(ViewAction)>,
     include_header: bool,
 ) -> Element {
-    let lowered = core
-        .settings()
-        .get("lower_refresh_rate")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let lowered = core.settings().preferences().lower_refresh_rate.on();
     let control = Switch::new(
         "settings-lower-refresh-rate",
         *theme,
@@ -1100,11 +1092,7 @@ fn performance(
         "Caps animation and scrolling at 60 frames per second to save power.",
         Some(control),
     );
-    let monitor_sync = core
-        .settings()
-        .get("graphics_vsync")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
+    let monitor_sync = core.settings().preferences().graphics_vsync.on();
     let monitor_control = Switch::new(
         "settings-monitor-refresh-rate",
         *theme,
@@ -1142,15 +1130,9 @@ fn streaming_entries() -> Vec<SelectEntry<&'static str>> {
 }
 
 fn streaming_value(core: &Core) -> &'static str {
-    if core
-        .settings()
-        .get("streaming_mode")
-        .and_then(serde_json::Value::as_str)
-        == Some("swift")
-    {
-        "swift"
-    } else {
-        "smooth"
+    match core.settings().preferences().streaming {
+        editor_core::Streaming::Smooth => "smooth",
+        editor_core::Streaming::Swift => "swift",
     }
 }
 
@@ -1221,15 +1203,9 @@ fn font_entries() -> Vec<SelectEntry<&'static str>> {
 }
 
 fn font_value(core: &Core) -> &'static str {
-    if core
-        .settings()
-        .get("font_set")
-        .and_then(serde_json::Value::as_str)
-        == Some("system")
-    {
-        "system"
-    } else {
-        "spline"
+    match core.settings().preferences().fonts {
+        editor_core::Fonts::Spline => "spline",
+        editor_core::Fonts::System => "system",
     }
 }
 
@@ -1287,10 +1263,7 @@ fn appearance(
     let hide_bad = Switch::new(
         "settings-switch-hide-bad-model-options",
         *theme,
-        core.settings()
-            .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true),
+        core.settings().preferences().hide_bad_model_options.on(),
         "Hide bad model options",
     )
     .on_change(move |enabled| hide_options(ViewAction::SetHideBadModelOptions(enabled)))
@@ -1298,10 +1271,7 @@ fn appearance(
     let all_models = Switch::new(
         "settings-switch-show-all-models",
         *theme,
-        core.settings()
-            .get(artisan_api::SHOW_ALL_MODELS_KEY)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        core.settings().preferences().show_all_models.on(),
         "Show all models",
     )
     .on_change(move |enabled| show_models(ViewAction::SetShowAllModels(enabled)))
@@ -1309,10 +1279,7 @@ fn appearance(
     let outline = Switch::new(
         "settings-switch-outline-text",
         *theme,
-        core.settings()
-            .get("outline_text")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true),
+        core.settings().preferences().outline_text.on(),
         "Outline text rendering",
     )
     .on_change(move |enabled| emit(ViewAction::SetOutlineText(enabled)))
@@ -1366,10 +1333,7 @@ fn access_rows(
     core: &Core,
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> [Element; 2] {
-    let preferences = editor_ui::preferences::Preferences::from_core(
-        core,
-        editor_ui::preferences::SystemAccess::default(),
-    );
+    let preferences = core.settings().preferences();
     [
         ui::row(
             theme,
@@ -1378,7 +1342,7 @@ fn access_rows(
             Some(ui::fixed(text_size(
                 controller,
                 theme,
-                preferences.text_scale,
+                preferences.text_percent,
                 Rc::clone(emit),
             ))),
         ),
@@ -1396,27 +1360,14 @@ fn access_rows(
     ]
 }
 
-const TEXT_SIZES: [u32; 6] = [100, 125, 150, 175, 200, 225];
-
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the stored scale is clamped to 1..=2.25"
-)]
-fn percent(scale: f32) -> u32 {
-    (scale * 100.0).round() as u32
-}
-
-fn text_size_entries(chosen: Option<u32>) -> Vec<SelectEntry<Option<u32>>> {
-    let mut sizes: Vec<u32> = TEXT_SIZES.into_iter().chain(chosen).collect();
-    sizes.sort_unstable();
-    sizes.dedup();
-    std::iter::once(SelectEntry::item(None, "Match system"))
-        .chain(
-            sizes
-                .into_iter()
-                .map(|percent| SelectEntry::item(Some(percent), format!("{percent}%"))),
-        )
+fn text_size_entries() -> Vec<SelectEntry<Option<u32>>> {
+    let sizes = artisan_api::choice_values("text_scale");
+    sizes
+        .iter()
+        .map(|size| match size {
+            None => SelectEntry::item(None, "Match system"),
+            Some(percent) => SelectEntry::item(Some(*percent), format!("{percent}%")),
+        })
         .collect()
 }
 
@@ -1426,17 +1377,12 @@ pub fn text_size_menu(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> SelectMenu<Option<u32>> {
-    let chosen = editor_ui::preferences::Preferences::from_core(
-        core,
-        editor_ui::preferences::SystemAccess::default(),
-    )
-    .text_scale
-    .map(percent);
+    let chosen = core.settings().preferences().text_percent;
     let change = Rc::clone(&emit);
     SelectMenu::new(
         *theme,
         Some(chosen),
-        text_size_entries(chosen),
+        text_size_entries(),
         Rc::clone(&controller.text_size_select),
         ui::CONTROL_WIDTH,
     )
@@ -1447,16 +1393,15 @@ pub fn text_size_menu(
 fn text_size(
     controller: &SettingsController,
     theme: &ArtisanTheme,
-    scale: Option<f32>,
+    chosen: Option<u32>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let chosen = scale.map(percent);
     let change = Rc::clone(&emit);
     Select::new(
         "settings-text-size",
         *theme,
         Some(chosen),
-        text_size_entries(chosen),
+        text_size_entries(),
         Rc::clone(&controller.text_size_select),
     )
     .label("Text size")
@@ -1479,11 +1424,7 @@ pub fn high_contrast_menu(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> SelectMenu<Option<bool>> {
-    let chosen = editor_ui::preferences::Preferences::from_core(
-        core,
-        editor_ui::preferences::SystemAccess::default(),
-    )
-    .high_contrast;
+    let chosen = core.settings().preferences().high_contrast;
     let change = Rc::clone(&emit);
     SelectMenu::new(
         *theme,
@@ -1537,7 +1478,7 @@ struct ViewSnapshot {
     account: editor_core::AccountPhase,
     account_error: Option<Problem>,
     local_forge: editor_core::LocalForge,
-    device_settings: Vec<Option<serde_json::Value>>,
+    device_settings: ShownPreferences,
     device_settings_error: (bool, Option<Problem>),
     host_settings: Vec<Option<serde_json::Value>>,
     setting_failures: Vec<(SettingKey, super::preferences::SettingFailure)>,
@@ -1561,17 +1502,37 @@ struct ViewSnapshot {
     menus: OpenMenus,
 }
 
+type ShownPreferences = (
+    [bool; 7],
+    [Option<bool>; 2],
+    Option<u32>,
+    editor_core::Fonts,
+    editor_core::Streaming,
+    editor_core::Browser,
+);
+
+fn shown(preferences: &editor_core::EditorPreferences) -> ShownPreferences {
+    (
+        [
+            preferences.dark_mode.on(),
+            preferences.outline_text.on(),
+            preferences.notifications.on(),
+            preferences.lower_refresh_rate.on(),
+            preferences.graphics_vsync.on(),
+            preferences.hide_bad_model_options.on(),
+            preferences.show_all_models.on(),
+        ],
+        [preferences.reduced_motion, preferences.high_contrast],
+        preferences.text_percent,
+        preferences.fonts,
+        preferences.streaming,
+        preferences.browser.clone(),
+    )
+}
+
 impl ViewSnapshot {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the snapshot reads every field the settings view renders, one line each"
-    )]
     fn capture(controller: &SettingsController, core: &Core) -> Self {
         let host = core.active_host();
-        let preferences = editor_ui::preferences::Preferences::from_core(
-            core,
-            editor_ui::preferences::SystemAccess::default(),
-        );
         let host_keys = [
             "retry_when_overloaded",
             "continue_after_usage_limit",
@@ -1587,25 +1548,7 @@ impl ViewSnapshot {
             account: core.account().phase().clone(),
             account_error: core.account().last_error().cloned(),
             local_forge: core.account().local_forge(),
-            device_settings: vec![
-                Some(serde_json::json!(preferences.theme.is_dark())),
-                Some(serde_json::json!(preferences.fonts.key())),
-                Some(serde_json::json!(preferences.outline_text)),
-                Some(serde_json::json!(preferences.text_scale)),
-                Some(serde_json::json!(preferences.high_contrast)),
-                Some(serde_json::json!(matches!(
-                    preferences.streaming,
-                    editor_ui::preferences::StreamingMode::Swift
-                ))),
-                Some(serde_json::json!(preferences.lower_frame_rate)),
-                Some(serde_json::json!(preferences.vsync)),
-                Some(serde_json::json!(
-                    core.settings()
-                        .get("notifications")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true)
-                )),
-            ],
+            device_settings: shown(core.settings().preferences()),
             device_settings_error: (
                 core.settings().unreadable().is_some(),
                 controller.editor_setting_error.clone(),

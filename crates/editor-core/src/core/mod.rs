@@ -47,7 +47,9 @@ pub(crate) use resident::CollectionBytes;
 pub use resident::ResidentBytes;
 pub use screen::{DeepLinkError, DraggedThread, Screen, SettingsPage, SettingsSection};
 pub use services::{DialRelay, RelayDialRequest, RelayRoute, Services};
-pub use settings::{SetSettingError, Settings, StoredSettingError};
+pub use settings::{
+    Browser, EditorPreferences, Fonts, SetSettingError, Settings, StoredSettingError, Streaming,
+};
 pub use settings_writer::{SettingsSave, SettingsShutdown, drain_settings};
 pub use store::{Core, CoreEvent, OpenCoreError};
 pub mod diagnostics;

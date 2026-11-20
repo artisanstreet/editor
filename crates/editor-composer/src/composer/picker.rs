@@ -270,16 +270,9 @@ impl PickerState {
         core: &editor_core::Core,
         host: &editor_core::HostData,
     ) {
-        self.show_all_models = core
-            .settings()
-            .get(artisan_api::SHOW_ALL_MODELS_KEY)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        self.hide_bad_model_options = core
-            .settings()
-            .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
+        let preferences = core.settings().preferences();
+        self.show_all_models = preferences.show_all_models.on();
+        self.hide_bad_model_options = preferences.hide_bad_model_options.on();
         self.customizations = host.settings.model_customizations().to_vec();
     }
 

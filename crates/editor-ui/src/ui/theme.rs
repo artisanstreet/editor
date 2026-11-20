@@ -808,20 +808,12 @@ pub enum FontSet {
 }
 
 impl FontSet {
-    const ALL: [Self; 2] = [Self::System, Self::Spline];
     #[must_use]
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::Spline => "spline",
-            Self::System => "system",
+    pub(crate) const fn chosen(fonts: editor_core::Fonts) -> Self {
+        match fonts {
+            editor_core::Fonts::Spline => Self::Spline,
+            editor_core::Fonts::System => Self::System,
         }
-    }
-    #[must_use]
-    pub(crate) fn from_key(key: Option<&str>) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|fonts| Some(fonts.key()) == key)
-            .unwrap_or_default()
     }
 
     const fn sans(self) -> &'static str {

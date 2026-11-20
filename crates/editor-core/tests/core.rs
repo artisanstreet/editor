@@ -8,6 +8,8 @@ mod client_error;
 mod connection;
 #[path = "core/host/database_rollback.rs"]
 mod database_rollback;
+#[path = "core/settings.rs"]
+mod editor_settings;
 #[path = "core/host.rs"]
 mod host;
 #[path = "core/hosts.rs"]

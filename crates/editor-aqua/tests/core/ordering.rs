@@ -636,8 +636,8 @@ fn observer_mutations_dispatch_before_next_transition_and_nested_drain_is_deferr
             ..
         } => {
             events.push("host-first");
-            core.set_setting("observer-test", true.into())
-                .expect("observer-test saves");
+            core.set_setting("browser", "Helium".into())
+                .expect("the browser setting saves");
             core.drain_with(|_, _| nested = true);
         }
         CoreEvent::SettingsChanged => events.push("settings"),
@@ -682,8 +682,8 @@ fn observer_effect_follows_sibling_effects_from_the_same_transition() {
             ..
         } => {
             events.push("thread");
-            core.set_setting("observer-test", true.into())
-                .expect("observer-test saves");
+            core.set_setting("browser", "Helium".into())
+                .expect("the browser setting saves");
         }
         CoreEvent::Host {
             event: HostEvent::Changed,
@@ -718,8 +718,8 @@ fn observer_cross_domain_effects_follow_existing_siblings_and_see_final_state() 
         } => {
             events.push("thread");
             core.host_mut(&id).unwrap().load_prompt(false);
-            core.set_setting("observer-test", true.into())
-                .expect("observer-test saves");
+            core.set_setting("browser", "Helium".into())
+                .expect("the browser setting saves");
         }
         CoreEvent::Host {
             event: HostEvent::Changed,

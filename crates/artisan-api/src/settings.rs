@@ -12,6 +12,7 @@ pub enum SettingOwner {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SettingKind {
     Bool,
+    SystemSwitch,
     ModelCustomizations,
     Choice { values: &'static [Option<u32>] },
     Options { values: &'static [&'static str] },
@@ -22,6 +23,8 @@ pub enum SettingKind {
 pub enum SettingValueError {
     #[error("{key} takes true or false")]
     NotBool { key: &'static str },
+    #[error("{key} takes true, false or null to follow the system")]
+    NotSystemSwitch { key: &'static str },
     #[error("{key} takes {hint}")]
     NotText {
         key: &'static str,
@@ -117,6 +120,8 @@ impl SettingDecl {
                 .map_err(|source| SettingValueError::ModelCustomizations { key, source }),
             SettingKind::Bool if value.is_boolean() => Ok(()),
             SettingKind::Bool => Err(SettingValueError::NotBool { key }),
+            SettingKind::SystemSwitch if value.is_boolean() || value.is_null() => Ok(()),
+            SettingKind::SystemSwitch => Err(SettingValueError::NotSystemSwitch { key }),
             SettingKind::Text { .. } if value.is_string() => Ok(()),
             SettingKind::Text { hint } => Err(SettingValueError::NotText { key, hint }),
             SettingKind::Options { values } => match value.as_str() {
@@ -329,10 +334,38 @@ pub const SETTINGS: &[SettingDecl] = &[
     SettingDecl {
         key: "reduced_motion",
         owner: SettingOwner::Editor,
-        kind: SettingKind::Bool,
-        default: "false",
+        kind: SettingKind::SystemSwitch,
+        default: "null",
         label: "Reduce motion",
-        description: "Turn off nonessential animation in the Editor.",
+        description: "Turn off nonessential animation in the Editor; null follows the system's reduced motion setting.",
+        needs_approval: false,
+    },
+    SettingDecl {
+        key: "high_contrast",
+        owner: SettingOwner::Editor,
+        kind: SettingKind::SystemSwitch,
+        default: "null",
+        label: "High contrast",
+        description: "Draw text, borders and focus rings with stronger contrast; null follows the system's contrast setting.",
+        needs_approval: false,
+    },
+    SettingDecl {
+        key: "text_scale",
+        owner: SettingOwner::Editor,
+        kind: SettingKind::Choice {
+            values: &[
+                None,
+                Some(100),
+                Some(125),
+                Some(150),
+                Some(175),
+                Some(200),
+                Some(225),
+            ],
+        },
+        default: "null",
+        label: "Text size",
+        description: "How large the Editor draws its text, in percent; null follows the system text size.",
         needs_approval: false,
     },
 ];
@@ -342,6 +375,21 @@ pub fn switch_decl(key: &str) -> &'static SettingDecl {
     setting_decl(key)
         .filter(|decl| matches!(decl.kind, SettingKind::Bool))
         .unwrap_or_else(|| unreachable!("invariant: {key} is a declared on or off setting"))
+}
+
+#[must_use]
+pub fn choice_values(key: &str) -> &'static [Option<u32>] {
+    match setting_decl(key).map(|decl| decl.kind) {
+        Some(SettingKind::Choice { values }) => values,
+        Some(
+            SettingKind::Bool
+            | SettingKind::SystemSwitch
+            | SettingKind::ModelCustomizations
+            | SettingKind::Options { .. }
+            | SettingKind::Text { .. },
+        )
+        | None => unreachable!("invariant: {key} is a declared choice setting"),
+    }
 }
 
 #[must_use]

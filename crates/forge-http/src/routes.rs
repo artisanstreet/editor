@@ -295,6 +295,7 @@ impl Rejected {
             }),
             Self::SettingValue(
                 error @ (Value::NotBool { key }
+                | Value::NotSystemSwitch { key }
                 | Value::NotText { key, .. }
                 | Value::NotAChoice { key, .. }
                 | Value::NotAnOption { key, .. }

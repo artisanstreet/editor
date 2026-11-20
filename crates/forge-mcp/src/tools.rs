@@ -1379,6 +1379,9 @@ pub(crate) async fn call(
                 };
                 let allowed = match &decl.kind {
                     artisan_api::SettingKind::Bool => "true or false".to_owned(),
+                    artisan_api::SettingKind::SystemSwitch => {
+                        "true, false or null to follow the system".to_owned()
+                    }
                     artisan_api::SettingKind::ModelCustomizations => {
                         "versioned model customization object: {version: 1, rules: [...]}"
                             .to_owned()

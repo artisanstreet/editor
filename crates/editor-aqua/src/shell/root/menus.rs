@@ -5,12 +5,10 @@ use std::rc::Rc;
 
 impl RootViews {
     pub(super) fn warm_browser(&mut self, shell: &Shell) {
-        let preferred = shell
-            .core
-            .settings()
-            .get("browser")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
+        let preferred = match &shell.core.settings().preferences().browser {
+            crate::core::Browser::SystemDefault => None,
+            crate::core::Browser::Named(name) => Some(name.clone()),
+        };
         if self
             .browser_lookup
             .browser

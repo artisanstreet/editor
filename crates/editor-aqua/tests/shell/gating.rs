@@ -305,14 +305,14 @@ fn rebuilds_follow_state_changes_and_effect_only_focus_is_applied() {
     assert_eq!(builds.get(), 2);
     app.shell
         .core
-        .set_setting("shell-gating-test", serde_json::json!(true))
-        .expect("shell-gating-test saves");
+        .set_setting("browser", serde_json::json!("Helium"))
+        .expect("the browser setting saves");
     aqua.dispatch_wake(&mut app, id);
     assert_eq!(builds.get(), 3);
     app.shell
         .core
-        .set_setting("shell-gating-test", serde_json::json!(true))
-        .expect("shell-gating-test saves");
+        .set_setting("browser", serde_json::json!("Helium"))
+        .expect("the browser setting saves");
     aqua.dispatch_wake(&mut app, id);
     assert_eq!(builds.get(), 3);
     size.width = 900.0;

@@ -71,38 +71,31 @@ pub struct Preferences {
 
 impl Preferences {
     pub fn from_core(core: &Core, system: SystemAccess) -> Self {
-        let settings = core.settings();
-        let boolean = |key: &str| settings.get(key).and_then(serde_json::Value::as_bool);
-        let string = |key: &str| settings.get(key).and_then(serde_json::Value::as_str);
+        let chosen = core.settings().preferences();
         Self {
-            theme: if boolean("dark_mode").unwrap_or(true) {
+            theme: if chosen.dark_mode.on() {
                 ThemeMode::Dark
             } else {
                 ThemeMode::Light
             },
-            fonts: FontSet::from_key(string("font_set")),
-            outline_text: boolean("outline_text").unwrap_or(true),
-            reduced_motion: boolean("reduced_motion"),
-            high_contrast: boolean("high_contrast"),
-            text_scale: settings
-                .get("text_scale")
-                .and_then(serde_json::Value::as_f64)
-                .filter(|percent| percent.is_finite())
-                .map(|percent| {
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "the scale is clamped to 1..=2.25"
-                    )]
-                    let scale = (percent.clamp(100.0, 225.0) / 100.0) as f32;
-                    scale
-                }),
-            streaming: if string("streaming_mode") == Some("swift") {
-                StreamingMode::Swift
-            } else {
-                StreamingMode::Smooth
+            fonts: FontSet::chosen(chosen.fonts),
+            outline_text: chosen.outline_text.on(),
+            reduced_motion: chosen.reduced_motion,
+            high_contrast: chosen.high_contrast,
+            text_scale: chosen.text_percent.map(|percent| {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "the declared text sizes are small whole percents"
+                )]
+                let scale = percent as f32 / 100.0;
+                scale
+            }),
+            streaming: match chosen.streaming {
+                editor_core::Streaming::Smooth => StreamingMode::Smooth,
+                editor_core::Streaming::Swift => StreamingMode::Swift,
             },
-            lower_frame_rate: boolean("lower_refresh_rate").unwrap_or(false),
-            vsync: boolean("graphics_vsync").unwrap_or(true),
+            lower_frame_rate: chosen.lower_refresh_rate.on(),
+            vsync: chosen.graphics_vsync.on(),
             system,
         }
     }

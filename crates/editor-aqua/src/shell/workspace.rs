@@ -368,11 +368,7 @@ impl Workspace {
                                 | Screen::Marketplace
                                 | Screen::Usage => None,
                             };
-                            let enabled = core
-                                .settings()
-                                .get("notifications")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(true);
+                            let enabled = core.settings().preferences().notifications.on();
                             let changes = self
                                 .notifications
                                 .thread_changed(host, thread_id, watching, enabled);

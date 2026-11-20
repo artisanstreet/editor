@@ -40,15 +40,7 @@ fn column(width: f32, child: Element) -> Element {
 }
 
 fn entries() -> Vec<SelectEntry<Option<u32>>> {
-    let choices = artisan_api::setting_decl(THREAD_RETENTION_DAYS_KEY)
-        .and_then(|decl| match decl.kind {
-            artisan_api::SettingKind::Choice { values } => Some(values),
-            artisan_api::SettingKind::Bool
-            | artisan_api::SettingKind::ModelCustomizations
-            | artisan_api::SettingKind::Options { .. }
-            | artisan_api::SettingKind::Text { .. } => None,
-        })
-        .unwrap_or(&[]);
+    let choices = artisan_api::choice_values(THREAD_RETENTION_DAYS_KEY);
     choices
         .iter()
         .map(|days| {
