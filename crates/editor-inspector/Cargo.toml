@@ -24,7 +24,6 @@ palette.workspace = true
 thiserror.workspace = true
 diagnostics.workspace = true
 tracing.workspace = true
-tokio-util.workspace = true
 editor-core.workspace = true
 editor-ui.workspace = true
 editor-sources.workspace = true

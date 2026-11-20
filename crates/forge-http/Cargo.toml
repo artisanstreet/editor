@@ -36,7 +36,6 @@ tempfile.workspace = true
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["server", "server-auto", "http1", "http2", "service", "tokio"] }
 reqwest = { workspace = true, features = ["stream", "json"] }
-rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
