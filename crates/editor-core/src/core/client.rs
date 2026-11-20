@@ -67,9 +67,23 @@ impl Request {
 }
 
 const RELAY_ORIGIN: &str = "https://relay.tunnel";
-const ANSWER_BYTES: usize = 32 * 1024 * 1024;
-const RELAY_BYTES: usize = artisan_api::TUNNEL_BODY_MAX_BYTES;
-const RESOURCE_BYTES: usize = 128 * 1024 * 1024;
+#[derive(Clone, Copy, Debug)]
+struct BodyLimit(usize);
+
+impl BodyLimit {
+    const ANSWER: Self = Self::of(32 * 1024 * 1024);
+    const RESOURCE: Self = Self::of(artisan_api::TUNNEL_BODY_MAX_BYTES);
+    const BLOB: Self = Self::of(artisan_api::TUNNEL_BODY_MAX_BYTES);
+
+    const fn of(bytes: usize) -> Self {
+        assert!(
+            bytes <= artisan_api::TUNNEL_BODY_MAX_BYTES,
+            "invariant: every Forge answer limit fits through the Relay, so both transports accept the same answers"
+        );
+        Self(bytes)
+    }
+}
+
 const REFUSAL_BYTES: usize = 64 * 1024;
 
 impl ForgeClient {
@@ -158,25 +172,25 @@ impl ForgeClient {
         &self,
         request: Request,
     ) -> Result<T, CallError> {
-        self.call_decoded(request, ANSWER_BYTES, None, |bytes| {
+        self.call_decoded(request, BodyLimit::ANSWER, None, |bytes| {
             serde_json::from_slice(&bytes).map_err(CallFailure::Decode)
         })
         .await
     }
 
     async fn call_empty(&self, request: Request) -> Result<(), CallError> {
-        self.call_decoded(request, ANSWER_BYTES, None, |_bytes| Ok(()))
+        self.call_decoded(request, BodyLimit::ANSWER, None, |_bytes| Ok(()))
             .await
     }
 
-    async fn call_bytes(&self, request: Request, limit: usize) -> Result<Vec<u8>, CallError> {
+    async fn call_bytes(&self, request: Request, limit: BodyLimit) -> Result<Vec<u8>, CallError> {
         self.call_decoded(request, limit, None, Ok).await
     }
 
     async fn call_decoded<T: Send + 'static>(
         &self,
         request: Request,
-        limit: usize,
+        limit: BodyLimit,
         admission: Option<Arc<tokio::sync::Semaphore>>,
         decode: impl FnOnce(Vec<u8>) -> Result<T, CallFailure> + Send + 'static,
     ) -> Result<T, CallError> {
@@ -196,11 +210,11 @@ impl ForgeClient {
                         None => None,
                     };
                 let bytes = match transport {
-                    Transport::Direct(_) => direct_bytes(builder, limit).await?,
+                    Transport::Direct(_) => direct_bytes(builder, limit.0).await?,
                     Transport::Relay(relay) => {
                         let (method, path, body) = relay_parts(builder)?;
                         relay
-                            .raw_bytes(&method, &path, body, limit.min(RELAY_BYTES))
+                            .raw_bytes(&method, &path, body, limit.0)
                             .await
                             .map_err(CallFailure::Relay)?
                     }
@@ -227,7 +241,7 @@ impl ForgeClient {
     pub async fn state(&self) -> Result<State, CallError> {
         self.call_decoded(
             self.request(reqwest::Method::GET, "/state"),
-            ANSWER_BYTES,
+            BodyLimit::ANSWER,
             None,
             |bytes| decode_state(&bytes),
         )
@@ -292,7 +306,7 @@ impl ForgeClient {
                     ("from_home", if from_home { "true" } else { "false" }),
                 ])
                 .query(&shown.into_iter().collect::<Vec<_>>()),
-            RESOURCE_BYTES,
+            BodyLimit::RESOURCE,
         )
         .await
     }
@@ -457,7 +471,7 @@ impl ForgeClient {
                     offset,
                     limit: Some(limit),
                 }),
-            limit as usize * 6 + 4096,
+            BodyLimit::of(limit as usize * 6 + 4096),
             Some(Arc::clone(source_ranges())),
             move |bytes| {
                 let mut range: artisan_api::ContentRange =
@@ -520,7 +534,7 @@ impl ForgeClient {
                 offset,
                 limit: Some(limit),
             }),
-            artisan_api::COLLECTION_RANGE_BYTES * 6 + 4096,
+            BodyLimit::of(artisan_api::COLLECTION_RANGE_BYTES * 6 + 4096),
             Some(Arc::clone(source_ranges())),
             move |bytes| {
                 let range: artisan_api::CollectionRange<T> =
@@ -586,7 +600,7 @@ impl ForgeClient {
                 offset,
                 limit: Some(limit),
             }),
-            65536,
+            BodyLimit::of(65536),
             Some(admission),
             move |bytes| {
                 let range: artisan_api::SourceIndexRange =
@@ -821,7 +835,7 @@ impl ForgeClient {
     pub async fn blob(&self, hash: &BlobHash) -> Result<Vec<u8>, CallError> {
         self.call_bytes(
             self.request(reqwest::Method::GET, &format!("/blobs/{hash}")),
-            RELAY_BYTES,
+            BodyLimit::BLOB,
         )
         .await
     }
