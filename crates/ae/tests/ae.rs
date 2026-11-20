@@ -261,6 +261,46 @@ fn a_local_build_installs_with_its_version() {
 }
 
 #[test]
+fn uninstalling_ae_itself_names_the_kept_data_instead_of_a_command_it_removed() {
+    let home = tempfile::tempdir().unwrap();
+    let build = home.path().join("stage");
+    let os = build.join(std::env::consts::OS);
+    std::fs::create_dir_all(&os).unwrap();
+    std::fs::write(os.join("ae"), "ae dev").unwrap();
+    std::fs::write(os.join("VERSION"), "0.5.0-dev+abc1234\n").unwrap();
+    let installed = install(home.path(), &build, &SigningKey::from_bytes(&[7; 32]));
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let data = App::Ae.dir_under(&artisan_street(home.path())).join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("kept"), "kept").unwrap();
+
+    let mut command = ae();
+    command.args(["uninstall", "--yes"]);
+    isolate(&mut command, home.path());
+    let output = command.output().unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{said}");
+    assert!(data.join("kept").exists(), "the data is kept: {said}");
+    assert!(
+        said.contains(&data.display().to_string()),
+        "the kept folder is named: {said}"
+    );
+    assert!(
+        !said.contains("ae uninstall --purge"),
+        "no advice to run the ae that was just removed: {said}"
+    );
+}
+
+#[test]
 fn a_failed_install_says_why_not_only_what_failed() {
     let home = tempfile::tempdir().unwrap();
     let release = home.path().join("release");

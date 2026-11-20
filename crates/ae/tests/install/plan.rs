@@ -116,3 +116,24 @@ fn a_purge_that_leaves_no_capturing_app_removes_the_claude_ai_browser_profile() 
     assert!(!purges_claude_ai_browser(true, &[App::Ae]));
     assert!(!purges_claude_ai_browser(false, &[]));
 }
+
+#[test]
+fn kept_data_is_purged_later_only_while_ae_stays_to_do_it() {
+    let forge = PathBuf::from("/street/forge/data");
+    let editor = PathBuf::from("/street/editor/data");
+    let with_data = [(App::Forge, forge.clone()), (App::Editor, editor.clone())];
+
+    assert_eq!(
+        kept_data(&[App::Forge], &with_data, false),
+        KeptData::PurgeLater
+    );
+    assert_eq!(
+        kept_data(&[App::Ae, App::Forge, App::Editor], &with_data, false),
+        KeptData::DeleteByHand(vec![forge, editor])
+    );
+    assert_eq!(
+        kept_data(&[App::Ae, App::Forge, App::Editor], &with_data, true),
+        KeptData::Nothing
+    );
+    assert_eq!(kept_data(&[App::Ae], &with_data, false), KeptData::Nothing);
+}

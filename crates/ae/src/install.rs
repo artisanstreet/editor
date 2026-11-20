@@ -2163,6 +2163,45 @@ fn removable(present: &[App], with_data: &[App], purge: bool) -> Vec<App> {
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum KeptData {
+    Nothing,
+    PurgeLater,
+    DeleteByHand(Vec<PathBuf>),
+}
+
+fn kept_data(chosen: &[App], with_data: &[(App, PathBuf)], purge: bool) -> KeptData {
+    let kept: Vec<PathBuf> = with_data
+        .iter()
+        .filter(|(app, _)| !purge && chosen.contains(app))
+        .map(|(_, path)| path.clone())
+        .collect();
+    if kept.is_empty() {
+        KeptData::Nothing
+    } else if chosen.contains(&App::Ae) {
+        KeptData::DeleteByHand(kept)
+    } else {
+        KeptData::PurgeLater
+    }
+}
+
+fn say_uninstalled(kept: KeptData) {
+    match kept {
+        KeptData::Nothing => ui::outro("Uninstalled."),
+        KeptData::PurgeLater => {
+            ui::outro("Uninstalled. Data was kept; `ae uninstall --purge` removes it.");
+        }
+        KeptData::DeleteByHand(folders) => {
+            let folders: Vec<String> = folders
+                .iter()
+                .map(|folder| folder.display().to_string())
+                .collect();
+            ui::note("Data was kept in", folders.join("\n"));
+            ui::outro("Uninstalled. Delete those folders to remove the data too.");
+        }
+    }
+}
+
 fn leaves_orphans(chosen: &[App], present: &[App]) -> bool {
     chosen.contains(&App::Ae)
         && present
@@ -2195,7 +2234,7 @@ pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), Unin
             path: data.clone(),
             source,
         })? {
-            with_data.push(app);
+            with_data.push((app, data));
         }
         hints.push((
             app,
@@ -2208,7 +2247,8 @@ pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), Unin
             present.push(app);
         }
     }
-    let candidates = removable(&present, &with_data, purge);
+    let has_data: Vec<App> = with_data.iter().map(|(app, _)| *app).collect();
+    let candidates = removable(&present, &has_data, purge);
     let mut chosen: Vec<App> = if apps.is_empty() {
         candidates.clone()
     } else {
@@ -2242,7 +2282,7 @@ pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), Unin
         }
         let keeping: Vec<&str> = chosen
             .iter()
-            .filter(|app| with_data.contains(app))
+            .filter(|app| has_data.contains(app))
             .map(|app| app.display_name())
             .collect();
         if !purge && !keeping.is_empty() {
@@ -2269,12 +2309,9 @@ pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), Unin
             return Ok(());
         }
     }
+    let kept = kept_data(&chosen, &with_data, purge);
     remove_chosen(chosen, purge)?;
-    ui::outro(if purge {
-        "Uninstalled."
-    } else {
-        "Uninstalled. Data was kept; `ae uninstall --purge` removes it."
-    });
+    say_uninstalled(kept);
     Ok(())
 }
 
