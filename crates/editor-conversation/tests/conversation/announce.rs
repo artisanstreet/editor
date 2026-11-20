@@ -347,3 +347,21 @@ fn a_stored_reply_whose_end_cannot_be_read_still_announces_that_it_finished() {
         }
     );
 }
+
+#[test]
+fn a_stored_reply_whose_forge_is_gone_announces_at_once_that_it_finished() {
+    let mut finished = FinishedReply::open("gone-thread");
+    finished.stub.core.remove_host(&finished.stub.host).unwrap();
+    finished.conversation.reply_tail = None;
+    finished
+        .conversation
+        .toggle_item(&finished.stub.core, &ItemId("long-reply".into()), true);
+    assert_eq!(
+        current(&finished.conversation),
+        Announcement {
+            text: "Reply finished".to_owned(),
+            busy: false,
+        },
+        "nothing is left waiting for an end that can no longer be read"
+    );
+}
