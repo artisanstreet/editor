@@ -41,7 +41,7 @@ impl ClosingListener {
 impl Drop for ClosingListener {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::SeqCst);
-        match TcpStream::connect(self.address) {
+        match TcpStream::connect_timeout(&self.address, crate::wait::LIVENESS) {
             Ok(wake) => drop(wake),
             Err(error)
                 if matches!(
