@@ -7,7 +7,9 @@ use editor_conversation::disclosure::RowDisclosure;
 use editor_conversation::fold::{Row, RowKey};
 use editor_conversation::presentation::{MarkdownOwners, PresentationScope};
 use editor_conversation::view::Dispatch;
-use editor_conversation::view::factory::{RealizedRow, RowFactory, WorkResources};
+use editor_conversation::view::factory::{
+    RealizedRow, RowFactory, RowServiceParts, RowServices, WorkResources,
+};
 use editor_conversation::view::motion::RowMotion;
 use editor_conversation::view::status::StatusShimmers;
 use editor_ui::theme::{ArtisanTheme, ThemeMode};
@@ -56,7 +58,31 @@ pub fn fixed_source(id: u64) -> Rc<dyn Fn() -> SelectionSourceId> {
     Rc::new(move || SelectionSourceId(id))
 }
 
+#[must_use]
+pub fn service_parts(core: &editor_core::Core, scope: &PresentationScope) -> RowServiceParts {
+    RowServiceParts {
+        provider: core
+            .source_provider(&scope.host, scope.instance)
+            .expect("invariant: a test presentation scope names a connected host"),
+        document: aqua_text::document::SelectionDocumentId(1),
+        on_source: Rc::new(|_| {}),
+        stored: Rc::default(),
+        images: core
+            .host_if_instance(&scope.host, scope.instance)
+            .expect("invariant: a test presentation scope names a connected host")
+            .blob_images(),
+        on_blob: Rc::new(|_, _, _| {}),
+    }
+}
+
+#[must_use]
+pub fn services(core: &editor_core::Core, scope: &PresentationScope) -> RowServices {
+    RowServices::new(scope, service_parts(core, scope))
+        .expect("invariant: a test scope's own host serves its rows")
+}
+
 pub fn row_factory(
+    services: RowServices,
     rows: Vec<RealizedRow>,
     scope: PresentationScope,
     markdown: Rc<RefCell<MarkdownOwners>>,
@@ -64,6 +90,7 @@ pub fn row_factory(
     allocate: Rc<dyn Fn() -> SelectionSourceId>,
 ) -> RowFactory {
     row_factory_at(
+        services,
         rows,
         scope,
         markdown,
@@ -74,6 +101,7 @@ pub fn row_factory(
 }
 
 fn row_factory_at(
+    services: RowServices,
     rows: Vec<RealizedRow>,
     scope: PresentationScope,
     markdown: Rc<RefCell<MarkdownOwners>>,
@@ -82,6 +110,7 @@ fn row_factory_at(
     now: std::time::Instant,
 ) -> RowFactory {
     row_factory_with(
+        services,
         rows,
         scope,
         markdown,
@@ -98,6 +127,7 @@ fn row_factory_at(
     reason = "mirrors RowFactory::new with test defaults for the rest"
 )]
 pub fn row_factory_with(
+    services: RowServices,
     rows: Vec<RealizedRow>,
     scope: PresentationScope,
     markdown: Rc<RefCell<MarkdownOwners>>,
@@ -127,6 +157,7 @@ pub fn row_factory_with(
             seconds: 0.0,
             timestamp: 0,
         },
+        services,
     )
 }
 

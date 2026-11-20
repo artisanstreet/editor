@@ -95,12 +95,69 @@ struct StoredResources {
     provider: editor_core::host::ScopedSourceProvider,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Service {
-    Sources,
-    SourceProvider,
-    Stored,
-    Images,
+pub struct RowServiceParts {
+    pub provider: editor_core::host::ScopedSourceProvider,
+    pub document: aqua_text::document::SelectionDocumentId,
+    pub on_source: Rc<dyn Fn(super::row_sources::RowSourceAction)>,
+    pub stored: Rc<RefCell<crate::conversation::stored::StoredConversation>>,
+    pub images: editor_core::host::BlobImages,
+    pub on_blob: Rc<dyn Fn(artisan_api::ItemId, u64, BlobAction)>,
+}
+
+pub struct RowServices {
+    sources: SourceResources,
+    stored: StoredResources,
+    images: BlobResources,
+}
+
+impl std::fmt::Debug for RowServiceParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowServiceParts").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for RowServices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowServices").finish_non_exhaustive()
+    }
+}
+
+impl RowServices {
+    pub fn new(
+        scope: &PresentationScope,
+        parts: RowServiceParts,
+    ) -> Result<Self, ConfigureRowsError> {
+        let RowServiceParts {
+            provider,
+            document,
+            on_source,
+            stored,
+            images,
+            on_blob,
+        } = parts;
+        if !(provider.is_available()
+            && provider.host() == &scope.host
+            && provider.instance() == scope.instance)
+        {
+            return Err(ConfigureRowsError::StaleSourceProvider);
+        }
+        stored.borrow_mut().rebind(Some(scope.clone()));
+        Ok(Self {
+            sources: SourceResources {
+                provider: provider.clone(),
+                document,
+                emit: on_source,
+            },
+            stored: StoredResources {
+                owner: stored,
+                provider,
+            },
+            images: BlobResources {
+                images,
+                emit: on_blob,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,8 +197,6 @@ pub enum Staleness {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RealizeRowError {
-    #[error("the row factory was built without {0:?}")]
-    Missing(Service),
     #[error("the row's {0:?} is unavailable")]
     Unavailable(Part),
     #[error("the row's {0:?} changed while it was realized")]
@@ -170,8 +225,6 @@ pub enum ConfigureRowsError {
     StaleScope,
     #[error("the source provider belongs to another host")]
     StaleSourceProvider,
-    #[error("the stored conversation belongs to another host")]
-    StaleStoredScope,
     #[error("the conversation has no row snapshot")]
     NoSnapshot,
     #[error("the factory was built without transcript observations")]
@@ -220,9 +273,9 @@ pub struct RowFactory {
     admission: Option<Rc<RefCell<crate::conversation::admission::RevealQueue>>>,
     reveals: Option<RevealResources>,
     media: Option<MediaLookup>,
-    blob_images: Option<BlobResources>,
-    source_resources: Option<SourceResources>,
-    stored: Option<StoredResources>,
+    blob_images: BlobResources,
+    source_resources: SourceResources,
+    stored: StoredResources,
     row_cache: Rc<RefCell<super::row_cache::RowCache>>,
     realized_owners: RefCell<HashMap<RowKey, std::rc::Weak<super::row_cache::RowOwner>>>,
     active: Rc<Cell<bool>>,

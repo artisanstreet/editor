@@ -198,20 +198,44 @@ impl RootViews {
         let seconds = now
             .saturating_duration_since(*self.motion_epoch.get_or_insert(now))
             .as_secs_f64();
+        let host_gone = || BuildError::HostGone {
+            host: scope.host.clone(),
+        };
         let blob_images = core
             .host_if_instance(&scope.host, scope.instance)
-            .ok_or_else(|| BuildError::HostGone {
-                host: scope.host.clone(),
-            })?
+            .ok_or_else(host_gone)?
             .blob_images();
+        let provider = core
+            .source_provider(&scope.host, scope.instance)
+            .ok_or_else(host_gone)?;
         let blob_actions = Rc::clone(&self.conversation_actions);
         let blob_scope = scope.clone();
-        let source_provider = core
-            .source_provider(&scope.host, scope.instance)
-            .ok_or_else(|| BuildError::HostGone {
-                host: scope.host.clone(),
-            })?;
         let source_actions = Rc::clone(&self.conversation_actions);
+        let services = crate::conversation::view::factory::RowServices::new(
+            &scope,
+            crate::conversation::view::factory::RowServiceParts {
+                provider,
+                document: workspace.selections.conversation,
+                on_source: Rc::new(move |action| {
+                    source_actions
+                        .borrow_mut()
+                        .push_back(ConversationAction::Source(action));
+                }),
+                stored: Rc::clone(&self.stored),
+                images: blob_images,
+                on_blob: Rc::new(move |item, revision, action| {
+                    blob_actions
+                        .borrow_mut()
+                        .push_back(ConversationAction::Blob(
+                            blob_scope.clone(),
+                            item,
+                            revision,
+                            action,
+                        ));
+                }),
+            },
+        )
+        .map_err(BuildError::Rows)?;
         let factory = Rc::new(
             RowFactory::new(
                 Vec::new(),
@@ -237,22 +261,11 @@ impl RootViews {
                     seconds,
                     timestamp: core.clock().timestamp(),
                 },
+                services,
             )
             .with_active(row_token)
             .with_settled(settled, self.row_style_epoch)
             .with_row_cache(Rc::clone(&self.row_cache))
-            .with_sources(
-                source_provider.clone(),
-                workspace.selections.conversation,
-                Rc::new(move |action| {
-                    source_actions
-                        .borrow_mut()
-                        .push_back(ConversationAction::Source(action));
-                }),
-            )
-            .map_err(BuildError::Rows)?
-            .with_stored(Rc::clone(&self.stored), source_provider)
-            .map_err(BuildError::Rows)?
             .with_copy({
                 let copy_actions = Rc::clone(&self.conversation_actions);
                 let copy_scope = scope.clone();
@@ -262,19 +275,6 @@ impl RootViews {
                         .push_back(ConversationAction::Copy(copy_scope.clone(), source));
                 })
             })
-            .with_blob_images(
-                blob_images,
-                Rc::new(move |item, revision, action| {
-                    blob_actions
-                        .borrow_mut()
-                        .push_back(ConversationAction::Blob(
-                            blob_scope.clone(),
-                            item,
-                            revision,
-                            action,
-                        ));
-                }),
-            )
             .with_lazy_rows(&workspace.conversation, core, self.composer_height)
             .map_err(BuildError::Rows)?
             .with_reveals(

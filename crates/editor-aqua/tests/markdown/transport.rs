@@ -443,11 +443,17 @@ fn stored_conversation_transaction(
                 seconds: 0.0,
                 timestamp: 0,
             },
+            editor_aqua::conversation::view::factory::RowServices::new(
+                &scope,
+                editor_aqua::conversation::view::factory::RowServiceParts {
+                    provider,
+                    document,
+                    stored: Rc::clone(&stored),
+                    ..test_support::editor::rows::service_parts(core, &scope)
+                },
+            )
+            .expect("the scope's own host serves its rows"),
         )
-        .with_sources(provider.clone(), document, Rc::new(|_| {}))
-        .expect("the test Forge client builds")
-        .with_stored(Rc::clone(&stored), provider)
-        .expect("the test Forge client builds")
         .with_observations(observations.clone()),
     );
     let realized = factory.realize(0, &row_key).expect("the row realizes");

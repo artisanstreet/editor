@@ -54,10 +54,7 @@ impl RowFactory {
             return AfterLayout::default();
         }
         let reveal = self.markdown.borrow().reveal_heatmaps(app);
-        let stored_reveal = self
-            .stored
-            .as_ref()
-            .is_some_and(|stored| stored.owner.borrow().sync_after_layout(app));
+        let stored_reveal = self.stored.owner.borrow().sync_after_layout(app);
         let mounted: std::collections::HashSet<_> = app
             .tree()
             .traverse()
@@ -99,13 +96,13 @@ impl RowFactory {
                 ..Default::default()
             };
         }
-        let stored = self.stored.as_ref().map(|stored| stored.owner.borrow());
+        let stored = self.stored.owner.borrow();
         let mut result = resources.owners.borrow_mut().sync(
             app,
             conversation,
             core,
             &self.markdown.borrow_mut(),
-            stored.as_deref(),
+            Some(&stored),
         );
         if let Some(queue) = &self.admission {
             let frontier = queue.borrow().frontier_key(self.now);

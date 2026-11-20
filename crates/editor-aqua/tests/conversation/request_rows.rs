@@ -8,6 +8,7 @@ use editor_aqua::conversation::fold::{Row, RowKey};
 use editor_aqua::conversation::presentation::MarkdownOwners;
 use editor_aqua::conversation::stored::StoredConversation;
 use editor_aqua::conversation::thread::AnswerState;
+use editor_aqua::conversation::view::factory::{RowServiceParts, RowServices};
 use editor_aqua::conversation::view::row_cache::RowCache;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use test_support::editor::core::{OpenThread, connect};
 use test_support::editor::rows::{
-    fixed_source, realized, row_factory, row_factory_with, row_model,
+    fixed_source, realized, row_factory, row_factory_with, row_model, service_parts,
 };
 use test_support::editor::ui::{click, mounted};
 use test_support::items;
@@ -92,6 +93,19 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
     };
     let factory = |sending| {
         row_factory_with(
+            RowServices::new(
+                &scope,
+                RowServiceParts {
+                    provider: provider.clone(),
+                    document: SelectionDocumentId(510),
+                    on_source: {
+                        let observed_sources = Rc::clone(&observed_sources);
+                        Rc::new(move |action| observed_sources.borrow_mut().push(action))
+                    },
+                    ..service_parts(&core, &scope)
+                },
+            )
+            .unwrap(),
             vec![row(sending)],
             scope.clone(),
             Rc::clone(&markdown),
@@ -110,11 +124,6 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
             Rc::default(),
         )
         .with_row_cache(Rc::clone(&cache))
-        .with_sources(provider.clone(), SelectionDocumentId(510), {
-            let observed_sources = Rc::clone(&observed_sources);
-            Rc::new(move |action| observed_sources.borrow_mut().push(action))
-        })
-        .unwrap()
     };
     let ready = factory(false);
     let mut app = mounted(800.0, 900.0, ready.realize(0, &key).unwrap().element);
@@ -163,18 +172,26 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
         )
     });
     let notice_factory = row_factory(
+        RowServices::new(
+            &scope,
+            RowServiceParts {
+                provider: provider.clone(),
+                document: SelectionDocumentId(510),
+                on_source: {
+                    let observed_sources = Rc::clone(&observed_sources);
+                    Rc::new(move |action| observed_sources.borrow_mut().push(action))
+                },
+                ..service_parts(&core, &scope)
+            },
+        )
+        .unwrap(),
         vec![notice_row],
         scope.clone(),
         Rc::clone(&markdown),
         true,
         fixed_source(512),
     )
-    .with_row_cache(Rc::clone(&cache))
-    .with_sources(provider.clone(), SelectionDocumentId(510), {
-        let observed_sources = Rc::clone(&observed_sources);
-        Rc::new(move |action| observed_sources.borrow_mut().push(action))
-    })
-    .unwrap();
+    .with_row_cache(Rc::clone(&cache));
     let mut notice_app = mounted(
         800.0,
         900.0,

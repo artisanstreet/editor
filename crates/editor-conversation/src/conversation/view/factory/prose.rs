@@ -147,7 +147,7 @@ impl RowFactory {
         };
         out.batches = prepared.batches;
         let element = self.reveal_frame(prepared.element, entrance, reveal);
-        self.prose_frame(cx, body, element, count).map(Some)
+        Ok(Some(self.prose_frame(cx, body, element, count)))
     }
 
     fn prose_frame(
@@ -156,7 +156,7 @@ impl RowFactory {
         body: &ProseBody<'_>,
         element: Element,
         count: usize,
-    ) -> Result<Element, RealizeRowError> {
+    ) -> Element {
         let RowContext {
             row,
             key,
@@ -167,7 +167,7 @@ impl RowFactory {
         let preview_notice = (block + 1 == count)
             .then(|| body.live.as_ref().and_then(LiveBinding::preview_notice))
             .flatten();
-        Ok(if body.key.slot.is_bubble() {
+        if body.key.slot.is_bubble() {
             let fresh = row
                 .model
                 .ui
@@ -179,7 +179,7 @@ impl RowFactory {
                 count,
                 body.source.as_str().is_empty(),
                 if block == 0 {
-                    self.user_attachments(row_owner, item)?
+                    self.user_attachments(row_owner, item)
                 } else {
                     None
                 },
@@ -196,7 +196,7 @@ impl RowFactory {
                 .build()
         } else {
             element
-        })
+        }
     }
 
     fn prose_live(

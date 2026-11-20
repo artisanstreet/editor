@@ -1,4 +1,4 @@
-use super::{BlobAction, RealizeRowError, RowFactory, Service};
+use super::{BlobAction, RowFactory};
 use artisan_api::ItemKind;
 use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use std::rc::Rc;
@@ -26,14 +26,14 @@ impl RowFactory {
         &self,
         owner: &super::super::row_cache::RowOwner,
         item: &artisan_api::Item,
-    ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
+    ) -> Option<aqua_ui::element::Element> {
         use aqua_ui::element::Box as UiBox;
         use aqua_ui::style::{Length, Style};
         let ItemKind::UserMessage { images, .. } = &item.kind else {
-            return Ok(None);
+            return None;
         };
         if images.is_empty() {
-            return Ok(None);
+            return None;
         }
         let mut row = UiBox::new().layout("row").spaced(Space::S8).style(
             Style::new()
@@ -44,9 +44,9 @@ impl RowFactory {
                 .justify(aqua_ui::JustifyContent::END),
         );
         for (index, hash) in images.iter().enumerate() {
-            row = row.child(self.blob_frame(owner, item, hash, Some(index), 96.0)?);
+            row = row.child(self.blob_frame(owner, item, hash, Some(index), 96.0));
         }
-        Ok(Some(row.build()))
+        Some(row.build())
     }
 
     #[expect(
@@ -60,16 +60,13 @@ impl RowFactory {
         hash: &artisan_api::BlobHash,
         attachment: Option<usize>,
         width: f32,
-    ) -> Result<aqua_ui::element::Element, RealizeRowError> {
+    ) -> aqua_ui::element::Element {
         use aqua_core::image::ImageFit;
         use aqua_ui::element::{Box as UiBox, Media};
         use aqua_ui::style::{Length, Style};
         use editor_core::host::BlobImage;
         use editor_ui::media_frame::MediaFrame;
-        let resources = self
-            .blob_images
-            .as_ref()
-            .ok_or(RealizeRowError::Missing(Service::Images))?;
+        let resources = &self.blob_images;
         let state = resources.images.lookup(hash);
         if !matches!(&state, Some(BlobImage::Ready(_))) {
             self.unsettled.set(true);
@@ -240,15 +237,15 @@ impl RowFactory {
         }
         let frame = frame.build();
         if attachment.is_some() {
-            Ok(frame)
+            frame
         } else {
-            Ok(UiBox::new()
+            UiBox::new()
                 .width(Length::Pct(100.0))
                 .style(Style::new().max_width(Length::Px(
                     editor_ui::chat_bubble::ChatBubbleSegment::MAX_WIDTH,
                 )))
                 .child(frame)
-                .build())
+                .build()
         }
     }
 }

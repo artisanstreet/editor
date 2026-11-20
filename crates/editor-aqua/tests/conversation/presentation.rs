@@ -8,13 +8,15 @@ use editor_aqua::conversation::presentation::{
     BodyKey, MarkdownOwners, MarkdownRender, PreparedElement, PresentationScope, SelectionOwners,
 };
 use editor_aqua::conversation::shared::Shared;
+use editor_aqua::conversation::view::factory::{RowServiceParts, RowServices};
 use editor_aqua::core::Core;
 use std::rc::Rc;
 use std::sync::Arc;
 use test_support::editor::core::{OpenThread, StubbedHost, connect, stub_host, test_core};
 use test_support::editor::forge::empty_state;
 use test_support::editor::rows::{
-    fixed_source, listed, realized, row_factory, row_factory_with, row_list, row_model, source_ids,
+    fixed_source, listed, realized, row_factory, row_factory_with, row_list, row_model,
+    service_parts, services, source_ids,
 };
 use test_support::editor::ui::{click, mount, mounted, node_with_key, painted_texts, ui_app};
 use test_support::items::{self, assistant_reply, read_tool, user_message};
@@ -136,6 +138,7 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     let factory = |at| {
         Rc::new(
             row_factory_with(
+                services(&core, &scope),
                 rows(),
                 scope.clone(),
                 Rc::clone(&markdown),
@@ -176,6 +179,7 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());
     let replacement_scope = PresentationScope::capture(&conversation, &core).unwrap();
     let _replacement_factory = row_factory_with(
+        services(&core, &replacement_scope),
         Vec::new(),
         replacement_scope,
         Rc::clone(&markdown),
@@ -293,6 +297,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     let observations = TranscriptObservations::default();
     let factory = Rc::new(
         row_factory(
+            services(&core, &scope),
             vec![realized(model)],
             scope.clone(),
             Rc::clone(&markdown),
@@ -320,6 +325,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     assert_eq!(owners.borrow().ready(&row_key), Some(false));
     let original = row_cache.borrow().get(&row_key).unwrap();
     let replacement = row_factory(
+        services(&core, &scope),
         vec![realized(row_model(&conversation, index, None).unwrap())],
         scope.clone(),
         Rc::clone(&markdown),
@@ -374,6 +380,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     let complete_observations = TranscriptObservations::default();
     let complete_factory = Rc::new(
         row_factory(
+            services(&core, &scope),
             vec![],
             scope.clone(),
             Rc::clone(&markdown),
@@ -497,6 +504,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     let markdown = Rc::new(RefCell::new(markdown));
     let (next, allocate) = source_ids(40);
     let factory = Rc::new(row_factory(
+        services(&core, &scope),
         vec![make_row(0), make_row(1)],
         scope.clone(),
         Rc::clone(&markdown),
@@ -543,6 +551,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     let activations = Rc::new(Cell::new(0));
     let activated = Rc::clone(&activations);
     let gap_factory = row_factory_with(
+        services(&core, &scope),
         vec![realized(RowModel {
             version: 3,
             ..row_model(Row::Gap, [])
@@ -599,21 +608,24 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     let blob_events = Rc::new(RefCell::new(Vec::new()));
     let emitted = Rc::clone(&blob_events);
     let images = core.host(&scope.host).unwrap().blob_images();
-    let user_factory = Rc::new(
-        row_factory(
-            vec![user_row(0), user_row(1)],
-            scope.clone(),
-            Rc::clone(&markdown),
-            true,
-            allocate,
+    let user_factory = Rc::new(row_factory(
+        RowServices::new(
+            &scope,
+            RowServiceParts {
+                images,
+                on_blob: Rc::new(move |item, seq, action| {
+                    emitted.borrow_mut().push((item, seq, action));
+                }),
+                ..service_parts(&core, &scope)
+            },
         )
-        .with_blob_images(
-            images,
-            Rc::new(move |item, seq, action| {
-                emitted.borrow_mut().push((item, seq, action));
-            }),
-        ),
-    );
+        .unwrap(),
+        vec![user_row(0), user_row(1)],
+        scope.clone(),
+        Rc::clone(&markdown),
+        true,
+        allocate,
+    ));
     let user_keys = [
         RowKey::Item(user_id.clone()),
         RowKey::Text(user_id.clone(), user_slot, 1),
@@ -653,21 +665,24 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
         .insert(user_id.clone(), Arc::new(empty_item));
     let empty_events = Rc::new(RefCell::new(Vec::new()));
     let emitted = Rc::clone(&empty_events);
-    let empty_factory = Rc::new(
-        row_factory(
-            vec![empty_row],
-            scope.clone(),
-            Rc::clone(&markdown),
-            true,
-            fixed_source(999),
+    let empty_factory = Rc::new(row_factory(
+        RowServices::new(
+            &scope,
+            RowServiceParts {
+                images: core.host(&scope.host).unwrap().blob_images(),
+                on_blob: Rc::new(move |id, seq, action| {
+                    emitted.borrow_mut().push((id, seq, action));
+                }),
+                ..service_parts(&core, &scope)
+            },
         )
-        .with_blob_images(
-            core.host(&scope.host).unwrap().blob_images(),
-            Rc::new(move |id, seq, action| {
-                emitted.borrow_mut().push((id, seq, action));
-            }),
-        ),
-    );
+        .unwrap(),
+        vec![empty_row],
+        scope.clone(),
+        Rc::clone(&markdown),
+        true,
+        fixed_source(999),
+    ));
     let mut empty_app = mounted(
         800.0,
         600.0,
@@ -737,6 +752,7 @@ fn agent_tasks_and_reports_read_as_markdown() {
         })
     };
     let factory = Rc::new(row_factory(
+        services(&opened.core, &scope),
         vec![make_row(slot, 0), make_row(slot, 1), make_row(report, 0)],
         scope,
         Rc::new(RefCell::new(markdown)),
@@ -1033,6 +1049,7 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
         editor_aqua::conversation::view::row_cache::RowCache::default(),
     ));
     let factory = row_factory(
+        services(&core, &scope),
         vec![realized(model)],
         scope,
         markdown,
@@ -1107,17 +1124,21 @@ fn stored_reply_that_is_still_loading_does_not_request_reveal_frames() {
     let owners = Rc::new(RefCell::new(MountedReveals::default()));
     let factory = Rc::new(
         row_factory(
+            RowServices::new(
+                &scope,
+                RowServiceParts {
+                    stored: Rc::new(RefCell::new(StoredConversation::default())),
+                    provider,
+                    ..service_parts(&core, &scope)
+                },
+            )
+            .unwrap(),
             vec![realized(model)],
             scope,
             markdown,
             false,
             source_ids(1100).1,
         )
-        .with_stored(
-            Rc::new(RefCell::new(StoredConversation::default())),
-            provider,
-        )
-        .unwrap()
         .with_reveals(&conversation, &core, Rc::clone(&owners), false)
         .unwrap(),
     );

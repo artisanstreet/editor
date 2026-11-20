@@ -1,4 +1,4 @@
-use super::{Part, RealizeRowError, RowFactory, Service, Staleness, truncate};
+use super::{Part, RealizeRowError, RowFactory, Staleness, truncate};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::rc::Weak;
@@ -135,12 +135,9 @@ impl RowFactory {
         use crate::conversation::view::resources::ResourceKey;
         use crate::conversation::view::row_sources::{RowSourceAction, RowSourceActionKind};
         let theme = super::super::request::question_theme(item, self.theme);
-        let services = self
-            .source_resources
-            .as_ref()
-            .ok_or(RealizeRowError::Missing(Service::Sources))?;
+        let services = &self.source_resources;
         if !services.provider.is_available() {
-            return Err(RealizeRowError::Missing(Service::SourceProvider));
+            return Err(RealizeRowError::Stale(Staleness::Scope));
         }
         let key = ResourceKey::Questions(item.id.clone());
         used.borrow_mut().insert(key.clone());

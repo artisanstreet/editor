@@ -1,7 +1,7 @@
 use super::super::status;
 use super::{
-    BlobAction, BlobResources, ConfigureRowsError, RealizedRow, RevealResources, RowFactory,
-    RowSource, SnapshotRow, SourceResources, StoredResources, WorkResources,
+    ConfigureRowsError, RealizedRow, RevealResources, RowFactory, RowServices, RowSource,
+    SnapshotRow, WorkResources,
 };
 use crate::conversation::fold::{Row, RowKey};
 use crate::conversation::presentation::{
@@ -36,6 +36,7 @@ impl RowFactory {
         on_code: Rc<dyn Fn(ScopedCodeAction)>,
         dispatch: super::super::Dispatch,
         work: WorkResources,
+        services: RowServices,
     ) -> Self {
         statuses.borrow_mut().set_scope(&scope);
         {
@@ -70,9 +71,9 @@ impl RowFactory {
             admission: None,
             reveals: None,
             media: None,
-            blob_images: None,
-            source_resources: None,
-            stored: None,
+            blob_images: services.images,
+            source_resources: services.sources,
+            stored: services.stored,
             row_cache: Rc::new(RefCell::new(row_cache)),
             realized_owners: RefCell::new(HashMap::new()),
             active: Rc::new(Cell::new(true)),
@@ -112,55 +113,9 @@ impl RowFactory {
         self
     }
 
-    pub fn with_sources(
-        mut self,
-        provider: editor_core::host::ScopedSourceProvider,
-        document: aqua_text::document::SelectionDocumentId,
-        emit: Rc<dyn Fn(super::super::row_sources::RowSourceAction)>,
-    ) -> Result<Self, ConfigureRowsError> {
-        if !(provider.is_available()
-            && provider.host() == &self.scope.host
-            && provider.instance() == self.scope.instance)
-        {
-            return Err(ConfigureRowsError::StaleSourceProvider);
-        }
-        self.source_resources = Some(SourceResources {
-            provider,
-            document,
-            emit,
-        });
-        Ok(self)
-    }
-
-    pub fn with_stored(
-        mut self,
-        owner: Rc<RefCell<crate::conversation::stored::StoredConversation>>,
-        provider: editor_core::host::ScopedSourceProvider,
-    ) -> Result<Self, ConfigureRowsError> {
-        if !(provider.is_available()
-            && provider.host() == &self.scope.host
-            && provider.instance() == self.scope.instance)
-        {
-            return Err(ConfigureRowsError::StaleStoredScope);
-        }
-        owner.borrow_mut().rebind(Some(self.scope.clone()));
-        self.stored = Some(StoredResources { owner, provider });
-        Ok(self)
-    }
-
     #[must_use]
     pub fn with_copy(mut self, copy: Rc<dyn Fn(super::super::source_actions::CopySource)>) -> Self {
         self.copy = Some(copy);
-        self
-    }
-
-    #[must_use]
-    pub fn with_blob_images(
-        mut self,
-        images: editor_core::host::BlobImages,
-        emit: Rc<dyn Fn(artisan_api::ItemId, u64, BlobAction)>,
-    ) -> Self {
-        self.blob_images = Some(BlobResources { images, emit });
         self
     }
 

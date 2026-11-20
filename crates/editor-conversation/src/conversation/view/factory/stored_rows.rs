@@ -1,5 +1,5 @@
 use super::realize::RowContext;
-use super::{RealizeRowError, RowFactory, Service, Staleness, StoredResources, media_width};
+use super::{RealizeRowError, RowFactory, Staleness, StoredResources, media_width};
 use crate::conversation::fold::{self, Slot};
 use crate::conversation::presentation::{BodyKey, ScopedCodeAction};
 use crate::conversation::stored::{StoredLeafServices, StoredLeafTarget};
@@ -72,10 +72,7 @@ impl RowFactory {
             block,
             reference,
         } = target;
-        let services = self
-            .stored
-            .as_ref()
-            .ok_or(RealizeRowError::Missing(Service::Stored))?;
+        let services = &self.stored;
         let key = BodyKey {
             item: item.id.clone(),
             slot,
@@ -123,11 +120,7 @@ impl RowFactory {
             }
             LeafPreparation::Ready(leaf) => leaf,
         };
-        let document = self
-            .source_resources
-            .as_ref()
-            .ok_or(RealizeRowError::Missing(Service::Sources))?
-            .document;
+        let document = self.source_resources.document;
         if let (Some((owner, fresh, ready)), Some(resources)) = (reveal, &self.reveals) {
             ready.set(false);
             owner.begin_frame(
@@ -279,10 +272,6 @@ impl RowFactory {
         .build()
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one literal stored row from source preparation through the retained batch"
-    )]
     pub(super) fn literal_row(
         &self,
         cx: &RowContext<'_>,
@@ -305,10 +294,7 @@ impl RowFactory {
             block,
             reference,
         } = target;
-        let services = self
-            .stored
-            .as_ref()
-            .ok_or(RealizeRowError::Missing(Service::Stored))?;
+        let services = &self.stored;
         let key = BodyKey {
             item: item.id.clone(),
             slot,
@@ -360,11 +346,7 @@ impl RowFactory {
             let full = self.slot_source_field(row_owner, item, slot, batches)?;
             return Ok(full);
         }
-        let document = self
-            .source_resources
-            .as_ref()
-            .ok_or(RealizeRowError::Missing(Service::Sources))?
-            .document;
+        let document = self.source_resources.document;
         let field = crate::conversation::content::SourceField::of_slot(slot);
         let resource = ResourceKey::Source(item.id.clone(), field);
         let id = *row_owner

@@ -89,7 +89,7 @@ mod reply {
     use editor_aqua::conversation::fold::{Row, Slot};
     use editor_aqua::conversation::presentation::{BodyKey, MarkdownOwners, PresentationScope};
     use editor_aqua::conversation::stored::StoredConversation;
-    use editor_aqua::conversation::view::factory::RealizedRow;
+    use editor_aqua::conversation::view::factory::{RealizedRow, RowServiceParts, RowServices};
     use editor_aqua::core::host::ScopedSourceProvider;
     use editor_aqua::core::{Core, ForgeClient, HostKind, Screen, hosts, runtime::runtime};
     use editor_aqua::qualification::fixture::ForgeServer;
@@ -99,7 +99,7 @@ mod reply {
     use std::rc::Rc;
     use std::sync::{Arc, mpsc};
     use std::time::{Duration, Instant};
-    use test_support::editor::rows::row_factory_with;
+    use test_support::editor::rows::{row_factory_with, service_parts};
     use test_support::editor::ui::{click, mounted, painted_texts};
 
     struct StoredReply {
@@ -143,6 +143,16 @@ mod reply {
             .unwrap();
             let (_, allocate) = test_support::editor::rows::source_ids(1000);
             let factory = row_factory_with(
+                RowServices::new(
+                    &self.scope,
+                    RowServiceParts {
+                        provider: self.provider.clone(),
+                        document: SelectionDocumentId(77),
+                        stored: Rc::clone(&self.stored),
+                        ..service_parts(&self.core, &self.scope)
+                    },
+                )
+                .unwrap(),
                 vec![RealizedRow {
                     model,
                     disclosure: editor_aqua::conversation::disclosure::RowDisclosure::default(),
@@ -155,15 +165,7 @@ mod reply {
                 Instant::now(),
                 scoped,
                 Rc::default(),
-            )
-            .with_sources(
-                self.provider.clone(),
-                SelectionDocumentId(77),
-                Rc::new(|_| {}),
-            )
-            .unwrap()
-            .with_stored(Rc::clone(&self.stored), self.provider.clone())
-            .unwrap();
+            );
             factory.realize(self.first, &row_key).unwrap().element
         }
 

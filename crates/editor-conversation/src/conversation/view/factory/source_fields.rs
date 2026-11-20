@@ -1,4 +1,4 @@
-use super::{Part, RealizeRowError, RowFactory, Service, Staleness};
+use super::{Part, RealizeRowError, RowFactory, Staleness};
 use crate::conversation::fold::{self, Slot};
 use aqua_ui::collection::BatchedCollectionRow;
 use artisan_api::TextContent;
@@ -82,10 +82,7 @@ impl RowFactory {
             .ok_or(RealizeRowError::Unavailable(Part::SourceField))?;
         if let TextContent::Inline(text) = source {
             if field == crate::conversation::content::SourceField::AnswerText {
-                let services = self
-                    .source_resources
-                    .as_ref()
-                    .ok_or(RealizeRowError::Missing(Service::Sources))?;
+                let services = &self.source_resources;
                 let key = ResourceKey::Source(item.id.clone(), field);
                 used.borrow_mut().insert(key.clone());
                 let id = *owner
@@ -143,12 +140,9 @@ impl RowFactory {
             }
             return Ok(element.build());
         }
-        let services = self
-            .source_resources
-            .as_ref()
-            .ok_or(RealizeRowError::Missing(Service::Sources))?;
+        let services = &self.source_resources;
         if !services.provider.is_available() {
-            return Err(RealizeRowError::Missing(Service::SourceProvider));
+            return Err(RealizeRowError::Stale(Staleness::Scope));
         }
         let key = ResourceKey::Source(item.id.clone(), field.clone());
         used.borrow_mut().insert(key.clone());

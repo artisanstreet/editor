@@ -6,6 +6,7 @@ use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::fold::{Row, RowKey};
 use editor_aqua::conversation::presentation::MarkdownOwners;
 use editor_aqua::conversation::presentation::PresentationScope;
+use editor_aqua::conversation::view::factory::{RowServiceParts, RowServices};
 use editor_aqua::conversation::view::row_cache::RowCache;
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
 use std::cell::RefCell;
@@ -14,7 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use test_support::editor::core::{StubbedHost, connect, remote_host, test_core};
 use test_support::editor::forge::empty_state;
-use test_support::editor::rows::{listed, realized, row_factory, row_list, row_model, source_ids};
+use test_support::editor::rows::{
+    listed, realized, row_factory, row_list, row_model, service_parts, source_ids,
+};
 use test_support::editor::ui::{click, mount, mounted, ui_app};
 use test_support::items::item;
 
@@ -73,14 +76,24 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
     let emitted = Rc::new(RefCell::new(Vec::new()));
     let capture = Rc::clone(&emitted);
     let factory = Rc::new(
-        row_factory(rows, scope.clone(), markdown, true, allocate)
-            .with_row_cache(Rc::clone(&cache))
-            .with_sources(
-                sources,
-                SelectionDocumentId(415),
-                Rc::new(move |action| capture.borrow_mut().push(action)),
+        row_factory(
+            RowServices::new(
+                &scope,
+                RowServiceParts {
+                    provider: sources,
+                    document: SelectionDocumentId(415),
+                    on_source: Rc::new(move |action| capture.borrow_mut().push(action)),
+                    ..service_parts(&core, &scope)
+                },
             )
             .unwrap(),
+            rows,
+            scope.clone(),
+            markdown,
+            true,
+            allocate,
+        )
+        .with_row_cache(Rc::clone(&cache)),
     );
     let keys = [
         RowKey::Item(items[0].id.clone()),

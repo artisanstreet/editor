@@ -500,12 +500,11 @@ impl RowFactory {
             Some(if slot.is_bubble() {
                 let count = self
                     .stored
-                    .as_ref()
-                    .and_then(|services| {
-                        services.owner.borrow().block_count(&BodyKey {
-                            item: id.clone(),
-                            slot,
-                        })
+                    .owner
+                    .borrow()
+                    .block_count(&BodyKey {
+                        item: id.clone(),
+                        slot,
                     })
                     .unwrap_or(1);
                 let sticker = self.bubble_sticker(
@@ -519,7 +518,7 @@ impl RowFactory {
                     count,
                     false,
                     if block == 0 {
-                        self.user_attachments(row_owner, item)?
+                        self.user_attachments(row_owner, item)
                     } else {
                         None
                     },
@@ -556,7 +555,7 @@ impl RowFactory {
                 .width(Length::Pct(100.0))
                 .spaced(Space::S8)
                 .style(Style::new().align(aqua_ui::AlignItems::END));
-            if let Some(attachments) = self.user_attachments(row_owner, item)? {
+            if let Some(attachments) = self.user_attachments(row_owner, item) {
                 root = root.child(attachments);
             }
             Some(root.build())
@@ -659,7 +658,7 @@ impl RowFactory {
             if width.is_nan() || width <= 0.0 {
                 return Err(RealizeRowError::Unmeasured);
             }
-            let image = self.blob_frame(row_owner, item, blob, None, width)?;
+            let image = self.blob_frame(row_owner, item, blob, None, width);
             Some(
                 aqua_ui::element::Box::new()
                     .layout("column")
@@ -964,18 +963,7 @@ impl RowFactory {
                 revealed: !row.held && !row.disclosure.hidden,
                 reveal_ready: reveal.map(|(_, _, ready)| Rc::clone(ready)),
                 live: snapshot_live,
-                stored: stored_proof.map(|proof| {
-                    (
-                        Rc::downgrade(
-                            &self
-                                .stored
-                                .as_ref()
-                                .expect("invariant: stored proofs exist only with stored services")
-                                .owner,
-                        ),
-                        proof,
-                    )
-                }),
+                stored: stored_proof.map(|proof| (Rc::downgrade(&self.stored.owner), proof)),
             };
             let (height, painted) = observations.callbacks(snapshot, Rc::clone(&self.markdown));
             let height_active = Rc::clone(&self.active);
