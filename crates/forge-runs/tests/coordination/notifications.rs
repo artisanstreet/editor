@@ -27,6 +27,39 @@ async fn other_thread(fixture: &Fixture) -> ThreadId {
     id
 }
 
+async fn watching_running_work(
+    fixture: &Fixture,
+) -> (
+    ThreadId,
+    forge_store::coordination::Record,
+    forge_store::coordination::Record,
+) {
+    let target = other_thread(fixture).await;
+    let task = fixture
+        .hub
+        .store()
+        .coordination_put(target.clone(), None, work(WorkState::Running), None)
+        .await
+        .unwrap();
+    let watch = fixture
+        .hub
+        .store()
+        .coordination_put(
+            fixture.thread_id.clone(),
+            None,
+            Content::Watch {
+                target: target.clone(),
+                state: WatchState::Pending,
+                after_revision: task.revision,
+                outcome: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    (target, task, watch)
+}
+
 fn work(state: WorkState) -> Content {
     Content::Work {
         objective: "Update shared API".into(),
@@ -112,29 +145,7 @@ async fn request_retries_do_not_duplicate_delivery_and_acknowledgments_notify_th
 #[tokio::test(flavor = "multi_thread")]
 async fn dependency_watches_survive_controller_restart_and_preserve_one_notification() {
     let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
-    let target = other_thread(&fixture).await;
-    let task = fixture
-        .hub
-        .store()
-        .coordination_put(target.clone(), None, work(WorkState::Running), None)
-        .await
-        .unwrap();
-    let watch = fixture
-        .hub
-        .store()
-        .coordination_put(
-            fixture.thread_id.clone(),
-            None,
-            Content::Watch {
-                target: target.clone(),
-                state: WatchState::Pending,
-                after_revision: task.revision,
-                outcome: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
+    let (target, task, watch) = watching_running_work(&fixture).await;
     fixture.hub.stop(test_support::wait::LIVENESS).await;
     fixture
         .hub
@@ -199,29 +210,7 @@ async fn dependency_watches_survive_controller_restart_and_preserve_one_notifica
 #[tokio::test(flavor = "multi_thread")]
 async fn cancelled_watches_never_start_a_notification_turn() {
     let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
-    let target = other_thread(&fixture).await;
-    let task = fixture
-        .hub
-        .store()
-        .coordination_put(target.clone(), None, work(WorkState::Running), None)
-        .await
-        .unwrap();
-    let watch = fixture
-        .hub
-        .store()
-        .coordination_put(
-            fixture.thread_id.clone(),
-            None,
-            Content::Watch {
-                target: target.clone(),
-                state: WatchState::Pending,
-                after_revision: task.revision,
-                outcome: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
+    let (target, task, watch) = watching_running_work(&fixture).await;
     fixture
         .hub
         .store()

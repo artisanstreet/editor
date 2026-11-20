@@ -156,29 +156,9 @@ fn logical_vertical_navigation_preserves_utf16_goal_across_short_lines() {
 #[test]
 fn mounted_input_and_composition_edit_editor_once() {
     use aqua_core::{ImeEvent, InputEvent};
-    use aqua_text::{SharedFonts, SharedRuns};
-    use editor_aqua::ui::text::mount::{EditorController, EditorEvent};
-    use editor_aqua::ui::theme::ArtisanTheme;
-    use std::cell::RefCell;
+    use editor_aqua::ui::text::mount::EditorEvent;
 
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded = Rc::clone(&events);
-    let controller = EditorController::new(Editor::new("", Mode::Prompt), move |event| {
-        recorded.borrow_mut().push(event);
-    });
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    runtime
-        .mount(|_| controller.element(Mode::Prompt, &ArtisanTheme::resolved(), ""))
-        .unwrap();
-    runtime.set_viewport(400.0, 200.0, 1.0);
-    runtime.build_frame().unwrap();
-    let node = runtime
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|node| runtime.tree().editor_snapshot(*node).is_some())
-        .unwrap();
-    runtime.tree_mut().set_focused(Some(node));
+    let (controller, mut runtime, node, events) = mounted("", Mode::Prompt, 400.0);
     runtime.handle_input(&InputEvent::TextInput { text: "a".into() });
     runtime.handle_input(&InputEvent::Ime(ImeEvent::Update {
         marked: "候".into(),
@@ -555,26 +535,8 @@ fn mounted(
 #[test]
 fn mounted_vertical_keys_update_authoritative_selection() {
     use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
-    use aqua_text::{SharedFonts, SharedRuns};
-    use editor_aqua::ui::text::mount::EditorController;
-    use editor_aqua::ui::theme::ArtisanTheme;
 
-    let controller = EditorController::new(Editor::new("one\nx\nlong", Mode::Document), |_| {});
-    let fonts = SharedFonts::new();
-    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
-    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
-    runtime
-        .mount(|_| controller.element(Mode::Document, &ArtisanTheme::resolved(), ""))
-        .unwrap();
-    runtime.set_viewport(400.0, 200.0, 1.0);
-    runtime.build_frame().unwrap();
-    let node = runtime
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|node| runtime.tree().editor_snapshot(*node).is_some())
-        .unwrap();
-    runtime.tree_mut().set_focused(Some(node));
+    let (controller, mut runtime, node, _) = mounted("one\nx\nlong", Mode::Document, 400.0);
     let up = InputEvent::KeyDown(KeyEvent {
         key: Key::Named(NamedKey::Up),
         modifiers: Modifiers::NONE,
@@ -640,24 +602,8 @@ fn mounted_pointer_placement_changes_authoritative_selection() {
 #[test]
 fn mounted_cut_changes_authoritative_state_once_and_is_undoable() {
     use aqua_core::{InputEvent, Key, KeyEvent, Modifiers};
-    use aqua_text::{SharedFonts, SharedRuns};
-    use editor_aqua::ui::text::mount::EditorController;
-    use editor_aqua::ui::theme::ArtisanTheme;
 
-    let controller = EditorController::new(Editor::new("hello", Mode::Document), |_| {});
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    runtime
-        .mount(|_| controller.element(Mode::Document, &ArtisanTheme::resolved(), ""))
-        .unwrap();
-    runtime.set_viewport(400.0, 200.0, 1.0);
-    runtime.build_frame().unwrap();
-    let node = runtime
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|node| runtime.tree().editor_snapshot(*node).is_some())
-        .unwrap();
-    runtime.tree_mut().set_focused(Some(node));
+    let (controller, mut runtime, node, _) = mounted("hello", Mode::Document, 400.0);
     runtime.handle_input(&InputEvent::KeyDown(KeyEvent {
         key: Key::Char('a'),
         modifiers: Modifiers::CONTROL,

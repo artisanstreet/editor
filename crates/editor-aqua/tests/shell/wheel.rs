@@ -6,72 +6,7 @@ use editor_aqua::conversation::scroll::{
 };
 use editor_aqua::shell::wheel::{Surface, WheelGlides};
 use std::time::Duration;
-
-const TRANSCRIPT: &str = "conversation-transcript";
-
-struct Rows;
-
-impl aqua_ui::collection::CollectionSource for Rows {
-    fn len(&self) -> usize {
-        20
-    }
-    fn key(&self, index: usize) -> aqua_ui::element::Key {
-        index.into()
-    }
-    fn layout(&self, available_width: f32) -> aqua_ui::collection::CollectionLayout {
-        aqua_ui::collection::CollectionLayout {
-            content_width: available_width,
-            column_widths: Vec::new(),
-        }
-    }
-    fn header(
-        &self,
-        _: &aqua_ui::collection::CollectionLayout,
-    ) -> Option<aqua_ui::element::Element> {
-        None
-    }
-    fn row(
-        &self,
-        _: usize,
-        _: &aqua_ui::collection::CollectionLayout,
-    ) -> aqua_ui::element::Element {
-        aqua_ui::element::Box::new()
-            .style(
-                aqua_ui::style::Style::new()
-                    .height(aqua_ui::style::px(20.0))
-                    .flex_shrink(0.0),
-            )
-            .build()
-    }
-    fn role(&self) -> aqua_ui::collection::CollectionRole {
-        aqua_ui::collection::CollectionRole::List
-    }
-    fn validate(&self) -> Result<(), aqua_ui::collection::CollectionError> {
-        Ok(())
-    }
-}
-
-fn transcript() -> aqua::UiApp {
-    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.set_viewport(100.0, 100.0, 1.0);
-    app.mount(|_| {
-        aqua_ui::element::Element::collection(aqua_ui::collection::CollectionDescriptor::new(
-            std::rc::Rc::new(Rows),
-            vec![
-                aqua_ui::style::Style::new()
-                    .width(aqua_ui::style::px(100.0))
-                    .height(aqua_ui::style::px(100.0)),
-            ],
-            true,
-            20.0,
-            2,
-        ))
-        .with_key(TRANSCRIPT)
-    })
-    .unwrap();
-    app.build_frame().unwrap();
-    app
-}
+use test_support::editor::ui::twenty_row_transcript as transcript;
 
 fn offset(app: &aqua::UiApp) -> f32 {
     let root = app.tree().root().unwrap();

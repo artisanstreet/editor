@@ -123,3 +123,59 @@ pub fn text_opacity(app: &mut UiApp, text: &str) -> f32 {
     }
     panic!("{text:?} is mounted but was not emitted into the scene")
 }
+
+struct TwentyRows;
+
+impl aqua_ui::collection::CollectionSource for TwentyRows {
+    fn len(&self) -> usize {
+        20
+    }
+    fn key(&self, index: usize) -> Key {
+        index.into()
+    }
+    fn layout(&self, available_width: f32) -> aqua_ui::collection::CollectionLayout {
+        aqua_ui::collection::CollectionLayout {
+            content_width: available_width,
+            column_widths: Vec::new(),
+        }
+    }
+    fn header(&self, _: &aqua_ui::collection::CollectionLayout) -> Option<Element> {
+        None
+    }
+    fn row(&self, _: usize, _: &aqua_ui::collection::CollectionLayout) -> Element {
+        aqua_ui::element::Box::new()
+            .style(
+                aqua_ui::style::Style::new()
+                    .height(aqua_ui::style::px(20.0))
+                    .flex_shrink(0.0),
+            )
+            .build()
+    }
+    fn role(&self) -> aqua_ui::collection::CollectionRole {
+        aqua_ui::collection::CollectionRole::List
+    }
+    fn validate(&self) -> Result<(), aqua_ui::collection::CollectionError> {
+        Ok(())
+    }
+}
+
+pub fn twenty_row_transcript() -> UiApp {
+    let mut app = ui_app(100.0, 100.0);
+    app.mount(|_| {
+        Element::collection(aqua_ui::collection::CollectionDescriptor::new(
+            std::rc::Rc::new(TwentyRows),
+            vec![
+                aqua_ui::style::Style::new()
+                    .width(aqua_ui::style::px(100.0))
+                    .height(aqua_ui::style::px(100.0)),
+            ],
+            true,
+            20.0,
+            2,
+        ))
+        .with_key("conversation-transcript")
+    })
+    .expect("mount the transcript");
+    app.build_frame().expect("lay out the transcript");
+    app
+}
