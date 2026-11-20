@@ -5,7 +5,7 @@ use super::{
 use crate::conversation::fold::{self, Slot};
 use crate::conversation::live::LiveBinding;
 use crate::conversation::presentation::{
-    BodyKey, MarkdownOwners, MarkdownRender, PreparedProjectedRow,
+    BodyKey, BodyText, MarkdownOwners, MarkdownRender, PreparedProjectedRow,
 };
 use crate::conversation::view::reveal::{MountedReveal, RevealHandle};
 use aqua_ui::element::Element;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 struct ProseBody<'a> {
     key: BodyKey,
     item: &'a Item,
-    source: &'a str,
+    source: BodyText<'a>,
     live: Option<LiveBinding>,
     block: usize,
     sealed: bool,
@@ -67,8 +67,9 @@ impl RowFactory {
             .set(shape_count.is_some() && live.is_none());
         let live_source = live.as_ref().map(|binding| self.live_text(&binding.text));
         let source = live_source
-            .as_deref()
-            .or(saved)
+            .as_ref()
+            .map(BodyText::Shared)
+            .or_else(|| saved.map(BodyText::Borrowed))
             .ok_or(RealizeRowError::Unavailable(Part::LiveSource))?;
         self.begin_prose_reveal(reveal, item, running && !sealed);
         let body = ProseBody {
@@ -176,7 +177,7 @@ impl RowFactory {
                 element,
                 block,
                 count,
-                body.source.is_empty(),
+                body.source.as_str().is_empty(),
                 if block == 0 {
                     self.user_attachments(row_owner, item)?
                 } else {
@@ -278,7 +279,7 @@ impl RowFactory {
                     }
                     let copy_source = super::super::source_actions::CopySource::from_parts(
                         body.live.as_ref().map(|binding| Arc::clone(&binding.text)),
-                        Arc::from(source),
+                        Arc::from(source.as_str()),
                     );
                     Ok(Preparation::Failed(
                         super::super::source_actions::failed_body(
@@ -330,8 +331,12 @@ impl RowFactory {
         body: &ProseBody<'_>,
         reveal: Option<&RevealHandle>,
     ) -> Result<PreparedProjectedRow, RealizeRowError> {
-        let (body_key, item, source, block) =
-            (body.key.clone(), body.item, body.source, body.block);
+        let (body_key, item, source, block) = (
+            body.key.clone(),
+            body.item,
+            body.source.as_str(),
+            body.block,
+        );
         let slot = body_key.slot;
         let code = owners.code_services(
             &self.scope,

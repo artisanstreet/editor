@@ -527,7 +527,14 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
     let engine = editor_aqua::ui::markdown::MarkdownEngine::new().unwrap();
     markdown
         .borrow_mut()
-        .prepare_on_realization(&scope, key, "reply", &engine, "replacement", 2)
+        .prepare_on_realization(
+            &scope,
+            key,
+            "reply",
+            &engine,
+            editor_aqua::conversation::presentation::BodyText::Borrowed("replacement"),
+            2,
+        )
         .unwrap();
     assert!(!markdown.borrow().accepts_projected(&scope, &proof, text));
     factory.dispose();

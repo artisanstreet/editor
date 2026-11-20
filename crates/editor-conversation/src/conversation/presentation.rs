@@ -38,6 +38,32 @@ fn prepare_body(
     }
 }
 
+fn same_text(known: &str, text: &str) -> bool {
+    std::ptr::eq(known, text) || known == text
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BodyText<'a> {
+    Shared(&'a Rc<str>),
+    Borrowed(&'a str),
+}
+
+impl BodyText<'_> {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Shared(text) => text,
+            Self::Borrowed(text) => text,
+        }
+    }
+
+    fn shared(&self) -> Rc<str> {
+        match self {
+            Self::Shared(text) => Rc::clone(text),
+            Self::Borrowed(text) => Rc::from(*text),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BodyError {
     #[error("the conversation presentation belongs to another thread or host")]
@@ -413,7 +439,7 @@ impl MarkdownOwners {
             body.preparation = None;
             self.selection.retain(app, |key| key != &request.key);
         }
-        if *body.source != *request.source {
+        if !same_text(&body.source, request.source) {
             body.rendered = None;
             body.prepared_item_seq = None;
             body.preparation = None;
@@ -494,7 +520,7 @@ impl MarkdownOwners {
         key: BodyKey,
         id: &str,
         engine: &MarkdownEngine,
-        source: &str,
+        source: BodyText<'_>,
         item_seq: artisan_api::Seq,
     ) -> Result<(usize, u64), BodyError> {
         if self.scope.as_ref() != Some(scope) {
@@ -530,18 +556,21 @@ impl MarkdownOwners {
                 .set_media_services(id, services)
                 .map_err(failed.clone())?;
         }
-        if *body.source != *source {
+        if !same_text(&body.source, source.as_str()) {
             body.rendered = None;
             body.prepared_item_seq = None;
             body.preparation = None;
             body.revision = body.revision.wrapping_add(1);
-            body.source = Rc::from(source);
+            body.source = source.shared();
         }
-        body.preparation =
-            Some(prepare_body(&mut body.presenter, engine, source, slot).map_err(failed)?);
-        let presenter = &body.presenter;
-        body.projected
-            .retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
+        if body.preparation.is_none() {
+            body.preparation = Some(
+                prepare_body(&mut body.presenter, engine, &body.source, slot).map_err(failed)?,
+            );
+            let presenter = &body.presenter;
+            body.projected
+                .retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
+        }
         body.prepared_item_seq = Some(item_seq);
         let count = body
             .presenter
@@ -568,7 +597,7 @@ impl MarkdownOwners {
             .ok_or_else(|| BodyError::Unprepared {
                 key: request.key.clone(),
             })?;
-        if body.id != request.id || *body.source != *request.source {
+        if body.id != request.id || !same_text(&body.source, request.source) {
             return Err(BodyError::StaleBody {
                 key: request.key.clone(),
             });
@@ -753,7 +782,7 @@ impl MarkdownOwners {
     ) -> bool {
         self.scope.as_ref() == Some(scope)
             && self.bodies.get(key).is_some_and(|body| {
-                *body.source == *source
+                same_text(&body.source, source)
                     && body.prepared_item_seq == Some(seq)
                     && body
                         .presenter
@@ -799,10 +828,10 @@ impl MarkdownOwners {
         proof: &ProjectedProof,
         source: &str,
     ) -> bool {
-        *proof.source == *source
+        same_text(&proof.source, source)
             && self.accepts_projected_row(scope, proof)
             && self.bodies.get(&proof.key).is_some_and(|body| {
-                body.source == proof.source
+                same_text(&body.source, &proof.source)
                     && proof.row + 1 == body.presenter.projected_count().unwrap_or(0)
             })
     }
@@ -829,7 +858,7 @@ impl MarkdownOwners {
     ) -> bool {
         self.scope.as_ref() == Some(scope)
             && self.bodies.get(key).is_some_and(|body| {
-                *body.source == *source
+                same_text(&body.source, source)
                     && body.projected.get(&row).is_some_and(|(actual, proof)| {
                         actual == range && body.presenter.projected_is_current(row, range, proof)
                     })
