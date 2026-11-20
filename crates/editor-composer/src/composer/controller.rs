@@ -1,7 +1,7 @@
 use super::{
     attachment::{Attachments, Source},
     draft_body::{DraftBody, DraftPath, SavedFile},
-    draft_session::Submission,
+    draft_session::{DraftSession, LostKey, Submission, Unrecovered},
     mentions::Mentions,
     persistence::{DraftLease, DraftSessions, SessionEvent},
     picker::{Menu, PickerState},
@@ -83,6 +83,12 @@ enum Outbox {
     Restored,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notice {
+    Unshown,
+    Shown,
+}
+
 #[derive(Clone, Debug)]
 pub struct DraftFile {
     pub key: u64,
@@ -140,6 +146,9 @@ pub struct Composer {
     turn_completions: Delivery<TurnCompletion>,
     edit_revision: u64,
     restore_revision: Option<u64>,
+    shown_epoch: u64,
+    lost_chips: Vec<(u64, LostKey)>,
+    unrecovered: Notice,
 }
 
 impl std::fmt::Debug for Composer {
@@ -170,6 +179,9 @@ impl Composer {
             .host(target.host())
             .map(|host| Attachments::new(host.client.clone()));
         let picker = PickerState::for_target(core, target.host());
+        let shown_epoch = session
+            .as_ref()
+            .map_or(0, |session| session.read(DraftSession::epoch));
         Self {
             target,
             editor: Rc::new(RefCell::new(editor)),
@@ -198,6 +210,9 @@ impl Composer {
             turn_completions: Delivery::new(NonZeroUsize::MIN),
             edit_revision: 0,
             restore_revision: Some(0),
+            shown_epoch,
+            lost_chips: Vec::new(),
+            unrecovered: Notice::Unshown,
         }
     }
 
@@ -250,6 +265,11 @@ impl Composer {
         if notice.is_some() {
             self.editor.borrow_mut().set_disabled(true);
         }
+        self.shown_epoch = session
+            .as_ref()
+            .map_or(0, |session| session.read(DraftSession::epoch));
+        self.lost_chips.clear();
+        self.unrecovered = Notice::Unshown;
         self.session = session;
         self.notice = notice;
     }
@@ -490,7 +510,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
+            .is_none_or(|session| session.read(DraftSession::sending))
         {
             return;
         }
@@ -554,7 +574,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
+            .is_none_or(|session| session.read(DraftSession::sending))
         {
             return;
         }
@@ -615,9 +635,15 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
+            .is_none_or(|session| session.read(DraftSession::sending))
         {
             return;
+        }
+        if let Some(index) = self.lost_chips.iter().position(|(chip, _)| *chip == key) {
+            let (_, lost) = self.lost_chips.remove(index);
+            if let Some(session) = &self.session {
+                session.dismiss_lost(lost);
+            }
         }
         if let Some(attachments) = &mut self.attachments {
             attachments.remove(key);
@@ -640,7 +666,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(super::draft_session::DraftSession::sending))
+            .is_none_or(|session| session.read(DraftSession::sending))
         {
             return;
         }
@@ -711,7 +737,7 @@ impl Composer {
         let Some(session) = &self.session else {
             return;
         };
-        session.queue(self.draft_body());
+        session.queue(self.draft_body(), self.shown_epoch);
     }
 
     pub fn sync(&mut self, core: &Core) -> Vec<SessionEvent> {
@@ -724,35 +750,29 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
-        let lost = session.take_lost_images();
-        let (presentable, sending, failed, body, unreadable, unsent) = session.read(|state| {
+        let (epoch, shown, failed, unreadable, unsent, lost, unrecovered) = session.read(|state| {
             (
-                state.presentable(),
-                state.sending(),
+                state.epoch(),
+                state.shown().cloned(),
                 state.send_failed(),
-                state.body().clone(),
                 state.unreadable().map(ToString::to_string),
                 state.unsent().cloned(),
+                state.lost().to_vec(),
+                state.unrecovered().cloned(),
             )
         });
-        let unsent = match (unsent, &self.outbox) {
-            (Some(sent), Outbox::Idle) => {
-                self.outbox = Outbox::InFlight(Box::new(sent));
-                true
-            }
-            (Some(_), Outbox::InFlight(_) | Outbox::Restored) => true,
-            (None, Outbox::Idle | Outbox::InFlight(_) | Outbox::Restored) => false,
-        };
+        if epoch != self.shown_epoch {
+            self.shown_epoch = epoch;
+            self.reset_input();
+        }
+        match (unsent, &self.outbox) {
+            (Some(sent), Outbox::Idle) => self.outbox = Outbox::InFlight(Box::new(sent)),
+            (Some(_), Outbox::InFlight(_) | Outbox::Restored)
+            | (None, Outbox::Idle | Outbox::InFlight(_) | Outbox::Restored) => {}
+        }
         for event in &events {
             match event {
-                SessionEvent::Accepted { .. } => {
-                    if matches!(self.outbox, Outbox::Restored) {
-                        self.clear_input();
-                        self.cleared = Some(std::time::Instant::now());
-                    }
-                    self.outbox = Outbox::Idle;
-                    self.bring_back_follow_up();
-                }
+                SessionEvent::Accepted { .. } => self.outbox = Outbox::Idle,
                 SessionEvent::ImageAdopted(hash) => {
                     if self.restore_revision != Some(self.edit_revision)
                         && let Some(attachments) = &mut self.attachments
@@ -761,43 +781,76 @@ impl Composer {
                         attachments.restore(hash.clone());
                     }
                 }
-                SessionEvent::Reloaded => {
-                    self.outbox = Outbox::Idle;
-                    self.parked.clear();
-                    self.editor.borrow_mut().set_text("");
-                    if let Some(attachments) = &mut self.attachments {
-                        attachments.clear();
-                    }
-                    self.files.clear();
-                    self.restore_revision = Some(self.edit_revision);
-                }
                 SessionEvent::Changed => {}
             }
-        }
-        for lost in lost {
-            self.attachments
-                .as_mut()
-                .expect("invariant: a composer with a draft session has its Forge's attachments")
-                .add_failed(lost.name, diagnostics::chain(&lost.failure));
         }
         if failed
             && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored)
         {
             self.restore_sent(*sent);
         }
-        let holding = sending && matches!(self.outbox, Outbox::Restored);
         self.editor
             .borrow_mut()
-            .set_disabled(holding || self.questionnaire.sending.is_some());
-        if presentable && !unsent && self.restore_revision.take() == Some(self.edit_revision) {
+            .set_disabled(self.questionnaire.sending.is_some());
+        if self.restore_revision == Some(self.edit_revision)
+            && let Some(body) = shown
+        {
+            self.restore_revision = None;
             if let Some(error) = unreadable {
                 self.notice = Some(format!("Couldn't read this draft: {error}"));
             }
-            if !body.is_empty() && self.input_empty() {
-                self.restore_body(body);
+            self.restore_body(body);
+        }
+        if let Some(unrecovered) = unrecovered.filter(|_| self.unrecovered == Notice::Unshown) {
+            self.unrecovered = Notice::Shown;
+            self.notice = Some(match unrecovered {
+                Unrecovered::SetAside(path) => format!(
+                    "A draft kept on this device couldn't be read. It was moved to {}.",
+                    path.display()
+                ),
+                Unrecovered::Left(path) => format!(
+                    "A draft kept on this device couldn't be read. It stays at {}, and this draft isn't kept on this device until it's moved.",
+                    path.display()
+                ),
+            });
+        }
+        self.show_lost(lost);
+        events
+    }
+
+    fn show_lost(&mut self, lost: Vec<super::draft_session::LostImage>) {
+        let Some(attachments) = &mut self.attachments else {
+            unreachable!(
+                "invariant: composer for {} on Forge {} has its Forge's attachments while it has a draft session",
+                self.target.scope(),
+                self.target.host()
+            );
+        };
+        self.lost_chips.retain(|(chip, key)| {
+            let kept = lost.iter().any(|lost| lost.key == *key);
+            if !kept {
+                attachments.remove(*chip);
+            }
+            kept
+        });
+        for image in lost {
+            if !self.lost_chips.iter().any(|(_, key)| *key == image.key) {
+                let chip = attachments.add_failed(image.name, image.reason);
+                self.lost_chips.push((chip, image.key));
             }
         }
-        events
+    }
+
+    fn reset_input(&mut self) {
+        self.outbox = Outbox::Idle;
+        self.parked.clear();
+        self.editor.borrow_mut().set_text("");
+        if let Some(attachments) = &mut self.attachments {
+            attachments.clear();
+        }
+        self.lost_chips.clear();
+        self.files.clear();
+        self.restore_revision = Some(self.edit_revision);
     }
 
     fn input_empty(&self) -> bool {
@@ -863,19 +916,6 @@ impl Composer {
         self.edited();
     }
 
-    fn bring_back_follow_up(&mut self) {
-        if self.parked.is_empty() || !self.input_empty() {
-            return;
-        }
-        let mut parked = std::mem::take(&mut self.parked);
-        let next = parked.remove(0);
-        self.restore_body(DraftBody {
-            follow_ups: parked,
-            ..next
-        });
-        self.edited();
-    }
-
     pub fn project(&self, host: &HostData) -> Option<ProjectId> {
         match &self.target {
             ComposerTarget::NewThread { project, .. } => self
@@ -925,7 +965,7 @@ impl Composer {
         let Some(session) = &self.session else {
             return Some("Draft unavailable");
         };
-        if session.read(super::draft_session::DraftSession::sending) {
+        if session.read(DraftSession::sending) {
             return Some("Sending…");
         }
         let items = self
@@ -973,7 +1013,7 @@ impl Composer {
         let sending = self
             .session
             .as_ref()
-            .is_some_and(|session| session.read(super::draft_session::DraftSession::sending));
+            .is_some_and(|session| session.read(DraftSession::sending));
         let can_continue = !sending
             && matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
         if working && !ready {
@@ -995,7 +1035,7 @@ impl Composer {
         {
             return false;
         }
-        if session.read(super::draft_session::DraftSession::sending)
+        if !session.read(DraftSession::sendable)
             || (self.editor.borrow().text().trim().is_empty()
                 && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
                 && self.files.is_empty())

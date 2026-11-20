@@ -10,6 +10,11 @@ fn typed(text: &str) -> DraftBody {
     }
 }
 
+fn type_in(session: &mut DraftSession, body: DraftBody) {
+    let seen = session.epoch();
+    session.queue(body, seen);
+}
+
 fn wire(body: &DraftBody) -> serde_json::Value {
     serde_json::to_value(body).unwrap()
 }
@@ -20,44 +25,30 @@ fn pending_shutdown_tracks_unsaved_edits_and_clears_only_after_save_or_invalidat
     assert!(!session.pending());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     assert!(!session.pending());
-    session.queue(typed("edited during load"));
+    type_in(&mut session, typed("edited during load"));
     assert!(session.pending());
     session.loaded(Ok(DraftSnapshot::default()));
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
-    session.written(&written, edited, Err(unanswered("offline")));
+    session.written(Err(unanswered("offline")));
     assert!(session.pending());
     session.retry();
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     assert!(session.pending());
     session.loaded(Ok(DraftSnapshot::default()));
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    let Some(Operation::Write { body: written, .. }) = session.next_operation() else {
         panic!("expected a retried draft write");
     };
-    session.written(
-        &written,
-        edited,
-        Ok(DraftWriteResult {
-            saved: true,
-            current: DraftSnapshot {
-                revision: 1,
-                body: wire(&written),
-            },
-        }),
-    );
+    session.written(Ok(DraftWriteResult {
+        saved: true,
+        current: DraftSnapshot {
+            revision: 1,
+            body: wire(&written),
+        },
+    }));
     assert!(!session.pending());
-    session.queue(typed("stale pairing"));
+    type_in(&mut session, typed("stale pairing"));
     assert!(session.pending());
     session.remove();
     assert!(!session.pending());
@@ -95,26 +86,17 @@ fn concurrent_draft_conflict_requires_an_explicit_resolution() {
         revision: 1,
         body: json!({"text": "old"}),
     }));
-    session.queue(typed("local"));
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    type_in(&mut session, typed("local"));
+    let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
-    session.written(
-        &written,
-        edited,
-        Ok(DraftWriteResult {
-            saved: false,
-            current: DraftSnapshot {
-                revision: 2,
-                body: json!({"text": "remote"}),
-            },
-        }),
-    );
+    session.written(Ok(DraftWriteResult {
+        saved: false,
+        current: DraftSnapshot {
+            revision: 2,
+            body: json!({"text": "remote"}),
+        },
+    }));
     assert!(session.conflict());
     assert!(session.next_operation().is_none());
     session.keep_local();
@@ -135,27 +117,18 @@ fn edits_during_a_write_are_not_discarded() {
     let mut session = DraftSession::new("thread:one".into());
     session.next_operation();
     session.loaded(Ok(DraftSnapshot::default()));
-    session.queue(typed("first"));
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    type_in(&mut session, typed("first"));
+    let Some(Operation::Write { body: written, .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
-    session.queue(typed("second"));
-    session.written(
-        &written,
-        edited,
-        Ok(DraftWriteResult {
-            saved: true,
-            current: DraftSnapshot {
-                revision: 1,
-                body: wire(&written),
-            },
-        }),
-    );
+    type_in(&mut session, typed("second"));
+    session.written(Ok(DraftWriteResult {
+        saved: true,
+        current: DraftSnapshot {
+            revision: 1,
+            body: wire(&written),
+        },
+    }));
     let Some(Operation::Write {
         expected_revision,
         body: written,
@@ -660,24 +633,27 @@ fn submission() -> editor_aqua::composer::draft_session::Submission {
 
 fn save_next(session: &mut DraftSession) {
     let Some(Operation::Write {
-        body: written,
-        edited,
         expected_revision,
+        body: written,
     }) = session.next_operation()
     else {
         panic!("expected a draft write");
     };
-    session.written(
-        &written,
-        edited,
-        Ok(DraftWriteResult {
-            saved: true,
-            current: DraftSnapshot {
-                revision: expected_revision + 1,
-                body: wire(&written),
-            },
-        }),
-    );
+    session.written(Ok(DraftWriteResult {
+        saved: true,
+        current: DraftSnapshot {
+            revision: expected_revision + 1,
+            body: wire(&written),
+        },
+    }));
+}
+
+fn send_again(session: &mut DraftSession) {
+    let mut again = submission();
+    again.message.id = artisan_api::ItemId::from("second-attempt");
+    again.thread = artisan_api::ThreadId::from("second-thread");
+    again.create.as_mut().unwrap().id = again.thread.clone();
+    session.submit(again);
 }
 
 fn assert_original_submission(session: &mut DraftSession) {
@@ -696,11 +672,11 @@ fn assert_original_submission(session: &mut DraftSession) {
 }
 
 #[test]
-fn draft_load_failure_unlocks_the_queued_send_and_retry_preserves_its_identity() {
+fn draft_load_failure_hands_the_message_back_and_sending_it_again_keeps_its_identity() {
     let mut session = DraftSession::new("new:project".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     let body = typed("Keep my draft");
-    session.queue(body.clone());
+    type_in(&mut session, body.clone());
     session.submit(submission());
     assert!(session.sending());
     session.loaded(Err(unanswered("offline")));
@@ -708,7 +684,7 @@ fn draft_load_failure_unlocks_the_queued_send_and_retry_preserves_its_identity()
     assert_eq!(*session.body(), body);
     assert!(session.pending());
     assert!(session.next_operation().is_none());
-    session.retry();
+    send_again(&mut session);
     assert!(session.sending());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
@@ -717,26 +693,21 @@ fn draft_load_failure_unlocks_the_queued_send_and_retry_preserves_its_identity()
 }
 
 #[test]
-fn draft_write_failure_unlocks_the_queued_send_without_losing_the_draft() {
+fn draft_write_failure_hands_the_message_back_without_losing_the_draft() {
     let mut session = DraftSession::new("new:project".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
     let body = typed("Keep my draft");
-    session.queue(body.clone());
+    type_in(&mut session, body.clone());
     session.submit(submission());
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
-    session.written(&written, edited, Err(unanswered("offline")));
+    session.written(Err(unanswered("offline")));
     assert!(!session.sending());
     assert_eq!(*session.body(), body);
     assert!(session.pending());
-    session.retry();
+    send_again(&mut session);
     assert!(
         matches!(session.next_operation(), Some(Operation::Load)),
         "a save with no answer is checked against Forge before writing again"
@@ -748,51 +719,41 @@ fn draft_write_failure_unlocks_the_queued_send_without_losing_the_draft() {
 }
 
 #[test]
-fn a_submitted_draft_conflict_unlocks_and_resumes_only_after_resolution() {
+fn a_message_whose_draft_another_client_replaced_is_sent_and_their_draft_stays() {
     let mut session = DraftSession::new("new:project".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
-    let body = typed("Keep my draft");
-    session.queue(body.clone());
+    type_in(&mut session, typed("Keep my draft"));
     session.submit(submission());
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
-    session.written(
-        &written,
-        edited,
-        Ok(DraftWriteResult {
-            saved: false,
-            current: DraftSnapshot {
-                revision: 7,
-                body: json!({"text": "other client"}),
-            },
-        }),
-    );
-    assert!(!session.sending());
-    assert_eq!(*session.body(), body);
-    assert!(session.conflict());
-    session.retry();
+    session.written(Ok(DraftWriteResult {
+        saved: false,
+        current: DraftSnapshot {
+            revision: 7,
+            body: json!({"text": "other client"}),
+        },
+    }));
     assert!(
-        session.conflict(),
-        "retrying does not hide the choice between the two versions"
+        !session.conflict(),
+        "nothing but the sent message was in this client's draft"
     );
     assert!(
-        session
-            .error()
-            .is_some_and(|error| error.contains("another client"))
+        session.sending(),
+        "the message the user sent still goes out"
     );
-    assert!(!session.sending());
-    assert!(session.next_operation().is_none());
-    session.keep_local();
-    assert!(session.sending());
-    save_next(&mut session);
-    assert_original_submission(&mut session);
+    let Some(Operation::Post(request)) = session.next_operation() else {
+        panic!("expected the message to be posted");
+    };
+    assert_eq!(request.message.id, submission().message.id);
+    assert_eq!(
+        request.message.draft, None,
+        "the send doesn't clear the other client's draft"
+    );
+    session.posted(Ok(()), submission().thread);
+    assert_eq!(*session.body(), typed("other client"));
+    assert!(!session.pending(), "their draft is not written back");
 }
 
 #[test]
@@ -803,17 +764,12 @@ fn a_save_forge_answered_too_late_is_not_shown_as_another_clients_change() {
         revision: 7,
         body: json!({"text": "old"}),
     }));
-    session.queue(typed("typed while Forge was slow"));
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    type_in(&mut session, typed("typed while Forge was slow"));
+    let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
-    session.written(&written, edited, Err(unanswered("operation timed out")));
-    session.queue(typed("typed while Forge was slow, then more"));
+    session.written(Err(unanswered("operation timed out")));
+    type_in(&mut session, typed("typed while Forge was slow, then more"));
     assert!(
         matches!(session.next_operation(), Some(Operation::Load)),
         "the unanswered save is checked before the next one"
@@ -851,18 +807,16 @@ fn repeated_unanswered_saves_never_pile_up() {
         revision: 3,
         body: json!({"text": "old"}),
     }));
-    session.queue(typed("mine"));
+    type_in(&mut session, typed("mine"));
     for _ in 0..3 {
         let Some(Operation::Write {
-            body: written,
-            edited,
-            expected_revision,
+            expected_revision, ..
         }) = session.next_operation()
         else {
             panic!("expected a draft write");
         };
         assert_eq!(expected_revision, 3);
-        session.written(&written, edited, Err(unanswered("offline")));
+        session.written(Err(unanswered("offline")));
         session.retry();
         assert!(matches!(session.next_operation(), Some(Operation::Load)));
         session.loaded(Ok(DraftSnapshot {
@@ -881,17 +835,12 @@ fn another_clients_change_after_a_timed_out_save_still_asks_which_to_keep() {
         revision: 7,
         body: json!({"text": "old"}),
     }));
-    session.queue(typed("mine"));
-    let Some(Operation::Write {
-        body: written,
-        edited,
-        ..
-    }) = session.next_operation()
-    else {
+    type_in(&mut session, typed("mine"));
+    let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
-    session.written(&written, edited, Err(unanswered("operation timed out")));
-    session.queue(typed("mine, edited"));
+    session.written(Err(unanswered("operation timed out")));
+    type_in(&mut session, typed("mine, edited"));
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot {
         revision: 8,
@@ -908,7 +857,7 @@ fn another_clients_change_after_a_timed_out_save_still_asks_which_to_keep() {
 fn typing_before_the_first_load_asks_which_draft_to_keep() {
     let mut session = DraftSession::new("thread:one".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
-    session.queue(typed("typed before the draft arrived"));
+    type_in(&mut session, typed("typed before the draft arrived"));
     session.loaded(Ok(DraftSnapshot {
         revision: 4,
         body: json!({"text": "saved on another machine"}),
@@ -927,7 +876,7 @@ fn typing_before_the_first_load_asks_which_draft_to_keep() {
 fn typing_before_the_first_load_of_an_empty_draft_just_saves() {
     let mut session = DraftSession::new("thread:one".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
-    session.queue(typed("typed early"));
+    type_in(&mut session, typed("typed early"));
     session.loaded(Ok(DraftSnapshot {
         revision: 2,
         body: serde_json::Value::Null,
@@ -950,10 +899,10 @@ fn the_message_posts_before_a_draft_typed_after_it_is_saved() {
     let mut session = DraftSession::new("new:project".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
-    session.queue(typed("Keep my draft"));
+    type_in(&mut session, typed("Keep my draft"));
     session.submit(submission());
     save_next(&mut session);
-    session.queue(typed("the next message"));
+    type_in(&mut session, typed("the next message"));
     let Some(Operation::Post(request)) = session.next_operation() else {
         panic!("expected the message to post before the new draft is saved");
     };
@@ -965,12 +914,12 @@ fn a_draft_typed_while_the_message_posts_survives_its_acceptance() {
     let mut session = DraftSession::new("new:project".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
-    session.queue(typed("Keep my draft"));
+    type_in(&mut session, typed("Keep my draft"));
     session.submit(submission());
     save_next(&mut session);
     assert!(matches!(session.next_operation(), Some(Operation::Post(_))));
     let typed = typed("the next message");
-    session.queue(typed.clone());
+    type_in(&mut session, typed.clone());
     session.posted(Ok(()), submission().thread);
     assert!(!session.sending());
     assert_eq!(*session.body(), typed);
@@ -993,11 +942,11 @@ fn a_draft_typed_while_the_message_posts_survives_its_acceptance() {
 }
 
 #[test]
-fn a_failed_post_reports_the_failure_and_keeps_the_submission_for_retry() {
+fn a_failed_post_reports_the_failure_and_keeps_the_messages_identity_for_sending_again() {
     let mut session = DraftSession::new("new:project".into());
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
-    session.queue(typed("Keep my draft"));
+    type_in(&mut session, typed("Keep my draft"));
     session.submit(submission());
     save_next(&mut session);
     assert!(matches!(session.next_operation(), Some(Operation::Post(_))));
@@ -1006,6 +955,11 @@ fn a_failed_post_reports_the_failure_and_keeps_the_submission_for_retry() {
     assert!(session.send_failed());
     assert!(!session.sending());
     session.retry();
+    assert!(
+        session.next_operation().is_none(),
+        "Try again doesn't send behind the user's back"
+    );
+    send_again(&mut session);
     assert!(!session.send_failed());
     assert_original_submission(&mut session);
 }
@@ -1016,7 +970,7 @@ fn posting_follows_a_new_thread_send_from_queued_to_accepted() {
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
     assert_eq!(session.posting(), Posting::Idle);
-    session.queue(typed("Keep my draft"));
+    type_in(&mut session, typed("Keep my draft"));
     session.submit(submission());
     let thread = submission().thread;
     assert_eq!(session.posting(), Posting::Sending(thread.clone()));
@@ -1024,7 +978,7 @@ fn posting_follows_a_new_thread_send_from_queued_to_accepted() {
     assert!(matches!(session.next_operation(), Some(Operation::Post(_))));
     session.posted(Err(not_sent()), thread.clone());
     assert_eq!(session.posting(), Posting::Failed);
-    session.retry();
+    send_again(&mut session);
     assert_eq!(session.posting(), Posting::Sending(thread.clone()));
     assert!(matches!(session.next_operation(), Some(Operation::Post(_))));
     session.posted(Ok(()), thread.clone());

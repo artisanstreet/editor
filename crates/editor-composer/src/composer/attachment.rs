@@ -164,13 +164,13 @@ pub struct PendingUpload {
     name: String,
 }
 
-const KEPT_IMAGE_NAME: &str = "Pasted image";
-
 impl PendingUpload {
+    pub(crate) const KEPT_NAME: &str = "Pasted image";
+
     pub(crate) fn kept(bytes: Vec<u8>) -> Self {
         Self {
             origin: Arc::new(Source::Bytes(bytes)),
-            name: KEPT_IMAGE_NAME.to_owned(),
+            name: Self::KEPT_NAME.to_owned(),
         }
     }
 
@@ -368,7 +368,7 @@ impl Attachments {
             .collect()
     }
 
-    pub(crate) fn add_failed(&mut self, name: String, reason: String) {
+    pub(crate) fn add_failed(&mut self, name: String, reason: String) -> u64 {
         let key = self.next;
         self.next += 1;
         tracing::warn!(key, %name, %reason, "an image pasted before leaving the draft can't be added");
@@ -386,6 +386,7 @@ impl Attachments {
             encoded: None,
             task: None,
         });
+        key
     }
     #[expect(
         clippy::too_many_lines,

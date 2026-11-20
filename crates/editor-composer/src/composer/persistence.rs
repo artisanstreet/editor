@@ -1,10 +1,10 @@
 use super::attachment::{PendingUpload, ReadImageError, upload_image};
 use super::draft_body::DraftBody;
 use super::draft_session::{
-    AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, LostImage, Operation,
-    PostMessageError, SAVE_DELAY, Submission,
+    AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptLostImage, LostKey, Operation,
+    PostMessageError, SAVE_DELAY, Submission, Unrecovered,
 };
-use super::spool::{DraftSpool, KeepSpooledDraftError};
+use super::spool::{DraftSpool, KeepSpooledDraftError, TakeSpooledDraftError};
 use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use std::{
@@ -20,7 +20,6 @@ use tracing::Instrument as _;
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
     Changed,
-    Reloaded,
     Accepted { thread: ThreadId, item: ItemId },
     ImageAdopted(BlobHash),
 }
@@ -245,10 +244,10 @@ impl Drop for DraftSessions {
     )]
     fn drop(&mut self) {
         let mut pending = pending_shutdown();
-        pending.retain(|session| session.read(DraftSession::pending));
+        pending.retain(|session| session.read(DraftSession::keepable));
         for session in self.sessions.values() {
             session.flush();
-            if session.read(DraftSession::pending) {
+            if session.read(DraftSession::keepable) {
                 pending.push(session.clone());
             }
         }
@@ -291,22 +290,36 @@ impl DraftSessions {
             return Err(DraftsFull { host, scope });
         }
         let mut state = DraftSession::new(scope.clone());
+        let mut spool = self.spool.clone();
         let recovered = match self.spool.as_ref().map(|spool| spool.take(&host, &scope)) {
             Some(Ok(Some(spooled))) => {
+                let mut images = Vec::new();
+                let mut damaged = Vec::new();
+                for image in spooled.images {
+                    match image {
+                        Ok(bytes) => images.push(PendingUpload::kept(bytes)),
+                        Err(error) => {
+                            tracing::error!(
+                                host = %host,
+                                %scope,
+                                error = %::diagnostics::chain(&error),
+                                "an image kept with a draft on this device is unreadable; keeping the rest of the draft"
+                            );
+                            damaged.push(KeptLostImage {
+                                name: PendingUpload::KEPT_NAME.to_owned(),
+                                reason: ::diagnostics::chain(&error),
+                            });
+                        }
+                    }
+                }
                 tracing::info!(
                     host = %host,
                     %scope,
-                    images = spooled.images.len(),
+                    images = images.len(),
+                    damaged = damaged.len(),
                     "recovered a draft kept locally at shutdown"
                 );
-                state.recover(
-                    spooled.draft,
-                    spooled
-                        .images
-                        .into_iter()
-                        .map(PendingUpload::kept)
-                        .collect(),
-                );
+                state.recover(spooled.draft, images, damaged);
                 true
             }
             Some(Ok(None)) | None => false,
@@ -315,8 +328,25 @@ impl DraftSessions {
                     host = %host,
                     %scope,
                     error = %::diagnostics::chain(&error),
-                    "a draft kept locally at shutdown is unreadable; leaving it on disk"
+                    "a draft kept locally at shutdown is unreadable"
                 );
+                match error {
+                    TakeSpooledDraftError::SetAside { set_aside, .. } => {
+                        state.set_unrecovered(Unrecovered::SetAside(set_aside));
+                    }
+                    TakeSpooledDraftError::Left {
+                        path, unreadable, ..
+                    } => {
+                        tracing::error!(
+                            host = %host,
+                            %scope,
+                            error = %::diagnostics::chain(&unreadable),
+                            "this draft won't be kept on this device so the unreadable one isn't overwritten"
+                        );
+                        spool = None;
+                        state.set_unrecovered(Unrecovered::Left(path));
+                    }
+                }
                 false
             }
         };
@@ -325,7 +355,7 @@ impl DraftSessions {
             host,
             scope,
             client,
-            spool: self.spool.clone(),
+            spool,
             shared: Mutex::new(Shared {
                 state,
                 viewers: Vec::new(),
@@ -374,31 +404,36 @@ impl DraftHandle {
     }
 
     fn keep_locally(&self) -> bool {
-        let (pending, scope, draft, images) = self.read(|state| {
+        let (keepable, scope, mut draft, images) = self.read(|state| {
             (
-                state.pending(),
+                state.keepable(),
                 state.scope().to_owned(),
                 state.kept(),
                 state.unacknowledged_images(),
             )
         });
-        let Some(spool) = self.0.spool.as_ref().filter(|_| pending) else {
+        let Some(spool) = self.0.spool.as_ref().filter(|_| keepable) else {
             return false;
         };
         let images = images
             .into_iter()
-            .filter_map(|image| match image {
+            .filter_map(|(name, image)| match image {
                 AdoptedImage::Read(bytes) => Some(bytes),
                 AdoptedImage::Unread(upload) => match upload.read() {
                     Ok(bytes) => Some(Arc::from(bytes)),
                     Err(source) => {
+                        let error = KeepLocallyError::Image(source);
                         tracing::error!(
                             host = %self.0.host,
                             %scope,
-                            image = upload.name(),
-                            error = %::diagnostics::chain(&KeepLocallyError::Image(source)),
+                            image = %name,
+                            error = %::diagnostics::chain(&error),
                             "couldn't keep a pasted image on this device; keeping the rest of the draft"
                         );
+                        draft.lost.push(KeptLostImage {
+                            name,
+                            reason: ::diagnostics::chain(&error),
+                        });
                         None
                     }
                 },
@@ -425,7 +460,7 @@ impl DraftHandle {
     }
 
     fn forget_recovered(&self, shared: &mut Shared) {
-        if !shared.recovered || shared.state.pending() {
+        if !shared.recovered || shared.state.keepable() {
             return;
         }
         shared.recovered = false;
@@ -448,8 +483,8 @@ impl DraftHandle {
         self.start_uploads();
     }
 
-    pub(crate) fn take_lost_images(&self) -> Vec<LostImage> {
-        self.0.shared().state.take_lost_images()
+    pub(crate) fn dismiss_lost(&self, key: LostKey) {
+        self.mutate(|shared| shared.state.dismiss_lost(key));
     }
 
     async fn read_and_upload(
@@ -506,7 +541,6 @@ impl DraftHandle {
             }
             shared.state.remove();
             self.0.cancelled.cancel();
-            shared.emit(&SessionEvent::Reloaded);
         });
     }
 
@@ -521,6 +555,7 @@ impl DraftHandle {
     fn mutate(&self, update: impl FnOnce(&mut Shared)) {
         let mut shared = self.0.shared();
         update(&mut shared);
+        self.forget_recovered(&mut shared);
         shared.emit(&SessionEvent::Changed);
         shared.version = shared.version.wrapping_add(1);
         let version = shared.version;
@@ -528,9 +563,9 @@ impl DraftHandle {
         self.0.changed.send_replace(version);
     }
 
-    pub fn queue(&self, body: DraftBody) {
+    pub fn queue(&self, body: DraftBody, seen: u64) {
         let mut shared = self.0.shared();
-        if !shared.state.queue(body) {
+        if !shared.state.queue(body, seen) {
             return;
         }
         if let Some(timer) = shared.timer.take() {
@@ -574,11 +609,7 @@ impl DraftHandle {
     }
 
     pub(crate) fn use_remote(&self) {
-        self.mutate(|shared| {
-            shared.state.use_remote();
-            shared.emit(&SessionEvent::Reloaded);
-            self.forget_recovered(shared);
-        });
+        self.mutate(|shared| shared.state.use_remote());
     }
 
     fn pump(&self) {
@@ -613,17 +644,13 @@ impl DraftHandle {
             Operation::Write {
                 expected_revision,
                 body,
-                edited,
             } => {
                 let request = WriteDraft {
                     expected_revision,
                     body: body.to_wire(),
                 };
                 let result = client.set_draft(&session.0.scope, &request).await;
-                session.mutate(|shared| {
-                    shared.state.written(&body, edited, result);
-                    session.forget_recovered(shared);
-                });
+                session.mutate(|shared| shared.state.written(result));
             }
             Operation::Post(request) => {
                 let span = tracing::info_span!(
@@ -661,7 +688,6 @@ impl DraftHandle {
                             item: request.message.id,
                         });
                     }
-                    session.forget_recovered(shared);
                 });
             }
         }
@@ -672,3 +698,7 @@ impl DraftHandle {
 #[cfg(test)]
 #[path = "../../tests/composer/persistence/deadline.rs"]
 mod deadline_tests;
+
+#[cfg(test)]
+#[path = "../../tests/composer/persistence/recovery.rs"]
+mod recovery_tests;

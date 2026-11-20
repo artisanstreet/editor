@@ -21,9 +21,9 @@ pub struct DraftBody {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedFile {
-    pub path: DraftPath,
+    pub(crate) path: DraftPath,
     #[serde(default)]
-    pub folder: bool,
+    pub(crate) folder: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

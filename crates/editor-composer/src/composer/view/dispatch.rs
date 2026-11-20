@@ -313,7 +313,14 @@ impl ComposerOwner {
             ComposerAction::RemoveFile(key) => composer.remove_file(key),
             ComposerAction::OpenImage(key) => effects.push(ComposerEffect::OpenImage(key)),
             ComposerAction::RetryDraft => {
-                if let Some(session) = &composer.session {
+                let resend = composer.session.as_ref().is_some_and(|session| {
+                    session.read(super::super::draft_session::DraftSession::send_failed)
+                });
+                if resend {
+                    if composer.send(host) {
+                        effects.push(ComposerEffect::EditorChanged);
+                    }
+                } else if let Some(session) = &composer.session {
                     session.retry();
                 }
             }

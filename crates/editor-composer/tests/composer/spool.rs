@@ -9,7 +9,16 @@ fn kept(text: &str) -> KeptDraft {
         },
         base: None,
         post: None,
+        lost: Vec::new(),
     }
+}
+
+fn images(spooled: &SpooledDraft) -> Vec<Option<&[u8]>> {
+    spooled
+        .images
+        .iter()
+        .map(|image| image.as_ref().ok().map(Vec::as_slice))
+        .collect()
 }
 
 #[test]
@@ -30,20 +39,97 @@ fn drafts_whose_host_and_scope_join_alike_are_kept_apart() {
         )
         .unwrap();
 
-    assert_eq!(
-        spool.take(&first, "new").unwrap(),
-        Some(SpooledDraft {
-            draft: kept("on the first Forge"),
-            images: Vec::new(),
-        })
-    );
+    let taken = spool.take(&first, "new").unwrap().unwrap();
+    assert_eq!(taken.draft, kept("on the first Forge"));
+    assert!(taken.images.is_empty(), "the first draft has no images");
     spool.forget(&first, "new").unwrap();
+    let taken = spool.take(&second, "a-new").unwrap().unwrap();
     assert_eq!(
-        spool.take(&second, "a-new").unwrap(),
-        Some(SpooledDraft {
-            draft: kept("on the second Forge"),
-            images: vec![b"image".to_vec()],
-        }),
+        (taken.draft.body.text.as_str(), images(&taken)),
+        ("on the second Forge", vec![Some(&b"image"[..])]),
         "forgetting one draft leaves the other's text and images"
+    );
+}
+
+#[test]
+fn a_missing_or_damaged_image_still_brings_back_the_drafts_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let spool = DraftSpool::new(directory.path());
+    let host = HostId("forge".into());
+    spool
+        .keep(
+            &host,
+            "new",
+            kept("text beside two images"),
+            &[
+                std::sync::Arc::from(&b"first"[..]),
+                std::sync::Arc::from(&b"second"[..]),
+            ],
+        )
+        .unwrap();
+    let mut stored: Vec<_> = std::fs::read_dir(directory.path().join("drafts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "image")
+        })
+        .collect();
+    stored.sort();
+    std::fs::remove_file(&stored[0]).unwrap();
+    std::fs::write(&stored[1], b"damaged").unwrap();
+
+    let taken = spool.take(&host, "new").unwrap().unwrap();
+    assert_eq!(taken.draft, kept("text beside two images"));
+    assert!(
+        taken
+            .images
+            .iter()
+            .any(|image| matches!(image, Err(TakeSpooledImageError::Read { .. })))
+            && taken
+                .images
+                .iter()
+                .any(|image| matches!(image, Err(TakeSpooledImageError::Damaged { .. }))),
+        "each image says what happened to it: {:?}",
+        taken.images
+    );
+}
+
+#[test]
+fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let spool = DraftSpool::new(directory.path());
+    let host = HostId("forge".into());
+    spool
+        .keep(
+            &host,
+            "new",
+            kept("an older draft"),
+            &[std::sync::Arc::from(&b"image"[..])],
+        )
+        .unwrap();
+    let record = directory.path().join("drafts").join("forge-new.json");
+    std::fs::write(&record, b"{ not json").unwrap();
+
+    let Err(TakeSpooledDraftError::SetAside { set_aside, .. }) = spool.take(&host, "new") else {
+        panic!("expected the unreadable draft to be moved aside");
+    };
+    spool
+        .keep(&host, "new", kept("a newer draft"), &[])
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&set_aside).unwrap(),
+        b"{ not json",
+        "keeping a newer draft leaves the unreadable one untouched"
+    );
+    let set_aside_images = std::fs::read_dir(directory.path().join("drafts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.contains(".image.unreadable-1"))
+        .count();
+    assert_eq!(set_aside_images, 1, "its image is kept beside it");
+    assert_eq!(
+        spool.take(&host, "new").unwrap().unwrap().draft,
+        kept("a newer draft")
     );
 }

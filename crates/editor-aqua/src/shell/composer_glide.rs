@@ -96,9 +96,8 @@ impl ComposerGlide {
     fn new_thread(&mut self, posting: Posting, lift: f32, now: Instant, reduced_motion: bool) {
         match posting {
             Posting::Sending(thread) => self.launch(thread, lift, now, reduced_motion),
-            Posting::Blocked(thread) | Posting::Accepted(thread) if self.launched_into(&thread) => {
-            }
-            Posting::Blocked(_) | Posting::Accepted(_) | Posting::Idle | Posting::Failed => {
+            Posting::Accepted(thread) if self.launched_into(&thread) => {}
+            Posting::Accepted(_) | Posting::Idle | Posting::Failed => {
                 self.center(now, reduced_motion);
             }
         }
@@ -112,7 +111,7 @@ impl ComposerGlide {
     fn wants_launch(&self, posting: &Posting) -> bool {
         match posting {
             Posting::Sending(_) => true,
-            Posting::Blocked(thread) | Posting::Accepted(thread) => self.launched_into(thread),
+            Posting::Accepted(thread) => self.launched_into(thread),
             Posting::Idle | Posting::Failed => false,
         }
     }

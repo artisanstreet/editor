@@ -16,10 +16,10 @@ pub struct DraftSpool {
     dir: PathBuf,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct SpooledDraft {
     pub(crate) draft: KeptDraft,
-    pub(crate) images: Vec<Vec<u8>>,
+    pub(crate) images: Vec<Result<Vec<u8>, TakeSpooledImageError>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,16 +42,44 @@ pub enum KeepSpooledDraftError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TakeSpooledDraftError {
-    #[error("read the draft")]
-    Draft(#[source] ReadConfigError),
+    #[error("the draft kept on this device is unreadable, so it was moved to {set_aside}")]
+    SetAside {
+        set_aside: PathBuf,
+        #[source]
+        source: Box<ReadConfigError>,
+    },
+    #[error("the draft kept on this device at {path} is unreadable ({unreadable}) and stays there")]
+    Left {
+        path: PathBuf,
+        unreadable: Box<ReadConfigError>,
+        #[source]
+        source: Box<SetAsideError>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TakeSpooledImageError {
     #[error("read the pasted image {path}")]
-    ReadImage {
+    Read {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("the pasted image {path} does not match its digest")]
-    ImageDamaged { path: PathBuf },
+    Damaged { path: PathBuf },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetAsideError {
+    #[error("link {from} to {to}")]
+    Link {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Remove(#[from] ForgetSpooledDraftError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -177,8 +205,23 @@ impl DraftSpool {
         scope: &str,
     ) -> Result<Option<SpooledDraft>, TakeSpooledDraftError> {
         let stem = stem(host, scope);
-        let record: Option<Record> = config_file::read(&self.dir.join(format!("{stem}.json")))
-            .map_err(TakeSpooledDraftError::Draft)?;
+        let path = self.dir.join(format!("{stem}.json"));
+        let record: Option<Record> = match config_file::read(&path) {
+            Ok(record) => record,
+            Err(unreadable) => {
+                return Err(match self.set_aside(&stem, &path) {
+                    Ok(set_aside) => TakeSpooledDraftError::SetAside {
+                        set_aside,
+                        source: Box::new(unreadable),
+                    },
+                    Err(source) => TakeSpooledDraftError::Left {
+                        path,
+                        unreadable: Box::new(unreadable),
+                        source: Box::new(source),
+                    },
+                });
+            }
+        };
         let Some(record) = record.filter(|record| &record.host == host && record.scope == scope)
         else {
             return Ok(None);
@@ -188,18 +231,17 @@ impl DraftSpool {
             .iter()
             .map(|digest| {
                 let path = self.image_path(&stem, digest);
-                let bytes =
-                    std::fs::read(&path).map_err(|source| TakeSpooledDraftError::ReadImage {
-                        path: path.clone(),
-                        source,
-                    })?;
+                let bytes = std::fs::read(&path).map_err(|source| TakeSpooledImageError::Read {
+                    path: path.clone(),
+                    source,
+                })?;
                 if ImageDigest::of(&bytes) == *digest {
                     Ok(bytes)
                 } else {
-                    Err(TakeSpooledDraftError::ImageDamaged { path })
+                    Err(TakeSpooledImageError::Damaged { path })
                 }
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         Ok(Some(SpooledDraft {
             draft: record.draft,
             images,
@@ -210,6 +252,51 @@ impl DraftSpool {
         let stem = stem(host, scope);
         remove(&self.dir.join(format!("{stem}.json")))?;
         self.remove_images(&stem, &HashSet::new())
+    }
+
+    fn set_aside(&self, stem: &str, record: &Path) -> Result<PathBuf, SetAsideError> {
+        let (set_aside, number) = (1_u64..)
+            .map(|number| {
+                let to = self.dir.join(format!("{stem}.unreadable-{number}.json"));
+                match std::fs::hard_link(record, &to) {
+                    Ok(()) => Ok(Some((to, number))),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+                    Err(source) => Err(SetAsideError::Link {
+                        from: record.to_owned(),
+                        to,
+                        source,
+                    }),
+                }
+            })
+            .find_map(Result::transpose)
+            .expect("invariant: some set-aside number is free")?;
+        remove(record)?;
+        let listed = |source| ForgetSpooledDraftError::List {
+            path: self.dir.clone(),
+            source,
+        };
+        let prefix = format!("{stem}.");
+        for entry in std::fs::read_dir(&self.dir).map_err(listed)? {
+            let path = entry.map_err(listed)?.path();
+            let ours = path
+                .extension()
+                .is_some_and(|extension| extension == "image")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix));
+            if ours {
+                let mut to = path.clone().into_os_string();
+                to.push(format!(".unreadable-{number}"));
+                std::fs::hard_link(&path, &to).map_err(|source| SetAsideError::Link {
+                    from: path.clone(),
+                    to: to.into(),
+                    source,
+                })?;
+                remove(&path)?;
+            }
+        }
+        Ok(set_aside)
     }
 
     fn write_image(&self, path: &Path, bytes: &[u8]) -> Result<(), KeepSpooledDraftError> {
