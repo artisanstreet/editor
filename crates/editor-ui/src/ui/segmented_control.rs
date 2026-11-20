@@ -14,7 +14,6 @@ use super::theme::{ArtisanTheme, Opacity};
 
 const SEGMENT: Row = Row::ListItem(Density::Dense);
 const SEGMENT_TEXT: TextRole = TextRole::Caption;
-const SEGMENT_HEIGHT: f32 = SEGMENT_TEXT.spec().line + 2.0 * SEGMENT.pad().y.px();
 
 pub(crate) struct Segment<T> {
     value: T,
@@ -86,6 +85,11 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
     )]
     pub(crate) fn build(self) -> Element {
         let theme = self.theme;
+        let segment_height = SEGMENT
+            .pad()
+            .y
+            .px()
+            .mul_add(2.0, theme.typography.size(SEGMENT_TEXT.spec().line));
         let selected = self
             .options
             .iter()
@@ -125,7 +129,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .border_of(1.0, Oklch::TRANSPARENT)
                 .radius(Length::Px(Radius::Field.px()));
             let mut button = Button::new()
-                .height(SEGMENT_HEIGHT)
+                .height(segment_height)
                 .style(style)
                 .child(live::layer(
                     Hover::Neutral,

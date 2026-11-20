@@ -361,14 +361,14 @@ fn limit_row(
     Aqua::Box()
         .styles([Aqua::Style()
             .width(pct(100.0))
-            .height(px(LIMIT_ROW))
+            .height(px(theme.typography.size(LIMIT_ROW)))
             .align(AlignItems::CENTER)
             .gap(10.0)])
         .child(icon)
         .child(
             Aqua::Box()
                 .styles([Aqua::Style()
-                    .width(px(LIMIT_LABEL))
+                    .width(px(theme.typography.size(LIMIT_LABEL)))
                     .flex_shrink(0.0)
                     .clip(true)])
                 .child(small_label(theme, &limit.label, palette.ink_dim))
@@ -454,8 +454,8 @@ fn label(theme: &ArtisanTheme, text: &str, color: Oklch, weight: FontWeight) -> 
     Aqua::Text(text.to_owned())
         .text_style(TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: TEXT,
-            line_height_px: LINE,
+            size_px: theme.typography.size(TEXT),
+            line_height_px: theme.typography.size(LINE),
             weight,
             ..TextStyle::default()
         })
@@ -469,8 +469,8 @@ fn small_label(theme: &ArtisanTheme, text: &str, color: Oklch) -> Element {
     Aqua::Text(text.to_owned())
         .text_style(TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: LIMIT_TEXT,
-            line_height_px: LIMIT_LINE,
+            size_px: theme.typography.size(LIMIT_TEXT),
+            line_height_px: theme.typography.size(LIMIT_LINE),
             weight: FontWeight::NORMAL,
             ..TextStyle::default()
         })

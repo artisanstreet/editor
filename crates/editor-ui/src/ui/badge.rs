@@ -86,16 +86,41 @@ fn pill(t: &ArtisanTheme, label: String) -> Element {
         .build()
 }
 
-const KEY: f32 = 22.0;
-const BACK: f32 = 0.07 * KEY;
-const LEFT: f32 = 0.16 * KEY;
-const RIGHT: f32 = 0.05 * KEY;
-const FRONT: f32 = 0.24 * KEY;
-const BODY_RADIUS: f32 = 0.15 * KEY;
-const FACE_RADIUS: f32 = 0.09 * KEY;
-const FACE_HEIGHT: f32 = KEY - BACK - FRONT;
-const LEGEND: f32 = 0.45 * KEY;
-const MIN_WIDTH: f32 = 0.92 * KEY;
+#[derive(Clone, Copy)]
+struct Key(f32);
+
+impl Key {
+    fn of(theme: &ArtisanTheme) -> Self {
+        Self(theme.typography.size(22.0))
+    }
+    const fn back(self) -> f32 {
+        0.07 * self.0
+    }
+    const fn left(self) -> f32 {
+        0.16 * self.0
+    }
+    const fn right(self) -> f32 {
+        0.05 * self.0
+    }
+    const fn front(self) -> f32 {
+        0.24 * self.0
+    }
+    const fn body_radius(self) -> f32 {
+        0.15 * self.0
+    }
+    const fn face_radius(self) -> f32 {
+        0.09 * self.0
+    }
+    const fn face_height(self) -> f32 {
+        self.0 - self.back() - self.front()
+    }
+    const fn legend(self) -> f32 {
+        0.45 * self.0
+    }
+    const fn min_width(self) -> f32 {
+        0.92 * self.0
+    }
+}
 
 const BASE: f32 = 27.0;
 const CONTRAST: f32 = 0.55;
@@ -151,9 +176,9 @@ fn to(x: f32, y: f32) -> PathCommand {
     PathCommand::Line(Point::new(x, y))
 }
 
-fn corner(x: f32, y: f32, sweep: bool) -> PathCommand {
+fn corner(key: Key, x: f32, y: f32, sweep: bool) -> PathCommand {
     PathCommand::Arc {
-        radii: Point::new(BODY_RADIUS, BODY_RADIUS),
+        radii: Point::new(key.body_radius(), key.body_radius()),
         rotation_radians: 0.0,
         large: false,
         sweep,
@@ -176,21 +201,21 @@ fn facet(bounds: Rect, commands: Vec<PathCommand>, background: GpuiBackground) -
     }
 }
 
-fn skirts() -> Element {
+fn skirts(key: Key) -> Element {
     Canvas::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
         .on_paint(move |bounds| {
             let (w, h) = (bounds.w, bounds.h);
-            let (face_left, face_right) = (LEFT, w - RIGHT);
-            let (face_top, face_bottom) = (BACK, h - FRONT);
-            let r = BODY_RADIUS;
+            let (face_left, face_right) = (key.left(), w - key.right());
+            let (face_top, face_bottom) = (key.back(), h - key.front());
+            let r = key.body_radius();
             vec![
                 facet(
                     bounds,
                     vec![
                         PathCommand::Move(Point::new(face_right, face_top)),
                         to(w - r, 0.0),
-                        corner(w, r, true),
+                        corner(key, w, r, true),
                         to(w, h - r),
                         to(face_right, face_bottom),
                         PathCommand::Close,
@@ -202,9 +227,9 @@ fn skirts() -> Element {
                     vec![
                         PathCommand::Move(Point::new(face_left, face_bottom)),
                         to(0.0, h - r),
-                        corner(r, h, false),
+                        corner(key, r, h, false),
                         to(w - r, h),
-                        corner(w, h - r, false),
+                        corner(key, w, h - r, false),
                         to(face_right, face_bottom),
                         PathCommand::Close,
                     ],
@@ -219,11 +244,12 @@ fn skirts() -> Element {
 fn keycap(theme: &ArtisanTheme, label: String) -> Element {
     let black = Oklch::new(0.0, 0.0, 0.0);
     let white = Oklch::new(1.0, 0.0, 0.0);
+    let key = Key::of(theme);
     let legend = Text::new(label)
         .text_style(TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: LEGEND.round(),
-            line_height_px: FACE_HEIGHT,
+            size_px: key.legend().round(),
+            line_height_px: key.face_height(),
             weight: FontWeight::MEDIUM,
             ..TextStyle::default()
         })
@@ -231,36 +257,36 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
         .wrap(false)
         .build();
     let face = UiBox::new()
-        .height(FACE_HEIGHT)
+        .height(key.face_height())
         .style(
             Style::new()
-                .min_width(Length::Px(MIN_WIDTH - LEFT - RIGHT))
-                .radius(Length::Px(FACE_RADIUS))
+                .min_width(Length::Px(key.min_width() - key.left() - key.right()))
+                .radius(Length::Px(key.face_radius()))
                 .align(AlignItems::CENTER)
                 .justify(JustifyContent::CENTER)
-                .padding_insets(Insets::hv(FACE_HEIGHT * 0.25, 0.0))
+                .padding_insets(Insets::hv(key.face_height() * 0.25, 0.0))
                 .gpui_background(gradient(135.0, shade(-3.0), shade(1.0)))
                 .gpui_shadows(vec![
                     shadow(
                         0.0,
-                        0.005 * KEY,
-                        0.028 * KEY,
-                        0.012 * KEY,
+                        0.005 * key.0,
+                        0.028 * key.0,
+                        0.012 * key.0,
                         false,
                         white.with_alpha(RIM),
                     ),
                     shadow(
-                        0.03 * KEY,
-                        0.04 * KEY,
-                        0.13 * KEY,
+                        0.03 * key.0,
+                        0.04 * key.0,
+                        0.13 * key.0,
                         0.0,
                         true,
                         black.with_alpha(INNER_DARK),
                     ),
                     shadow(
-                        -0.021 * KEY,
-                        -0.028 * KEY,
-                        0.13 * KEY,
+                        -0.021 * key.0,
+                        -0.028 * key.0,
+                        0.13 * key.0,
                         0.0,
                         true,
                         white.with_alpha(INNER_LIGHT),
@@ -270,39 +296,39 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
         .child(legend)
         .build();
     let body = UiBox::new()
-        .height(KEY)
-        .radius(BODY_RADIUS)
+        .height(key.0)
+        .radius(key.body_radius())
         .fill(shade(0.0).to_paint())
         .clip(true)
         .style(Style::new().padding_insets(Insets {
-            left: LEFT,
-            right: RIGHT,
-            top: BACK,
-            bottom: FRONT,
+            left: key.left(),
+            right: key.right(),
+            top: key.back(),
+            bottom: key.front(),
         }))
-        .child(skirts())
+        .child(skirts(key))
         .child(face)
         .build();
     UiBox::new()
-        .height(KEY)
+        .height(key.0)
         .style(
             Style::new()
                 .flex_shrink(0.0)
-                .radius(Length::Px(BODY_RADIUS))
+                .radius(Length::Px(key.body_radius()))
                 .gpui_shadows(vec![
                     shadow(
                         0.0,
-                        0.08 * KEY,
-                        0.18 * KEY,
-                        -0.04 * KEY,
+                        0.08 * key.0,
+                        0.18 * key.0,
+                        -0.04 * key.0,
                         false,
                         black.with_alpha(CAST * 0.35 * 0.51),
                     ),
                     shadow(
-                        0.06 * KEY,
-                        0.28 * KEY,
-                        0.52 * KEY,
-                        -0.01 * KEY,
+                        0.06 * key.0,
+                        0.28 * key.0,
+                        0.52 * key.0,
+                        -0.01 * key.0,
                         false,
                         black.with_alpha(CAST * 0.6 * 0.35),
                     ),

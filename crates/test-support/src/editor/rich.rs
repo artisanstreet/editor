@@ -23,6 +23,7 @@ pub struct MountedBody {
     engine: MarkdownEngine,
     presenter: MarkdownPresenter,
     services: HeatmapServices,
+    theme: ArtisanTheme,
     invalidated: Rc<Cell<bool>>,
     mounted: bool,
 }
@@ -41,7 +42,11 @@ pub fn fence(kind: &str, json: &str) -> String {
 impl MountedBody {
     #[must_use]
     pub fn new(source: &str) -> Self {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        Self::themed(source, ArtisanTheme::for_mode(ThemeMode::Dark))
+    }
+
+    #[must_use]
+    pub fn themed(source: &str, theme: &ArtisanTheme) -> Self {
         let mut app = UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
         app.set_viewport(720.0, 900.0, 1.0);
         let mut body = Self {
@@ -49,6 +54,7 @@ impl MountedBody {
             engine: MarkdownEngine::new().expect("the markdown engine starts"),
             presenter: MarkdownPresenter::default(),
             services: HeatmapServices::new(*theme),
+            theme: *theme,
             invalidated: Rc::new(Cell::new(false)),
             mounted: false,
         };
@@ -79,7 +85,7 @@ impl MountedBody {
 
     fn render(&mut self) {
         self.invalidated.set(false);
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let theme = &self.theme;
         let glyph: GlyphFactory = Rc::new(|_, _, _| ui::Box::new().build());
         let flag = Rc::clone(&self.invalidated);
         let invalidate: Rc<dyn Fn()> = Rc::new(move || flag.set(true));

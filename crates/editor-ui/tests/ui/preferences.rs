@@ -57,28 +57,71 @@ fn windows_text_size_and_high_contrast_reach_the_theme() {
     assert!((theme.typography.scale - 1.5).abs() < f32::EPSILON);
 }
 
-fn label_height(theme: &ArtisanTheme) -> Option<f32> {
+fn text_height(element: aqua_ui::element::Element, text: &str) -> f32 {
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::element::Box as UiBox;
-    let text = TextRole::Label
+    use aqua_ui::tree::NodeKind;
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| UiBox::new().width(160.0).child(element).build())
+        .expect("the element mounts");
+    app.set_viewport(400.0, 400.0, 1.0);
+    app.build_frame().expect("the element draws");
+    let tree = app.tree();
+    let node = tree
+        .traverse()
+        .into_iter()
+        .find(|node| {
+            matches!(&tree.get(*node).expect("a traversed node exists").kind, NodeKind::Text(shown) if shown.text() == text)
+        })
+        .unwrap_or_else(|| panic!("{text:?} is shown"));
+    tree.rect(node).expect("a shown text has a rect").h
+}
+
+fn label(theme: &ArtisanTheme) -> aqua_ui::element::Element {
+    TextRole::Label
         .text(
             theme,
             "Larger text wraps onto more lines in the same column",
         )
         .wrap(true)
         .build()
-        .with_key("label");
-    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.mount(|_| UiBox::new().width(160.0).child(text).build())
-        .ok()?;
-    app.set_viewport(400.0, 400.0, 1.0);
-    app.build_frame().ok()?;
-    let node =
-        app.tree()
-            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
-                "label",
-            )))?;
-    Some(app.tree().rect(node)?.h)
+}
+
+fn account_menu(theme: &ArtisanTheme) -> aqua_ui::element::Element {
+    use editor_ui::chrome::account::{Account, Identity, Sheet, menu};
+    use editor_ui::chrome::limits::{EngineLimits, Limit};
+    let account = Account {
+        identity: Identity::of("Ada Lovelace", "ada@example.com", None),
+        avatar: None,
+        limits: vec![EngineLimits {
+            engine: artisan_api::EngineId::Claude,
+            limits: vec![Limit {
+                label: "Week".into(),
+                cadence: artisan_api::UsageCadence::Week,
+                scope: None,
+                used_percent: 40.0,
+                resets_at: None,
+            }],
+        }],
+    };
+    menu(
+        theme,
+        &Sheet {
+            account: &account,
+            menu: &editor_ui::chrome::menu::Menu::default(),
+            width: 160.0,
+            now: std::time::Instant::now(),
+            emit: std::rc::Rc::new(|_| {}),
+        },
+    )
+}
+
+fn suggested_prompt(theme: &ArtisanTheme) -> aqua_ui::element::Element {
+    use editor_ui::text::mount::EditorController;
+    use editor_ui::text::{Editor, Mode};
+    let controller = EditorController::new(Editor::new("", Mode::Prompt), |_| {});
+    controller.set_suggestion(Some("Summarise".into()));
+    controller.element(Mode::Prompt, theme, "")
 }
 
 #[test]
@@ -89,9 +132,21 @@ fn a_larger_text_size_reflows_labels() {
         ..SystemAccess::default()
     })
     .theme();
-    let (larger, standard) = (
-        label_height(&larger).unwrap(),
-        label_height(&standard).unwrap(),
+    let grows = |build: fn(&ArtisanTheme) -> aqua_ui::element::Element, text: &str| {
+        let (larger, standard) = (
+            text_height(build(&larger), text),
+            text_height(build(&standard), text),
+        );
+        assert!(
+            larger > standard * 1.5,
+            "{text:?} grew from {standard} to only {larger}"
+        );
+    };
+    grows(
+        label,
+        "Larger text wraps onto more lines in the same column",
     );
-    assert!(larger > standard * 1.5);
+    grows(account_menu, "Ada Lovelace");
+    grows(account_menu, "Week");
+    grows(suggested_prompt, "Tab");
 }

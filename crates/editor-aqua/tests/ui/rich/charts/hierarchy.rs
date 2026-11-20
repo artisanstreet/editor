@@ -64,3 +64,34 @@ fn flame_rows_reverse_icicle_and_leaf_pointer_click_does_not_zoom() {
     assert!(chart.shows("l6"));
     assert!(!chart.shows("l7"));
 }
+
+#[test]
+fn hierarchy_labels_grow_with_the_text_size() {
+    use editor_aqua::ui::preferences::{Preferences, SystemAccess};
+    use editor_aqua::ui::theme::{FontSet, ThemeMode};
+    let theme = |text_scale| {
+        Preferences {
+            theme: ThemeMode::Dark,
+            fonts: FontSet::Spline,
+            outline_text: true,
+            reduced_motion: None,
+            high_contrast: None,
+            text_scale: Some(text_scale),
+            streaming: editor_aqua::ui::preferences::StreamingMode::Smooth,
+            lower_frame_rate: false,
+            vsync: true,
+            system: SystemAccess::default(),
+        }
+        .theme()
+    };
+    let height = |text_scale| {
+        MountedBody::themed(
+            &test_support::editor::rich::fence("hierarchy", TREE),
+            &theme(text_scale),
+        )
+        .text_rect("branch")
+        .h
+    };
+    let (standard, larger) = (height(1.0), height(1.75));
+    assert!(larger > standard * 1.5, "{standard} grew only to {larger}");
+}

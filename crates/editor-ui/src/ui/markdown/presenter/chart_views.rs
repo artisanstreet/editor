@@ -352,8 +352,8 @@ impl MarkdownPresenter {
                     families: vec![aqua_text::FontFamily::Named(
                         current_theme.typography.sans.family.to_owned(),
                     )],
-                    size_px: 11.0,
-                    line_height_px: 14.0,
+                    size_px: current_theme.typography.size(11.0),
+                    line_height_px: current_theme.typography.size(14.0),
                     weight,
                     ..aqua_text::TextStyle::default()
                 };
