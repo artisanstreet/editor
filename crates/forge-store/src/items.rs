@@ -957,31 +957,37 @@ impl Tx<'_> {
     fn upsert_item(&mut self, mut new: NewItem) -> Result<Item, WriteFailure> {
         let native_id = new.native_id.clone();
         let old = read::item(self, &new.id)?;
-        if let ItemKind::Agent { label, .. } = &mut new.kind
-            && label.as_ref().is_none_or(|label| label.trim().is_empty())
-        {
-            *label = old.as_ref().and_then(|item| match &item.kind {
-                ItemKind::Agent { label, .. } => label
-                    .as_ref()
-                    .filter(|label| !label.trim().is_empty())
-                    .cloned(),
-                ItemKind::UserMessage { .. }
-                | ItemKind::AssistantMessage { .. }
-                | ItemKind::Tool { .. }
-                | ItemKind::Question { .. }
-                | ItemKind::Plan { .. }
-                | ItemKind::Image { .. }
-                | ItemKind::Compaction { .. }
-                | ItemKind::Notice { .. }
-                | ItemKind::Error { .. } => None,
+        if let ItemKind::Agent { label, .. } = &mut new.kind {
+            let kept = label
+                .take()
+                .filter(|label| !label.trim().is_empty())
+                .or_else(|| {
+                    old.as_ref().and_then(|item| match &item.kind {
+                        ItemKind::Agent { label, .. } => label
+                            .as_ref()
+                            .filter(|label| !label.trim().is_empty())
+                            .cloned(),
+                        ItemKind::UserMessage { .. }
+                        | ItemKind::AssistantMessage { .. }
+                        | ItemKind::Tool { .. }
+                        | ItemKind::Question { .. }
+                        | ItemKind::Plan { .. }
+                        | ItemKind::Image { .. }
+                        | ItemKind::Compaction { .. }
+                        | ItemKind::Notice { .. }
+                        | ItemKind::Error { .. } => None,
+                    })
+                });
+            let wakes = !new.status.is_terminal()
+                && old.as_ref().is_none_or(|item| item.status.is_terminal());
+            *label = Some(match kept {
+                Some(kept) if !wakes => kept,
+                kept => {
+                    let held = read::held_agent_labels(self, &new.thread_id, &new.id)?;
+                    artisan_api::HeldAgentNames::new(held.iter().map(String::as_str))
+                        .keep_or_choose(kept, new.id.as_str())
+                }
             });
-            if label.is_none() {
-                let taken = read::agent_labels(self, &new.thread_id)?;
-                *label = Some(artisan_api::choose_agent_name(
-                    new.id.as_str(),
-                    taken.iter().map(String::as_str),
-                ));
-            }
         }
         let item = if let Some(old) = old {
             if old.thread_id != new.thread_id {

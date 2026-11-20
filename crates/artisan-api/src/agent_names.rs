@@ -101,28 +101,49 @@ pub const AGENT_NAMES: [&str; 100] = [
     "Vilde",
 ];
 
-#[must_use]
-pub fn choose_agent_name<'a>(seed: &str, taken: impl IntoIterator<Item = &'a str>) -> String {
-    let taken: std::collections::HashSet<String> =
-        taken.into_iter().map(str::to_lowercase).collect();
-    let pick = seed_hash(seed);
-    let mut generation = 1u32;
-    loop {
-        let free: Vec<String> = AGENT_NAMES
-            .iter()
-            .map(|name| {
-                if generation == 1 {
-                    (*name).to_owned()
-                } else {
-                    format!("{name} {generation}")
-                }
-            })
-            .filter(|name| !taken.contains(&name.to_lowercase()))
-            .collect();
-        if let Some(name) = pick_from(&free, pick) {
-            return name.clone();
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeldAgentNames(std::collections::HashSet<String>);
+
+impl HeldAgentNames {
+    #[must_use]
+    pub fn new<'a>(held: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(held.into_iter().map(str::to_lowercase).collect())
+    }
+
+    #[must_use]
+    pub(crate) fn holds(&self, name: &str) -> bool {
+        self.0.contains(&name.to_lowercase())
+    }
+
+    #[must_use]
+    pub fn keep_or_choose(&self, kept: Option<String>, seed: &str) -> String {
+        match kept {
+            Some(kept) if !self.holds(&kept) => kept,
+            Some(_) | None => self.choose(seed),
         }
-        generation += 1;
+    }
+
+    #[must_use]
+    pub(crate) fn choose(&self, seed: &str) -> String {
+        let pick = seed_hash(seed);
+        let mut generation = 1u32;
+        loop {
+            let free: Vec<String> = AGENT_NAMES
+                .iter()
+                .map(|name| {
+                    if generation == 1 {
+                        (*name).to_owned()
+                    } else {
+                        format!("{name} {generation}")
+                    }
+                })
+                .filter(|name| !self.holds(name))
+                .collect();
+            if let Some(name) = pick_from(&free, pick) {
+                return name.clone();
+            }
+            generation += 1;
+        }
     }
 }
 

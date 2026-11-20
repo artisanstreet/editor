@@ -151,15 +151,21 @@ pub(crate) fn agent_by_address(
         .at("items/agent_by_address.sql")
 }
 
-pub(crate) fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<String>> {
+pub(crate) fn held_agent_labels(
+    conn: &Connection,
+    thread_id: &ThreadId,
+    except: &ItemId,
+) -> Result<Vec<String>> {
     let mut statement = conn
-        .prepare_cached(include_str!("sql/items/agent_labels.sql"))
-        .at("items/agent_labels.sql")?;
+        .prepare_cached(include_str!("sql/items/held_agent_labels.sql"))
+        .at("items/held_agent_labels.sql")?;
     let labels = statement
-        .query_map([thread_id.as_str()], |row| row.get::<_, String>(0))
-        .at("items/agent_labels.sql")?
+        .query_map([thread_id.as_str(), except.as_str()], |row| {
+            row.get::<_, String>(0)
+        })
+        .at("items/held_agent_labels.sql")?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .at("items/agent_labels.sql")?;
+        .at("items/held_agent_labels.sql")?;
     Ok(labels)
 }
 

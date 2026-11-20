@@ -20,7 +20,7 @@ pub mod tls;
 pub mod transport;
 mod tunnel;
 
-pub use agent_names::{AGENT_NAMES, choose_agent_name, fallback_agent_name};
+pub use agent_names::{AGENT_NAMES, HeldAgentNames, fallback_agent_name};
 pub use clock::WallClock;
 pub use content::{
     CONTENT_RANGE_BYTES, ContentId, ContentQuery, ContentRange, ContentRef, INLINE_TEXT_BYTES,
