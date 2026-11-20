@@ -740,24 +740,7 @@ impl Extensions {
         &self,
         id: &str,
     ) -> Result<Vec<CatalogSkill>, MarketplaceInstallError> {
-        let root = self.data_dir().join("marketplace");
-        let staging_root = root.clone();
-        let staging = tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&staging_root)?;
-            tempfile::Builder::new()
-                .prefix("install-")
-                .tempdir_in(&staging_root)
-        })
-        .await
-        .map_err(|source| MarketplaceInstallError::StagingTask {
-            listing: id.to_owned(),
-            source,
-        })?
-        .map_err(|source| MarketplaceInstallError::Staging {
-            listing: id.to_owned(),
-            path: root,
-            source,
-        })?;
+        let staging = marketplace_staging(self.data_dir().join("marketplace"), id).await?;
         let scratch = staging.path().to_path_buf();
         let installed = match forge_engines::fetch_skill(self.engines().http(), id, &scratch).await
         {
@@ -1121,6 +1104,29 @@ impl Extensions {
     }
 }
 
+async fn marketplace_staging(
+    root: PathBuf,
+    listing: &str,
+) -> Result<tempfile::TempDir, MarketplaceInstallError> {
+    let staging_root = root.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&staging_root)?;
+        tempfile::Builder::new()
+            .prefix("install-")
+            .tempdir_in(&staging_root)
+    })
+    .await
+    .map_err(|source| MarketplaceInstallError::StagingTask {
+        listing: listing.to_owned(),
+        source,
+    })?
+    .map_err(|source| MarketplaceInstallError::Staging {
+        listing: listing.to_owned(),
+        path: root,
+        source,
+    })
+}
+
 fn candidates(homes: &[(EngineId, Option<PathBuf>)]) -> Vec<PromptCandidate> {
     let mut found: Vec<PromptCandidate> = Vec::new();
     for (engine, home) in homes {
@@ -1216,3 +1222,7 @@ fn prompt_state(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/extensions/staging.rs"]
+mod staging_tests;
