@@ -993,3 +993,8 @@ mod marker_budget_tests;
 #[cfg(all(test, not(target_os = "linux")))]
 #[path = "../tests/customise/copied_reconciliation.rs"]
 mod copied_reconciliation_tests;
+
+#[cfg(test)]
+#[cfg(not(target_os = "linux"))]
+#[path = "../tests/customise/publish_copy.rs"]
+mod publish_copy_tests;

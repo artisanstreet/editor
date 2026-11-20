@@ -1,7 +1,5 @@
 use super::*;
 use crate::customise::materialize;
-#[cfg(all(unix, not(target_os = "linux")))]
-use crate::customise::publish_copy;
 
 fn skill(folder: &Path, name: &str, body: &str) {
     fs::create_dir_all(folder).unwrap();
@@ -72,33 +70,6 @@ fn replacing_an_installed_skill_leaves_no_replacement_record() {
     install_skill(&[], &config, &source, true).unwrap();
     assert!(body(&config.skills_dir.join("review")).contains("second"));
     assert_eq!(names(&config.skills_dir), ["review"]);
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-#[test]
-fn a_failed_copy_keeps_the_engine_reading_the_previous_copy() {
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("skills/review");
-    let engine_skills = dir.path().join("claude/.claude/skills");
-    let link = engine_skills.join("review");
-    let staging = super::super::staging_root(&engine_skills);
-    skill(&target, "review", "first");
-    fs::create_dir_all(&engine_skills).unwrap();
-    publish_copy(&target, &link, &staging).unwrap();
-    assert!(body(&link).contains("first"));
-
-    skill(&target, "review", "second");
-    std::os::unix::fs::symlink(&target, target.join("loop")).unwrap();
-    assert!(publish_copy(&target, &link, &staging).is_err());
-    assert!(body(&link).contains("first"));
-    assert!(link.join(COPY_MARKER).is_file());
-    assert!(names(&staging).is_empty());
-
-    fs::remove_file(target.join("loop")).unwrap();
-    publish_copy(&target, &link, &staging).unwrap();
-    assert!(body(&link).contains("second"));
-    assert!(super::super::copied_skill_matches(&link, &target).unwrap());
-    assert!(names(&staging).is_empty());
 }
 
 #[cfg(unix)]
