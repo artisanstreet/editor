@@ -217,6 +217,10 @@ fn send_rejected(rejected: &SendRejected) -> Failure {
             Failure::Run(RunFailure::ImageMissing { blob: blob.clone() })
         }
         SendRejected::InvalidConfig => Failure::Run(RunFailure::InvalidConfig),
+        SendRejected::ConfigTooLarge { bytes } => Failure::Run(RunFailure::ConfigTooLarge {
+            bytes: wide(*bytes),
+            limit: wide(forge_store::MAX_CONFIG_BYTES),
+        }),
     }
 }
 
@@ -297,6 +301,20 @@ fn update_thread(thread: &ThreadId, failure: &UpdateThreadFailure) -> Failure {
         UpdateThreadFailure::InvalidConfig => Failure::Thread(ThreadFailure::InvalidConfig {
             thread: thread.clone(),
         }),
+        UpdateThreadFailure::ConfigTooLarge { bytes } => {
+            Failure::Thread(ThreadFailure::ConfigTooLarge {
+                thread: thread.clone(),
+                bytes: wide(*bytes),
+                limit: wide(forge_store::MAX_CONFIG_BYTES),
+            })
+        }
+        UpdateThreadFailure::TitleTooLong { bytes } => {
+            Failure::Thread(ThreadFailure::TitleTooLong {
+                thread: thread.clone(),
+                bytes: wide(*bytes),
+                limit: wide(forge_store::MAX_TITLE_BYTES),
+            })
+        }
         UpdateThreadFailure::Storage(_) => Failure::Internal,
     }
 }
@@ -338,6 +356,20 @@ pub fn create_thread(error: &CreateThreadError) -> Failure {
         CreateThreadError::InvalidConfig { thread } => {
             Failure::Thread(ThreadFailure::InvalidConfig {
                 thread: thread.clone(),
+            })
+        }
+        CreateThreadError::ConfigTooLarge { thread, bytes } => {
+            Failure::Thread(ThreadFailure::ConfigTooLarge {
+                thread: thread.clone(),
+                bytes: wide(*bytes),
+                limit: wide(forge_store::MAX_CONFIG_BYTES),
+            })
+        }
+        CreateThreadError::TitleTooLong { thread, bytes } => {
+            Failure::Thread(ThreadFailure::TitleTooLong {
+                thread: thread.clone(),
+                bytes: wide(*bytes),
+                limit: wide(forge_store::MAX_TITLE_BYTES),
             })
         }
         CreateThreadError::Storage { .. } => Failure::Internal,

@@ -43,6 +43,18 @@ pub enum ThreadFailure {
     ParentNotFound { thread: ThreadId, parent: ThreadId },
     #[error("The settings of thread {thread} set a context window its engine doesn't offer.")]
     InvalidConfig { thread: ThreadId },
+    #[error("The settings of thread {thread} are {bytes} bytes; they can be at most {limit}.")]
+    ConfigTooLarge {
+        thread: ThreadId,
+        bytes: u64,
+        limit: u64,
+    },
+    #[error("The title of thread {thread} is {bytes} bytes; it can be at most {limit}.")]
+    TitleTooLong {
+        thread: ThreadId,
+        bytes: u64,
+        limit: u64,
+    },
     #[error("The search is {bytes} bytes; it can be at most {limit}.")]
     SearchTooLong { bytes: u64, limit: u64 },
 }
@@ -80,6 +92,8 @@ pub enum RunFailure {
     ImageMissing { blob: BlobHash },
     #[error("The message sets a context window its engine doesn't offer.")]
     InvalidConfig,
+    #[error("The message's settings are {bytes} bytes; they can be at most {limit}.")]
+    ConfigTooLarge { bytes: u64, limit: u64 },
     #[error("{reason}")]
     AnswerRefused {
         item: Option<ItemId>,
@@ -394,7 +408,10 @@ impl ThreadFailure {
             Self::NotFound { .. } | Self::ItemNotFound { .. } | Self::ParentNotFound { .. } => {
                 ErrorCode::NotFound
             }
-            Self::InvalidConfig { .. } | Self::SearchTooLong { .. } => ErrorCode::BadRequest,
+            Self::InvalidConfig { .. }
+            | Self::ConfigTooLarge { .. }
+            | Self::TitleTooLong { .. }
+            | Self::SearchTooLong { .. } => ErrorCode::BadRequest,
         }
     }
 }
@@ -415,7 +432,8 @@ impl RunFailure {
             | Self::ImageTooLarge { .. }
             | Self::ImagesTooLarge { .. }
             | Self::ImageMissing { .. }
-            | Self::InvalidConfig => ErrorCode::BadRequest,
+            | Self::InvalidConfig
+            | Self::ConfigTooLarge { .. } => ErrorCode::BadRequest,
         }
     }
 }

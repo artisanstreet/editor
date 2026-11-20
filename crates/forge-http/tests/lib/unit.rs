@@ -823,6 +823,116 @@ async fn remote_editors_get_item_pages_zstd_compressed_but_events_stay_plain() {
     assert!(events.headers().get("content-encoding").is_none());
 }
 
+const EDITOR_ANSWER_BYTES: usize = 32 * 1024 * 1024;
+
+fn largest_config() -> EngineConfig {
+    let mut config = EngineConfig::new(EngineId::Claude);
+    config
+        .options
+        .insert("note".to_owned(), serde_json::Value::String(String::new()));
+    let room = forge_store::MAX_CONFIG_BYTES - serde_json::to_vec(&config).unwrap().len();
+    config.options.insert(
+        "note".to_owned(),
+        serde_json::Value::String("o".repeat(room)),
+    );
+    config
+}
+
+async fn fill_settings(store: &Store) {
+    let mut chunk = 1024 * 1024;
+    let mut index = 0;
+    while chunk > 0 {
+        let saved = store
+            .set_setting(
+                format!("filler_{index}"),
+                serde_json::Value::String("s".repeat(chunk)),
+            )
+            .await;
+        index += 1;
+        if saved.is_err() {
+            chunk /= 2;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_starting_state_fits_the_editor_with_every_collection_full() {
+    let (_dir, address, store) = forge().await;
+    let editor = paired(&store, address, "full").await;
+    let existing = store.state().await.unwrap().projects.len();
+    let projects =
+        futures::future::try_join_all((existing..forge_store::MAX_LIVE_PROJECTS).map(|index| {
+            store.create_project(CreateProject {
+                id: ProjectId::new(),
+                path: format!(
+                    "/{index:p>width$}",
+                    width = forge_store::MAX_PROJECT_PATH_BYTES - 1
+                ),
+                name: Some("n".repeat(forge_store::MAX_PROJECT_NAME_BYTES)),
+            })
+        }))
+        .await
+        .unwrap();
+    fill_settings(&store).await;
+    let config = largest_config();
+    let threads = futures::future::try_join_all((0..400).map(|_| {
+        store.create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: projects[0].id.clone(),
+            config: config.clone(),
+            title: Some("t".repeat(forge_store::MAX_TITLE_BYTES)),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+    }))
+    .await
+    .unwrap();
+    futures::future::try_join_all(threads.iter().map(|thread| {
+        store.upsert_run(artisan_api::Run {
+            config: Some(config.clone()),
+            id: artisan_api::RunId::new(),
+            thread_id: thread.id.clone(),
+            engine: EngineId::Claude,
+            model: config.model.clone(),
+            state: artisan_api::RunState::Running,
+            usage: artisan_api::Usage::default(),
+            session_id: Some(artisan_api::RunId::new().to_string()),
+            seq: 0,
+            input_cutoff: 0,
+            started_at: 0,
+            continuation: None,
+        })
+    }))
+    .await
+    .unwrap();
+
+    let body = editor
+        .http()
+        .get(editor.url("/state"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        body.len() <= EDITOR_ANSWER_BYTES,
+        "the starting state is {} bytes; the Editor reads at most {EDITOR_ANSWER_BYTES}",
+        body.len()
+    );
+    let state: State = serde_json::from_slice(&body).unwrap();
+    assert_eq!(state.projects.len(), forge_store::MAX_LIVE_PROJECTS);
+    assert!(
+        state
+            .runs
+            .iter()
+            .filter(|run| matches!(run.state, artisan_api::RunState::Running))
+            .count()
+            >= 400,
+        "every live run is in the starting state"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_client_that_never_finishes_tls_is_dropped_and_frees_its_slot() {
     let identity = Identity::generate("artisan-forge").unwrap();

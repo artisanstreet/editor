@@ -82,16 +82,39 @@ impl From<SendRejected> for InputFailure {
 pub enum UpdateThreadFailure {
     #[error("the config sets a context window its engine does not offer")]
     InvalidConfig,
+    #[error("the config is {bytes} bytes; the limit is {MAX_CONFIG_BYTES}")]
+    ConfigTooLarge { bytes: usize },
+    #[error("the title is {bytes} bytes; the limit is {MAX_TITLE_BYTES}")]
+    TitleTooLong { bytes: usize },
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
 
-pub(crate) fn valid_config(config: &artisan_api::EngineConfig) -> bool {
-    !config.options.contains_key("context_window")
+pub const MAX_TITLE_BYTES: usize = 1024;
+pub const MAX_CONFIG_BYTES: usize = 16 * 1024;
+
+pub(crate) enum ConfigProblem {
+    ContextWindow,
+    TooLarge { bytes: usize },
+}
+
+pub(crate) fn config_problem(config: &artisan_api::EngineConfig) -> Option<ConfigProblem> {
+    let bytes = crate::encoded::len(config);
+    if bytes > MAX_CONFIG_BYTES {
+        return Some(ConfigProblem::TooLarge { bytes });
+    }
+    let offered = !config.options.contains_key("context_window")
         || (matches!(
             config.engine,
             artisan_api::EngineId::Claude | artisan_api::EngineId::Codex
-        ) && config.context_window_override().is_some())
+        ) && config.context_window_override().is_some());
+    (!offered).then_some(ConfigProblem::ContextWindow)
+}
+
+pub(crate) fn title_too_long(title: Option<&String>) -> Option<usize> {
+    title
+        .map(String::len)
+        .filter(|bytes| *bytes > MAX_TITLE_BYTES)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,8 +274,23 @@ impl Tx<'_> {
         if let Some(existing) = read::thread(self, &request.id).map_err(storage)? {
             return Ok(existing);
         }
-        if !valid_config(&request.config) {
-            return Err(CreateThreadError::InvalidConfig { thread: request.id });
+        match config_problem(&request.config) {
+            Some(ConfigProblem::ContextWindow) => {
+                return Err(CreateThreadError::InvalidConfig { thread: request.id });
+            }
+            Some(ConfigProblem::TooLarge { bytes }) => {
+                return Err(CreateThreadError::ConfigTooLarge {
+                    thread: request.id,
+                    bytes,
+                });
+            }
+            None => {}
+        }
+        if let Some(bytes) = title_too_long(request.title.as_ref()) {
+            return Err(CreateThreadError::TitleTooLong {
+                thread: request.id,
+                bytes,
+            });
         }
         let project = read::project(self, &request.project_id)
             .map_err(storage)?
@@ -337,12 +375,15 @@ impl Tx<'_> {
         id: &ThreadId,
         update: UpdateThread,
     ) -> Result<Option<Thread>, UpdateThreadFailure> {
-        if update
-            .config
-            .as_ref()
-            .is_some_and(|config| !valid_config(config))
-        {
-            return Err(UpdateThreadFailure::InvalidConfig);
+        match update.config.as_ref().and_then(config_problem) {
+            Some(ConfigProblem::ContextWindow) => return Err(UpdateThreadFailure::InvalidConfig),
+            Some(ConfigProblem::TooLarge { bytes }) => {
+                return Err(UpdateThreadFailure::ConfigTooLarge { bytes });
+            }
+            None => {}
+        }
+        if let Some(bytes) = title_too_long(update.title.as_ref()) {
+            return Err(UpdateThreadFailure::TitleTooLong { bytes });
         }
         let Some(mut thread) = read::thread(self, id)? else {
             return Ok(None);

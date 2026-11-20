@@ -107,12 +107,13 @@ pub use threads::{
     AgentThreadsError, AwaitsUserError, ChangesSinceError, CreateProjectError,
     CreateProjectFailure, InspectorError, LastReplyError, LatestRunError, MAX_LIVE_PROJECTS,
     MAX_PROJECT_NAME_BYTES, MAX_PROJECT_PATH_BYTES, MarkUnreadError, ReadProjectError,
-    ReadRunError, ReadThreadError, RemoveProjectError, ReplaceTitleError, STATE_BYTES,
-    SettleThreadError, StateError, ThreadTitlesError, ThreadsPageError, UpdateThreadError,
-    UpsertRunError, WorkingAgentsError,
+    ReadRunError, ReadThreadError, RemoveProjectError, ReplaceTitleError, ReplaceTitleFailure,
+    STATE_BYTES, SettleThreadError, StateError, ThreadTitlesError, ThreadsPageError,
+    UpdateThreadError, UpsertRunError, WorkingAgentsError,
 };
 pub use writer::{
-    InputFailure, MAX_MESSAGE_TEXT_BYTES, SETTINGS_BYTES, UpdateThreadFailure, WriteFailure,
+    InputFailure, MAX_CONFIG_BYTES, MAX_MESSAGE_TEXT_BYTES, MAX_TITLE_BYTES, SETTINGS_BYTES,
+    UpdateThreadFailure, WriteFailure,
 };
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
@@ -212,6 +213,16 @@ pub enum CreateThreadError {
     },
     #[error("create thread {thread}: the config sets a context window its engine does not offer")]
     InvalidConfig { thread: ThreadId },
+    #[error(
+        "create thread {thread}: the config is {bytes} bytes; the limit is {}",
+        writer::MAX_CONFIG_BYTES
+    )]
+    ConfigTooLarge { thread: ThreadId, bytes: usize },
+    #[error(
+        "create thread {thread}: the title is {bytes} bytes; the limit is {}",
+        writer::MAX_TITLE_BYTES
+    )]
+    TitleTooLong { thread: ThreadId, bytes: usize },
     #[error("create thread {thread}")]
     Storage {
         thread: ThreadId,
@@ -250,6 +261,11 @@ pub enum SendRejected {
     MissingBlob(BlobHash),
     #[error("the message config sets a context window its engine does not offer")]
     InvalidConfig,
+    #[error(
+        "the message config is {bytes} bytes; the limit is {}",
+        writer::MAX_CONFIG_BYTES
+    )]
+    ConfigTooLarge { bytes: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]

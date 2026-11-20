@@ -30,7 +30,18 @@ pub enum CreateProjectFailure {
 operation_error!(CreateProjectError(CreateProjectFailure), "create project {project}", project: ProjectId);
 operation_error!(RemoveProjectError(StorageError), "remove project {project}", project: ProjectId);
 operation_error!(UpdateThreadError(UpdateThreadFailure), "update thread {thread}", thread: ThreadId);
-operation_error!(ReplaceTitleError(WriteFailure), "replace the title of thread {thread}", thread: ThreadId);
+#[derive(Debug, thiserror::Error)]
+pub enum ReplaceTitleFailure {
+    #[error(
+        "the title is {bytes} bytes; the limit is {}",
+        crate::writer::MAX_TITLE_BYTES
+    )]
+    TooLong { bytes: usize },
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+operation_error!(ReplaceTitleError(ReplaceTitleFailure), "replace the title of thread {thread}", thread: ThreadId);
 operation_error!(
     ThreadsPageError(read::ThreadsPageFailure),
     "page the threads"
@@ -151,6 +162,9 @@ impl Store {
         let thread = id.clone();
         let id = id.clone();
         self.write_acknowledged(move |tx| {
+            if let Some(bytes) = crate::writer::title_too_long(Some(&title)) {
+                return Err(ReplaceTitleFailure::TooLong { bytes });
+            }
             let Some(mut thread) = read::thread(tx, &id)? else {
                 return Ok(None);
             };
@@ -443,6 +457,75 @@ fn encoded_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, Storage
     read::to_body(value).map(|body| body.len())
 }
 
+const FIRST_THREAD_RESERVE: usize = 256 * 1024;
+
+fn within<T: serde::Serialize>(
+    used: &mut usize,
+    limit: usize,
+    values: Vec<T>,
+    named: impl Fn(&T) -> String,
+) -> Result<Vec<T>, StorageError> {
+    let mut kept = Vec::with_capacity(values.len());
+    for value in values {
+        let bytes = encoded_len(&value)?;
+        if used.saturating_add(bytes) > limit {
+            tracing::warn!(
+                bytes,
+                "the state a client starts from has no room for {}",
+                named(&value)
+            );
+            continue;
+        }
+        *used = used.saturating_add(bytes);
+        kept.push(value);
+    }
+    Ok(kept)
+}
+
+struct FittedPage {
+    threads: Vec<Thread>,
+    runs: Vec<Run>,
+    next: Option<artisan_api::ThreadCursor>,
+}
+
+fn fit_page(mut used: usize, page: artisan_api::ThreadsPage) -> Result<FittedPage, StorageError> {
+    let mut threads = Vec::with_capacity(page.threads.len());
+    let mut runs: Vec<Run> = Vec::with_capacity(page.runs.len());
+    let mut latest = page.runs;
+    for thread in page.threads {
+        let run = latest
+            .iter()
+            .position(|run| run.thread_id == thread.id)
+            .map(|index| latest.swap_remove(index));
+        let bytes = encoded_len(&thread)?
+            .saturating_add(run.as_ref().map(encoded_len).transpose()?.unwrap_or(0));
+        if used.saturating_add(bytes) > STATE_BYTES {
+            let next = threads
+                .last()
+                .map(|kept: &Thread| artisan_api::ThreadCursor {
+                    activity_seq: kept.activity_seq,
+                    id: kept.id.clone(),
+                });
+            if next.is_none() {
+                tracing::warn!(thread = %thread.id, bytes, "the state a client starts from has no room for its first thread");
+            }
+            return Ok(FittedPage {
+                threads,
+                runs,
+                next,
+            });
+        }
+        used = used.saturating_add(bytes);
+        threads.push(thread);
+        runs.extend(run);
+    }
+    Ok(FittedPage {
+        threads,
+        runs,
+        next: page.next,
+    })
+}
+
 fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageError> {
     let projects: Vec<Project> = read::many(
         conn,
@@ -494,34 +577,21 @@ fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageE
         include_str!("sql/state/live_runs.sql"),
         [LIVE_RUNS],
     )?;
-    let mut used = encoded_len(&projects)?
-        .saturating_add(encoded_len(&settings)?)
-        .saturating_add(encoded_len(&pinned)?)
-        .saturating_add(encoded_len(&live)?);
-    let mut threads = Vec::with_capacity(page.threads.len() + pinned.len());
-    let mut runs: Vec<Run> = Vec::with_capacity(page.runs.len() + live.len());
-    let mut threads_next = page.next;
-    let mut latest = page.runs;
-    for thread in page.threads {
-        let run = latest
-            .iter()
-            .position(|run| run.thread_id == thread.id)
-            .map(|index| latest.swap_remove(index));
-        let bytes = encoded_len(&thread)?
-            .saturating_add(run.as_ref().map(encoded_len).transpose()?.unwrap_or(0));
-        if used.saturating_add(bytes) > STATE_BYTES && !threads.is_empty() {
-            threads_next = threads
-                .last()
-                .map(|kept: &Thread| artisan_api::ThreadCursor {
-                    activity_seq: kept.activity_seq,
-                    id: kept.id.clone(),
-                });
-            break;
-        }
-        used = used.saturating_add(bytes);
-        threads.push(thread);
-        runs.extend(run);
-    }
+    let mut used = encoded_len(&projects)?.saturating_add(encoded_len(&settings)?);
+    let live = within(&mut used, STATE_BYTES - FIRST_THREAD_RESERVE, live, |run| {
+        format!("live run {} of thread {}", run.id, run.thread_id)
+    })?;
+    let pinned = within(
+        &mut used,
+        STATE_BYTES - FIRST_THREAD_RESERVE,
+        pinned,
+        |thread| format!("pinned thread {}", thread.id),
+    )?;
+    let FittedPage {
+        mut threads,
+        mut runs,
+        next: threads_next,
+    } = fit_page(used, page)?;
     threads.extend(pinned);
     for run in live {
         if !runs.iter().any(|known| known.id == run.id) {

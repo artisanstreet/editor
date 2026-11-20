@@ -1,10 +1,11 @@
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, ThreadId, ThreadWindow,
-    ThreadsQuery,
+    ThreadsQuery, UpdateThread,
 };
 use forge_store::{
-    CreateProjectFailure, MAX_LIVE_PROJECTS, MAX_PROJECT_NAME_BYTES, MAX_PROJECT_PATH_BYTES,
-    STATE_BYTES, Store,
+    CreateProjectFailure, CreateThreadError, MAX_CONFIG_BYTES, MAX_LIVE_PROJECTS,
+    MAX_PROJECT_NAME_BYTES, MAX_PROJECT_PATH_BYTES, MAX_TITLE_BYTES, ReplaceTitleFailure,
+    STATE_BYTES, Store, UpdateThreadFailure,
 };
 use std::collections::HashSet;
 
@@ -16,26 +17,34 @@ fn project(path: &str) -> CreateProject {
     }
 }
 
+fn thread(project: &ProjectId) -> CreateThread {
+    CreateThread {
+        id: ThreadId::new(),
+        project_id: project.clone(),
+        config: EngineConfig::new(EngineId::Claude),
+        title: Some("t".repeat(MAX_TITLE_BYTES)),
+        parent_thread_id: None,
+        spawned_by: None,
+    }
+}
+
+fn oversized_config() -> EngineConfig {
+    let mut config = EngineConfig::new(EngineId::Claude);
+    config.options.insert(
+        "note".to_owned(),
+        serde_json::Value::String("o".repeat(MAX_CONFIG_BYTES)),
+    );
+    config
+}
+
 #[tokio::test]
 async fn the_starting_state_fits_the_editor_and_pages_the_threads_it_leaves_out() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let project = store.create_project(project("/work/app")).await.unwrap();
-    let title = "t".repeat(1024 * 1024);
     let mut created = HashSet::new();
-    for _ in 0..30 {
-        let thread = store
-            .create_thread(CreateThread {
-                id: ThreadId::new(),
-                project_id: project.id.clone(),
-                config: EngineConfig::new(EngineId::Claude),
-                title: Some(title.clone()),
-                parent_thread_id: None,
-                spawned_by: None,
-            })
-            .await
-            .unwrap();
-        created.insert(thread.id);
+    for _ in 0..230 {
+        created.insert(store.create_thread(thread(&project.id)).await.unwrap().id);
     }
 
     let state = store.state().await.unwrap();
@@ -73,6 +82,70 @@ async fn the_starting_state_fits_the_editor_and_pages_the_threads_it_leaves_out(
         seen, created,
         "paging on from the state reaches every thread"
     );
+}
+
+#[tokio::test]
+async fn a_thread_title_or_config_past_its_limit_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store.create_project(project("/work/app")).await.unwrap();
+    let mut titled = thread(&project.id);
+    titled.title = Some("t".repeat(MAX_TITLE_BYTES + 1));
+    let error = store.create_thread(titled).await.unwrap_err();
+    assert!(
+        matches!(error, CreateThreadError::TitleTooLong { .. }),
+        "{error:?}"
+    );
+    let mut configured = thread(&project.id);
+    configured.config = oversized_config();
+    let error = store.create_thread(configured).await.unwrap_err();
+    assert!(
+        matches!(error, CreateThreadError::ConfigTooLarge { .. }),
+        "{error:?}"
+    );
+
+    let kept = store.create_thread(thread(&project.id)).await.unwrap();
+    let error = store
+        .update_thread(
+            &kept.id,
+            UpdateThread {
+                title: Some("t".repeat(MAX_TITLE_BYTES + 1)),
+                ..UpdateThread::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(*error.cause, UpdateThreadFailure::TitleTooLong { .. }),
+        "{error:?}"
+    );
+    let error = store
+        .update_thread(
+            &kept.id,
+            UpdateThread {
+                config: Some(oversized_config()),
+                ..UpdateThread::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(*error.cause, UpdateThreadFailure::ConfigTooLarge { .. }),
+        "{error:?}"
+    );
+    let error = store
+        .replace_thread_title(
+            &kept.id,
+            kept.title.clone(),
+            "t".repeat(MAX_TITLE_BYTES + 1),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(*error.cause, ReplaceTitleFailure::TooLong { .. }),
+        "{error:?}"
+    );
+    assert_eq!(store.thread(&kept.id).await.unwrap().unwrap(), kept);
 }
 
 #[tokio::test]

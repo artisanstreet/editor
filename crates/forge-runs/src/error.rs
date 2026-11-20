@@ -39,7 +39,8 @@ const fn send_rejected(rejected: &SendRejected) -> ErrorClass {
         | SendRejected::ImageTooLarge { .. }
         | SendRejected::ImagesTooLarge { .. }
         | SendRejected::MissingBlob(_)
-        | SendRejected::InvalidConfig => ErrorClass::BadRequest,
+        | SendRejected::InvalidConfig
+        | SendRejected::ConfigTooLarge { .. } => ErrorClass::BadRequest,
     }
 }
 
@@ -122,7 +123,9 @@ pub const fn setting(failure: &SettingFailure) -> ErrorClass {
 #[must_use]
 pub const fn update_thread(failure: &UpdateThreadFailure) -> ErrorClass {
     match failure {
-        UpdateThreadFailure::InvalidConfig => ErrorClass::BadRequest,
+        UpdateThreadFailure::InvalidConfig
+        | UpdateThreadFailure::ConfigTooLarge { .. }
+        | UpdateThreadFailure::TitleTooLong { .. } => ErrorClass::BadRequest,
         UpdateThreadFailure::Storage(_) => ErrorClass::Internal,
     }
 }
@@ -136,7 +139,9 @@ pub(crate) const fn create_thread(error: &CreateThreadError) -> ErrorClass {
         CreateThreadError::ProjectRemoved { .. } => ErrorClass::Conflict,
         CreateThreadError::AgentWithoutParent { .. }
         | CreateThreadError::AgentNotInParent { .. }
-        | CreateThreadError::InvalidConfig { .. } => ErrorClass::BadRequest,
+        | CreateThreadError::InvalidConfig { .. }
+        | CreateThreadError::ConfigTooLarge { .. }
+        | CreateThreadError::TitleTooLong { .. } => ErrorClass::BadRequest,
         CreateThreadError::Storage { .. } => ErrorClass::Internal,
     }
 }

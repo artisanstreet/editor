@@ -1,7 +1,7 @@
 use crate::content::ContentError;
 use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
-use crate::writer::{InputFailure, Tx, WriteFailure, valid_config};
+use crate::writer::{ConfigProblem, InputFailure, Tx, WriteFailure, config_problem};
 use crate::{
     AnswerRefused, CreateThreadError, NewItem, PendingInputs, SendRejected, Store, collection,
     content, fresh_item, read,
@@ -1084,8 +1084,14 @@ impl Tx<'_> {
         )?;
         if created {
             if let Some(config) = message.config {
-                if !valid_config(&config) {
-                    return Err(SendRejected::InvalidConfig.into());
+                match config_problem(&config) {
+                    Some(ConfigProblem::ContextWindow) => {
+                        return Err(SendRejected::InvalidConfig.into());
+                    }
+                    Some(ConfigProblem::TooLarge { bytes }) => {
+                        return Err(SendRejected::ConfigTooLarge { bytes }.into());
+                    }
+                    None => {}
                 }
                 thread.config = config;
             }
