@@ -22,6 +22,7 @@ fn type_into(session: &DraftHandle, body: DraftBody) {
     session.queue(
         body,
         session.read(editor_aqua::composer::draft_session::DraftSession::epoch),
+        false,
     );
 }
 
@@ -2185,6 +2186,58 @@ fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_ide
             .await,
             thread,
             "trying again after reopening is the same message"
+        );
+    });
+}
+
+#[test]
+fn an_image_pasted_while_another_clients_draft_loads_stays_and_asks_which_to_keep() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::draft_session::DraftSession;
+
+    let (directory, mut core, _config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "pasting");
+        let mut sessions = DraftSessions::default();
+        let mut composer = Composer::new(
+            &core,
+            &mut sessions,
+            ComposerTarget::NewThread {
+                host,
+                project: Some(artisan_api::ProjectId::from("project")),
+            },
+        );
+        let image = directory.path().join("pasted.png");
+        std::fs::write(&image, pasted_png()).unwrap();
+        composer.add_paths(vec![image]);
+
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(
+            &mut socket,
+            json!({"revision": 3, "body": {"text": "theirs"}}),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(composer.session.as_ref().unwrap(), DraftSession::is_loaded).await;
+        composer.sync(&core);
+
+        assert_eq!(
+            composer
+                .attachments
+                .as_ref()
+                .map(|attachments| attachments.items.len()),
+            Some(1),
+            "the image being uploaded is still in the composer"
+        );
+        assert!(
+            composer
+                .session
+                .as_ref()
+                .unwrap()
+                .read(DraftSession::conflict),
+            "the user chooses which draft to keep"
         );
     });
 }

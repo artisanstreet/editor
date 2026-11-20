@@ -50,7 +50,7 @@ fn refused_write(state: &mut DraftSession, revision: u64, current: &DraftBody) {
 
 fn type_in(state: &mut DraftSession, body: DraftBody) {
     let shown = state.epoch();
-    state.queue(body, shown);
+    state.queue(body, shown, false);
 }
 
 fn post(state: &mut DraftSession) -> Submission {
@@ -411,7 +411,7 @@ fn typing_into_a_view_from_before_another_clients_draft_arrived_asks_which_to_ke
         shown,
         "the other client's draft replaced the view"
     );
-    state.queue(typed("typed here"), shown);
+    state.queue(typed("typed here"), shown, false);
     assert!(
         state.conflict(),
         "the keystroke was typed over text the user never saw replaced"
@@ -542,7 +542,11 @@ fn typing_into_a_composer_that_has_not_shown_the_failed_send_yet_keeps_the_messa
     let (mut state, first) = sent_and_typed_over("send this", "typed meanwhile");
     let shown_before_failing = state.epoch();
     state.posted(Err(not_sent(&first)), thread());
-    state.queue(typed("typed meanwhile, and more"), shown_before_failing);
+    state.queue(
+        typed("typed meanwhile, and more"),
+        shown_before_failing,
+        false,
+    );
     assert_eq!(
         state.shown(),
         Some(&handed_back("send this", &["typed meanwhile, and more"])),
@@ -592,6 +596,20 @@ fn a_draft_holding_only_a_failed_send_is_kept_open_and_kept_on_this_device() {
         state.keepable(),
         "closing the Editor keeps the failed message's identity on this device"
     );
+}
+
+#[test]
+fn an_image_still_uploading_when_another_clients_draft_arrives_asks_which_to_keep() {
+    let mut state = DraftSession::new("thread:thread".into());
+    let shown = state.epoch();
+    state.queue(DraftBody::default(), shown, true);
+    load(&mut state, 3, &typed("theirs"));
+    assert_eq!(
+        state.epoch(),
+        shown,
+        "the composer keeps the pasted image instead of showing the other draft"
+    );
+    assert!(state.conflict(), "the user chooses which draft to keep");
 }
 
 #[test]
@@ -767,7 +785,7 @@ fn removing_the_pairing_empties_the_draft_view() {
     assert_ne!(state.epoch(), epoch, "the composer clears what it shows");
     assert_eq!(state.body(), &DraftBody::default());
     assert!(
-        !state.queue(typed("more"), state.epoch()),
+        !state.queue(typed("more"), state.epoch(), false),
         "nothing is saved"
     );
 }

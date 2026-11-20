@@ -717,7 +717,11 @@ impl Composer {
         let Some(session) = &self.session else {
             return;
         };
-        session.queue(self.draft_body(), self.shown_epoch);
+        let uploading = self
+            .attachments
+            .as_ref()
+            .is_some_and(Attachments::uploading);
+        session.queue(self.draft_body(), self.shown_epoch, uploading);
     }
 
     pub fn sync(&mut self, core: &Core) -> Vec<SessionEvent> {

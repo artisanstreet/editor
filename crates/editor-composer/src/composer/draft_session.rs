@@ -322,6 +322,7 @@ struct Draft {
     body: DraftBody,
     remote: Remote,
     edits: Edits,
+    uploading: bool,
     adopting: Vec<Adoption>,
     lost: Vec<LostImage>,
     next_key: u64,
@@ -455,6 +456,10 @@ impl Draft {
         handed_back
     }
 
+    const fn local_edits(&self) -> bool {
+        self.edits.unsaved() || self.uploading
+    }
+
     fn halt_on_conflict(&mut self, scope: &str) {
         tracing::warn!(%scope, "draft changed on another client; asking which version to keep");
         self.halt = match std::mem::replace(&mut self.halt, Halt::Clear) {
@@ -473,7 +478,8 @@ impl Draft {
             let edited = outgoing.edited;
             self.edits.saved_through(edited);
         }
-        let gives_way = self.holds_only_the_message_in_flight()
+        let gives_way = !self.uploading
+            && self.holds_only_the_message_in_flight()
             && match origin {
                 Origin::Own => false,
                 Origin::Changed => true,
@@ -482,7 +488,7 @@ impl Draft {
         let arrival = if snapshot.body.matches(&self.body) {
             self.edits.settle();
             Arrival::Kept
-        } else if !self.edits.unsaved() {
+        } else if !self.local_edits() {
             self.show(snapshot.body.shown())
         } else if origin == Origin::Own {
             Arrival::Kept
@@ -629,6 +635,7 @@ impl DraftSession {
                     latest: 0,
                     saved: 0,
                 },
+                uploading: false,
                 adopting: Vec::new(),
                 lost: Vec::new(),
                 next_key: 0,
@@ -848,6 +855,12 @@ impl DraftSession {
         }
     }
 
+    pub(crate) fn view_closed(&mut self) {
+        if let State::Open(draft) = &mut self.state {
+            draft.uploading = false;
+        }
+    }
+
     pub(crate) fn next_uploads(&mut self) -> Vec<(AdoptionKey, AdoptedImage)> {
         let State::Open(draft) = &mut self.state else {
             return Vec::new();
@@ -942,10 +955,11 @@ impl DraftSession {
         self.draft().is_some_and(Draft::released)
     }
 
-    pub fn queue(&mut self, body: DraftBody, seen: u64) -> bool {
+    pub fn queue(&mut self, body: DraftBody, seen: u64, uploading: bool) -> bool {
         let State::Open(draft) = &mut self.state else {
             return false;
         };
+        draft.uploading = uploading;
         let stale = seen != self.epoch;
         let over_hand_back = stale && self.handed_back == Some(self.epoch);
         let body = match draft.outgoing().filter(|_| over_hand_back) {

@@ -15,6 +15,7 @@ fn pending_write() -> (DraftHandle, DraftBody) {
             ..DraftBody::default()
         },
         0,
+        false,
     );
     let Some(Operation::Write { body, .. }) = state.next_operation() else {
         panic!("expected a pending write");

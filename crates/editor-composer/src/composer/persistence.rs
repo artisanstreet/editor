@@ -167,6 +167,7 @@ impl std::ops::Deref for DraftLease {
 
 impl Drop for DraftLease {
     fn drop(&mut self) {
+        self.handle.mutate(|shared| shared.state.view_closed());
         self.handle.flush();
     }
 }
@@ -595,9 +596,9 @@ impl DraftHandle {
         self.0.changed.send_replace(version);
     }
 
-    pub fn queue(&self, body: DraftBody, seen: u64) {
+    pub fn queue(&self, body: DraftBody, seen: u64, uploading: bool) {
         let mut shared = self.0.shared();
-        if !shared.state.queue(body, seen) {
+        if !shared.state.queue(body, seen, uploading) {
             return;
         }
         if let Some(timer) = shared.timer.take() {

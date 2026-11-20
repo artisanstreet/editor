@@ -12,7 +12,7 @@ fn typed(text: &str) -> DraftBody {
 
 fn type_in(session: &mut DraftSession, body: DraftBody) {
     let seen = session.epoch();
-    session.queue(body, seen);
+    session.queue(body, seen, false);
 }
 
 fn wire(body: &DraftBody) -> serde_json::Value {

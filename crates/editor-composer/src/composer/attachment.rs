@@ -355,6 +355,12 @@ impl Attachments {
             .iter()
             .any(|item| item.state.hash() == Some(hash))
     }
+    pub(crate) fn uploading(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item.state, State::Encoding | State::Uploading))
+    }
+
     pub fn take_unfinished(&mut self) -> Vec<PendingUpload> {
         self.items
             .iter_mut()
