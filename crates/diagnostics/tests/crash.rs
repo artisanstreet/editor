@@ -298,3 +298,55 @@ fn resolve(module: &Path, offsets: &[u64]) -> Vec<(String, Option<u32>)> {
     }
     resolved
 }
+
+const CAUGHT_TEST: &str = "a_caught_panic_writes_no_report_and_a_later_crash_still_does";
+
+#[expect(clippy::panic, reason = "the renderer stand-in panics on purpose")]
+fn render_diagram() -> u32 {
+    panic!("the diagram renderer gave up")
+}
+
+#[test]
+fn a_caught_panic_writes_no_report_and_a_later_crash_still_does() {
+    if let Some(data) = std::env::var_os(CRASH_DATA) {
+        CrashReporter {
+            app: artisan_paths::App::Editor,
+            version: "9.9.9 (test)",
+            data: Path::new(&data).to_owned(),
+            recent: diagnostics::subscribe("info", std::io::sink).unwrap(),
+        }
+        .install();
+        let caught = diagnostics::crash::catch(render_diagram).unwrap_err();
+        assert_eq!(caught.message, "the diagram renderer gave up");
+        assert!(
+            caught.location.contains("crash.rs:"),
+            "the caught panic says where it happened: {caught}"
+        );
+        abandon_turn();
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([CAUGHT_TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(CRASH_DATA, directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "the child must crash after the caught panic"
+    );
+    let reports: Vec<_> = std::fs::read_dir(CrashReporter::folder(directory.path()))
+        .unwrap()
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(
+        reports.len(),
+        1,
+        "only the real crash is reported: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        reports[0].contains("message: invariant: run r-7 of thread t-42 lost its turn"),
+        "{}",
+        reports[0]
+    );
+}

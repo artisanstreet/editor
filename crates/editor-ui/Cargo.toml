@@ -23,6 +23,7 @@ aqua-media = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }
 artisan-mentions.workspace = true
 artisan-markdown-index.workspace = true
+diagnostics.workspace = true
 editor-assets.workspace = true
 editor-audio.workspace = true
 palette.workspace = true

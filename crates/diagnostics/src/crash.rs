@@ -2,10 +2,53 @@ use crate::RecentLines;
 use crate::frames::Frames;
 use artisan_paths::App;
 use std::backtrace::Backtrace;
-use std::panic::PanicHookInfo;
+use std::cell::{Cell, RefCell};
+use std::panic::{PanicHookInfo, UnwindSafe};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_error::SpanTrace;
+
+thread_local! {
+    static CATCHING: Cell<usize> = const { Cell::new(0) };
+    static CAUGHT: RefCell<Option<CaughtPanic>> = const { RefCell::new(None) };
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("panicked at {location}: {message}")]
+pub struct CaughtPanic {
+    pub message: String,
+    pub location: String,
+}
+
+pub fn catch<T>(run: impl FnOnce() -> T + UnwindSafe) -> Result<T, CaughtPanic> {
+    CATCHING.with(|depth| depth.set(depth.get() + 1));
+    let result = std::panic::catch_unwind(run);
+    CATCHING.with(|depth| depth.set(depth.get() - 1));
+    result.map_err(|payload| {
+        CAUGHT.take().unwrap_or_else(|| CaughtPanic {
+            message: payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a non-text panic payload".to_owned()),
+            location: "unknown".to_owned(),
+        })
+    })
+}
+
+fn location(info: &PanicHookInfo<'_>) -> String {
+    info.location().map_or_else(
+        || "unknown".to_owned(),
+        |location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        },
+    )
+}
 
 #[derive(Debug)]
 pub struct CrashReporter {
@@ -92,6 +135,16 @@ impl CrashReporter {
     pub fn install(self) {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            if CATCHING.with(Cell::get) > 0 {
+                CAUGHT.set(Some(CaughtPanic {
+                    message: info
+                        .payload_as_str()
+                        .unwrap_or("non-string panic payload")
+                        .to_owned(),
+                    location: location(info),
+                }));
+                return;
+            }
             match self.write(info) {
                 Ok(path) => {
                     eprintln!("crash report: {}", path.display());
@@ -112,17 +165,7 @@ impl CrashReporter {
             version: self.version,
             thread: current.name().unwrap_or("unnamed"),
             message: info.payload_as_str().unwrap_or("non-string panic payload"),
-            location: info.location().map_or_else(
-                || "unknown".to_owned(),
-                |location| {
-                    format!(
-                        "{}:{}:{}",
-                        location.file(),
-                        location.line(),
-                        location.column()
-                    )
-                },
-            ),
+            location: location(info),
             backtrace: Backtrace::force_capture(),
             frames: Frames::capture(),
             spans: SpanTrace::capture(),
