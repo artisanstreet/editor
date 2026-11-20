@@ -752,3 +752,34 @@ fn a_record_that_could_not_be_saved_leaves_the_trusted_copy_usable() {
         "the trusted copy changed although its record didn't"
     );
 }
+
+#[test]
+fn a_full_access_launch_keeps_an_engine_folder_the_user_linked() {
+    let (base, home) = engine_home();
+    let users = base.path().join("dotfiles-claude");
+    std::fs::create_dir_all(&users).unwrap();
+    std::fs::write(users.join("settings.json"), r#"{"theme":"mine"}"#).unwrap();
+    std::fs::remove_dir_all(home.join(".claude")).unwrap();
+    std::os::unix::fs::symlink(&users, home.join(".claude")).unwrap();
+    let customisation = crate::Customisation {
+        prompt: Some("Be brief.".to_owned()),
+        ..crate::Customisation::default()
+    };
+
+    let launched = crate::materialize(EngineId::Claude, &home, &customisation);
+
+    assert_eq!(
+        std::fs::read_link(home.join(".claude")).ok().as_deref(),
+        Some(users.as_path()),
+        "Forge replaced the user's own .claude link with an empty folder"
+    );
+    assert_eq!(
+        std::fs::read_dir(&users).unwrap().count(),
+        1,
+        "Forge wrote into the folder the user's link points to"
+    );
+    assert!(
+        launched.is_err(),
+        "a launch that can't write its prompt says so"
+    );
+}

@@ -79,6 +79,8 @@ pub enum GuardError {
     },
     #[error("{engine}'s configuration folder {} is a link, so Forge can't guard what's beneath it", path.display())]
     LinkedFolder { engine: EngineId, path: PathBuf },
+    #[error("{} lies beneath a link Forge didn't make, so Forge won't write {engine}'s configuration through it", path.display())]
+    ThroughLink { engine: EngineId, path: PathBuf },
     #[error("{engine}'s configuration {} is nested over {MAX_DEPTH} folders deep", path.display())]
     TooDeep { engine: EngineId, path: PathBuf },
     #[error("restore {engine}'s configuration at {}", path.display())]
@@ -225,6 +227,12 @@ fn unreferenced_copies(copies: &Path, manifest: &Manifest) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn planted_by_a_run(manifest: Option<&Manifest>) -> impl Fn(&Path) -> bool + '_ {
+    move |reached| {
+        manifest.is_some_and(|manifest| !matches!(manifest.get(reached), Some(Entry::Link(_))))
+    }
 }
 
 fn holds(folder: &Folder, name: &OsStr, length: u64, wanted: &str) -> io::Result<bool> {
@@ -780,6 +788,24 @@ struct Held {
     manifest: Option<Manifest>,
 }
 
+impl Held {
+    fn reach_guarded(
+        &self,
+        engine: EngineId,
+        parent: &Path,
+        failed: impl FnOnce(io::Error) -> GuardError,
+    ) -> Result<Folder, GuardError> {
+        let planted = planted_by_a_run(self.manifest.as_ref());
+        self.opened
+            .reach(parent, Create::Replacing(&planted))
+            .map_err(failed)?
+            .ok_or_else(|| GuardError::ThroughLink {
+                engine,
+                path: self.opened.path.join(parent),
+            })
+    }
+}
+
 fn held(engine: EngineId, home: &Path, relative: &Path) -> Result<Held, GuardError> {
     let busy = hold(engine, home, BUSY_LOCK)?;
     let writing = |source| GuardError::Write {
@@ -941,11 +967,7 @@ fn put(
         source,
     };
     let (parent, name) = split(relative);
-    let folder = held
-        .opened
-        .reach(parent, Create::Replacing)
-        .map_err(writing)?
-        .expect("invariant: reaching a folder while creating it always yields it");
+    let folder = held.reach_guarded(engine, parent, writing)?;
     let wanted = digest(bytes);
     let current = folder.found(name).map_err(writing)?;
     let unchanged = match current {
@@ -998,11 +1020,7 @@ pub(crate) fn link(
         source,
     };
     let (parent, name) = split(relative);
-    let folder = held
-        .opened
-        .reach(parent, Create::Replacing)
-        .map_err(writing)?
-        .expect("invariant: reaching a folder while creating it always yields it");
+    let folder = held.reach_guarded(engine, parent, writing)?;
     if matches!(folder.found(name).map_err(writing)?, Found::Folder) {
         folder.remove(name).map_err(writing)?;
     }
@@ -1047,11 +1065,7 @@ pub(crate) fn give(
         source,
     };
     let (parent, name) = split(relative);
-    let folder = held
-        .opened
-        .reach(parent, Create::Replacing)
-        .map_err(moving)?
-        .expect("invariant: reaching a folder while creating it always yields it");
+    let folder = held.reach_guarded(engine, parent, moving)?;
     let (source_folder, source_name) = split(from);
     let source = Home::open(source_folder).map_err(moving)?;
     source

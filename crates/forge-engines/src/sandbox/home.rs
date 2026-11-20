@@ -286,8 +286,9 @@ impl Home {
         }
     }
 
-    pub(super) fn reach(&self, relative: &Path, create: Create) -> io::Result<Option<Folder>> {
+    pub(super) fn reach(&self, relative: &Path, create: Create<'_>) -> io::Result<Option<Folder>> {
         let mut folder = Folder(self.folder.0.try_clone()?);
+        let mut reached = PathBuf::new();
         for component in relative.components() {
             let Component::Normal(name) = component else {
                 return Err(io::Error::other(format!(
@@ -295,6 +296,7 @@ impl Home {
                     relative.display()
                 )));
             };
+            reached.push(name);
             folder = match (folder.found(name)?, create) {
                 (Found::Folder, _) => folder.open(name)?,
                 (
@@ -304,11 +306,17 @@ impl Home {
                 | (Found::Link(_) | Found::File { .. } | Found::Other, Create::Missing) => {
                     return Ok(None);
                 }
-                (Found::Missing, Create::Missing | Create::Replacing) => {
+                (Found::Missing, Create::Missing | Create::Replacing(_)) => {
                     folder.make_folder(name)?
                 }
-                (Found::Link(_) | Found::File { .. } | Found::Other, Create::Replacing) => {
-                    tracing::warn!(path = %self.path.join(relative).display(), "replacing what a sandboxed run put where Forge keeps an engine's files");
+                (
+                    Found::Link(_) | Found::File { .. } | Found::Other,
+                    Create::Replacing(planted),
+                ) => {
+                    if !planted(&reached) {
+                        return Ok(None);
+                    }
+                    tracing::warn!(path = %self.path.join(&reached).display(), "replacing what a sandboxed run put where Forge keeps an engine's files");
                     folder.remove(name)?;
                     folder.make_folder(name)?
                 }
@@ -318,11 +326,15 @@ impl Home {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Create {
+#[derive(Clone, Copy)]
+pub(super) enum Create<'planted> {
     No,
     Missing,
-    Replacing,
+    Replacing(&'planted dyn Fn(&Path) -> bool),
+}
+
+const fn forge_owned(_reached: &Path) -> bool {
+    true
 }
 
 fn split(relative: &Path) -> io::Result<(&Path, &OsStr)> {
@@ -341,8 +353,8 @@ pub(crate) fn write(home: &Path, relative: &Path, bytes: &[u8], mode: u32) -> io
     let (parent, name) = split(relative)?;
     let opened = home_folder(home)?;
     let folder = opened
-        .reach(parent, Create::Replacing)?
-        .expect("invariant: reaching a folder while creating it always yields it");
+        .reach(parent, Create::Replacing(&forge_owned))?
+        .expect("invariant: Forge replaces anything in the way of its own files");
     if matches!(folder.found(name)?, Found::Folder) {
         folder.remove(name)?;
     }
