@@ -61,8 +61,8 @@ pub(crate) enum InstallError {
         version: String,
         system: &'static str,
     },
-    #[error("look for an `ae` that isn't Artisan's")]
-    ExistingAe(#[from] platform::ExistingAeError),
+    #[error(transparent)]
+    PlaceAe(#[from] PlaceAeError),
     #[error("remember {} as the install folder", root.display())]
     ChooseRoot {
         root: PathBuf,
@@ -447,6 +447,8 @@ pub(crate) enum UpdateError {
     #[error(transparent)]
     Ask(#[from] AskError),
     #[error(transparent)]
+    PlaceAe(#[from] PlaceAeError),
+    #[error(transparent)]
     HandOver(#[from] HandOverError),
 }
 
@@ -601,6 +603,8 @@ pub(crate) struct InstallArgs {
     bundled_editor: Option<PathBuf>,
     #[arg(long, hide = true)]
     bundled_linux_ae: Option<PathBuf>,
+    #[arg(long, hide = true, value_name = "PATH")]
+    replace_ae: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1045,7 +1049,7 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
             return Ok(());
         }
     }
-    let Some(replaceable) = replace_foreign_ae(args)? else {
+    let Some(placement) = place_ae(args.yes, args.apply, args.replace_ae.as_deref())? else {
         ui::outro("Nothing was installed.");
         return Ok(());
     };
@@ -1060,7 +1064,11 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
         if args.apply {
             return Err(InstallError::FeedApply);
         }
-        hand_over(&runtime, feed, &editor, &forge)?;
+        let forwarded = Forwarded {
+            yes: args.yes,
+            replace_ae: placement.agreed,
+        };
+        hand_over(&runtime, feed, &editor, &forge, &forwarded)?;
     } else {
         let origin = match args.feed.as_deref() {
             Some(feed) => Origin::parse(feed).ok_or_else(|| InstallError::NotAFeed {
@@ -1070,7 +1078,14 @@ pub(crate) fn install(args: &InstallArgs) -> Result<(), InstallError> {
                 .update_feed()
                 .map_or(Origin::Local, |feed| Origin::Feed(feed.to_owned())),
         };
-        apply(&release, &source, &origin, &plan, args.yes, &replaceable)?;
+        apply(
+            &release,
+            &source,
+            &origin,
+            &plan,
+            args.yes,
+            &placement.replaceable,
+        )?;
     }
 
     let editor_somewhere = plan.editor != EditorTarget::Nowhere;
@@ -1092,24 +1107,71 @@ fn confirmed(question: &str) -> Result<bool, AskError> {
         .map_err(ui::prompt_error)
 }
 
-fn replace_foreign_ae(args: &InstallArgs) -> Result<Option<platform::Replaceable>, InstallError> {
+struct AePlacement {
+    replaceable: platform::Replaceable,
+    agreed: Option<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PlaceAeError {
+    #[error("look for an `ae` that isn't Artisan's")]
+    Existing(#[from] platform::ExistingAeError),
+    #[error(transparent)]
+    Ask(#[from] AskError),
+}
+
+fn place_ae(
+    yes: bool,
+    apply: bool,
+    agreed: Option<&Path>,
+) -> Result<Option<AePlacement>, PlaceAeError> {
     let (file, replaceable) = match platform::existing_ae()? {
-        platform::ExistingAe::Artisans(replaceable) => return Ok(Some(replaceable)),
+        platform::ExistingAe::Artisans(replaceable) => {
+            return Ok(Some(AePlacement {
+                replaceable,
+                agreed: None,
+            }));
+        }
         platform::ExistingAe::Foreign { path, replaceable } => (path, replaceable),
     };
-    let replace = if ui::interactive() && !args.apply {
+    let replace = if agreed == Some(file.as_path()) {
+        true
+    } else if ui::interactive() && !apply {
         confirmed(&format!(
             "{} is a file that isn't Artisan's. Replace it with Artisan's `ae`?",
             file.display()
         ))?
-    } else if args.yes {
+    } else if yes {
         true
     } else {
         return Err(
             ui::needs_flag(&format!("whether to replace {}", file.display()), "--yes").into(),
         );
     };
-    Ok(replace.then_some(replaceable))
+    Ok(replace.then_some(AePlacement {
+        replaceable,
+        agreed: Some(file),
+    }))
+}
+
+#[derive(Debug)]
+struct Forwarded {
+    yes: bool,
+    replace_ae: Option<PathBuf>,
+}
+
+impl Forwarded {
+    fn arguments(&self) -> Vec<std::ffi::OsString> {
+        let mut arguments = Vec::new();
+        if self.yes {
+            arguments.push("--yes".into());
+        }
+        if let Some(path) = &self.replace_ae {
+            arguments.push("--replace-ae".into());
+            arguments.push(path.clone().into_os_string());
+        }
+        arguments
+    }
 }
 
 fn apply(
@@ -1147,6 +1209,7 @@ fn hand_over(
     feed: &Feed,
     editor: &EditorPlace,
     forge: &ForgePlace,
+    forwarded: &Forwarded,
 ) -> Result<(), HandOverError> {
     let remembered: Vec<&str> = feed
         .update_feed()
@@ -1186,6 +1249,7 @@ fn hand_over(
         .args(["--editor", editor.argument()])
         .args(["--forge", &forge.argument()])
         .args(&remembered)
+        .args(forwarded.arguments())
         .status()
         .map_err(|source| HandOverError::Run {
             program: carrier.clone(),
@@ -2080,7 +2144,20 @@ pub(crate) fn update(yes: bool) -> Result<(), UpdateError> {
             return Ok(());
         }
     }
-    hand_over(&runtime, &feed, &EditorPlace::Keep, &ForgePlace::Keep)?;
+    let Some(placement) = place_ae(yes, false, None)? else {
+        ui::outro("Nothing was updated.");
+        return Ok(());
+    };
+    hand_over(
+        &runtime,
+        &feed,
+        &EditorPlace::Keep,
+        &ForgePlace::Keep,
+        &Forwarded {
+            yes,
+            replace_ae: placement.agreed,
+        },
+    )?;
     ui::outro("Up to date.");
     Ok(())
 }
