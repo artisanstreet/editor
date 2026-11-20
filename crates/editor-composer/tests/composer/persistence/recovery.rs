@@ -108,8 +108,7 @@ fn an_unreadable_kept_draft_is_reported_and_left_for_the_user() {
     std::fs::write(&record, b"{ not json").unwrap();
 
     let lease = device.reopen();
-    let Some(Unrecovered::SetAside(set_aside)) = lease.read(|state| state.unrecovered().cloned())
-    else {
+    let Some(Unrecovered::SetAside(set_aside)) = lease.take_unrecovered() else {
         panic!("expected the unreadable draft to be reported");
     };
     assert_eq!(

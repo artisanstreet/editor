@@ -638,8 +638,8 @@ impl DraftSession {
             .and_then(|snapshot| snapshot.body.unreadable())
     }
 
-    pub(crate) const fn unrecovered(&self) -> Option<&Unrecovered> {
-        self.unrecovered.as_ref()
+    pub(crate) const fn take_unrecovered(&mut self) -> Option<Unrecovered> {
+        self.unrecovered.take()
     }
 
     pub(crate) fn set_unrecovered(&mut self, unrecovered: Unrecovered) {

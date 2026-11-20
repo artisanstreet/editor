@@ -544,6 +544,10 @@ impl DraftHandle {
         });
     }
 
+    pub(crate) fn take_unrecovered(&self) -> Option<Unrecovered> {
+        self.0.shared().state.take_unrecovered()
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.changed.subscribe()
     }

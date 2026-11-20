@@ -1934,3 +1934,49 @@ fn text_typed_after_an_unanswered_send_shows_on_reopening_and_survives_the_resen
         }
     });
 }
+
+#[test]
+fn the_notice_about_an_unreadable_kept_draft_shows_once() {
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, _acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "notice");
+        let drafts = directory.path().join("drafts");
+        std::fs::create_dir_all(&drafts).unwrap();
+        std::fs::write(drafts.join("notice-new_3aproject.json"), b"{ not json").unwrap();
+        let target = ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+        let mut sessions = DraftSessions::with_spool(spool);
+        let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        composer.sync(&core);
+        assert!(
+            composer
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("couldn't be read")),
+            "{:?}",
+            composer.notice
+        );
+
+        composer.set_target(
+            &core,
+            &mut sessions,
+            ComposerTarget::NewThread {
+                host,
+                project: Some(artisan_api::ProjectId::from("elsewhere")),
+            },
+        );
+        composer.set_target(&core, &mut sessions, target);
+        composer.sync(&core);
+        assert_eq!(
+            composer.notice, None,
+            "coming back to the draft doesn't repeat the notice"
+        );
+    });
+}

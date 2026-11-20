@@ -83,12 +83,6 @@ enum Outbox {
     Restored,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Notice {
-    Unshown,
-    Shown,
-}
-
 #[derive(Clone, Debug)]
 pub struct DraftFile {
     pub key: u64,
@@ -148,7 +142,6 @@ pub struct Composer {
     restore_revision: Option<u64>,
     shown_epoch: u64,
     lost_chips: Vec<(u64, LostKey)>,
-    unrecovered: Notice,
 }
 
 impl std::fmt::Debug for Composer {
@@ -212,7 +205,6 @@ impl Composer {
             restore_revision: Some(0),
             shown_epoch,
             lost_chips: Vec::new(),
-            unrecovered: Notice::Unshown,
         }
     }
 
@@ -269,7 +261,6 @@ impl Composer {
             .as_ref()
             .map_or(0, |session| session.read(DraftSession::epoch));
         self.lost_chips.clear();
-        self.unrecovered = Notice::Unshown;
         self.session = session;
         self.notice = notice;
     }
@@ -750,7 +741,7 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
-        let (epoch, shown, failed, unreadable, unsent, lost, unrecovered) = session.read(|state| {
+        let (epoch, shown, failed, unreadable, unsent, lost) = session.read(|state| {
             (
                 state.epoch(),
                 state.shown().cloned(),
@@ -758,9 +749,9 @@ impl Composer {
                 state.unreadable().map(ToString::to_string),
                 state.unsent().cloned(),
                 state.lost().to_vec(),
-                state.unrecovered().cloned(),
             )
         });
+        let unrecovered = session.take_unrecovered();
         if epoch != self.shown_epoch {
             self.shown_epoch = epoch;
             self.reset_input();
@@ -801,8 +792,7 @@ impl Composer {
             }
             self.restore_body(body);
         }
-        if let Some(unrecovered) = unrecovered.filter(|_| self.unrecovered == Notice::Unshown) {
-            self.unrecovered = Notice::Shown;
+        if let Some(unrecovered) = unrecovered {
             self.notice = Some(match unrecovered {
                 Unrecovered::SetAside(path) => format!(
                     "A draft kept on this device couldn't be read. It was moved to {}.",
