@@ -28,6 +28,16 @@ pub(crate) enum Ending {
     Replies,
     EngineDies,
     ForgeDies(Stop),
+    ForgeDiesBeforeSession(Stop),
+}
+
+impl Ending {
+    pub(crate) const fn leaves_session(self, resumed: bool) -> bool {
+        match self {
+            Self::Replies | Self::EngineDies | Self::ForgeDies(_) => true,
+            Self::ForgeDiesBeforeSession(_) => resumed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,9 +167,10 @@ fn delivery(rng: &mut Rng) -> Delivery {
 }
 
 fn ending(rng: &mut Rng) -> Ending {
-    match rng.below(6) {
+    match rng.below(7) {
         0 => Ending::EngineDies,
         1 => Ending::ForgeDies(stop(rng)),
+        2 => Ending::ForgeDiesBeforeSession(stop(rng)),
         _ => Ending::Replies,
     }
 }

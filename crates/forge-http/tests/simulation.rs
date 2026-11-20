@@ -24,7 +24,7 @@ use std::time::Duration;
 use test_support::replay::ReplayingEngine;
 use test_support::transcript::Transcript;
 
-const FIXED_SEEDS: [u64; 6] = [1, 3, 7, 42, 45, 0x5EED];
+const FIXED_SEEDS: [u64; 8] = [1, 3, 5, 7, 42, 45, 375, 0x5EED];
 
 #[test]
 fn forge_keeps_its_promises_under_seeded_faults() {
@@ -91,6 +91,7 @@ struct Session {
     draft: DraftSnapshot,
     expected_replies: Vec<String>,
     policy: Policy,
+    resumes: bool,
 }
 
 fn simulate(seed: u64) {
@@ -179,6 +180,7 @@ impl Session {
             draft,
             expected_replies: Vec::new(),
             policy: Policy::default(),
+            resumes: false,
         }
     }
 
@@ -282,6 +284,11 @@ impl Session {
             "Forge acknowledges the message it was sent"
         );
         self.acknowledged.push((message.id, text));
+        self.end_turn(&thread, number, ending, before);
+    }
+
+    fn end_turn(&mut self, thread: &ThreadId, number: usize, ending: Ending, before: usize) {
+        let thread = thread.clone();
         match ending {
             Ending::Replies => {
                 self.expected_replies.push(engine::reply(number));
@@ -311,7 +318,35 @@ impl Session {
                     );
                 }
             }
+            Ending::ForgeDiesBeforeSession(stop) => {
+                let id = self
+                    .acknowledged
+                    .last()
+                    .map(|(id, _)| id.clone())
+                    .expect("invariant: the message was just acknowledged");
+                self.wait("the engine to take the message", |_, screen| {
+                    taken(screen, &thread, &id)
+                });
+                self.forge.restart(stop);
+                if self.resumes && self.policy.carries_on() {
+                    let reply = engine::reply(number);
+                    self.expected_replies.push(reply.clone());
+                    self.wait(
+                        "the resumed turn to carry on after Forge restarted",
+                        |_, screen| {
+                            assistant_says(screen, &thread, &reply) && !screen.live(&thread)
+                        },
+                    );
+                } else {
+                    self.wait_settled(
+                        &thread,
+                        before + 1,
+                        "the turn with no session to carry on to stay ended after Forge restarted",
+                    );
+                }
+            }
         }
+        self.resumes = ending.leaves_session(self.resumes);
     }
 
     fn wait_settled(&mut self, thread: &ThreadId, runs: usize, what: &str) {
@@ -484,6 +519,13 @@ fn assistant_text(item: &Item) -> Option<&str> {
         | ItemKind::Notice { .. }
         | ItemKind::Error { .. } => None,
     }
+}
+
+fn taken(screen: &Screen, thread: &ThreadId, id: &ItemId) -> bool {
+    screen
+        .thread_items(thread)
+        .iter()
+        .any(|item| &item.id == id && item.status == artisan_api::Status::Done)
 }
 
 fn assistant_says(screen: &Screen, thread: &ThreadId, text: &str) -> bool {
