@@ -156,6 +156,24 @@ pub enum RollbackError {
         #[source]
         source: RetainedError,
     },
+    #[error("remove {} so the previous Forge starts without it", path.display())]
+    Clear {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("finish removing {} for the previous Forge", database.display())]
+    SettleClear {
+        database: PathBuf,
+        #[source]
+        source: RetainedError,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Cleared {
+    Nothing,
+    SetAside { found: usize, aside: PathBuf },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -397,32 +415,7 @@ pub(crate) fn roll_back(
         retained::Kind::Backup { version } => version,
         retained::Kind::Aside { .. } => unreachable!("invariant: only backups are restored"),
     };
-    let pending = retained::pending_notice(database).map_err(|source| RollbackError::Notice {
-        database: database.to_owned(),
-        source,
-    })?;
-    let aside = match pending {
-        Some(notice)
-            if usize::try_from(notice.found).is_ok_and(|noted| noted == found)
-                && Path::new(&notice.set_aside).is_file() =>
-        {
-            PathBuf::from(notice.set_aside)
-        }
-        Some(_) | None => {
-            let aside = set_aside(&mut conn, database, found, pace)?;
-            let notice = DatabaseRollback {
-                found: u32::try_from(found).expect("invariant: schema versions fit in u32"),
-                restored: u32::try_from(restored).expect("invariant: schema versions fit in u32"),
-                set_aside: aside.display().to_string(),
-                at,
-            };
-            retained::hold_notice(database, &notice).map_err(|source| RollbackError::Notice {
-                database: database.to_owned(),
-                source,
-            })?;
-            aside
-        }
-    };
+    let aside = noticed_aside(&mut conn, database, found, restored, at, pace)?;
     conn.close().map_err(|(_, source)| open(source))?;
     let restore = |source| RollbackError::Restore {
         database: database.to_owned(),
@@ -450,6 +443,77 @@ pub(crate) fn roll_back(
         restored,
         aside,
     })
+}
+
+pub(crate) fn clear(
+    database: &Path,
+    at: Timestamp,
+    pace: &Progress,
+) -> Result<Cleared, RollbackError> {
+    if !database.is_file() {
+        return Ok(Cleared::Nothing);
+    }
+    let open = |source| RollbackError::Open {
+        database: database.to_owned(),
+        source: Box::new(source),
+    };
+    let mut conn = Connection::open(database).map_err(open)?;
+    let found: usize = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(open)?;
+    if found == 0 {
+        return Ok(Cleared::Nothing);
+    }
+    let aside = noticed_aside(&mut conn, database, found, 0, at, pace)?;
+    conn.close().map_err(|(_, source)| open(source))?;
+    let name = unicode(database).ok_or_else(|| RollbackError::NotUnicode {
+        database: database.to_owned(),
+    })?;
+    for suffix in ["-wal", "-shm", ""] {
+        let path = PathBuf::from(format!("{name}{suffix}"));
+        remove_if_present(&path).map_err(|source| RollbackError::Clear { path, source })?;
+    }
+    retained::end_attempt(database).map_err(|source| RollbackError::SettleClear {
+        database: database.to_owned(),
+        source,
+    })?;
+    Ok(Cleared::SetAside { found, aside })
+}
+
+fn noticed_aside(
+    conn: &mut Connection,
+    database: &Path,
+    found: usize,
+    restored: usize,
+    at: Timestamp,
+    pace: &Progress,
+) -> Result<PathBuf, RollbackError> {
+    let pending = retained::pending_notice(database).map_err(|source| RollbackError::Notice {
+        database: database.to_owned(),
+        source,
+    })?;
+    match pending {
+        Some(notice)
+            if usize::try_from(notice.found).is_ok_and(|noted| noted == found)
+                && Path::new(&notice.set_aside).is_file() =>
+        {
+            Ok(PathBuf::from(notice.set_aside))
+        }
+        Some(_) | None => {
+            let aside = set_aside(conn, database, found, pace)?;
+            let notice = DatabaseRollback {
+                found: u32::try_from(found).expect("invariant: schema versions fit in u32"),
+                restored: u32::try_from(restored).expect("invariant: schema versions fit in u32"),
+                set_aside: aside.display().to_string(),
+                at,
+            };
+            retained::hold_notice(database, &notice).map_err(|source| RollbackError::Notice {
+                database: database.to_owned(),
+                source,
+            })?;
+            Ok(aside)
+        }
+    }
 }
 
 fn set_aside(

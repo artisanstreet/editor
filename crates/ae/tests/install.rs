@@ -229,6 +229,75 @@ mod tests {
         assert!(sandbox.listening(), "the released Forge serves again");
     }
 
+    fn a_failed_first_start_puts_the_released_forge_back_without_the_new_database(
+        before: Option<&[u8]>,
+    ) {
+        let port = PortReservation::loopback();
+        let sandbox = Sandbox::with_previous(port.address(), &released_forge());
+        let data = App::Forge
+            .dir_under(&artisan_street(sandbox.root.path()))
+            .join("data");
+        let database = data.join("forge.sqlite3");
+        if let Some(before) = before {
+            std::fs::write(&database, before).expect("leave the database the release had");
+        }
+        let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
+        std::fs::create_dir_all(&stage).expect("create the stage");
+        test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
+        script(
+            &stage.join(App::Forge.binary_name()),
+            &format!(
+                "#!/bin/sh\nexec '{}' --listen 192.0.2.1:9 \"$@\"\n",
+                forge_binary().display()
+            ),
+        );
+
+        let update = sandbox.ae(&[
+            "install",
+            "--editor",
+            "none",
+            "--forge",
+            "here",
+            "--yes",
+            "--from",
+            &sandbox.root.path().join("stage").to_string_lossy(),
+        ]);
+
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&update.stdout),
+            String::from_utf8_lossy(&update.stderr)
+        );
+        assert!(!update.status.success(), "the update fails: {said}");
+        assert!(
+            said.contains("the previous Forge is back in place and running"),
+            "{said}"
+        );
+        assert!(
+            data.join(format!(
+                "forge.sqlite3.rolled-back-from-{}-0",
+                forge_store::Store::schema_version()
+            ))
+            .is_file(),
+            "the database the failed Forge made is kept aside: {said}"
+        );
+        assert!(
+            !database.exists(),
+            "the released Forge starts without a database, as it had none: {said}"
+        );
+        assert!(sandbox.listening(), "the released Forge serves again");
+    }
+
+    #[test]
+    fn a_failed_update_of_a_forge_that_never_made_a_database_starts_it_without_the_new_one() {
+        a_failed_first_start_puts_the_released_forge_back_without_the_new_database(None);
+    }
+
+    #[test]
+    fn a_failed_update_of_a_forge_with_an_empty_database_starts_it_without_the_new_one() {
+        a_failed_first_start_puts_the_released_forge_back_without_the_new_database(Some(b""));
+    }
+
     #[test]
     fn an_update_that_cannot_read_the_database_version_leaves_the_released_forge_running() {
         use std::io::Read as _;

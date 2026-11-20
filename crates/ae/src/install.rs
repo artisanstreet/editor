@@ -295,6 +295,12 @@ pub(crate) enum RestoreDatabaseError {
         #[source]
         source: Box<forge_store::RollbackError>,
     },
+    #[error("set aside the database in {} that the previous Forge never had", data.display())]
+    Clear {
+        data: PathBuf,
+        #[source]
+        source: Box<forge_store::RollbackError>,
+    },
 }
 
 impl std::fmt::Display for PutBack {
@@ -1577,7 +1583,9 @@ fn put_in_place(
             progress.message("Stopping Forge");
             service::prepare_bootstrap_stop().map_err(InstallAppError::PrepareStop)?;
             service::stop()?;
-            Stopped::Forge { database }
+            Stopped::Forge {
+                database: StoredBefore::of(database),
+            }
         }
         App::Editor => {
             if platform::close_processes(std::slice::from_ref(&binary))
@@ -1627,8 +1635,23 @@ fn put_in_place(
 
 #[derive(Clone, Copy)]
 enum Stopped {
-    Forge { database: Option<StorageVersion> },
+    Forge { database: StoredBefore },
     Nothing,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StoredBefore {
+    Nothing,
+    Schema(usize),
+}
+
+impl StoredBefore {
+    const fn of(database: Option<StorageVersion>) -> Self {
+        match database {
+            Some(StorageVersion { schema, .. }) if schema > 0 => Self::Schema(schema),
+            Some(_) | None => Self::Nothing,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1666,31 +1689,48 @@ fn put_back(
 }
 
 fn restore_database(
-    database: Option<StorageVersion>,
+    database: StoredBefore,
     progress: &ui::Progress,
 ) -> Result<(), RestoreDatabaseError> {
-    let Some(database) = database else {
-        return Ok(());
-    };
     service::stop().map_err(RestoreDatabaseError::Stop)?;
     let data = paths::data(App::Forge)?;
     let lock = forge_store::DataLock::acquire(&data).map_err(RestoreDatabaseError::Lock)?;
-    match forge_store::admin::roll_back_for(&lock, database.schema).map_err(|source| {
-        RestoreDatabaseError::RollBack {
-            data: data.clone(),
-            schema: database.schema,
-            source: Box::new(source),
+    match database {
+        StoredBefore::Schema(schema) => {
+            match forge_store::admin::roll_back_for(&lock, schema).map_err(|source| {
+                RestoreDatabaseError::RollBack {
+                    data: data.clone(),
+                    schema,
+                    source: Box::new(source),
+                }
+            })? {
+                forge_store::admin::RolledBack::Current => {}
+                forge_store::admin::RolledBack::Restored {
+                    found,
+                    restored,
+                    aside,
+                } => progress.message(format!(
+                    "Put back the schema {restored} database for the previous Forge; the schema {found} data is kept in {}",
+                    aside.display()
+                )),
+            }
         }
-    })? {
-        forge_store::admin::RolledBack::Current => {}
-        forge_store::admin::RolledBack::Restored {
-            found,
-            restored,
-            aside,
-        } => progress.message(format!(
-            "Put back the schema {restored} database for the previous Forge; the schema {found} data is kept in {}",
-            aside.display()
-        )),
+        StoredBefore::Nothing => {
+            match forge_store::admin::clear_for_a_fresh_start(&lock).map_err(|source| {
+                RestoreDatabaseError::Clear {
+                    data: data.clone(),
+                    source: Box::new(source),
+                }
+            })? {
+                forge_store::admin::Cleared::Nothing => {}
+                forge_store::admin::Cleared::SetAside { found, aside } => {
+                    progress.message(format!(
+                        "The previous Forge had no database yet, so it starts without one; the schema {found} data is kept in {}",
+                        aside.display()
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }

@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime};
 mod backup;
 mod frozen;
 
-pub(crate) use backup::Rollback;
 pub use backup::{BackupError, FinishUpgradeError, RollbackError};
+pub(crate) use backup::{Cleared, Rollback};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Upgrade {
@@ -339,6 +339,14 @@ pub(crate) fn roll_back_to(
     pace: &crate::progress::Progress,
 ) -> Result<Rollback, RollbackError> {
     backup::roll_back(database, supported, at, pace)
+}
+
+pub(crate) fn clear(
+    database: &Path,
+    at: artisan_api::Timestamp,
+    pace: &crate::progress::Progress,
+) -> Result<Cleared, RollbackError> {
+    backup::clear(database, at, pace)
 }
 
 fn migrate_to(conn: &mut Connection, target: usize, upgrade: &Upgrade) -> Result<(), SchemaError> {

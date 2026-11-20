@@ -296,6 +296,26 @@ pub fn roll_back_for(
     )
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cleared {
+    Nothing,
+    SetAside { found: usize, aside: PathBuf },
+}
+
+pub fn clear_for_a_fresh_start(data_lock: &DataLock) -> Result<Cleared, schema::RollbackError> {
+    let environment = Environment::system();
+    Ok(
+        match schema::clear(
+            &data_lock.dir().join(DATABASE),
+            environment.clock.now(),
+            &environment.progress,
+        )? {
+            schema::Cleared::Nothing => Cleared::Nothing,
+            schema::Cleared::SetAside { found, aside } => Cleared::SetAside { found, aside },
+        },
+    )
+}
+
 fn existing(dir: &Path) -> Result<PathBuf, AdminError> {
     let path = dir.join(DATABASE);
     if path.is_file() {
