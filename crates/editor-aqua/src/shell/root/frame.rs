@@ -141,7 +141,6 @@ impl RootViews {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
         aqua_core::checkpoint::reach();
-        let tm_events = crate::shell::application::Tm::new("fc.events");
         let events = self.transcript.observations.drain();
         let painted_count = events.painted.len();
         #[cfg(feature = "qualification")]
@@ -162,7 +161,6 @@ impl RootViews {
                         && !painted.bounds.intersect(clip).is_empty()
                 })
                 .count();
-            let tm_capture = crate::shell::application::Tm::new("fc.capture");
             let candidates: Vec<_> = events
                 .painted
                 .into_iter()
@@ -228,8 +226,6 @@ impl RootViews {
                     elapsed: lap_start.measured(),
                 },
             );
-            drop(tm_capture);
-            let tm_ack = crate::shell::application::Tm::new("fc.ack");
             for candidate in candidates {
                 candidate.acknowledge(&workspace.conversation, &mut shell.core, &markdown);
             }
@@ -249,7 +245,6 @@ impl RootViews {
                 }
             }
             self.read_watch = Some(watch);
-            drop(tm_ack);
             let _tm_viewports = crate::shell::application::Tm::new("fc.viewports");
             let landing_before = workspace.conversation.landing.is_some();
             for event in events.viewports {
@@ -305,7 +300,6 @@ impl RootViews {
                 changed |= self.noted.note(Cause::Landed, true);
             }
         }
-        drop(tm_events);
         aqua_core::checkpoint::reach();
         let _tm_after = crate::shell::application::Tm::new("fc.after");
         crate::conversation::view::transcript::apply_heights(

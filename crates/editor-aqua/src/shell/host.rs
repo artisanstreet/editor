@@ -237,14 +237,11 @@ impl Shell {
         const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
         let mut notifications = Vec::new();
         let mut causes = Invalidation::default();
-        let tm_a = crate::shell::application::Tm::new("sd.assets");
         causes.note(
             Cause::MediaAssets,
             self.audio_assets.drain() | self.models.drain() | self.meshes_changed.replace(false),
         );
         let mut preferences_changed = false;
-        drop(tm_a);
-        let tm_b = crate::shell::application::Tm::new("sd.entry");
         let (mut entry_effects, entry_changed) = self.entry.dispatch(&mut self.core);
         causes.note(Cause::EntryActions, entry_changed);
         let (theme_transition, mut settings_platform_effects) =
@@ -262,8 +259,6 @@ impl Shell {
             };
         entry_effects.append(&mut settings_platform_effects);
         let mut settings_platform_effects = entry_effects;
-        drop(tm_b);
-        let tm_c = crate::shell::application::Tm::new("sd.events");
         let watched = entry_watched_thread(&self.entry);
         let thread_on_screen = matches!(self.core.screen(), Screen::Thread { .. });
         let entry = &mut self.entry;
@@ -317,15 +312,11 @@ impl Shell {
             self.core.wake();
         }
         causes.note(Cause::LiveText, self.live.due(now));
-        drop(tm_c);
-        let tm_d = crate::shell::application::Tm::new("sd.finish");
         self.entry.finish_events(&mut self.core, ui);
         causes.note(Cause::EntryState, self.entry.drain(&mut self.core));
         if preferences_changed {
             self.preferences = Preferences::from_core(&self.core, self.preferences.system);
         }
-        drop(tm_d);
-        let tm_e = crate::shell::application::Tm::new("sd.domains");
         if let Some(workspace) = self.entry.workspace_mut() {
             workspace.refresh_composer_mentions(&mut self.core, &self.preferences.theme());
             causes.extend(workspace.drain_domains(&mut self.core, &self.images));
@@ -336,7 +327,6 @@ impl Shell {
             causes.note(Cause::PaletteState, workspace.drain_palette(&self.core));
             causes.note(Cause::ReferenceState, workspace.drain_reference(&self.core));
         }
-        drop(tm_e);
         ShellUpdates {
             notifications,
             preferences_changed,

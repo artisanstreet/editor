@@ -1641,14 +1641,9 @@ impl Workspace {
         assets: &aqua::images::ImageAssets,
     ) -> crate::shell::refresh::Invalidation {
         use crate::shell::refresh::Cause;
-        let tm_1 = crate::shell::application::Tm::new("dd.conversation");
         let conversation_changed = self.conversation.drain(core);
-        drop(tm_1);
-        let tm_2 = crate::shell::application::Tm::new("dd.questions");
         let question_changed = self.conversation.question_pages.drain(core);
         self.sync_question_pages(core);
-        drop(tm_2);
-        let tm_3 = crate::shell::application::Tm::new("dd.composer");
         let mut accepted = None;
         let mut composer_changed = false;
         if let Some(owner) = &mut self.composer {
@@ -1669,7 +1664,6 @@ impl Workspace {
             }
             self.route_composer_effects(core, result.effects);
         }
-        drop(tm_3);
         if let Some((target, thread)) = accepted {
             if Self::follow_accepted(core, &target, &thread) == Followed::Navigated {
                 self.sent_new_thread = Some(thread.clone());
@@ -1679,25 +1673,15 @@ impl Workspace {
                     .jump(core, crate::conversation::viewport::Jump::Latest);
             }
         }
-        let tm_4 = crate::shell::application::Tm::new("dd.qpages2");
         self.sync_question_pages(core);
-        drop(tm_4);
         let now = self.clock.timestamp();
-        let tm_5 = crate::shell::application::Tm::new("dd.sidebar");
         let sidebar = self.sidebar.drain(core, now);
-        drop(tm_5);
-        let tm_6 = crate::shell::application::Tm::new("dd.settings_sidebar");
         let settings_sidebar = self.settings_sidebar.drain(core, now);
-        drop(tm_6);
-        let tm_7 = crate::shell::application::Tm::new("dd.others");
         let usage = self.usage.drain(core);
         let marketplace = self.marketplace.drain(core);
         let settings = self.settings.drain(core);
         let home = self.home.drain(core);
-        drop(tm_7);
-        let tm_8 = crate::shell::application::Tm::new("dd.images");
         let images_changed = self.images.drain(assets) | self.images.poll_assets();
-        drop(tm_8);
         let mut causes = crate::shell::refresh::Invalidation::default();
         causes.note(Cause::ConversationState, conversation_changed);
         causes.note(Cause::ConversationImages, images_changed);

@@ -748,7 +748,6 @@ impl<V: SectionViews> ShellApplication<V> {
         reason = "one drain pass over shell, views and native effects with shared timing"
     )]
     fn drain(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sections_changed: bool) {
-        let tm_pre = Tm::new("drain.pre");
         for control in self.shell.titlebar.take_actions() {
             let request = match control {
                 aqua::prelude::CaptionControl::Minimize => {
@@ -775,9 +774,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 "could not activate notification"
             );
         }
-        drop(tm_pre);
         let mut causes = Invalidation::default();
-        let tm_workspace = Tm::new("drain.workspace");
         let noted = self.views.take_invalidation();
         let mut domain_changed = causes.note(Cause::Sections, sections_changed) | !noted.is_empty();
         causes.extend(noted);
@@ -811,11 +808,8 @@ impl<V: SectionViews> ShellApplication<V> {
                 ctx.request_frame(id, FrameReason::INPUT);
             }
         }
-        drop(tm_workspace);
         let drain_span = crate::core::diagnostics::rebuild_stats::span("shell_drain");
-        let tm_shell = Tm::new("drain.shell");
         let mut updates = self.shell.drain(active, self.ui.ui_mut());
-        drop(tm_shell);
         drop(drain_span);
         let drained = std::mem::take(&mut updates.causes);
         domain_changed |= !drained.is_empty();
@@ -829,11 +823,8 @@ impl<V: SectionViews> ShellApplication<V> {
             ctx.request_animation_deadline(id, ctx.now() + wait);
         }
         aqua_core::checkpoint::reach();
-        let tm_update = Tm::new("drain.update");
         domain_changed |= causes.note(Cause::WorkspaceActions, self.update(ctx, id, updates));
-        drop(tm_update);
         aqua_core::checkpoint::reach();
-        let tm_sync = Tm::new("drain.sync");
         if let Some(workspace) = self.shell.entry.workspace_mut() {
             workspace.sync_marketplace_ui(self.ui.ui_mut());
             let settings_visible =
@@ -855,7 +846,6 @@ impl<V: SectionViews> ShellApplication<V> {
                 ctx.request_animation_deadline(id, ctx.now() + delay);
             }
         }
-        drop(tm_sync);
         self.shell.bind(ctx, id);
         if !self.mounted {
             causes.note(Cause::Unmounted, true);
