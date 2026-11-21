@@ -44,7 +44,7 @@ impl Rig {
             client,
         );
         let (_spool, mut sessions) = crate::draft_sessions();
-        let owner = ComposerOwner::new(
+        let mut owner = ComposerOwner::new(
             &core,
             &mut sessions,
             ComposerTarget::NewThread {
@@ -53,6 +53,8 @@ impl Rig {
             },
             Rc::new(|_| {}),
         );
+        crate::recovered(owner.controller.borrow().session.as_ref().unwrap());
+        owner.drain_async(&core, &aqua::images::ImageAssets::default());
         assert!(!owner.controller.borrow().editor.borrow().is_disabled());
         let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
         let editor = owner.editor.clone();
