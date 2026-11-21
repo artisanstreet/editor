@@ -763,12 +763,13 @@ impl DraftHandle {
         let kept = *self.0.kept();
         let scope = &self.0.scope;
         let holder = kept.slot().map_or(Holder::Newcomer, Holder::Owner);
+        let kept_in = |slot: Slot| match kept {
+            Kept::Nothing => Kept::Written(slot),
+            kept @ (Kept::Recovered(_) | Kept::Written(_) | Kept::Unforgotten(_)) => kept,
+        };
         match serving.keep(draft, &images, holder) {
             Ok(slot) => {
-                *self.0.kept() = match kept {
-                    Kept::Nothing => Kept::Written(slot),
-                    kept @ (Kept::Recovered(_) | Kept::Written(_) | Kept::Unforgotten(_)) => kept,
-                };
+                *self.0.kept() = kept_in(slot);
                 match slot {
                     Slot::Record => tracing::warn!(
                         host = %self.0.host,
@@ -784,6 +785,9 @@ impl DraftHandle {
                 Ok(())
             }
             Err(source) => {
+                if let Some(slot) = source.published() {
+                    *self.0.kept() = kept_in(slot);
+                }
                 let error = KeepLocallyError::Spool(source);
                 tracing::error!(
                     host = %self.0.host,

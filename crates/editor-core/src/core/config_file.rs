@@ -238,6 +238,11 @@ fn put_in_place(
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn move_folder_through(from: &Path, to: &Path) -> std::io::Result<()> {
+    write_through::move_folder(from, to)
+}
+
 #[cfg(unix)]
 fn sync_directory(parent: &Path, path: &Path) -> Result<(), WriteConfigError> {
     File::open(parent)

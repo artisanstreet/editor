@@ -16,6 +16,7 @@ pub trait SpoolDisk: Send + Sync {
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
     fn remove_tree(&self, path: &Path) -> std::io::Result<()>;
     fn remove_empty_folder(&self, path: &Path) -> std::io::Result<()>;
+    fn sync_folder(&self, folder: &Path) -> std::io::Result<()>;
 }
 
 #[derive(Debug)]
@@ -32,8 +33,14 @@ impl LocalDisk {
 }
 
 impl SpoolDisk for LocalDisk {
+    #[cfg(unix)]
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    #[cfg(windows)]
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        config_file::move_folder_through(from, to)
     }
 
     fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
@@ -42,6 +49,16 @@ impl SpoolDisk for LocalDisk {
 
     fn remove_empty_folder(&self, path: &Path) -> std::io::Result<()> {
         std::fs::remove_dir(path)
+    }
+
+    #[cfg(unix)]
+    fn sync_folder(&self, folder: &Path) -> std::io::Result<()> {
+        std::fs::File::open(folder).and_then(|folder| folder.sync_all())
+    }
+
+    #[cfg(windows)]
+    fn sync_folder(&self, _folder: &Path) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -165,7 +182,7 @@ pub struct SpooledDraft {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum KeepSpooledDraftError {
+pub(crate) enum KeepSpooledDraftError {
     #[error("create the directory {path}")]
     CreateDirectory {
         path: PathBuf,
@@ -199,6 +216,27 @@ pub enum KeepSpooledDraftError {
         #[source]
         source: std::io::Error,
     },
+    #[error("flush the folder {path} to disk after keeping the draft there")]
+    Unsynced {
+        slot: Slot,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl KeepSpooledDraftError {
+    pub(crate) const fn published(&self) -> Option<Slot> {
+        match self {
+            Self::Unsynced { slot, .. } => Some(*slot),
+            Self::CreateDirectory { .. }
+            | Self::List { .. }
+            | Self::WriteImage { .. }
+            | Self::Draft(_)
+            | Self::Sync { .. }
+            | Self::Publish { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -553,8 +591,8 @@ impl Serving {
         let dir = &self.turn.owner.dir;
         std::fs::create_dir_all(&root).map_err(failed(&root))?;
         dir.parent()
-            .map_or(Ok(()), sync_folder)
-            .and_then(|()| sync_folder(dir))
+            .map_or(Ok(()), |parent| self.disk().sync_folder(parent))
+            .and_then(|()| self.disk().sync_folder(dir))
             .map_err(failed(&root))
     }
 
@@ -614,10 +652,12 @@ impl Serving {
             },
         )
         .map_err(KeepSpooledDraftError::Draft)?;
-        sync_folder(staging.path()).map_err(|source| KeepSpooledDraftError::Sync {
-            path: staging.path().to_owned(),
-            source,
-        })?;
+        self.disk()
+            .sync_folder(staging.path())
+            .map_err(|source| KeepSpooledDraftError::Sync {
+                path: staging.path().to_owned(),
+                source,
+            })?;
         let to = self.unit_path(unit);
         self.disk().rename(staging.path(), &to).map_err(|source| {
             KeepSpooledDraftError::Publish {
@@ -627,12 +667,13 @@ impl Serving {
             }
         })?;
         drop(staging.keep());
-        if let Err(source) = sync_folder(&root) {
-            tracing::warn!(
-                error = %source,
-                "kept a draft on this device, but it may not survive a power cut"
-            );
-        }
+        self.disk()
+            .sync_folder(&root)
+            .map_err(|source| KeepSpooledDraftError::Unsynced {
+                slot,
+                path: root.clone(),
+                source,
+            })?;
         for older in units.iter().filter(|older| older.slot == slot) {
             let path = self.unit_path(*older);
             if let Err(error) = self.disk().remove_tree(&path) {
@@ -793,13 +834,15 @@ impl Serving {
 
     fn sync_root(&self) -> Result<(), ForgetSpooledDraftError> {
         let root = self.root();
-        sync_folder(&root).map_err(|source| ForgetSpooledDraftError::Sync { path: root, source })
+        self.disk()
+            .sync_folder(&root)
+            .map_err(|source| ForgetSpooledDraftError::Sync { path: root, source })
     }
 
     fn remove_root_if_empty(&self) {
         match self.disk().remove_empty_folder(&self.root()) {
             Ok(()) => {
-                if let Err(error) = sync_folder(&self.turn.owner.dir) {
+                if let Err(error) = self.disk().sync_folder(&self.turn.owner.dir) {
                     tracing::warn!(%error, "removed an empty drafts folder, but it may come back after a power cut");
                 }
             }
@@ -839,7 +882,7 @@ impl Serving {
                 to: folder.clone(),
                 source,
             })?;
-        if let Err(source) = sync_folder(&root) {
+        if let Err(source) = self.disk().sync_folder(&root) {
             tracing::warn!(
                 error = %source,
                 "moved an unreadable draft aside, but the move may not survive a power cut"
@@ -900,20 +943,6 @@ fn removed(path: &Path, removal: std::io::Result<()>) -> Result<(), ForgetSpoole
             source,
         }),
     }
-}
-
-#[cfg(unix)]
-fn sync_folder(folder: &Path) -> std::io::Result<()> {
-    std::fs::File::open(folder).and_then(|folder| folder.sync_all())
-}
-
-#[cfg(not(unix))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "Windows journals folder changes itself and std can't flush a folder there, so this matches the Unix flush's signature"
-)]
-fn sync_folder(_folder: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 fn stem(host: &HostId, scope: &str) -> String {

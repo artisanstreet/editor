@@ -47,10 +47,18 @@ pub(crate) enum Rule {
     PauseAfter,
     Refuse,
     RefuseRemoval,
+    RefuseSync,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Rename,
+    Removal,
+    Sync,
 }
 
 struct Armed {
-    removal: bool,
+    operation: Operation,
     matches: Box<dyn Fn(&Path) -> bool + Send>,
     rule: Rule,
     reached: mpsc::Sender<()>,
@@ -84,7 +92,11 @@ impl ScriptedDisk {
         let (reached_sender, reached) = mpsc::channel();
         let (release, release_receiver) = mpsc::channel();
         self.armed.lock().unwrap().push(Armed {
-            removal: matches!(rule, Rule::RefuseRemoval),
+            operation: match rule {
+                Rule::RefuseRemoval => Operation::Removal,
+                Rule::RefuseSync => Operation::Sync,
+                Rule::PauseBefore | Rule::PauseAfter | Rule::Refuse => Operation::Rename,
+            },
             matches: Box::new(matches),
             rule,
             reached: reached_sender,
@@ -95,32 +107,39 @@ impl ScriptedDisk {
 }
 
 impl ScriptedDisk {
-    fn take(&self, removal: bool, path: &Path) -> Option<Armed> {
+    fn take(&self, operation: Operation, path: &Path) -> Option<Armed> {
         let mut armed = self.armed.lock().unwrap();
         armed
             .iter()
-            .position(|armed| armed.removal == removal && (armed.matches)(path))
+            .position(|armed| armed.operation == operation && (armed.matches)(path))
             .map(|index| armed.remove(index))
     }
 }
 
 impl SpoolDisk for ScriptedDisk {
+    fn sync_folder(&self, folder: &Path) -> std::io::Result<()> {
+        match self.take(Operation::Sync, folder) {
+            Some(_) => Err(std::io::Error::other("flush refused by the test disk")),
+            None => std::fs::File::open(folder).and_then(|folder| folder.sync_all()),
+        }
+    }
+
     fn remove_empty_folder(&self, path: &Path) -> std::io::Result<()> {
-        match self.take(true, path) {
+        match self.take(Operation::Removal, path) {
             Some(_) => Err(std::io::Error::other("removal refused by the test disk")),
             None => std::fs::remove_dir(path),
         }
     }
 
     fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
-        match self.take(true, path) {
+        match self.take(Operation::Removal, path) {
             Some(_) => Err(std::io::Error::other("removal refused by the test disk")),
             None => std::fs::remove_dir_all(path),
         }
     }
 
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        let Some(armed) = self.take(false, to) else {
+        let Some(armed) = self.take(Operation::Rename, to) else {
             return std::fs::rename(from, to);
         };
         let pause = |armed: &Armed| {
@@ -137,7 +156,7 @@ impl SpoolDisk for ScriptedDisk {
                 pause(&armed);
                 renamed
             }
-            Rule::Refuse | Rule::RefuseRemoval => {
+            Rule::Refuse | Rule::RefuseRemoval | Rule::RefuseSync => {
                 Err(std::io::Error::other("refused by the test disk"))
             }
         }

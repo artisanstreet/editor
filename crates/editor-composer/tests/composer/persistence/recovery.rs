@@ -403,6 +403,76 @@ fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
 }
 
 #[test]
+fn a_draft_whose_folder_could_not_be_flushed_stays_held_beside_the_version_it_replaces() {
+    let mut device = Device::new();
+    device
+        .spool()
+        .keep(
+            &device.host,
+            "new",
+            kept("the version on disk"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    type_into(&lease, "typed over it");
+    drop(device.disk.arm(Rule::RefuseSync, named("recovering-new")));
+
+    device.core.remove_host(&device.host).unwrap();
+    sessions.retain_hosts(&device.core);
+
+    assert!(
+        sessions.unkept().is_some(),
+        "a keep that wasn't flushed to disk is reported"
+    );
+    assert!(
+        !lease.read(DraftSession::removed),
+        "the draft stays held in memory"
+    );
+    assert_eq!(
+        editor_core::config_file::read::<serde_json::Value>(
+            &device.drafts().join("recovering-new/record.1/record.json")
+        )
+        .unwrap()["body"]["text"],
+        "the version on disk",
+        "the version it replaces is not removed before the new one is flushed"
+    );
+
+    assert_eq!(sessions.keep_unkept(), None, "trying again keeps it");
+    assert!(lease.read(DraftSession::removed));
+    assert_eq!(
+        device.unit("record.").file_name().unwrap(),
+        "record.3",
+        "the later keep replaces both earlier versions in the same slot"
+    );
+    assert!(
+        device.spool().kept_beside(&device.host, "new").is_empty(),
+        "the draft is not kept a second time beside itself"
+    );
+    assert_eq!(
+        device
+            .spool()
+            .take(&device.host, "new")
+            .unwrap()
+            .unwrap()
+            .draft
+            .body
+            .text,
+        "typed over it"
+    );
+}
+
+#[test]
 fn a_draft_held_across_two_pairings_keeps_both_pairings_images_when_trying_again() {
     let mut device = Device::new();
     let instance = device.core.host(&device.host).unwrap().instance();
