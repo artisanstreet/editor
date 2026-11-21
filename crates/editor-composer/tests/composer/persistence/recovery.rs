@@ -439,6 +439,7 @@ fn a_draft_held_across_two_pairings_keeps_both_pairings_images_when_trying_again
     assert_eq!(images, expected, "neither pairing's image is lost");
 }
 
+#[cfg(unix)]
 fn saved_by_forge(device: &Device) -> DraftHandle {
     let mut state = DraftSession::new("new".into());
     assert!(matches!(state.next_operation(), Some(Operation::Load)));
