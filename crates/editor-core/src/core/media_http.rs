@@ -44,7 +44,7 @@ pub struct UrlIdentity {
 
 impl UrlIdentity {
     #[must_use]
-    pub(crate) fn of(url: &url::Url) -> Self {
+    fn of(url: &url::Url) -> Self {
         let origin = url.host_str().map(|host| match url.port() {
             Some(port) => format!("{}://{host}:{port}", url.scheme()),
             None => format!("{}://{host}", url.scheme()),
@@ -56,7 +56,7 @@ impl UrlIdentity {
     }
 
     #[must_use]
-    pub(crate) fn unparsed(text: &str) -> Self {
+    fn unparsed(text: &str) -> Self {
         Self {
             origin: None,
             digest: digest(text),

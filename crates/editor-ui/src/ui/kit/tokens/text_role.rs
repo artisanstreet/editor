@@ -14,7 +14,7 @@ pub struct TextSpec {
     size: f32,
     line: f32,
     pub weight: FontWeight,
-    pub face: Face,
+    face: Face,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
