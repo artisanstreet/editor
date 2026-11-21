@@ -34,6 +34,12 @@ pub enum PrepareError {
         #[source]
         source: std::io::Error,
     },
+    #[error("prepare the image folder of thread {thread}")]
+    ImageFolderTask {
+        thread: ThreadId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
     #[error("read what {engine} gets at launch")]
     Customisation {
         engine: EngineId,
@@ -1001,9 +1007,19 @@ pub(crate) struct Prepared {
 }
 
 async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<Option<PathBuf>, PrepareError> {
-    match crate::images::grantable_folder(hub.data_dir(), thread).await {
+    use crate::images::{FolderError, RootError};
+    let checked = crate::images::grantable_folder(hub.data_dir(), thread)
+        .await
+        .map_err(|source| PrepareError::ImageFolderTask {
+            thread: thread.clone(),
+            source,
+        })?;
+    match checked {
         Ok(images) => Ok(Some(images)),
-        Err(error @ crate::images::FolderError::NotAFolder { .. }) => {
+        Err(
+            error @ (FolderError::NotAFolder { .. }
+            | FolderError::Root(RootError::NotAFolder { .. })),
+        ) => {
             tracing::warn!(
                 %thread,
                 error = diagnostics::chain(&error),
@@ -1011,12 +1027,11 @@ async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<Option<PathBuf>, P
             );
             Ok(None)
         }
-        Err(crate::images::FolderError::Create {
-            thread,
-            path,
-            source,
-        }) => Err(PrepareError::ImageFolder {
-            thread,
+        Err(
+            FolderError::Create { path, source, .. }
+            | FolderError::Root(RootError::Check { path, source }),
+        ) => Err(PrepareError::ImageFolder {
+            thread: thread.clone(),
             path,
             source,
         }),

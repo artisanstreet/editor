@@ -632,6 +632,85 @@ async fn an_image_folder_replaced_by_a_symlink_is_never_granted_to_the_engine() 
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+async fn a_linked_image_cache_is_never_swept_written_or_granted() {
+    let granted = Arc::new(Mutex::new(None::<(Vec<PathBuf>, String)>));
+    let recorded = Arc::clone(&granted);
+    let script: Script = Arc::new(move |turn, _io| {
+        let recorded = Arc::clone(&recorded);
+        Box::pin(async move {
+            *recorded.lock().unwrap() =
+                Some((turn.launch.readable.clone(), turn.input.text.clone()));
+            Outcome::done()
+        })
+    });
+    let fixture = fixture(script).await;
+    let project = tempfile::tempdir().unwrap();
+    let key = scratch::folder_key(&fixture.thread_id);
+    for kept in [".git", "src", key.as_str()] {
+        std::fs::create_dir_all(project.path().join(kept)).unwrap();
+        std::fs::write(project.path().join(kept).join("kept"), b"precious").unwrap();
+    }
+    std::fs::write(project.path().join("Cargo.toml"), b"precious").unwrap();
+    let root = image_folder(&fixture, &fixture.thread_id)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::os::unix::fs::symlink(project.path(), &root).unwrap();
+    let blob = fixture.hub.store().put_image(png(18)).await.unwrap();
+
+    let exclusive = forge_store::DataLock::acquire(fixture.dir.path()).unwrap();
+    sweep_leftovers(fixture.dir.path(), fixture.hub.store(), &exclusive).await;
+    drop(exclusive);
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, with_image("look", &blob.hash))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    images::remove_thread_folder(fixture.dir.path(), &fixture.thread_id).unwrap_err();
+
+    let mut left = walkdir(project.path());
+    left.sort();
+    let mut planted = [
+        ".git/kept",
+        "Cargo.toml",
+        &format!("{key}/kept"),
+        "src/kept",
+    ]
+    .map(PathBuf::from);
+    planted.sort();
+    assert_eq!(
+        left, planted,
+        "Forge touched the folder its image cache links to"
+    );
+    let (readable, text) = granted.lock().unwrap().take().expect("the run started");
+    assert!(
+        readable
+            .iter()
+            .all(|dir| !dir.starts_with(&root) && !dir.starts_with(project.path())),
+        "the engine may read through the linked cache: {readable:?}"
+    );
+    assert_eq!(text, "look\n\n[The file path of image 1 isn't available.]");
+}
+
+fn walkdir(base: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![base.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                found.push(path.strip_prefix(base).unwrap().to_path_buf());
+            }
+        }
+    }
+    found
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_exclusive_sweep_removes_stale_partials_and_stray_files_and_goes_on_past_failures() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
