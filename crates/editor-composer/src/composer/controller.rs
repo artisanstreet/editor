@@ -999,51 +999,44 @@ impl Composer {
         }
     }
 
-    pub(crate) fn unsendable(&self) -> editor_core::Problem {
-        let uploading = self
-            .attachments
-            .as_ref()
-            .is_some_and(Attachments::uploading);
-        let empty = self.editor.borrow().text().trim().is_empty()
-            && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
-            && self.files.is_empty();
-        editor_core::Problem::new(match (uploading, empty) {
-            (true, _) => "This message can't be sent until its images finish uploading.",
-            (false, true) => "This message has nothing to send. Type it again, then send it.",
-            (false, false) => {
-                "This message couldn't be sent again. Check that its Forge is connected, then try again."
-            }
-        })
-    }
-
-    pub fn send(&mut self, host: &HostData) -> bool {
+    pub fn send(&mut self, host: &HostData) -> Result<(), SendRefusal> {
         let Some(session) = &self.session else {
-            return false;
+            return Err(SendRefusal::NoDraft);
         };
-        if self.host_instance != Some(host.instance())
-            || session.read(DraftSession::epoch) != self.shown_epoch
-            || self.questionnaire.writing_answer()
-            || matches!(&self.target, ComposerTarget::Thread { thread, .. } if !host.threads.contains_key(thread))
-        {
-            return false;
+        if self.host_instance != Some(host.instance()) {
+            return Err(SendRefusal::ForgeReconnected);
         }
-        if !session.read(DraftSession::sendable)
-            || (self.editor.borrow().text().trim().is_empty()
-                && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
-                && self.files.is_empty())
-        {
-            return false;
+        if session.read(DraftSession::epoch) != self.shown_epoch {
+            return Err(SendRefusal::DraftChanged);
         }
-        let Some(images) = self
-            .attachments
-            .as_ref()
-            .and_then(Attachments::ready_hashes)
-        else {
-            return false;
+        if self.questionnaire.writing_answer() {
+            return Err(SendRefusal::AnsweringQuestion);
+        }
+        if matches!(&self.target, ComposerTarget::Thread { thread, .. } if !host.threads.contains_key(thread))
+        {
+            return Err(SendRefusal::ThreadMissing);
+        }
+        if session.read(DraftSession::sending) {
+            return Err(SendRefusal::AlreadySending);
+        }
+        if !session.read(DraftSession::sendable) {
+            return Err(SendRefusal::DraftLoading);
+        }
+        if self.editor.borrow().text().trim().is_empty()
+            && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
+            && self.files.is_empty()
+        {
+            return Err(SendRefusal::Empty);
+        }
+        let images = match &self.attachments {
+            None => Vec::new(),
+            Some(attachments) => match attachments.ready_hashes() {
+                Some(images) => images,
+                None if attachments.uploading() => return Err(SendRefusal::ImageUploading),
+                None => return Err(SendRefusal::ImageFailed),
+            },
         };
-        let Some(config) = self.effective_config(host) else {
-            return false;
-        };
+        let config = self.effective_config(host).ok_or(SendRefusal::NoModel)?;
         let (create, thread_config, thread) = match &self.target {
             ComposerTarget::Thread { thread, .. } => (
                 None,
@@ -1051,9 +1044,7 @@ impl Composer {
                 thread.clone(),
             ),
             ComposerTarget::NewThread { .. } => {
-                let Some(project_id) = self.project(host) else {
-                    return false;
-                };
+                let project_id = self.project(host).ok_or(SendRefusal::NoProject)?;
                 let thread = ThreadId::new();
                 (
                     Some(CreateThread {
@@ -1086,8 +1077,36 @@ impl Composer {
         }
         self.clear_input();
         self.cleared = Some(std::time::Instant::now());
-        true
+        Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SendRefusal {
+    #[error("This message's draft isn't open. Open the thread again, then send it.")]
+    NoDraft,
+    #[error("This Forge reconnected since the message was written. Try again in a moment.")]
+    ForgeReconnected,
+    #[error("This draft changed since it was shown. Check it, then send it again.")]
+    DraftChanged,
+    #[error("A question is being answered. Send the answer first.")]
+    AnsweringQuestion,
+    #[error("This thread isn't on this Forge.")]
+    ThreadMissing,
+    #[error("This message is already being sent.")]
+    AlreadySending,
+    #[error("This draft is still loading. Try again once it has loaded.")]
+    DraftLoading,
+    #[error("This message has nothing to send. Type it again, then send it.")]
+    Empty,
+    #[error("This message can't be sent until its images finish uploading.")]
+    ImageUploading,
+    #[error("An image couldn't be uploaded. Remove it or try it again.")]
+    ImageFailed,
+    #[error("Choose a model, then send it again.")]
+    NoModel,
+    #[error("Choose a project, then send it again.")]
+    NoProject,
 }
 
 fn file_links(text: &str, files: &[DraftFile]) -> String {

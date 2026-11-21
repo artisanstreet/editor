@@ -674,7 +674,7 @@ fn pasted_png() -> Vec<u8> {
     png
 }
 
-fn hand_over_pasted_image(lease: &DraftLease, client: ForgeClient) {
+fn hand_over_pasted_image(lease: &DraftHandle, client: ForgeClient) {
     use editor_aqua::composer::attachment::{Attachments, Source};
 
     let mut attachments = Attachments::new(client);
@@ -1532,7 +1532,7 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
         composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
         composer.editor.borrow_mut().set_text(&prompt);
         composer.edited();
-        assert!(composer.send(core.host(&host).unwrap()));
+        assert_eq!(composer.send(core.host(&host).unwrap()), Ok(()));
         composer.editor.borrow_mut().set_text("the follow-up");
         composer.edited();
 
@@ -1818,7 +1818,7 @@ async fn close_while_sending(
     composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
     composer.editor.borrow_mut().set_text("send me");
     composer.edited();
-    assert!(composer.send(core.host(target.host()).unwrap()));
+    assert_eq!(composer.send(core.host(target.host()).unwrap()), Ok(()));
     let (mut socket, route, body) = composer_request(listener, acceptor).await;
     assert!(route.starts_with("PUT /drafts/"), "{route}");
     let sent = body["body"].clone();
@@ -1915,7 +1915,7 @@ fn text_typed_after_an_unanswered_send_shows_on_reopening_and_survives_the_resen
             "the later text is kept beside it"
         );
 
-        assert!(composer.send(core.host(&host).unwrap()));
+        assert_eq!(composer.send(core.host(&host).unwrap()), Ok(()));
         loop {
             let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
             if route.starts_with("PUT /drafts/") {
@@ -1955,7 +1955,7 @@ async fn send_and_type_over(
     composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
     composer.editor.borrow_mut().set_text("send me");
     composer.edited();
-    assert!(composer.send(core.host(host).unwrap()));
+    assert_eq!(composer.send(core.host(host).unwrap()), Ok(()));
     composer.editor.borrow_mut().set_text("typed meanwhile");
     composer.edited();
     let (mut socket, route, body) = composer_request(listener, acceptor).await;
@@ -2007,7 +2007,7 @@ async fn resent_thread(
         [follow_up],
         "what was typed after sending is kept beside it"
     );
-    assert!(composer.send(core.host(host).unwrap()));
+    assert_eq!(composer.send(core.host(host).unwrap()), Ok(()));
     loop {
         let (mut socket, route, body) = composer_request(listener, acceptor).await;
         if route.starts_with("PUT /drafts/") {
@@ -2087,16 +2087,38 @@ async fn composer_whose_send_failed(
     listener: &TcpListener,
     acceptor: &TlsAcceptor,
 ) -> (editor_aqua::composer::view::ComposerOwner, DraftHandle) {
-    use editor_aqua::composer::controller::ComposerTarget;
+    let target = editor_aqua::composer::controller::ComposerTarget::NewThread {
+        host: host.clone(),
+        project: Some(artisan_api::ProjectId::from("project")),
+    };
+    let (owner, sending, route) =
+        composer_whose_send_to_failed(core, target, sessions, listener, acceptor).await;
+    assert_eq!(route, "POST /threads HTTP/1.1");
+    (owner, sending)
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "the composer is UI-thread state, driven here on the test's one thread"
+)]
+async fn composer_whose_send_to_failed(
+    core: &Core,
+    target: editor_aqua::composer::controller::ComposerTarget,
+    sessions: &mut DraftSessions,
+    listener: &TcpListener,
+    acceptor: &TlsAcceptor,
+) -> (
+    editor_aqua::composer::view::ComposerOwner,
+    DraftHandle,
+    String,
+) {
     use editor_aqua::composer::draft_session::DraftSession;
 
+    let host = target.host().clone();
     let owner = editor_aqua::composer::view::ComposerOwner::new(
         core,
         sessions,
-        ComposerTarget::NewThread {
-            host: host.clone(),
-            project: Some(artisan_api::ProjectId::from("project")),
-        },
+        target,
         std::rc::Rc::new(|_| {}),
     );
     let sending = DraftHandle::clone(owner.controller.borrow().session.as_ref().unwrap());
@@ -2108,7 +2130,7 @@ async fn composer_whose_send_failed(
         composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
         composer.editor.borrow_mut().set_text("send me");
         composer.edited();
-        assert!(composer.send(core.host(host).unwrap()));
+        assert_eq!(composer.send(core.host(&host).unwrap()), Ok(()));
     }
     let (mut socket, route, body) = composer_request(listener, acceptor).await;
     assert!(route.starts_with("PUT /drafts/"), "{route}");
@@ -2119,10 +2141,129 @@ async fn composer_whose_send_failed(
     .await;
     drop(socket);
     let (posting, route, _) = composer_request(listener, acceptor).await;
-    assert_eq!(route, "POST /threads HTTP/1.1");
     refuse(posting).await;
     wait_for_session(&sending, DraftSession::send_failed).await;
-    (owner, sending)
+    (owner, sending, route)
+}
+
+fn known_thread(id: &artisan_api::ThreadId) -> artisan_api::Thread {
+    artisan_api::Thread {
+        id: id.clone(),
+        project_id: artisan_api::ProjectId::from("project"),
+        title: None,
+        config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
+        activity_seq: 1,
+        activity_at: 0,
+        read_seq: 1,
+        marked_unread: false,
+        settled_seq: 0,
+        seq: 1,
+        created_at: 0,
+        updated_at: 0,
+        archived: false,
+        parent_thread_id: None,
+        spawned_by: None,
+        parked_until: None,
+    }
+}
+
+#[test]
+fn trying_again_after_the_thread_left_the_forge_says_the_thread_is_gone() {
+    use artisan_api::ThreadId;
+    use editor_aqua::composer::controller::ComposerTarget;
+    use editor_aqua::composer::view::ComposerAction;
+
+    let (_directory, mut core, _config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "thread-gone");
+        let thread = ThreadId::from("thread");
+        core.host_mut(&host)
+            .unwrap()
+            .threads
+            .insert(thread.clone(), known_thread(&thread));
+        let mut sessions = DraftSessions::default();
+        let target = ComposerTarget::Thread {
+            host: host.clone(),
+            thread: thread.clone(),
+        };
+        let (owner, _, route) =
+            composer_whose_send_to_failed(&core, target, &mut sessions, &listener, &acceptor).await;
+        assert_eq!(route, "POST /threads/thread/messages HTTP/1.1");
+        core.host_mut(&host).unwrap().threads.remove(&thread);
+
+        owner.dispatch_with_change(&mut core, ComposerAction::RetryDraft, None);
+
+        let composer = owner.controller.borrow();
+        assert_eq!(
+            composer
+                .notice
+                .as_ref()
+                .map(editor_aqua::core::Problem::headline),
+            Some("This thread isn't on this Forge."),
+            "trying again names the real reason instead of blaming the connection"
+        );
+    });
+}
+
+#[test]
+fn trying_again_with_a_refused_image_says_to_remove_the_image() {
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::view::ComposerAction;
+
+    let (_directory, mut core, _config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "image-refused");
+        let client = core.host(&host).unwrap().client.clone();
+        let mut sessions = DraftSessions::default();
+        let (owner, sending) =
+            composer_whose_send_failed(&core, &host, &mut sessions, &listener, &acceptor).await;
+        owner.controller.borrow_mut().sync(&core);
+
+        hand_over_pasted_image(&sending, client);
+        let (mut socket, route, _) = loop {
+            let (mut socket, route, body) = draft_or_blob_request(&listener, &acceptor).await;
+            if route.starts_with("PUT /blobs") {
+                break (socket, route, body);
+            }
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            respond(
+                &mut socket,
+                json!({"saved": true, "current": {"revision": 2, "body": body["body"]}}),
+            )
+            .await;
+        };
+        assert_eq!(route, "PUT /blobs HTTP/1.1");
+        let failure = artisan_api::Failure::Resource(artisan_api::ResourceFailure::TooManyPixels {
+            width: 40_000,
+            height: 40_000,
+            limit: 100_000_000,
+        });
+        let message = failure.to_string();
+        respond_status(
+            &mut socket,
+            "400 Bad Request",
+            serde_json::to_value(artisan_api::ApiError::new(failure, message)).unwrap(),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(&sending, |state| !state.pending()).await;
+        owner.controller.borrow_mut().sync(&core);
+        assert!(sending.read(DraftSession::send_failed));
+
+        owner.dispatch_with_change(&mut core, ComposerAction::RetryDraft, None);
+
+        let composer = owner.controller.borrow();
+        assert_eq!(
+            composer
+                .notice
+                .as_ref()
+                .map(editor_aqua::core::Problem::headline),
+            Some("An image couldn't be uploaded. Remove it or try it again."),
+            "trying again names the failed image instead of blaming the connection"
+        );
+    });
 }
 
 #[test]

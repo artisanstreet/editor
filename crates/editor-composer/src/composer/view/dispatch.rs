@@ -155,7 +155,7 @@ impl ComposerOwner {
                         self.send_answer(host, answer, composer.generation());
                         effects.push(ComposerEffect::EditorChanged);
                     }
-                } else if composer.send(host) {
+                } else if composer.send(host).is_ok() {
                     effects.push(ComposerEffect::EditorChanged);
                 }
                 effects.push(ComposerEffect::FocusEditor);
@@ -318,10 +318,11 @@ impl ComposerOwner {
                 });
                 if resend {
                     composer.reconcile();
-                    if composer.send(host) {
-                        effects.push(ComposerEffect::EditorChanged);
-                    } else {
-                        composer.notice = Some(composer.unsendable());
+                    match composer.send(host) {
+                        Ok(()) => effects.push(ComposerEffect::EditorChanged),
+                        Err(refusal) => {
+                            composer.notice = Some(editor_core::Problem::new(refusal.to_string()));
+                        }
                     }
                 } else if let Some(session) = &composer.session {
                     session.retry();
