@@ -104,7 +104,7 @@ struct Shown {
 #[derive(Default)]
 pub struct ActionFailureDialog {
     failure: Option<ActionFailure>,
-    drafts_seen: u64,
+    drafts_seen: Option<u64>,
     shown: Option<Shown>,
     events: Rc<RefCell<VecDeque<Event>>>,
 }
@@ -152,7 +152,9 @@ impl ActionFailureDialog {
     pub fn offer_drafts(&mut self, held: Option<crate::composer::persistence::UnkeptDrafts>) {
         match (held, &mut self.failure) {
             (None, Some(ActionFailure::Drafts { .. })) => self.failure = None,
-            (Some(unkept), _) if unkept.generation != self.drafts_seen => self.show_drafts(unkept),
+            (Some(unkept), _) if Some(unkept.generation) != self.drafts_seen => {
+                self.show_drafts(unkept);
+            }
             (Some(unkept), Some(ActionFailure::Drafts { problem })) => *problem = unkept.problem,
             (
                 _,
@@ -174,7 +176,7 @@ impl ActionFailureDialog {
     }
 
     fn show_drafts(&mut self, unkept: crate::composer::persistence::UnkeptDrafts) {
-        self.drafts_seen = unkept.generation;
+        self.drafts_seen = Some(unkept.generation);
         self.failure = Some(ActionFailure::Drafts {
             problem: unkept.problem,
         });
@@ -224,7 +226,14 @@ impl ActionFailureDialog {
         effect
     }
 
-    pub(crate) fn close(&mut self, ui: &mut UiApp) {
+    pub fn tear_down(&mut self, ui: &mut UiApp) {
+        if let Some(ActionFailure::Drafts { .. }) = self.failure {
+            self.drafts_seen = None;
+        }
+        self.close(ui);
+    }
+
+    fn close(&mut self, ui: &mut UiApp) {
         self.failure = None;
         self.dispose(ui);
         self.events.borrow_mut().clear();

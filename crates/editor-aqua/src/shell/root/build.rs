@@ -42,7 +42,7 @@ impl RootViews {
             self.connection.reset();
             self.thread_loading.reset();
             self.thread_landing.reset();
-            shell.failures.close(ui);
+            shell.failures.tear_down(ui);
             self.workspace_key = None;
             self.dialogs.settings_panel = None;
             return Ok(entry);

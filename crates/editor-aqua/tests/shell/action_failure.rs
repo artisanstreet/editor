@@ -199,3 +199,35 @@ fn the_drafts_notice_closes_once_every_held_draft_is_taken_back_and_stays_closed
         "a newly held draft shows the notice again"
     );
 }
+
+#[test]
+fn a_drafts_notice_still_open_at_sign_out_shows_again_after_signing_in() {
+    use editor_aqua::composer::persistence::UnkeptDrafts;
+
+    let mut ui = workspace();
+    let theme = ArtisanTheme::resolved();
+    let mut failure = ActionFailureDialog::default();
+    let unkept = UnkeptDrafts {
+        count: 1,
+        generation: 1,
+        problem: editor_aqua::core::Problem::caused_by(
+            "Artisan couldn't save your unsent draft to this device. Try again keeps it.",
+            &std::io::Error::other("the disk is full"),
+        ),
+    };
+    failure.offer_drafts(Some(unkept.clone()));
+    failure.mount(&mut ui, &theme);
+    ui.build_frame().unwrap();
+
+    failure.tear_down(&mut ui);
+    assert!(
+        failure.failure().is_none(),
+        "the sign-in screen has no notice"
+    );
+    let mut ui = workspace();
+    failure.offer_drafts(Some(unkept));
+    failure.mount(&mut ui, &theme);
+    ui.build_frame().unwrap();
+
+    assert_on_screen(&ui, &["Couldn't keep unsaved drafts", "Try again"]);
+}
