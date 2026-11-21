@@ -144,7 +144,10 @@ fn fail(failure: &ReplayError, mut record: impl FnMut(&dyn std::error::Error)) -
 
 fn log(text: &str) {
     let exe = std::env::current_exe().expect("the replaying engine knows its own path");
-    append(&exe.with_file_name(LOG), &format!("{text}\n"));
+    append(
+        &exe.with_file_name(LOG),
+        &format!("{} {text}\n", std::process::id()),
+    );
 }
 
 fn transcript() -> Result<(PathBuf, Transcript), ReplayError> {

@@ -470,16 +470,16 @@ impl Session {
 }
 
 fn turn_failures(log: &str) -> Vec<&str> {
-    let mut in_turn = false;
+    let mut turns = std::collections::HashSet::new();
     log.lines()
-        .filter(|line| {
-            if line.starts_with("started with") {
-                in_turn = false;
-            } else if line.starts_with("replaying launch") {
-                in_turn = true;
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(process, event)| {
+            if event.starts_with("replaying launch") {
+                turns.insert(*process);
             }
-            in_turn && line.starts_with("failed:")
+            turns.contains(process) && event.starts_with("failed:")
         })
+        .map(|(_, event)| event)
         .collect()
 }
 
