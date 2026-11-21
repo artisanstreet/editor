@@ -208,8 +208,8 @@ pub enum WslCommandError {
     TimedOut { seconds: u64 },
     #[error("run wsl.exe")]
     Run(#[source] std::io::Error),
-    #[error("wsl.exe failed: {stderr}")]
-    Failed { stderr: String },
+    #[error("wsl.exe exited with {code:?}: {stderr}")]
+    Failed { code: Option<i32>, stderr: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -309,7 +309,8 @@ async fn run_wsl(
         .map_err(WslCommandError::Run)?;
     if !output.status.success() {
         return Err(WslCommandError::Failed {
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            code: output.status.code(),
+            stderr: wsl_text(&output.stderr).trim().to_owned(),
         });
     }
     Ok(output)
@@ -319,14 +320,36 @@ async fn wsl_listing(args: &'static [&'static str]) -> Result<String, WslCommand
     let mut command = wsl_exe();
     command.args(args);
     let output = run_wsl(command, 10).await?;
-    let units: Vec<u16> = output
-        .stdout
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
-        .collect();
-    Ok(String::from_utf16_lossy(&units).replace('\0', ""))
+    Ok(wsl_text(&output.stdout))
+}
+
+fn wsl_text(bytes: &[u8]) -> String {
+    let text = if bytes.contains(&0) {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    text.trim_start_matches('\u{feff}').replace('\0', "")
+}
+
+fn running_or_none(listing: Result<String, WslCommandError>) -> Result<String, WslCommandError> {
+    match listing {
+        Err(WslCommandError::Failed { code, stderr }) => {
+            tracing::info!(
+                ?code,
+                %stderr,
+                "wsl.exe --list --running failed, so no distribution is running"
+            );
+            Ok(String::new())
+        }
+        listing => listing,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -363,11 +386,12 @@ pub async fn wsl_state() -> Result<Vec<WslDistro>, WslStateError> {
     if !cfg!(windows) {
         return Ok(Vec::new());
     }
-    let (verbose, running) = tokio::try_join!(
+    let (verbose, running) = tokio::join!(
         wsl_listing(&["--list", "--verbose"]),
         wsl_listing(&["--list", "--running", "--quiet"]),
-    )
-    .map_err(WslStateError)?;
+    );
+    let verbose = verbose.map_err(WslStateError)?;
+    let running = running_or_none(running).map_err(WslStateError)?;
     Ok(parse_wsl_listing(&verbose, &running))
 }
 
@@ -432,3 +456,7 @@ pub async fn pair(
         kind,
     })
 }
+
+#[cfg(test)]
+#[path = "../../tests/core/hosts/wsl_command.rs"]
+mod wsl_command_tests;
