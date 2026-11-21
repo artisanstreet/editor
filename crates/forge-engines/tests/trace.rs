@@ -76,6 +76,43 @@ fn inline_image_payloads_are_traced_as_their_size() {
     assert!(out[0].get("truncated_from").is_none(), "{:?}", out[0]);
 }
 
+fn elided_sizes(traced: &str) -> usize {
+    traced
+        .split('<')
+        .skip(1)
+        .filter_map(|tail| tail.split_once(" bytes>"))
+        .filter_map(|(count, _)| count.trim_end_matches(" more").parse::<usize>().ok())
+        .sum()
+}
+
+#[test]
+fn an_inline_payload_streamed_past_one_record_is_traced_as_its_size() {
+    let payload = "iVBORw0KGgo+/=".repeat(16 * 1024);
+    for lead in (16 * 1024 - 32)..=(16 * 1024) {
+        let dir = tempfile::tempdir().unwrap();
+        let started = Trace::start(dir.path(), "codex-t-6", Secrets::default()).unwrap();
+        let written = format!(
+            "{}data:image/webp;base64,{payload}\" after\n",
+            "x".repeat(lead)
+        );
+        let mut stderr = started.trace.stream(Kind::Stderr);
+        for read in written.as_bytes().chunks(4096) {
+            stderr.write(read);
+        }
+        drop(stderr);
+        finish(started);
+        let traced = traced_stderr(dir.path());
+        assert!(
+            !traced.contains("iVBORw0KGgo"),
+            "a payload fragment was traced verbatim with {lead} bytes ahead of it"
+        );
+        assert!(traced.starts_with(&"x".repeat(lead)));
+        assert!(traced.contains(";base64,<"), "the marker was split: {lead}");
+        assert!(traced.ends_with("\" after\n"), "{lead}");
+        assert_eq!(elided_sizes(&traced), payload.len(), "{lead}");
+    }
+}
+
 #[test]
 fn every_record_past_the_budget_is_counted_as_dropped() {
     let dir = tempfile::tempdir().unwrap();

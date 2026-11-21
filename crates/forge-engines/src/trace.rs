@@ -650,6 +650,7 @@ impl Trace {
             trace: self.clone(),
             kind,
             held: Vec::new(),
+            inline: Inline::Text,
         }
     }
 
@@ -678,29 +679,69 @@ impl Trace {
     }
 }
 
+const INLINE_MARK: &str = ";base64,";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Inline {
+    #[default]
+    Text,
+    Payload,
+}
+
+fn payload_len(text: &str) -> usize {
+    text.bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        .count()
+}
+
 fn without_inline_payloads(text: &str) -> std::borrow::Cow<'_, str> {
-    const MARK: &str = ";base64,";
-    if !text.contains(MARK) {
-        return std::borrow::Cow::Borrowed(text);
+    elide_inline_payloads(Inline::Text, text).0
+}
+
+fn elide_inline_payloads(state: Inline, text: &str) -> (std::borrow::Cow<'_, str>, Inline) {
+    if state == Inline::Text && !text.contains(INLINE_MARK) {
+        return (std::borrow::Cow::Borrowed(text), Inline::Text);
     }
     let mut kept = String::with_capacity(text.len().min(MAX_RECORD_BYTES));
     let mut rest = text;
-    while let Some((before, after)) = rest.split_once(MARK) {
-        let payload = after
-            .bytes()
-            .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
-            .count();
+    let mut state = state;
+    if state == Inline::Payload {
+        let payload = payload_len(rest);
+        if payload > 0 {
+            kept.push('<');
+            kept.push_str(&payload.to_string());
+            kept.push_str(" more bytes>");
+        }
+        rest = rest.split_at(payload).1;
+        if !rest.is_empty() {
+            state = Inline::Text;
+        }
+    }
+    while let Some((before, after)) = rest.split_once(INLINE_MARK) {
+        let payload = payload_len(after);
         kept.push_str(before);
-        kept.push_str(MARK);
+        kept.push_str(INLINE_MARK);
         if payload > 0 {
             kept.push('<');
             kept.push_str(&payload.to_string());
             kept.push_str(" bytes>");
         }
         rest = after.split_at(payload).1;
+        state = if rest.is_empty() {
+            Inline::Payload
+        } else {
+            Inline::Text
+        };
     }
     kept.push_str(rest);
-    std::borrow::Cow::Owned(kept)
+    (std::borrow::Cow::Owned(kept), state)
+}
+
+fn clear_of_inline_mark(bytes: &[u8], cut: usize) -> usize {
+    let mark = INLINE_MARK.as_bytes();
+    (cut.saturating_sub(mark.len() - 1)..cut)
+        .find(|&start| mark.starts_with(&bytes[start..cut]))
+        .unwrap_or(cut)
 }
 
 #[derive(Debug)]
@@ -708,6 +749,7 @@ pub struct Stream {
     trace: Trace,
     kind: Kind,
     held: Vec<u8>,
+    inline: Inline,
 }
 
 impl Stream {
@@ -715,12 +757,19 @@ impl Stream {
         let Some(sink) = &self.trace.sink else { return };
         self.held.extend_from_slice(bytes);
         let cut = char_boundary(&self.held, frame_end(&self.held));
+        let cut = clear_of_inline_mark(&self.held, cut);
         let cut = sink.secrets.clear_of_secrets(&self.held, cut);
         if cut > 0 {
             let framed: Vec<u8> = self.held.drain(..cut).collect();
-            self.trace
-                .record(self.kind, &String::from_utf8_lossy(&framed));
+            self.emit(&framed);
         }
+    }
+
+    fn emit(&mut self, framed: &[u8]) {
+        let text = String::from_utf8_lossy(framed);
+        let (kept, inline) = elide_inline_payloads(self.inline, &text);
+        self.inline = inline;
+        self.trace.record(self.kind, &kept);
     }
 }
 
@@ -728,8 +777,7 @@ impl Drop for Stream {
     fn drop(&mut self) {
         if !self.held.is_empty() {
             let rest = std::mem::take(&mut self.held);
-            self.trace
-                .record(self.kind, &String::from_utf8_lossy(&rest));
+            self.emit(&rest);
         }
     }
 }
