@@ -218,7 +218,14 @@ fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     let shard = target
         .parent()
         .expect("invariant: a blob path sits in its shard folder");
+    let new_shard = !shard.is_dir();
     fs::create_dir_all(shard).map_err(io("create blob shard", shard))?;
+    if new_shard {
+        let blobs = shard
+            .parent()
+            .expect("invariant: a blob shard sits in the blob folder");
+        sync_folder(blobs)?;
+    }
 
     let mut temporary =
         tempfile::NamedTempFile::new_in(shard).map_err(io("create a blob file in", shard))?;
@@ -231,7 +238,24 @@ fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(io("write blob", &target)(error.error)),
     }
+    sync_folder(shard)?;
     Ok(blob_ref)
+}
+
+#[cfg(unix)]
+fn sync_folder(folder: &Path) -> Result<(), BlobFailure> {
+    fs::File::open(folder)
+        .and_then(|folder| folder.sync_all())
+        .map_err(io("flush blob folder", folder))
+}
+
+#[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Windows has no folder fsync and NTFS journals renames; callers handle one signature"
+)]
+fn sync_folder(_folder: &Path) -> Result<(), BlobFailure> {
+    Ok(())
 }
 
 #[derive(Debug)]
