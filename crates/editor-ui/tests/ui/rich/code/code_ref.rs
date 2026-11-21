@@ -131,3 +131,34 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
         )]
     );
 }
+
+#[test]
+fn at_the_largest_text_size_excerpt_lines_get_a_full_line_each() {
+    use aqua_ui::tree::NodeKind;
+    let value = block(r#"{"ref":"src/x.rs:7-9","excerpt":"one\ntwo"}"#);
+    let mut theme = ArtisanTheme::resolved();
+    theme.typography = theme.typography.scaled(2.25);
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| value.render(&theme, "block", None, None, Rc::new(|_, _| {})))
+        .unwrap();
+    app.set_viewport(600.0, 800.0, 1.0);
+    app.build_frame().unwrap();
+    let tree = app.tree();
+    let line = |text: &str| {
+        tree.traverse()
+            .into_iter()
+            .find(|node| {
+                tree.get(*node).is_some_and(
+                    |shown| matches!(&shown.kind, NodeKind::Text(shown) if shown.text() == text),
+                )
+            })
+            .and_then(|node| tree.rect(node))
+            .unwrap_or_else(|| panic!("{text:?} is shown"))
+    };
+    let pitch = line("two").y - line("one").y;
+    let drawn = TextRole::Code.style(&theme).line_height_px;
+    assert!(
+        pitch >= drawn - 0.5,
+        "{drawn}px code lines are stacked only {pitch}px apart"
+    );
+}

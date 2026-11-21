@@ -21,7 +21,7 @@ pub(super) fn truncate(
             Style::new()
                 .min_width(Length::Pct(0.0))
                 .flex_grow(1.0)
-                .max_height(Length::Px(role.spec().line)),
+                .max_height(Length::Px(role.line_px(theme))),
         )
         .build()
 }

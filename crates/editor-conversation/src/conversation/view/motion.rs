@@ -271,7 +271,7 @@ impl RowMotion {
             text,
             role.style(theme),
             color,
-            role.spec().line,
+            role.line_px(theme),
             overflow,
         )
     }

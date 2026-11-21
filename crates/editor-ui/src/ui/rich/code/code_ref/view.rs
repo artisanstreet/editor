@@ -17,8 +17,6 @@ use crate::ui::{
     theme::ArtisanTheme,
 };
 
-const LINE_PX: f32 = TextRole::Code.spec().line;
-
 impl CodeRefBlock {
     pub(crate) fn copy(&self) -> String {
         self.excerpt()
@@ -95,7 +93,8 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
     let gutter = f32::from(u16::try_from(largest.max(1).ilog10() + 1).unwrap_or(u16::MAX))
         .mul_add(Space::S8.px(), Space::S8.px());
     let width = block.width + gutter + Space::S12.px();
-    let height = super::super::super::charts::scale::f32_of_count(count.min(18)) * LINE_PX;
+    let line = TextRole::Code.line_px(theme);
+    let height = super::super::super::charts::scale::f32_of_count(count.min(18)) * line;
     let lines = Arc::clone(&block.lines);
     let theme = *theme;
     let rows = List::new()
@@ -115,7 +114,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
                 .build();
             UiBox::new()
                 .width(Length::Pct(100.0))
-                .height(LINE_PX)
+                .height(line)
                 .spaced(Space::S12)
                 .style(Style::new().min_width(Length::Px(0.0)))
                 .clip(true)
@@ -132,7 +131,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
                             Style::new()
                                 .flex_grow(1.0)
                                 .min_width(Length::Px(0.0))
-                                .min_height(Length::Px(LINE_PX)),
+                                .min_height(Length::Px(line)),
                         )
                         .child(source)
                         .build(),
@@ -145,7 +144,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
                 .min_width(Length::Px(width))
                 .height(Length::Px(height)),
         )
-        .estimated_row_height(Length::Px(LINE_PX))
+        .estimated_row_height(Length::Px(line))
         .virtualize()
         .build()
         .with_key(format!("{id}-excerpt-list"));

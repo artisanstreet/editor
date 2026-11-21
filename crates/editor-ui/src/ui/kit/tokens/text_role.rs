@@ -11,8 +11,8 @@ pub enum Face {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextSpec {
-    pub size: f32,
-    pub line: f32,
+    size: f32,
+    line: f32,
     pub weight: FontWeight,
     pub face: Face,
 }

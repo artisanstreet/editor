@@ -211,7 +211,7 @@ pub(crate) fn row(
         UiBox::new()
             .layout("row")
             .width(Length::Pct(100.0))
-            .height(ROLE.spec().line * frame.open)
+            .height(ROLE.line_px(theme) * frame.open)
             .clip(true)
             .spaced(Space::S12)
             .style(ROLE.inherit(theme))

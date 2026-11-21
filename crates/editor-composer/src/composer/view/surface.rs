@@ -196,7 +196,7 @@ impl ComposerOwner {
                         &frame,
                         UiBox::new()
                             .style(TextRole::Label.inherit(theme))
-                            .child(ticker.build(TextRole::Label.spec().line))
+                            .child(ticker.build(TextRole::Label.line_px(theme)))
                             .build(),
                         Rc::clone(&self.dispatch),
                     );

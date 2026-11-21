@@ -89,7 +89,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             .pad()
             .y
             .px()
-            .mul_add(2.0, theme.typography.size(SEGMENT_TEXT.spec().line));
+            .mul_add(2.0, SEGMENT_TEXT.line_px(&theme));
         let selected = self
             .options
             .iter()

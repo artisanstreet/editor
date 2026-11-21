@@ -132,7 +132,7 @@ pub fn content_view(
                 theme,
                 text,
                 view.rows.clone(),
-                viewport(TextRole::Code.spec().line, None),
+                viewport(TextRole::Code.line_px(theme), None),
                 document,
                 source_id,
             );

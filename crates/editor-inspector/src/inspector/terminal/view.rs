@@ -28,8 +28,8 @@ pub enum TerminalAction {
     Viewport(CollectionViewport),
 }
 
-fn line_height() -> f32 {
-    TYPE.spec().line
+fn line_height(theme: &ArtisanTheme) -> f32 {
+    TYPE.line_px(theme)
 }
 
 struct Rows {
@@ -62,14 +62,14 @@ impl CollectionSource for Rows {
     }
     fn row(&self, index: usize, _: &CollectionLayout) -> Element {
         let state = self.dialog.borrow();
-        let Some(job) = &state.job else {
-            return UiBox::new().height(line_height()).build();
-        };
         let theme = self.theme;
+        let Some(job) = &state.job else {
+            return UiBox::new().height(line_height(&theme)).build();
+        };
         let font = TYPE.style(&theme);
         let mut row = UiBox::new()
             .width(Length::Pct(100.0))
-            .style(Style::new().min_height(Length::Px(line_height())));
+            .style(Style::new().min_height(Length::Px(line_height(&theme))));
         match self.layout.row(index) {
             Some(Row::Command(index)) => {
                 let prompt = shell_prompt(job.cwd.as_deref());
@@ -217,7 +217,7 @@ pub(crate) fn terminal_view(
                 .width(Length::Pct(100.0)),
         ],
         true,
-        line_height(),
+        line_height(theme),
         4,
     );
     let viewport_callback = Rc::clone(action);

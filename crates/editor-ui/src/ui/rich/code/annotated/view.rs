@@ -19,7 +19,6 @@ use crate::ui::{
     theme::{ArtisanTheme, Opacity},
 };
 
-const LINE_HEIGHT: f32 = TextRole::Code.spec().line;
 const NOTE: Row = Row::ListItem(Density::Dense);
 const BADGE: f32 = 16.0;
 const MARKER: f32 = 24.0;
@@ -143,7 +142,8 @@ impl AnnotatedCode {
             + gutter
             + Space::S12.px()
             + if model.notes.is_empty() { 0.0 } else { MARKER };
-        let height = crate::ui::rich::charts::scale::f32_of_count(count.min(18)) * LINE_HEIGHT;
+        let height = crate::ui::rich::charts::scale::f32_of_count(count.min(18))
+            * TextRole::Code.line_px(theme);
         let row_model = Arc::clone(&model);
         let row_state = Rc::clone(&state);
         let row_invalidate = Rc::clone(&invalidate);
@@ -160,7 +160,7 @@ impl AnnotatedCode {
             .key(|index| *index)
             .virtualize()
             .width_probe(widest)
-            .estimated_row_height(Length::Px(LINE_HEIGHT))
+            .estimated_row_height(Length::Px(TextRole::Code.line_px(theme)))
             .style(
                 Style::new()
                     .width(Length::Pct(100.0))
@@ -191,7 +191,7 @@ impl AnnotatedCode {
                 .with_key(format!("{id}-code-scroll")),
         );
         if !model.notes.is_empty() {
-            let note_height = 2.0f32.mul_add(NOTE.pad().y.px(), TextRole::Label.spec().line);
+            let note_height = 2.0f32.mul_add(NOTE.pad().y.px(), TextRole::Label.line_px(theme));
             let height = crate::ui::rich::charts::scale::f32_of_count(model.notes.len().min(6))
                 * note_height;
             let note_model = Arc::clone(&model);
@@ -298,6 +298,7 @@ fn code_row(
     invalidate: Rc<dyn Fn()>,
 ) -> Element {
     let accent = theme.colors.link;
+    let line = TextRole::Code.line_px(theme);
     let lit = active
         .and_then(|note| model.notes.get(note))
         .is_some_and(|note| note.span.contains(model.number(index)));
@@ -323,7 +324,7 @@ fn code_row(
     }
     let mut row = UiBox::new()
         .width(Length::Pct(100.0))
-        .height(LINE_HEIGHT)
+        .height(line)
         .spaced(Space::S12)
         .clip(true)
         .style(style);
@@ -360,7 +361,7 @@ fn code_row(
                     Style::new()
                         .flex_grow(1.0)
                         .min_width(Length::Px(0.0))
-                        .min_height(Length::Px(LINE_HEIGHT)),
+                        .min_height(Length::Px(line)),
                 )
                 .child(
                     Text::new(model.lines[index].clone())
@@ -414,7 +415,7 @@ fn note_row(
     }
     row = row.child(
         UiBox::new()
-            .height(TextRole::Label.spec().line)
+            .height(TextRole::Label.line_px(theme))
             .style(Style::new().align(AlignItems::CENTER))
             .child(badge(theme, index + 1, on))
             .build(),

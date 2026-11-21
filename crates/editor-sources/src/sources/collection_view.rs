@@ -283,7 +283,7 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
             theme,
             text,
             ranges,
-            viewport(TextRole::Code.spec().line, max_height),
+            viewport(TextRole::Code.line_px(theme), max_height),
             document,
             source_id,
         ));

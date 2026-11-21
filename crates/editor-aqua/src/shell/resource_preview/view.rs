@@ -16,7 +16,6 @@ use crate::ui::{
 };
 
 const WELL: Surface = Surface::Inset;
-const LINE: f32 = TextRole::Code.spec().line;
 const GUTTER: f32 = 64.0;
 const CHROME: f32 = 180.0;
 const MIN_HEIGHT: f32 = 120.0;
@@ -249,6 +248,7 @@ fn lines_view(
     prepared: Arc<Prepared>,
 ) -> Element {
     let theme = *theme;
+    let line_height = TextRole::Code.line_px(&theme);
     let count = prepared.window.len();
     let lines = List::new()
         .items(0..count)
@@ -263,7 +263,7 @@ fn lines_view(
             let target = line == prepared.target_line;
             let mut row = UiBox::new()
                 .width(Length::Pct(100.0))
-                .height(LINE)
+                .height(line_height)
                 .spaced(Space::S12);
             if target {
                 row = row
@@ -301,7 +301,7 @@ fn lines_view(
         })
         .virtualize()
         .measured_uniform_rows()
-        .estimated_row_height(Length::Px(LINE))
+        .estimated_row_height(Length::Px(line_height))
         .style(
             Style::new()
                 .width(Length::Pct(100.0))

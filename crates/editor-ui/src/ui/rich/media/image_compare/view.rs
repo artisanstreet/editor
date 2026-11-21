@@ -667,7 +667,7 @@ fn image_layer(
 fn pill(theme: &crate::ui::theme::ArtisanTheme, text: String) -> aqua_ui::element::Element {
     let height = 2.0f32.mul_add(
         Surface::Pill(0.0).padding_px(),
-        TextRole::Caption.spec().line,
+        TextRole::Caption.line_px(theme),
     );
     Surface::Pill(height).build(
         theme,
