@@ -308,12 +308,7 @@ fn a_send_that_fails_before_the_pairing_is_removed_keeps_the_text_typed_after_it
         thread: ThreadId("thread".into()),
     });
     type_into(&lease, "typed after sending");
-    let mut changed = lease.subscribe();
-    runtime().block_on(async {
-        while lease.read(|state| state.error().is_none()) {
-            changed.changed().await.unwrap();
-        }
-    });
+    wait_until(&lease, || lease.read(|state| state.error().is_some()));
 
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
@@ -678,13 +673,21 @@ fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
     assert!(!lease.read(DraftSession::conflict));
 }
 
-fn wait_until_removed(lease: &DraftLease, path: &std::path::Path) {
+fn wait_until(lease: &DraftLease, done: impl Fn() -> bool) {
     let mut changed = lease.subscribe();
     runtime().block_on(async {
-        while path.exists() {
-            changed.changed().await.unwrap();
-        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !done() {
+                changed.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the draft finishes its work on this device");
     });
+}
+
+fn wait_until_removed(lease: &DraftLease, path: &std::path::Path) {
+    wait_until(lease, || !path.exists());
 }
 
 fn kept_beside_a_record(device: &Device) {
@@ -1025,17 +1028,12 @@ fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_ne
             .iter()
             .any(|rejected| rejected.spool == device.spool() && rejected.removal == Removal::Failed)
     };
-    let mut changed = lease.subscribe();
     lease.keep_local();
     assert!(
         !lease.read(DraftSession::conflict),
         "the choice is made at once"
     );
-    runtime().block_on(async {
-        while !failed() {
-            changed.changed().await.unwrap();
-        }
-    });
+    wait_until(&lease, failed);
     assert!(beside.exists());
     std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o755)).unwrap();
     drop(lease);
