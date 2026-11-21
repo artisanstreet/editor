@@ -7,6 +7,7 @@ use editor_ui::theme::ArtisanTheme;
 
 pub(crate) const ROW_GAP: Space = Space::S2;
 pub(crate) const SECTION_SPACER: f32 = Space::S6.px();
+pub(crate) const MODEL_GAP: f32 = Space::S4.px();
 pub(crate) const PADDING: Space = Space::S6;
 const GAP: f32 = ROW_GAP.px();
 const PADDING_TOP: f32 = PADDING.px();
@@ -47,6 +48,7 @@ fn row_height(theme: &ArtisanTheme, row: &ModelRow) -> f32 {
     match row {
         ModelRow::Engine(_) | ModelRow::Group { .. } => group_row_height(theme),
         ModelRow::Gate(_) => gate_row_height(theme),
+        ModelRow::Gap(_) => MODEL_GAP,
         ModelRow::Model { .. } => model_row_height(theme),
     }
 }

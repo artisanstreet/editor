@@ -624,6 +624,7 @@ fn claude_model(value: &Value) -> Option<Model> {
         default_variant: None,
         lab: None,
         group: None,
+        section: None,
     })
 }
 
@@ -843,6 +844,7 @@ fn codex_listing(rows: &[Value], windows: &[(String, u64, u64)]) -> Listing {
             default_variant: None,
             lab: None,
             group: None,
+            section: None,
         });
     }
     listing
