@@ -6,7 +6,7 @@ use aqua_ui::element::{Box as UiBox, Element, Key};
 use aqua_ui::events::hit_test;
 use aqua_ui::layout::NaiveMeasurer;
 use aqua_ui::tree::{UiTree, hash_key};
-use editor_ui::kit::{Density, Row, RowItem, Surface};
+use editor_ui::kit::{Density, Row, RowItem, RowKind, Surface};
 use editor_ui::theme::{ArtisanTheme, ThemeMode};
 
 #[test]
@@ -31,9 +31,11 @@ fn list_headings_align_with_list_item_text() {
             "a heading in a list lines up with the rows below it"
         );
     }
-    assert_eq!(
-        Row::ListHeading.height(ArtisanTheme::for_mode(ThemeMode::Dark)),
-        Row::Heading.height(ArtisanTheme::for_mode(ThemeMode::Dark)),
+    assert!(
+        close(
+            Row::ListHeading.height(ArtisanTheme::for_mode(ThemeMode::Dark)),
+            Row::Heading.height(ArtisanTheme::for_mode(ThemeMode::Dark))
+        ),
         "list headings are as tall as menu headings"
     );
     assert!(
@@ -50,7 +52,7 @@ fn control() -> Element {
         .with_key("control")
 }
 
-fn hits_control(row: Row) -> bool {
+fn hits_control(row: impl Into<RowKind>) -> bool {
     let runtime = Runtime::new();
     let mut tree = UiTree::new();
     let mut mounted = View::new(runtime.create_scope(), tree.command_sink());
@@ -90,7 +92,7 @@ fn hits_control(row: Row) -> bool {
 #[test]
 fn a_form_rows_trailing_control_receives_the_pointer() {
     assert!(
-        hits_control(Row::Form),
+        hits_control(RowKind::Form),
         "a switch or select at the end of a form row stays clickable"
     );
 }

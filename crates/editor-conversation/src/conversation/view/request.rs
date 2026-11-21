@@ -5,7 +5,7 @@ use aqua_ui::style::{Length, Style};
 use artisan_api::{
     Answer, ApprovalRequest, Collection, Decision, Item, ItemKind, Status, ToolKind,
 };
-use editor_ui::kit::{Button, ButtonTone, Row, Space, Spaced, Surface, TextRole};
+use editor_ui::kit::{Button, ButtonTone, RowKind, Space, Spaced, Surface, TextRole};
 use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
@@ -37,7 +37,7 @@ fn card(theme: &ArtisanTheme, title: &str, details: Element) -> Element {
     let block = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .padded(Row::Form.pad().y)
+        .padded(RowKind::Form.pad().y)
         .spaced(Space::S8)
         .style(TextRole::Label.inherit(theme))
         .child(TextRole::LabelStrong.text(theme, title.to_owned()).build())

@@ -140,7 +140,7 @@ const GROUP_GAP: Space = Space::S12;
 pub fn children_height(theme: &editor_ui::theme::ArtisanTheme, count: u16) -> f32 {
     let rows = f32::from(count);
     let gaps = rows.max(1.0) - 1.0;
-    rows.mul_add(ROW.height(theme).unwrap_or_default(), gaps * ROW_GAP.px())
+    rows.mul_add(ROW.height(theme), gaps * ROW_GAP.px())
 }
 
 fn section_id(page: SettingsPage) -> String {

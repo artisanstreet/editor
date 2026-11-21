@@ -720,7 +720,7 @@ pub(crate) fn project_picker_dialog(
                 .height(Length::Px(FOLDER_LIST_HEIGHT))
                 .width(Length::Pct(100.0)),
         )
-        .estimated_row_height(Length::Px(FOLDER_ROW.height(&theme).unwrap_or_default()))
+        .estimated_row_height(Length::Px(FOLDER_ROW.height(&theme)))
         .virtualize()
         .build();
     let path = picker

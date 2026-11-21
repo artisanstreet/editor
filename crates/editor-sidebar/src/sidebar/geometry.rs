@@ -25,12 +25,12 @@ impl ThreadLayout {
     }
 
     pub(crate) fn height(self, theme: &ArtisanTheme) -> f32 {
-        self.row().height(theme).unwrap_or_default()
+        self.row().height(theme)
     }
 }
 
 pub fn history_height(theme: &ArtisanTheme) -> f32 {
-    Divider::Rule.height(theme) + TOGGLE.height(theme).unwrap_or_default()
+    Divider::Rule.height(theme) + TOGGLE.height(theme)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,7 +52,7 @@ impl Entry {
         match self {
             Self::Thread(_, layout) => layout.height(theme),
             Self::Hit(_) => ThreadLayout::Standalone.height(theme),
-            Self::Project { .. } | Self::Heading(_) => HEADING.height(theme).unwrap_or_default(),
+            Self::Project { .. } | Self::Heading(_) => HEADING.height(theme),
             Self::History => history_height(theme),
             Self::Gap(height) => *height,
             Self::Spacer => 0.0,

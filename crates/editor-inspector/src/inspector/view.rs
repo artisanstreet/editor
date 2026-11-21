@@ -57,10 +57,7 @@ fn inked(theme: &ArtisanTheme, role: TextRole, words: impl Into<String>, ink: Ok
 fn static_row(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     UiBox::new()
         .width(Length::Pct(100.0))
-        .height(
-            ROW.height(theme)
-                .expect("invariant: inspector list rows have a fixed height"),
-        )
+        .height(ROW.height(theme))
         .padded(ROW.pad().x)
         .spaced(ROW.gap())
         .style(

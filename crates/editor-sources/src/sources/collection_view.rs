@@ -24,9 +24,7 @@ const ENTRY: Row = Row::ListItem(Density::Regular);
 const READ: ButtonSize = ButtonSize::Sm;
 
 fn entry_height(theme: &ArtisanTheme) -> f32 {
-    ENTRY
-        .height(theme)
-        .expect("invariant: a list item row has a fixed height")
+    ENTRY.height(theme)
 }
 
 #[derive(Debug)]

@@ -2,7 +2,7 @@ use super::Surface;
 use crate::ui::chrome::card::{Edge, Surfaces};
 use crate::ui::kit::divider::Divider;
 use crate::ui::kit::hover::Hover;
-use crate::ui::kit::row::Row;
+use crate::ui::kit::row::{Row, RowKind};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_core::geometry::CornerRadii;
 use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Insets};
@@ -113,7 +113,7 @@ impl Band {
             GpuiBackground::Solid(surfaces.bg.to_reference_paint())
         };
         let padding = self.padding();
-        let pad = Row::Form.pad();
+        let pad = RowKind::Form.pad();
         let fill = selected.then(|| {
             UiBox::new()
                 .style(Hover::Neutral.style(theme))

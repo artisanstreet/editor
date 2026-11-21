@@ -200,9 +200,7 @@ fn clicks_close_the_outline_only_outside_the_drawer_and_chevron() {
 
 #[test]
 fn the_cursor_scrolls_the_panel_only_when_it_leaves_the_view() {
-    let pitch = Row::MenuItem
-        .height(&ArtisanTheme::resolved())
-        .unwrap_or_default();
+    let pitch = Row::MenuItem.height(&ArtisanTheme::resolved());
     let view = pitch * 5.0;
     test_support::assert_near!(
         navigator::panel_keep_offset(&ArtisanTheme::resolved(), 2, 0.0, view),

@@ -15,7 +15,7 @@ use super::{
 };
 use editor_core::HostData;
 use editor_ui::{
-    kit::{ButtonTone, Density, Row as KitRow, Space, Spaced, TextRole},
+    kit::{ButtonTone, Density, Row as KitRow, RowKind, Space, Spaced, TextRole},
     select::{Select, SelectEntry, SelectMenu},
     theme::ArtisanTheme,
 };
@@ -26,7 +26,7 @@ const VISIBLE_ROWS: u8 = 8;
 
 fn row_height(theme: &ArtisanTheme) -> f32 {
     2.0f32.mul_add(
-        KitRow::Form.pad().y.px(),
+        RowKind::Form.pad().y.px(),
         KitRow::ListItem(Density::Tall).lines(theme) + Space::S2.px(),
     )
 }
@@ -182,7 +182,7 @@ pub(crate) fn archived(
     } else {
         let header = UiBox::new()
             .spaced(Space::S16)
-            .padded(KitRow::Form.pad().y)
+            .padded(RowKind::Form.pad().y)
             .style(Style::new().align(AlignItems::CENTER))
             .child(ui::grow(ui::line(
                 theme,
@@ -221,7 +221,7 @@ pub(crate) fn archived(
                 UiBox::new()
                     .width(Length::Pct(100.0))
                     .spaced(Space::S16)
-                    .padded(KitRow::Form.pad().y)
+                    .padded(RowKind::Form.pad().y)
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(ui::grow(
                         ui::stack(Space::S2)

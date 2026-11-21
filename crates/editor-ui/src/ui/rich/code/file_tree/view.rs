@@ -28,7 +28,7 @@ const ROW: kit::Row = kit::Row::ListItem(Density::Dense);
 const DEPTH_INDENT: f32 = 16.0;
 
 fn row_height(theme: &ArtisanTheme) -> f32 {
-    ROW.height(theme).unwrap_or_default()
+    ROW.height(theme)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

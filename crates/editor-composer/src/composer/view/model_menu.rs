@@ -264,9 +264,9 @@ pub(super) fn model_gate_row(
 ) -> Element {
     let mut body = UiBox::new()
         .layout("column")
-        .height(super::super::model_list::GATE_ROW_HEIGHT)
-        .padded(Space::S12)
-        .spaced(Space::S4)
+        .height(super::super::model_list::gate_row_height(theme))
+        .padded(super::super::model_list::GATE_PADDING)
+        .spaced(super::super::model_list::GATE_GAP)
         .style(Style::new().flex_shrink(0.0))
         .child(
             TextRole::Label
@@ -814,7 +814,6 @@ pub(super) fn model_item_height(theme: &ArtisanTheme, count: usize) -> f32 {
     let count = super::rows(count.max(1));
     Row::ListItem(Density::Tall)
         .height(theme)
-        .unwrap_or_default()
         .min((count - 1.0).mul_add(-MODEL_ITEM_GAP, MODEL_PANE_HEIGHT) / count)
 }
 

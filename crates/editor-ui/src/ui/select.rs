@@ -292,7 +292,7 @@ fn menu_height(theme: &ArtisanTheme, count: usize) -> f32 {
 }
 
 fn option_height(theme: &ArtisanTheme) -> f32 {
-    Row::MenuItem.height(theme).unwrap_or_default()
+    Row::MenuItem.height(theme)
 }
 
 fn typeahead_form(text: &str) -> String {

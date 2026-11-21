@@ -17,9 +17,7 @@ pub const PANEL_WIDTH: f32 = 320.0;
 const DIGIT_WIDTH: f32 = 7.5;
 
 fn panel_pitch(theme: &ArtisanTheme) -> f32 {
-    PANEL_ROW
-        .height(theme)
-        .expect("invariant: menu item rows have a fixed height")
+    PANEL_ROW.height(theme)
 }
 
 fn number_width(count: usize) -> f32 {

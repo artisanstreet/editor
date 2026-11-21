@@ -367,3 +367,55 @@ fn a_gated_engine_explains_itself_on_keyboard_focus_and_to_assistive_tech() {
     assert_eq!(mounted.app.tree().focused(), Some(tab.node));
     assert_eq!(shown.borrow().as_slice(), &[true]);
 }
+
+fn largest_text() -> ArtisanTheme {
+    editor_ui::preferences::Preferences {
+        theme: editor_ui::theme::ThemeMode::Dark,
+        fonts: editor_ui::theme::FontSet::Spline,
+        outline_text: true,
+        reduced_motion: None,
+        high_contrast: None,
+        text_scale: Some(2.25),
+        streaming: editor_ui::preferences::StreamingMode::Smooth,
+        lower_frame_rate: false,
+        vsync: true,
+        system: editor_ui::preferences::SystemAccess::default(),
+    }
+    .theme()
+}
+
+#[test]
+fn a_gated_engine_row_holds_its_reason_and_action_at_the_largest_text_size() {
+    let theme = largest_text();
+    let signed_out = engine(
+        r#"{"state":"signed_out"}"#,
+        r#"{"state":"fresh","observed_at":0}"#,
+    );
+    let mounted = Mounted::new(|dispatch| {
+        UiBox::new()
+            .layout("column")
+            .width(340.0)
+            .child(
+                model_gate_row(
+                    &theme,
+                    signed_out.engine,
+                    gate(&signed_out).unwrap(),
+                    &dispatch,
+                )
+                .with_key("gate"),
+            )
+            .build()
+    });
+    let tree = mounted.app.tree();
+    let rect = |key: &str| {
+        tree.sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key)))
+            .and_then(|node| tree.rect(node))
+            .unwrap_or_else(|| panic!("{key} is laid out"))
+    };
+    let row = rect("gate");
+    let action = rect("composer-engine-gate-codex");
+    assert!(
+        action.y + action.h <= row.y + row.h + 0.5,
+        "the sign-in link stays inside its row at 225%: {action:?} in {row:?}"
+    );
+}

@@ -24,8 +24,19 @@ pub enum Row {
     ListItem(Density),
     Heading,
     ListHeading,
-    Form,
     Key,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RowKind {
+    Fixed(Row),
+    Form,
+}
+
+impl From<Row> for RowKind {
+    fn from(row: Row) -> Self {
+        Self::Fixed(row)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -37,23 +48,7 @@ pub struct Pad {
 impl Row {
     #[must_use]
     pub const fn pad(self) -> Pad {
-        let (x, y) = match self {
-            Self::MenuItem | Self::Key => (Space::S12, Space::S8),
-            Self::ListItem(Density::Regular | Density::Tall) => (Space::S8, Space::S8),
-            Self::ListItem(Density::Dense) => (Space::S4, Space::S4),
-            Self::Heading => (Space::S12, Space::S6),
-            Self::ListHeading => (Space::S8, Space::S6),
-            Self::Form => (Space::S12, Space::S12),
-        };
-        Pad { x, y }
-    }
-
-    #[must_use]
-    const fn title(self) -> TextRole {
-        match self {
-            Self::Heading | Self::ListHeading => TextRole::Caption,
-            Self::MenuItem | Self::ListItem(_) | Self::Form | Self::Key => TextRole::Label,
-        }
+        RowKind::Fixed(self).pad()
     }
 
     #[must_use]
@@ -62,46 +57,25 @@ impl Row {
             Self::ListItem(Density::Tall) => {
                 TextRole::Label.line_px(theme) + TextRole::Caption.line_px(theme)
             }
-            Self::MenuItem
-            | Self::ListItem(_)
-            | Self::Heading
-            | Self::ListHeading
-            | Self::Form
-            | Self::Key => self.title().line_px(theme),
+            Self::MenuItem | Self::ListItem(_) | Self::Heading | Self::ListHeading | Self::Key => {
+                RowKind::Fixed(self).title().line_px(theme)
+            }
         }
     }
 
     #[must_use]
     pub const fn interactive(self) -> bool {
-        !matches!(
-            self,
-            Self::Heading | Self::ListHeading | Self::Form | Self::Key
-        )
-    }
-
-    #[must_use]
-    const fn wraps(self) -> bool {
-        matches!(self, Self::Form)
+        RowKind::Fixed(self).interactive()
     }
 
     #[must_use]
     pub const fn gap(self) -> Space {
-        match self {
-            Self::Form => Space::S16,
-            Self::MenuItem | Self::ListItem(_) | Self::Heading | Self::ListHeading | Self::Key => {
-                Space::S8
-            }
-        }
+        RowKind::Fixed(self).gap()
     }
 
     #[must_use]
-    pub fn height(self, theme: &ArtisanTheme) -> Option<f32> {
-        match self {
-            Self::Form => None,
-            Self::MenuItem | Self::ListItem(_) | Self::Heading | Self::ListHeading | Self::Key => {
-                Some(2.0f32.mul_add(self.pad().y.px(), self.lines(theme)))
-            }
-        }
+    pub fn height(self, theme: &ArtisanTheme) -> f32 {
+        2.0f32.mul_add(self.pad().y.px(), self.lines(theme))
     }
 
     #[must_use]
@@ -118,10 +92,53 @@ impl Row {
     }
 }
 
+impl RowKind {
+    #[must_use]
+    pub const fn pad(self) -> Pad {
+        let (x, y) = match self {
+            Self::Fixed(Row::MenuItem | Row::Key) => (Space::S12, Space::S8),
+            Self::Fixed(Row::ListItem(Density::Regular | Density::Tall)) => (Space::S8, Space::S8),
+            Self::Fixed(Row::ListItem(Density::Dense)) => (Space::S4, Space::S4),
+            Self::Fixed(Row::Heading) => (Space::S12, Space::S6),
+            Self::Fixed(Row::ListHeading) => (Space::S8, Space::S6),
+            Self::Form => (Space::S12, Space::S12),
+        };
+        Pad { x, y }
+    }
+
+    #[must_use]
+    const fn title(self) -> TextRole {
+        match self {
+            Self::Fixed(Row::Heading | Row::ListHeading) => TextRole::Caption,
+            Self::Fixed(Row::MenuItem | Row::ListItem(_) | Row::Key) | Self::Form => {
+                TextRole::Label
+            }
+        }
+    }
+
+    #[must_use]
+    const fn interactive(self) -> bool {
+        matches!(self, Self::Fixed(Row::MenuItem | Row::ListItem(_)))
+    }
+
+    #[must_use]
+    const fn wraps(self) -> bool {
+        matches!(self, Self::Form)
+    }
+
+    #[must_use]
+    const fn gap(self) -> Space {
+        match self {
+            Self::Form => Space::S16,
+            Self::Fixed(_) => Space::S8,
+        }
+    }
+}
+
 pub struct RowItem {
     key: Key,
     theme: ArtisanTheme,
-    row: Row,
+    row: RowKind,
     radius: f32,
     hover: Hover,
     face: Option<Element>,
@@ -153,10 +170,11 @@ impl RowItem {
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,
-        row: Row,
+        row: impl Into<RowKind>,
         surface: Surface,
         title: impl Into<String>,
     ) -> Self {
+        let row = row.into();
         Self {
             key: key.into(),
             theme,
@@ -173,10 +191,9 @@ impl RowItem {
             hoverable: true,
             disabled: false,
             role: match row {
-                Row::MenuItem => Role::MenuItem,
-                Row::ListItem(_) | Row::Heading | Row::ListHeading | Row::Form | Row::Key => {
-                    Role::Button
-                }
+                RowKind::Fixed(Row::MenuItem) => Role::MenuItem,
+                RowKind::Fixed(Row::ListItem(_) | Row::Heading | Row::ListHeading | Row::Key)
+                | RowKind::Form => Role::Button,
             },
             on_activate: None,
             on_hover: None,
@@ -299,9 +316,9 @@ impl RowItem {
                 bottom: pad.y.px(),
             })
             .radius(Length::Px(self.radius));
-        match self.row.height(&self.theme) {
-            Some(height) => style.height(Length::Px(height)),
-            None => style,
+        match self.row {
+            RowKind::Fixed(row) => style.height(Length::Px(row.height(&self.theme))),
+            RowKind::Form => style,
         }
     }
 
@@ -317,7 +334,7 @@ impl RowItem {
 
     fn ink(&self) -> Oklch {
         match (self.row, self.hover) {
-            (Row::Heading | Row::ListHeading, _) => self.theme.colors.text_muted,
+            (RowKind::Fixed(Row::Heading | Row::ListHeading), _) => self.theme.colors.text_muted,
             (_, Hover::Destructive) => self.theme.colors.destructive_text,
             (_, Hover::Neutral) => self.theme.colors.text,
         }

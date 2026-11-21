@@ -20,7 +20,7 @@ pub use divider::Divider;
 pub use hover::{Highlight, Hover, live};
 pub use pane::Seam;
 pub use problem::ProblemNotice;
-pub use row::{Density, Pad, Row, RowItem};
+pub use row::{Density, Pad, Row, RowItem, RowKind};
 pub use surface::{Media, Picker, Surface, Tone, Tooltip};
 pub(crate) use tokens::Elevation;
 pub use tokens::{

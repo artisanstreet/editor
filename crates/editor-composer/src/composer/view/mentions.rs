@@ -38,8 +38,8 @@ fn mention_metrics(
     theme: &ArtisanTheme,
     viewport: aqua_core::Size,
 ) -> super::super::mentions::Metrics {
-    let row = Row::MenuItem.height(theme).unwrap_or_default();
-    let heading = Row::Heading.height(theme).unwrap_or_default();
+    let row = Row::MenuItem.height(theme);
+    let heading = Row::Heading.height(theme);
     let fits = 2.0f32.mul_add(
         -MENTION_SURFACE.padding_px(),
         2.0f32.mul_add(-MENU_VIEWPORT_MARGIN, viewport.h),

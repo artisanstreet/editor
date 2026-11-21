@@ -152,9 +152,7 @@ fn choosing(theme: &ArtisanTheme, props: &Props<'_>, choices: &Choices) -> Vec<E
                 }),
         )
         .build();
-    let row_height = Row::ListItem(Density::Regular)
-        .height(theme)
-        .expect("invariant: list rows have a fixed height");
+    let row_height = Row::ListItem(Density::Regular).height(theme);
     let visible = f32::from(VISIBLE_ROWS);
     let machines = Scroll::new()
         .layout("column")
@@ -257,11 +255,7 @@ fn machine_row(
     let radius = Radius::Field.px();
     let face = UiBox::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-        .child(key_face(
-            theme,
-            radius,
-            row.height(theme).unwrap_or_default(),
-        ))
+        .child(key_face(theme, radius, row.height(theme)))
         .build()
         .exclude_from_hit_testing();
     let item = RowItem::new(

@@ -7,8 +7,8 @@ use aqua_ui::{
 use editor_core::Problem;
 use editor_ui::{
     kit::{
-        Button, ButtonTone, Divider, ProblemNotice, Row, RowItem, Space, Spaced, Surface, TextRole,
-        Tone, surface::tint,
+        Button, ButtonTone, Divider, ProblemNotice, RowItem, RowKind, Space, Spaced, Surface,
+        TextRole, Tone, surface::tint,
     },
     theme::ArtisanTheme,
 };
@@ -173,7 +173,7 @@ pub(crate) fn row(
     let item = RowItem::new(
         format!("settings-row-{title}"),
         *theme,
-        Row::Form,
+        RowKind::Form,
         CARD,
         title,
     );
@@ -193,7 +193,7 @@ pub(crate) fn block(content: Element) -> Element {
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .padded(Row::Form.pad().y)
+        .padded(RowKind::Form.pad().y)
         .child(content)
         .build()
 }

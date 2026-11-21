@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 const ROW: Row = Row::Heading;
 pub(crate) fn height(theme: &ArtisanTheme) -> f32 {
-    ROW.height(theme).unwrap_or_default()
+    ROW.height(theme)
 }
 
 pub(crate) fn bar_height(theme: &ArtisanTheme) -> f32 {

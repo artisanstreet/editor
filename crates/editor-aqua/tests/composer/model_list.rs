@@ -40,6 +40,33 @@ fn the_engine_bar_follows_the_section_under_it_and_lands_on_the_last_at_the_end(
 }
 
 #[test]
+fn the_engine_bar_switches_when_the_scaled_section_heading_reaches_the_top() {
+    use editor_aqua::ui::preferences::{Preferences, StreamingMode, SystemAccess};
+    use editor_aqua::ui::theme::{FontSet, ThemeMode};
+    let theme = Preferences {
+        theme: ThemeMode::Dark,
+        fonts: FontSet::Spline,
+        outline_text: true,
+        reduced_motion: None,
+        high_contrast: None,
+        text_scale: Some(2.25),
+        streaming: StreamingMode::Smooth,
+        lower_frame_rate: false,
+        vsync: true,
+        system: SystemAccess::default(),
+    }
+    .theme();
+    let rows = rows();
+    let layout = ListLayout::new(&theme, &rows);
+    let codex = layout.anchor(&rows, EngineId::Codex, VIEWPORT).unwrap();
+    assert_eq!(
+        layout.spied(&rows, codex - 40.0, VIEWPORT),
+        Some(EngineId::Codex),
+        "a 225% heading 40 px below the top is already at the top edge, so its engine is shown"
+    );
+}
+
+#[test]
 fn opening_centres_the_current_model_without_scrolling_past_the_ends() {
     let rows = rows();
     let layout = ListLayout::new(&ArtisanTheme::resolved(), &rows);

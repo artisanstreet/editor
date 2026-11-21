@@ -2,17 +2,15 @@ use artisan_api::EngineId;
 use std::time::{Duration, Instant};
 
 use super::picker::ModelRow;
-use editor_ui::kit::{Row, Space};
+use editor_ui::kit::{Row, Space, TextRole};
 use editor_ui::theme::ArtisanTheme;
 
-pub(crate) const GATE_ROW_HEIGHT: f32 = 84.0;
 pub(crate) const ROW_GAP: Space = Space::S2;
 pub(crate) const SECTION_SPACER: f32 = Space::S6.px();
 pub(crate) const PADDING: Space = Space::S6;
 const GAP: f32 = ROW_GAP.px();
 const PADDING_TOP: f32 = PADDING.px();
 const PADDING_BOTTOM: f32 = PADDING.px();
-const SPY_LINE: f32 = 28.0;
 const JUMP_DURATION: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -20,21 +18,35 @@ pub struct ListLayout {
     tops: Vec<f32>,
     height: f32,
     model: f32,
+    spy_line: f32,
 }
 
 #[must_use]
-pub fn group_row_height(theme: &ArtisanTheme) -> f32 {
-    Row::Heading.height(theme).unwrap_or_default()
+pub(crate) fn group_row_height(theme: &ArtisanTheme) -> f32 {
+    Row::Heading.height(theme)
+}
+
+pub(crate) const GATE_PADDING: Space = Space::S12;
+pub(crate) const GATE_GAP: Space = Space::S4;
+const GATE_REASON_LINES: f32 = 2.0;
+
+#[must_use]
+pub(crate) fn gate_row_height(theme: &ArtisanTheme) -> f32 {
+    let line = TextRole::Label.line_px(theme);
+    2.0f32.mul_add(
+        GATE_PADDING.px(),
+        GATE_REASON_LINES.mul_add(line, GATE_GAP.px() + line),
+    )
 }
 
 fn model_row_height(theme: &ArtisanTheme) -> f32 {
-    Row::MenuItem.height(theme).unwrap_or_default()
+    Row::MenuItem.height(theme)
 }
 
 fn row_height(theme: &ArtisanTheme, row: &ModelRow) -> f32 {
     match row {
         ModelRow::Engine(_) | ModelRow::Group { .. } => group_row_height(theme),
-        ModelRow::Gate(_) => GATE_ROW_HEIGHT,
+        ModelRow::Gate(_) => gate_row_height(theme),
         ModelRow::Model { .. } => model_row_height(theme),
     }
 }
@@ -59,6 +71,7 @@ impl ListLayout {
             tops,
             height: content + PADDING_BOTTOM,
             model: model_row_height(theme),
+            spy_line: group_row_height(theme),
         }
     }
 
@@ -80,7 +93,7 @@ impl ListLayout {
         }
         rows.iter()
             .zip(&self.tops)
-            .take_while(|(_, top)| **top - scroll <= SPY_LINE)
+            .take_while(|(_, top)| **top - scroll <= self.spy_line)
             .last()
             .or_else(|| rows.iter().zip(&self.tops).next())
             .map(|(row, _)| row.engine())

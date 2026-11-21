@@ -65,10 +65,7 @@ pub fn project_menu(
                     .child(
                         Scroll::new()
                             .width(Length::Pct(100.0))
-                            .height(
-                                super::rows(count.min(PROJECT_ROWS_SHOWN))
-                                    * row.height(theme).unwrap_or_default(),
-                            )
+                            .height(super::rows(count.min(PROJECT_ROWS_SHOWN)) * row.height(theme))
                             .child(rows.build())
                             .build()
                             .with_key(PROJECT_SCROLL),
