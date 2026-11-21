@@ -119,7 +119,7 @@ fn a_restored_send_waiting_on_a_choice_asks_for_the_choice_and_refuses_another_s
     use crate::composer::draft_session::{DraftSession, KeptDraft};
     use crate::composer::persistence::DraftSessions;
     use crate::composer::spool::tests::Direct as _;
-    use crate::composer::spool::{DraftSpool, Holder, Slot};
+    use crate::composer::spool::{DraftSpool, Holder, LocalDisk, Slot};
     use artisan_api::tls::{Identity, fingerprint};
     use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
 
@@ -140,7 +140,7 @@ fn a_restored_send_waiting_on_a_choice_asks_for_the_choice_and_refuses_another_s
         host: config.id.clone(),
         project: None,
     };
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
     let kept = |text: &str| KeptDraft {
         body: DraftBody {
             text: text.to_owned(),
@@ -224,7 +224,7 @@ fn sending_while_a_draft_kept_beside_waits_for_a_choice_is_refused_and_keeps_the
     use crate::composer::draft_session::{DraftSession, KeptDraft};
     use crate::composer::persistence::DraftSessions;
     use crate::composer::spool::tests::Direct as _;
-    use crate::composer::spool::{DraftSpool, Holder, Slot};
+    use crate::composer::spool::{DraftSpool, Holder, LocalDisk, Slot};
     use artisan_api::tls::{Identity, fingerprint};
     use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
 
@@ -245,7 +245,7 @@ fn sending_while_a_draft_kept_beside_waits_for_a_choice_is_refused_and_keeps_the
         host: config.id.clone(),
         project: None,
     };
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
     let kept = |text: &str| KeptDraft {
         body: DraftBody {
             text: text.to_owned(),

@@ -1097,7 +1097,6 @@ impl DraftHandle {
 
     fn discard(&self, serving: &Serving, slot: Slot, choice: Choice) {
         let inner = &self.0;
-        let path = serving.slot_path(slot);
         let which = choice.which();
         match serving.forget(slot) {
             Ok(()) => {}
@@ -1105,7 +1104,6 @@ impl DraftHandle {
                 host = %inner.host,
                 scope = %inner.scope,
                 which,
-                path = %path.display(),
                 error = %::diagnostics::chain(&error),
                 "set aside a draft the user chose against but couldn't remove it; removing it when this draft next opens"
             ),
@@ -1113,7 +1111,6 @@ impl DraftHandle {
                 host = %inner.host,
                 scope = %inner.scope,
                 which,
-                path = %path.display(),
                 error = %::diagnostics::chain(&error),
                 "couldn't set aside a draft the user chose against; it is offered again when this draft next opens"
             ),

@@ -138,7 +138,10 @@ fn removing_host_keeps_the_composers_draft_and_unfinished_image_on_this_device()
         "the image still uploading is kept with the draft"
     );
     test_support::editor::core::connect_client(&mut core, &config, client.clone());
-    let mut sessions = DraftSessions::with_spool(DraftSpool::new(directory.path()));
+    let mut sessions = DraftSessions::with_spool(DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    ));
     let reopened = sessions
         .open(
             config.id.clone(),

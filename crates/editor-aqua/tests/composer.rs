@@ -28,7 +28,10 @@ fn draft_sessions() -> (
 ) {
     let spool = tempfile::tempdir().unwrap();
     let sessions = editor_aqua::composer::persistence::DraftSessions::with_spool(
-        editor_aqua::composer::spool::DraftSpool::new(spool.path()),
+        editor_aqua::composer::spool::DraftSpool::new(
+            spool.path(),
+            editor_aqua::composer::spool::LocalDisk::shared(),
+        ),
     );
     (spool, sessions)
 }

@@ -12,12 +12,24 @@ use std::{
     sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak},
 };
 
-pub(crate) trait SpoolDisk: Send + Sync {
+pub trait SpoolDisk: Send + Sync {
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
     fn remove_tree(&self, path: &Path) -> std::io::Result<()>;
+    fn remove_empty_folder(&self, path: &Path) -> std::io::Result<()>;
 }
 
-struct LocalDisk;
+#[derive(Debug)]
+pub struct LocalDisk(());
+
+impl LocalDisk {
+    #[must_use]
+    pub fn shared() -> Arc<dyn SpoolDisk> {
+        static LOCAL: OnceLock<Arc<LocalDisk>> = OnceLock::new();
+        let local: Arc<dyn SpoolDisk> =
+            Arc::<Self>::clone(LOCAL.get_or_init(|| Arc::new(Self(()))));
+        local
+    }
+}
 
 impl SpoolDisk for LocalDisk {
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
@@ -26,6 +38,10 @@ impl SpoolDisk for LocalDisk {
 
     fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
         std::fs::remove_dir_all(path)
+    }
+
+    fn remove_empty_folder(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::remove_dir(path)
     }
 }
 
@@ -76,6 +92,12 @@ struct Queue {
     served: Condvar,
 }
 
+impl Owner {
+    fn queues(&self) -> MutexGuard<'_, HashMap<String, Arc<Queue>>> {
+        self.queues.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 impl Queue {
     fn order(&self) -> MutexGuard<'_, Order> {
         self.order.lock().unwrap_or_else(PoisonError::into_inner)
@@ -104,6 +126,10 @@ impl Drop for Turn {
         }
         drop(order);
         self.queue.served.notify_all();
+        let mut queues = self.owner.queues();
+        if Arc::strong_count(&self.queue) == 2 {
+            queues.remove(&self.stem);
+        }
     }
 }
 
@@ -395,30 +421,21 @@ fn owners() -> MutexGuard<'static, HashMap<PathBuf, Weak<Owner>>> {
 
 impl DraftSpool {
     #[must_use]
-    pub fn new(editor_dir: &Path) -> Self {
-        Self::at(editor_dir.join("drafts"), || Arc::new(LocalDisk))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_disk(editor_dir: &Path, disk: Arc<dyn SpoolDisk>) -> Self {
-        let expected = Arc::clone(&disk);
-        let spool = Self::at(editor_dir.join("drafts"), move || disk);
-        assert!(
-            Arc::ptr_eq(&spool.owner.disk, &expected),
-            "invariant: a drafts folder is written through one disk"
-        );
-        spool
-    }
-
-    fn at(dir: PathBuf, disk: impl FnOnce() -> Arc<dyn SpoolDisk>) -> Self {
+    pub fn new(editor_dir: &Path, disk: Arc<dyn SpoolDisk>) -> Self {
+        let dir = editor_dir.join("drafts");
         let mut owners = owners();
         owners.retain(|_, owner| owner.strong_count() > 0);
         if let Some(owner) = owners.get(&dir).and_then(Weak::upgrade) {
+            assert!(
+                Arc::ptr_eq(&owner.disk, &disk),
+                "invariant: the drafts folder {} is written through one disk",
+                dir.display()
+            );
             return Self { owner };
         }
         let owner = Arc::new(Owner {
             dir: dir.clone(),
-            disk: disk(),
+            disk,
             queues: Mutex::default(),
         });
         owners.insert(dir, Arc::downgrade(&owner));
@@ -427,23 +444,16 @@ impl DraftSpool {
 
     pub(crate) fn turn(&self, host: &HostId, scope: &str) -> Turn {
         let stem = stem(host, scope);
-        let queue = Arc::clone(
-            self.owner
-                .queues
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(stem.clone())
-                .or_insert_with(|| {
-                    Arc::new(Queue {
-                        order: Mutex::new(Order {
-                            issued: 0,
-                            serving: 1,
-                            abandoned: BTreeSet::new(),
-                        }),
-                        served: Condvar::new(),
-                    })
+        let queue = Arc::clone(self.owner.queues().entry(stem.clone()).or_insert_with(|| {
+            Arc::new(Queue {
+                order: Mutex::new(Order {
+                    issued: 0,
+                    serving: 1,
+                    abandoned: BTreeSet::new(),
                 }),
-        );
+                served: Condvar::new(),
+            })
+        }));
         let number = {
             let mut order = queue.order();
             order.issued += 1;
@@ -529,13 +539,6 @@ impl Serving {
 
     fn unit_path(&self, unit: Unit) -> PathBuf {
         self.root().join(unit.name())
-    }
-
-    pub(crate) fn slot_path(&self, slot: Slot) -> PathBuf {
-        self.units()
-            .ok()
-            .and_then(|units| Self::current(&units, slot))
-            .map_or_else(|| self.root(), |unit| self.unit_path(unit))
     }
 
     fn create_root(&self) -> Result<(), KeepSpooledDraftError> {
@@ -632,7 +635,7 @@ impl Serving {
         }
         for older in units.iter().filter(|older| older.slot == slot) {
             let path = self.unit_path(*older);
-            if let Err(error) = std::fs::remove_dir_all(&path) {
+            if let Err(error) = self.disk().remove_tree(&path) {
                 tracing::warn!(
                     path = %path.display(),
                     %error,
@@ -794,7 +797,7 @@ impl Serving {
     }
 
     fn remove_root_if_empty(&self) {
-        match std::fs::remove_dir(self.root()) {
+        match self.disk().remove_empty_folder(&self.root()) {
             Ok(()) => {
                 if let Err(error) = sync_folder(&self.turn.owner.dir) {
                     tracing::warn!(%error, "removed an empty drafts folder, but it may come back after a power cut");

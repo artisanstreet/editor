@@ -1,4 +1,5 @@
 use super::*;
+use crate::composer::spool::LocalDisk;
 use artisan_api::tls::{Identity, fingerprint};
 use artisan_api::{DraftSnapshot, DraftWriteResult};
 
@@ -26,7 +27,7 @@ fn pending_write() -> (DraftHandle, DraftBody, tempfile::TempDir) {
         host: HostId("deadline-test".into()),
         scope: "new".into(),
         client,
-        spool: DraftSpool::new(spool.path()),
+        spool: DraftSpool::new(spool.path(), LocalDisk::shared()),
         kept: Mutex::new(Kept::Nothing),
         shared: Mutex::new(Shared {
             state,

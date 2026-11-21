@@ -618,7 +618,10 @@ fn closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it() {
         return;
     }
     let (directory, core, config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     let instance = core.host(&config.id).unwrap().instance();
     run(async {
         let (listener, acceptor, client) = server().await;
@@ -735,7 +738,10 @@ fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
         return;
     }
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "recovering");
@@ -845,7 +851,10 @@ fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text(
         return;
     }
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "recovering-image");
@@ -945,7 +954,10 @@ fn a_dropped_image_whose_file_is_gone_by_closing_is_kept_with_the_draft() {
         return;
     }
     let (directory, core, config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     let instance = core.host(&config.id).unwrap().instance();
     run(async {
         let (listener, acceptor, client) = server().await;
@@ -1135,7 +1147,10 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
         return;
     }
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "sending");
@@ -1228,7 +1243,10 @@ fn typing_offline_after_a_saved_edit_does_not_ask_which_draft_to_keep() {
         return;
     }
     let (directory, core, config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     let instance = core.host(&config.id).unwrap().instance();
     run(async {
         let (listener, acceptor, client) = server().await;
@@ -1372,7 +1390,10 @@ fn closing_while_an_image_uploads_keeps_the_image_on_this_device_until_forge_tak
         return;
     }
     let (directory, core, config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     let instance = core.host(&config.id).unwrap().instance();
     run(async {
         let (listener, acceptor, client) = server().await;
@@ -1874,7 +1895,10 @@ fn text_typed_after_an_unanswered_send_shows_on_reopening_and_survives_the_resen
         return;
     }
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "resending");
@@ -2372,7 +2396,10 @@ fn a_send_that_fails_before_the_reopened_composer_first_shows_comes_back_with_it
         return;
     }
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "unshown");
@@ -2428,7 +2455,10 @@ fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_ide
         return;
     }
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "released");
@@ -2532,7 +2562,10 @@ fn the_notice_about_an_unreadable_kept_draft_shows_once() {
     use editor_aqua::composer::spool::DraftSpool;
 
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, _acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "notice");
@@ -2582,7 +2615,10 @@ fn a_refused_send_clears_once_its_cause_is_fixed_and_leaves_the_recovery_notice_
     use editor_aqua::composer::view::ComposerAction;
 
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "notice");
@@ -2684,7 +2720,10 @@ fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_remov
     use editor_aqua::composer::view::ComposerAction;
 
     let (directory, mut core, _config, _client) = fixture();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(
+        directory.path(),
+        editor_aqua::composer::spool::LocalDisk::shared(),
+    );
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "rivals");

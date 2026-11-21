@@ -105,6 +105,13 @@ impl ScriptedDisk {
 }
 
 impl SpoolDisk for ScriptedDisk {
+    fn remove_empty_folder(&self, path: &Path) -> std::io::Result<()> {
+        match self.take(true, path) {
+            Some(_) => Err(std::io::Error::other("removal refused by the test disk")),
+            None => std::fs::remove_dir(path),
+        }
+    }
+
     fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
         match self.take(true, path) {
             Some(_) => Err(std::io::Error::other("removal refused by the test disk")),
@@ -185,7 +192,7 @@ fn images(spooled: &SpooledDraft) -> Vec<Option<&[u8]>> {
 #[test]
 fn drafts_whose_host_and_scope_join_alike_are_kept_apart() {
     let directory = tempfile::tempdir().unwrap();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
     let first = HostId("forge-a".into());
     let second = HostId("forge".into());
     spool
@@ -222,7 +229,7 @@ fn drafts_whose_host_and_scope_join_alike_are_kept_apart() {
 #[test]
 fn a_missing_or_damaged_image_still_brings_back_the_drafts_text() {
     let directory = tempfile::tempdir().unwrap();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
     let host = HostId("forge".into());
     spool
         .keep(
@@ -268,7 +275,7 @@ fn a_missing_or_damaged_image_still_brings_back_the_drafts_text() {
 #[test]
 fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
     let directory = tempfile::tempdir().unwrap();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
     let host = HostId("forge".into());
     spool
         .keep(
@@ -315,7 +322,7 @@ fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
 fn an_unreadable_kept_draft_that_cannot_be_moved_aside_is_reported_where_it_still_is() {
     let directory = tempfile::tempdir().unwrap();
     let disk = Arc::new(ScriptedDisk::default());
-    let spool = DraftSpool::with_disk(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
+    let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
     let host = HostId("forge".into());
     spool
         .keep(
@@ -344,7 +351,7 @@ fn an_unreadable_kept_draft_that_cannot_be_moved_aside_is_reported_where_it_stil
 #[test]
 fn a_draft_that_did_not_recover_the_record_is_kept_beside_it_instead_of_over_it() {
     let directory = tempfile::tempdir().unwrap();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
     let host = HostId("forge".into());
     spool
         .keep(
@@ -387,7 +394,7 @@ fn a_draft_that_did_not_recover_the_record_is_kept_beside_it_instead_of_over_it(
 #[test]
 fn a_draft_kept_beside_again_rewrites_its_own_slot_and_drops_images_it_no_longer_holds() {
     let directory = tempfile::tempdir().unwrap();
-    let spool = DraftSpool::new(directory.path());
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
     let host = HostId("forge".into());
     spool
         .keep(
@@ -439,7 +446,7 @@ fn a_draft_kept_beside_again_rewrites_its_own_slot_and_drops_images_it_no_longer
 fn a_draft_kept_where_a_discarded_one_is_still_being_removed_keeps_its_text_and_images() {
     let directory = tempfile::tempdir().unwrap();
     let disk = Arc::new(ScriptedDisk::default());
-    let spool = DraftSpool::with_disk(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
+    let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
     let host = HostId("forge".into());
     spool
         .keep(
@@ -493,7 +500,7 @@ fn a_draft_kept_where_a_discarded_one_is_still_being_removed_keeps_its_text_and_
 fn two_drafts_discarded_at_once_are_both_removed() {
     let directory = tempfile::tempdir().unwrap();
     let disk = Arc::new(ScriptedDisk::default());
-    let spool = DraftSpool::with_disk(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
+    let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
     let host = HostId("forge".into());
     for text in ["the record", "first beside", "second beside"] {
         spool
@@ -520,5 +527,86 @@ fn two_drafts_discarded_at_once_are_both_removed() {
     assert_eq!(
         spool.take(&host, "new").unwrap().map(|taken| taken.draft),
         Some(kept("the record"))
+    );
+}
+
+#[test]
+fn a_replaced_version_the_disk_refuses_to_remove_stays_and_the_newer_one_is_taken() {
+    let directory = tempfile::tempdir().unwrap();
+    let disk = Arc::new(ScriptedDisk::default());
+    let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
+    let host = HostId("forge".into());
+    spool
+        .keep(
+            &host,
+            "new",
+            kept("first"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    drop(disk.arm(Rule::RefuseRemoval, named("record.1")));
+    spool
+        .keep(
+            &host,
+            "new",
+            kept("second"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+
+    let drafts = directory.path().join("drafts");
+    assert!(
+        drafts.join("forge-new").join("record.1").is_dir(),
+        "the replaced version is removed through the spool's disk"
+    );
+    assert_eq!(
+        spool.take(&host, "new").unwrap().map(|taken| taken.draft),
+        Some(kept("second"))
+    );
+}
+
+#[test]
+fn an_emptied_draft_folder_is_removed_through_the_spools_disk() {
+    let directory = tempfile::tempdir().unwrap();
+    let disk = Arc::new(ScriptedDisk::default());
+    let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
+    let host = HostId("forge".into());
+    spool
+        .keep(&host, "new", kept("kept"), &[], Holder::Owner(Slot::Record))
+        .unwrap();
+    drop(disk.arm(Rule::RefuseRemoval, named("forge-new")));
+
+    spool.forget(&host, "new", Slot::Record).unwrap();
+    assert!(
+        directory.path().join("drafts").join("forge-new").is_dir(),
+        "the disk refused to remove the empty folder, so it stays"
+    );
+    assert!(spool.take(&host, "new").unwrap().is_none());
+}
+
+#[test]
+fn a_drafts_queue_is_let_go_once_no_turn_waits_on_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
+    let host = HostId("forge".into());
+    let first = spool.turn(&host, "new");
+    let second = spool.turn(&host, "new");
+    drop(first.wait());
+    assert_eq!(spool.owner.queues().len(), 1, "the second turn still waits");
+    drop(second);
+    assert!(
+        spool.owner.queues().is_empty(),
+        "no turn is left, so the queue is gone"
+    );
+    spool
+        .keep(&host, "new", kept("kept"), &[], Holder::Owner(Slot::Record))
+        .unwrap();
+    assert!(spool.owner.queues().is_empty());
+    assert_eq!(
+        spool.take(&host, "new").unwrap().map(|taken| taken.draft),
+        Some(kept("kept")),
+        "a later turn starts a new queue"
     );
 }

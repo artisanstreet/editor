@@ -54,7 +54,7 @@ impl Device {
         let client = ForgeClient::new(&config.address, &config.fingerprint, &identity).unwrap();
         test_support::editor::core::connect_client(&mut core, &config, client.clone());
         let disk = Arc::new(ScriptedDisk::default());
-        let spool = DraftSpool::with_disk(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
+        let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
         Self {
             _forge: forge,
             directory,
