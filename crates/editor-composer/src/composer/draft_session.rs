@@ -254,6 +254,7 @@ enum Halt {
 
 #[derive(Debug)]
 enum Request {
+    Recovering,
     Idle,
     Loading,
     Writing { body: Box<DraftBody>, edited: u64 },
@@ -827,7 +828,11 @@ impl Draft {
             }),
             (
                 Remote::Loaded(snapshot),
-                Request::Idle | Request::Loading | Request::Posting | Request::PostingSetAside,
+                Request::Recovering
+                | Request::Idle
+                | Request::Loading
+                | Request::Posting
+                | Request::PostingSetAside,
             ) => Some(Base {
                 revision: snapshot.revision,
                 written: None,
@@ -842,6 +847,14 @@ impl Draft {
 
 impl DraftSession {
     pub fn new(scope: String) -> Self {
+        Self::starting(scope, Request::Idle)
+    }
+
+    pub(crate) fn recovering_from_device(scope: String) -> Self {
+        Self::starting(scope, Request::Recovering)
+    }
+
+    fn starting(scope: String, request: Request) -> Self {
         Self {
             scope,
             epoch: 0,
@@ -858,7 +871,7 @@ impl DraftSession {
                 adopting: Vec::new(),
                 lost: Vec::new(),
                 next_key: 0,
-                request: Request::Idle,
+                request,
                 halt: Halt::Clear,
                 send: Send::Idle,
                 set_aside: Vec::new(),
@@ -925,6 +938,26 @@ impl DraftSession {
 
     pub(crate) fn set_unrecovered(&mut self, unrecovered: Unrecovered) {
         self.unrecovered.push(unrecovered);
+    }
+
+    pub fn recovering(&self) -> bool {
+        self.draft()
+            .is_some_and(|draft| matches!(draft.request, Request::Recovering))
+    }
+
+    pub(crate) fn recovered(&mut self) {
+        let State::Open(draft) = &mut self.state else {
+            unreachable!(
+                "invariant: draft {} finishes recovering before it can be removed",
+                self.scope
+            );
+        };
+        assert!(
+            matches!(draft.request, Request::Recovering),
+            "invariant: draft {} finishes recovering only once",
+            self.scope
+        );
+        draft.request = Request::Idle;
     }
 
     pub fn is_loaded(&self) -> bool {
@@ -1222,8 +1255,9 @@ impl DraftSession {
     }
 
     pub(crate) fn sendable(&self) -> bool {
-        self.draft()
-            .is_some_and(|draft| draft.in_flight().is_none())
+        self.draft().is_some_and(|draft| {
+            draft.in_flight().is_none() && !matches!(draft.request, Request::Recovering)
+        })
     }
 
     pub fn posting(&self) -> Posting {
@@ -1247,6 +1281,13 @@ impl DraftSession {
             self.dropped("an edit");
             return false;
         };
+        if matches!(draft.request, Request::Recovering) {
+            tracing::info!(
+                scope = %self.scope,
+                "an edit arrived while the draft kept on this device was being read, so it is not taken"
+            );
+            return false;
+        }
         draft.uploading = uploading;
         let stale = seen != self.epoch;
         let over_hand_back = stale && self.handed_back == Some(self.epoch);
@@ -1276,6 +1317,9 @@ impl DraftSession {
         let State::Open(draft) = &mut self.state else {
             return Err(SendRefusal::NoDraft);
         };
+        if matches!(draft.request, Request::Recovering) {
+            return Err(SendRefusal::DraftLoading);
+        }
         if !draft.rivals.is_empty() {
             return Err(SendRefusal::ChoosingDraft);
         }

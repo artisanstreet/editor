@@ -267,6 +267,7 @@ fn replacing_host_invalidates_old_draft_writer_but_preserves_current_writer() {
             client.clone(),
         )
         .unwrap();
+    block_on_session(&old, |state| !state.recovering());
     type_into(&old, typed("old pairing"));
     core.remove_host(&config.id).unwrap();
     test_support::editor::core::connect_client(&mut core, &config, client.clone());
@@ -274,9 +275,14 @@ fn replacing_host_invalidates_old_draft_writer_but_preserves_current_writer() {
     let current = sessions
         .open(config.id.clone(), current_instance, "new".into(), client)
         .unwrap();
+    block_on_session(&current, |state| !state.recovering());
     type_into(&current, typed("current pairing"));
 
     sessions.retain_hosts(&core);
+    block_on_session(
+        &old,
+        editor_aqua::composer::draft_session::DraftSession::removed,
+    );
 
     assert!(old.read(editor_aqua::composer::draft_session::DraftSession::removed));
     assert!(!current.read(editor_aqua::composer::draft_session::DraftSession::removed));
@@ -440,8 +446,12 @@ fn explicit_host_removal_cancels_an_inflight_write_and_queued_post() {
 
         core.remove_host(&config.id).unwrap();
         sessions.retain_hosts(&core);
+        wait_for_session(
+            &lease,
+            editor_aqua::composer::draft_session::DraftSession::removed,
+        )
+        .await;
 
-        assert!(lease.read(editor_aqua::composer::draft_session::DraftSession::removed));
         assert!(!lease.read(editor_aqua::composer::draft_session::DraftSession::sending));
         assert_eq!(
             lease.read(|state| state.body().clone()),
@@ -480,7 +490,7 @@ fn child_process(test: &str) -> bool {
 
 #[test]
 fn process_exit_waits_for_draft_write_acceptance() {
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
 
     if !child_process("persistence::process_exit_waits_for_draft_write_acceptance") {
         return;
@@ -502,7 +512,10 @@ fn process_exit_waits_for_draft_write_acceptance() {
         drop(lease);
         drop(sessions);
 
-        let mut shutdown = Box::pin(drain_pending(Duration::from_secs(5)));
+        let mut shutdown = Box::pin(drain_pending(ShutdownLimits {
+            forge: Duration::from_secs(5),
+            device: Duration::from_secs(5),
+        }));
         assert!(test_support::poll::poll_once(shutdown.as_mut()).is_pending());
         let (mut socket, route, body) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
@@ -520,7 +533,7 @@ fn process_exit_waits_for_draft_write_acceptance() {
 
 #[test]
 fn process_exit_reports_a_pending_draft_at_the_deadline() {
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
 
     if !child_process("persistence::process_exit_reports_a_pending_draft_at_the_deadline") {
         return;
@@ -545,7 +558,11 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
 
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -564,7 +581,7 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
 
 #[test]
 fn process_exit_reports_a_rejected_draft_write() {
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
 
     if !child_process("persistence::process_exit_reports_a_rejected_draft_write") {
         return;
@@ -586,7 +603,10 @@ fn process_exit_reports_a_rejected_draft_write() {
         drop(lease);
         drop(sessions);
 
-        let mut shutdown = Box::pin(drain_pending(Duration::from_secs(5)));
+        let mut shutdown = Box::pin(drain_pending(ShutdownLimits {
+            forge: Duration::from_secs(5),
+            device: Duration::from_secs(5),
+        }));
         assert!(test_support::poll::poll_once(shutdown.as_mut()).is_pending());
         let (mut socket, route, _) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
@@ -609,7 +629,7 @@ fn process_exit_reports_a_rejected_draft_write() {
 
 #[test]
 fn closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it() {
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -636,7 +656,11 @@ fn closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it() {
         let (socket, route, _) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -698,6 +722,17 @@ fn hand_over_pasted_image(lease: &DraftHandle, client: ForgeClient) {
     }
 }
 
+fn block_on_session(
+    session: &DraftHandle,
+    until: impl Fn(&editor_aqua::composer::draft_session::DraftSession) -> bool,
+) {
+    editor_aqua::core::runtime::runtime().block_on(wait_for_session(session, until));
+}
+
+async fn recovered(session: &DraftHandle) {
+    wait_for_session(session, |state| !state.recovering()).await;
+}
+
 async fn wait_for_session(
     session: &DraftHandle,
     until: impl Fn(&editor_aqua::composer::draft_session::DraftSession) -> bool,
@@ -729,7 +764,7 @@ fn connect_host(core: &mut Core, listener: &TcpListener, pin: &str, name: &str) 
 fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -753,6 +788,7 @@ fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
 
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        recovered(composer.session.as_ref().unwrap()).await;
         let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
         assert!(route.starts_with("GET /drafts/"), "{route}");
         respond(&mut socket, json!({"revision": 0, "body": null})).await;
@@ -769,7 +805,11 @@ fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
         let (socket, route, _) = composer_request(&listener, &acceptor).await;
         assert!(route.starts_with("PUT /drafts/"), "{route}");
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -780,6 +820,7 @@ fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
 
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let mut composer = Composer::new(&core, &mut sessions, target);
+        recovered(composer.session.as_ref().unwrap()).await;
         composer.sync(&core);
         assert_eq!(
             composer.editor.borrow().text(),
@@ -842,7 +883,7 @@ async fn draft_or_blob_request(
 fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text() {
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -891,7 +932,11 @@ fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text(
         assert!(routes[0].starts_with("PUT /blobs"), "{routes:?}");
         assert!(routes[1].starts_with("PUT /drafts/"), "{routes:?}");
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -945,7 +990,7 @@ fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text(
 fn a_dropped_image_whose_file_is_gone_by_closing_is_kept_with_the_draft() {
     use editor_aqua::composer::attachment::{Attachments, Source};
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -989,7 +1034,11 @@ fn a_dropped_image_whose_file_is_gone_by_closing_is_kept_with_the_draft() {
         drop(lease);
         drop(sessions);
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -1054,6 +1103,7 @@ fn an_image_forge_refuses_comes_back_as_a_failed_image_and_the_draft_keeps_savin
         };
         let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(&core, &mut sessions, target);
+        recovered(composer.session.as_ref().unwrap()).await;
         let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
         assert!(route.starts_with("GET /drafts/"), "{route}");
         respond(&mut socket, json!({"revision": 0, "body": null})).await;
@@ -1138,7 +1188,7 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
     use artisan_api::ThreadId;
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -1184,7 +1234,11 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
         drop(lease);
         drop(sessions);
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -1195,6 +1249,7 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
 
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let mut composer = Composer::new(&core, &mut sessions, target);
+        recovered(composer.session.as_ref().unwrap()).await;
         answer_empty_draft(&listener, &acceptor, 2).await;
         let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
         assert_eq!(
@@ -1234,7 +1289,7 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
 #[test]
 fn typing_offline_after_a_saved_edit_does_not_ask_which_draft_to_keep() {
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -1271,7 +1326,11 @@ fn typing_offline_after_a_saved_edit_does_not_ask_which_draft_to_keep() {
         drop(lease);
         drop(sessions);
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -1381,7 +1440,7 @@ fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
 #[test]
 fn closing_while_an_image_uploads_keeps_the_image_on_this_device_until_forge_takes_it() {
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -1408,7 +1467,11 @@ fn closing_while_an_image_uploads_keeps_the_image_on_this_device_until_forge_tak
         drop(lease);
         drop(sessions);
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
@@ -1775,6 +1838,7 @@ fn a_paragraph_shows_on_return_although_the_image_handed_over_with_it_was_refuse
         };
         let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(&core, &mut sessions, here.clone());
+        recovered(composer.session.as_ref().unwrap()).await;
         answer_empty_draft(&listener, &acceptor, 0).await;
         let session = DraftHandle::clone(composer.session.as_ref().unwrap());
         wait_for_session(&session, DraftSession::is_loaded).await;
@@ -1843,7 +1907,7 @@ async fn close_while_sending(
 ) -> (Value, Value) {
     use editor_aqua::composer::controller::Composer;
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
 
     let mut sessions = DraftSessions::with_spool(spool.clone());
     let mut composer = Composer::new(core, &mut sessions, target.clone());
@@ -1871,7 +1935,11 @@ async fn close_while_sending(
     drop(composer);
     drop(sessions);
     assert_eq!(
-        drain_pending(Duration::ZERO).await,
+        drain_pending(ShutdownLimits {
+            forge: Duration::ZERO,
+            device: Duration::from_secs(5),
+        })
+        .await,
         ShutdownOutcome::Incomplete {
             failed: 0,
             timed_out: 1,
@@ -1912,6 +1980,7 @@ fn text_typed_after_an_unanswered_send_shows_on_reopening_and_survives_the_resen
 
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let mut composer = Composer::new(&core, &mut sessions, target);
+        recovered(composer.session.as_ref().unwrap()).await;
         composer.sync(&core);
         assert_eq!(
             composer.editor.borrow().text(),
@@ -2080,6 +2149,7 @@ fn a_send_that_fails_while_another_thread_is_open_comes_back_and_resends_as_the_
         };
         let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        recovered(composer.session.as_ref().unwrap()).await;
         let (posting, thread) =
             send_and_type_over(&core, &mut composer, &host, &listener, &acceptor).await;
         let sending = DraftHandle::clone(composer.session.as_ref().unwrap());
@@ -2412,6 +2482,7 @@ fn a_send_that_fails_before_the_reopened_composer_first_shows_comes_back_with_it
 
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let mut composer = Composer::new(&core, &mut sessions, target);
+        recovered(composer.session.as_ref().unwrap()).await;
         let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
         assert!(route.starts_with("GET /drafts/"), "{route}");
         respond(&mut socket, json!({"revision": 1, "body": sent})).await;
@@ -2446,7 +2517,7 @@ fn a_send_that_fails_before_the_reopened_composer_first_shows_comes_back_with_it
 fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_identity() {
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -2468,6 +2539,7 @@ fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_ide
         };
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        recovered(composer.session.as_ref().unwrap()).await;
         let (posting, thread) =
             send_and_type_over(&core, &mut composer, &host, &listener, &acceptor).await;
         let sending = DraftHandle::clone(composer.session.as_ref().unwrap());
@@ -2477,7 +2549,11 @@ fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_ide
         drop(sending);
         drop(sessions);
         assert_eq!(
-            drain_pending(Duration::ZERO).await,
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
             ShutdownOutcome::Incomplete {
                 failed: 1,
                 timed_out: 0,
@@ -2487,6 +2563,7 @@ fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_ide
 
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let mut composer = Composer::new(&core, &mut sessions, target);
+        recovered(composer.session.as_ref().unwrap()).await;
         composer.sync(&core);
         assert_eq!(
             resent_thread(
@@ -2522,6 +2599,8 @@ fn an_image_pasted_while_another_clients_draft_loads_stays_and_asks_which_to_kee
                 project: Some(artisan_api::ProjectId::from("project")),
             },
         );
+        recovered(composer.session.as_ref().unwrap()).await;
+        composer.sync(&core);
         let image = directory.path().join("pasted.png");
         std::fs::write(&image, pasted_png()).unwrap();
         composer.add_paths(vec![image]);
@@ -2580,6 +2659,7 @@ fn the_notice_about_an_unreadable_kept_draft_shows_once() {
         };
         let mut sessions = DraftSessions::with_spool(spool);
         let mut composer = Composer::new(&core, &mut sessions, target.clone());
+        recovered(composer.session.as_ref().unwrap()).await;
         composer.sync(&core);
         assert!(
             composer

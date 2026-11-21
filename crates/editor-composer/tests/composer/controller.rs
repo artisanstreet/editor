@@ -112,6 +112,17 @@ fn a_refused_turn_action_says_what_failed_and_keeps_forges_words_as_the_detail()
     );
 }
 
+fn recovered(composer: &mut super::Composer, core: &editor_core::Core) {
+    let session = composer.session.as_ref().unwrap();
+    let mut changed = session.subscribe();
+    editor_core::runtime::runtime().block_on(async {
+        while session.read(crate::composer::draft_session::DraftSession::recovering) {
+            changed.changed().await.unwrap();
+        }
+    });
+    composer.sync(core);
+}
+
 #[test]
 fn a_restored_send_waiting_on_a_choice_asks_for_the_choice_and_refuses_another_send() {
     use super::{Composer, ComposerTarget, SendRefusal, Submission};
@@ -182,18 +193,17 @@ fn a_restored_send_waiting_on_a_choice_asks_for_the_choice_and_refuses_another_s
         .unwrap();
     let mut sessions = DraftSessions::with_spool(spool);
     let mut composer = Composer::new(&core, &mut sessions, target);
+    recovered(&mut composer, &core);
     composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
     composer.project = Some(artisan_api::ProjectId::from("project"));
     composer.editor.borrow_mut().set_text("another message");
     let host = core.host(&config.id).unwrap();
-    assert!(
-        composer
-            .session
-            .as_ref()
-            .unwrap()
-            .read(DraftSession::sending)
-    );
-
+    let sending = composer
+        .session
+        .as_ref()
+        .unwrap()
+        .read(DraftSession::sending);
+    assert!(sending);
     assert_eq!(
         composer.blocked(host),
         Some("Choose which draft to keep first."),
@@ -276,6 +286,7 @@ fn sending_while_a_draft_kept_beside_waits_for_a_choice_is_refused_and_keeps_the
         .unwrap();
     let mut sessions = DraftSessions::with_spool(spool);
     let mut composer = Composer::new(&core, &mut sessions, target);
+    recovered(&mut composer, &core);
     composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
     composer.project = Some(artisan_api::ProjectId::from("project"));
     composer
@@ -303,4 +314,82 @@ fn sending_while_a_draft_kept_beside_waits_for_a_choice_is_refused_and_keeps_the
             .read(DraftSession::sending),
         "once the user has chosen, the message goes out"
     );
+}
+
+#[test]
+fn a_draft_kept_on_this_device_shows_once_read_and_the_composer_waits_for_it() {
+    use super::{Composer, ComposerTarget, SendRefusal};
+    use crate::composer::draft_body::DraftBody;
+    use crate::composer::draft_session::{DraftSession, KeptDraft};
+    use crate::composer::persistence::DraftSessions;
+    use crate::composer::spool::tests::Direct as _;
+    use crate::composer::spool::{DraftSpool, Holder, LocalDisk, Slot};
+    use artisan_api::tls::{Identity, fingerprint};
+    use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = test_support::net::SilentListener::bind();
+    let identity = Identity::generate("recovering-draft").unwrap();
+    let config = HostConfig {
+        id: HostId("recovering".into()),
+        name: "Forge".into(),
+        address: forge.address().to_string(),
+        fingerprint: fingerprint(identity.certificate_der().unwrap().as_ref()),
+        kind: HostKind::Local,
+    };
+    let client = ForgeClient::new(&config.address, &config.fingerprint, &identity).unwrap();
+    test_support::editor::core::connect_client(&mut core, &config, client);
+    let target = ComposerTarget::NewThread {
+        host: config.id.clone(),
+        project: None,
+    };
+    let scope = target.scope();
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
+    spool
+        .keep(
+            &config.id,
+            &scope,
+            KeptDraft {
+                body: DraftBody {
+                    text: "kept on this device".to_owned(),
+                    ..DraftBody::default()
+                },
+                base: None,
+                post: None,
+                lost: Vec::new(),
+                set_aside: Vec::new(),
+            },
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    let busy = spool.turn(&config.id, &scope).wait();
+    let mut sessions = DraftSessions::with_spool(spool.clone());
+
+    let mut composer = Composer::new(&core, &mut sessions, target);
+    composer.sync(&core);
+    assert!(
+        composer.editor.borrow().is_disabled(),
+        "the composer takes no edits while the kept draft is read"
+    );
+    composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
+    composer.project = Some(artisan_api::ProjectId::from("project"));
+    composer.editor.borrow_mut().set_text("typed too early");
+    let host = core.host(&config.id).unwrap();
+    assert_eq!(composer.send(host), Err(SendRefusal::DraftLoading));
+    assert!(
+        composer
+            .session
+            .as_ref()
+            .unwrap()
+            .read(DraftSession::recovering)
+    );
+    composer.editor.borrow_mut().set_text("");
+
+    drop(busy);
+    drop(spool.turn(&config.id, &scope).wait());
+    composer.sync(&core);
+    assert_eq!(composer.editor.borrow().text(), "kept on this device");
+    assert!(!composer.editor.borrow().is_disabled());
 }

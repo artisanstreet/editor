@@ -56,7 +56,14 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
     let (mut workspace, _) = Workspace::new(&core, None, SelectionAllocator::default().workspace());
     workspace.sync_composer(&core, &mut ui);
     let draft = {
-        let composer = workspace.composer().as_ref().unwrap().controller.borrow();
+        let mut composer = workspace
+            .composer()
+            .as_ref()
+            .unwrap()
+            .controller
+            .borrow_mut();
+        crate::recovered(composer.session.as_ref().unwrap());
+        composer.sync(&core);
         composer.editor.borrow_mut().set_text("queued draft");
         composer.save();
         editor_aqua::composer::persistence::DraftHandle::clone(composer.session.as_ref().unwrap())
@@ -65,7 +72,10 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
     core.remove_host(&config.id).unwrap();
     workspace.handle_event(&core, &editor_aqua::core::CoreEvent::HostsChanged, false);
 
-    assert!(draft.read(editor_aqua::composer::draft_session::DraftSession::removed));
+    crate::wait_for_draft(
+        &draft,
+        editor_aqua::composer::draft_session::DraftSession::removed,
+    );
     assert_eq!(
         draft.read(|state| state.body().clone()),
         editor_aqua::composer::draft_body::DraftBody::default()
@@ -92,13 +102,15 @@ fn removing_host_keeps_the_composers_draft_and_unfinished_image_on_this_device()
     let mut ui = ShellResources::new(1.0).unwrap().ui;
     let (mut workspace, _) = Workspace::new(&core, None, SelectionAllocator::default().workspace());
     workspace.sync_composer(&core, &mut ui);
-    {
+    let draft = {
         let mut composer = workspace
             .composer()
             .as_ref()
             .unwrap()
             .controller
             .borrow_mut();
+        crate::recovered(composer.session.as_ref().unwrap());
+        composer.sync(&core);
         composer
             .editor
             .borrow_mut()
@@ -113,10 +125,15 @@ fn removing_host_keeps_the_composers_draft_and_unfinished_image_on_this_device()
             .unwrap()
             .add(Source::Bytes(image.into_inner()), "Pasted image".into());
         composer.edited();
-    }
+        editor_aqua::composer::persistence::DraftHandle::clone(composer.session.as_ref().unwrap())
+    };
 
     core.remove_host(&config.id).unwrap();
     workspace.handle_event(&core, &editor_aqua::core::CoreEvent::HostsChanged, false);
+    crate::wait_for_draft(
+        &draft,
+        editor_aqua::composer::draft_session::DraftSession::removed,
+    );
 
     let listed = |folder: &std::path::Path| -> Vec<std::path::PathBuf> {
         std::fs::read_dir(folder)
@@ -150,6 +167,7 @@ fn removing_host_keeps_the_composers_draft_and_unfinished_image_on_this_device()
             client,
         )
         .unwrap();
+    crate::recovered(&reopened);
     assert_eq!(
         reopened.read(|state| state.body().text.clone()),
         "typed while Forge was away"

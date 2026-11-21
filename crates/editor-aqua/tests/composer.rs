@@ -35,3 +35,12 @@ fn draft_sessions() -> (
     );
     (spool, sessions)
 }
+
+fn recovered(session: &editor_aqua::composer::persistence::DraftHandle) {
+    let mut changed = session.subscribe();
+    editor_aqua::core::runtime::runtime().block_on(async {
+        while session.read(editor_aqua::composer::draft_session::DraftSession::recovering) {
+            changed.changed().await.unwrap();
+        }
+    });
+}

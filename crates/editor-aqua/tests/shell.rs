@@ -52,3 +52,19 @@ mod stopwatch;
 mod wheel;
 #[path = "shell/workspace.rs"]
 mod workspace;
+
+fn wait_for_draft(
+    session: &editor_aqua::composer::persistence::DraftHandle,
+    until: impl Fn(&editor_aqua::composer::draft_session::DraftSession) -> bool,
+) {
+    let mut changed = session.subscribe();
+    editor_aqua::core::runtime::runtime().block_on(async {
+        while !session.read(&until) {
+            changed.changed().await.unwrap();
+        }
+    });
+}
+
+fn recovered(session: &editor_aqua::composer::persistence::DraftHandle) {
+    wait_for_draft(session, |state| !state.recovering());
+}

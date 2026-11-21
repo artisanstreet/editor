@@ -15,6 +15,7 @@ fn type_into_composer(opened: &mut ThreadShell, text: &str) {
         .unwrap()
         .controller
         .borrow_mut();
+    crate::recovered(composer.session.as_ref().unwrap());
     composer.editor.borrow_mut().set_text(text);
     composer.edited();
 }
@@ -88,6 +89,7 @@ fn sign_out_and_back_in_on_the_thread(opened: &mut ThreadShell) -> String {
         .unwrap()
         .controller
         .borrow_mut();
+    crate::recovered(composer.session.as_ref().unwrap());
     composer.sync(&shell.core);
     composer.editor.borrow().text().to_owned()
 }
@@ -122,7 +124,12 @@ fn a_draft_this_device_could_not_keep_at_sign_out_comes_back_and_is_kept_once_at
     } = opened;
     drop(shell);
     let outcome = editor_aqua::core::runtime::runtime().block_on(
-        editor_aqua::composer::persistence::drain_pending(std::time::Duration::from_secs(5)),
+        editor_aqua::composer::persistence::drain_pending(
+            editor_aqua::composer::persistence::ShutdownLimits {
+                forge: std::time::Duration::from_secs(5),
+                device: std::time::Duration::from_secs(5),
+            },
+        ),
     );
     assert!(
         matches!(

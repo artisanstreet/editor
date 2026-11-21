@@ -289,7 +289,7 @@ impl Entry {
         });
         self.landed = false;
         let mounted = ready.map(|account| {
-            let (mut workspace, effects) =
+            let (workspace, effects) =
                 Workspace::new(core, self.failure.clone(), self.selections.workspace());
             if let Some(held) = self.held_drafts.take() {
                 workspace.take_held_drafts(held);

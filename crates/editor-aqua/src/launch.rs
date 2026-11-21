@@ -342,7 +342,12 @@ fn run(qualifying: bool) -> Result<(), LaunchError> {
         .map_err(|message| LaunchError::Run { message });
     let (drafts, settings) = crate::core::runtime::runtime().block_on(async {
         tokio::join!(
-            crate::composer::persistence::drain_pending(std::time::Duration::from_secs(5)),
+            crate::composer::persistence::drain_pending(
+                crate::composer::persistence::ShutdownLimits {
+                    forge: std::time::Duration::from_secs(5),
+                    device: std::time::Duration::from_secs(5),
+                }
+            ),
             crate::core::drain_settings(std::time::Duration::from_secs(5)),
         )
     });

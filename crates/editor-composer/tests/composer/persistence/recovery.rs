@@ -80,20 +80,35 @@ impl Device {
     }
 
     fn settle(&self) {
-        drop(self.spool.turn(&self.host, "new").wait());
+        for scope in ["new", "first", "second"] {
+            drop(self.spool.turn(&self.host, scope).wait());
+        }
     }
 
     fn reopen(&self) -> DraftLease {
         let instance = self.core.host(&self.host).unwrap().instance();
-        DraftSessions::with_spool(self.spool())
+        let lease = DraftSessions::with_spool(self.spool())
             .open(
                 self.host.clone(),
                 instance,
                 "new".into(),
                 self.client.clone(),
             )
-            .unwrap()
+            .unwrap();
+        self.settle();
+        lease
     }
+}
+
+#[cfg(unix)]
+fn retire_now(session: &DraftHandle) -> Result<(), KeepLocallyError> {
+    let turn = session.retiring();
+    session.retire_within(&turn.wait())
+}
+
+fn keep_locally(lease: &DraftHandle) -> Result<bool, KeepLocallyError> {
+    let turn = lease.0.spool.turn(&lease.0.host, &lease.0.scope);
+    lease.settle_within(&turn.wait())
 }
 
 fn kept(text: &str) -> KeptDraft {
@@ -225,10 +240,12 @@ fn removing_the_pairing_keeps_a_recovered_draft_as_it_was_last_edited() {
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "edited while Forge was away");
 
     let replaced = repair(&mut device);
     sessions.retain_hosts(&device.core);
+    device.settle();
     assert!(lease.read(DraftSession::removed));
     drop(lease);
     let reopened = sessions
@@ -239,6 +256,7 @@ fn removing_the_pairing_keeps_a_recovered_draft_as_it_was_last_edited() {
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
 
     assert_eq!(
         reopened.read(|state| state.body().text.clone()),
@@ -260,6 +278,7 @@ fn removing_the_pairing_keeps_a_fresh_draft_its_unanswered_message_and_unfinishe
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "typed while Forge was away");
     lease
         .submit(Submission {
@@ -280,6 +299,7 @@ fn removing_the_pairing_keeps_a_fresh_draft_its_unanswered_message_and_unfinishe
 
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
+    device.settle();
     drop(lease);
     drop(sessions);
 
@@ -313,6 +333,7 @@ fn a_send_that_fails_before_the_pairing_is_removed_keeps_the_text_typed_after_it
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "typed while Forge was away");
     lease
         .submit(Submission {
@@ -332,6 +353,7 @@ fn a_send_that_fails_before_the_pairing_is_removed_keeps_the_text_typed_after_it
 
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
+    device.settle();
     drop(lease);
     drop(sessions);
 
@@ -366,11 +388,13 @@ fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "only copy of this text");
     std::fs::write(device.drafts(), b"not a folder").unwrap();
 
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
+    device.settle();
 
     assert!(
         !lease.read(DraftSession::removed),
@@ -386,13 +410,17 @@ fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
         unkept.problem.headline(),
         "Artisan couldn't save your unsent draft to this device. Try again keeps it."
     );
+    assert_eq!(sessions.keep_unkept(), None, "the keep is tried again");
+    device.settle();
     assert!(
-        sessions.keep_unkept().is_some(),
+        sessions.unkept().is_some(),
         "trying again while the folder is still blocked keeps reporting it"
     );
 
     std::fs::remove_file(device.drafts()).unwrap();
     assert_eq!(sessions.keep_unkept(), None);
+    device.settle();
+    assert_eq!(sessions.unkept(), None);
     assert!(lease.read(DraftSession::removed));
     let kept = device
         .spool()
@@ -425,11 +453,13 @@ fn a_draft_whose_folder_could_not_be_flushed_stays_held_beside_the_version_it_re
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "typed over it");
     drop(device.disk.arm(Rule::RefuseSync, named("recovering-new")));
 
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
+    device.settle();
 
     assert!(
         sessions.unkept().is_some(),
@@ -449,6 +479,8 @@ fn a_draft_whose_folder_could_not_be_flushed_stays_held_beside_the_version_it_re
     );
 
     assert_eq!(sessions.keep_unkept(), None, "trying again keeps it");
+    device.settle();
+    assert_eq!(sessions.unkept(), None);
     assert!(lease.read(DraftSession::removed));
     assert_eq!(
         device.unit("record.").file_name().unwrap(),
@@ -485,11 +517,13 @@ fn a_draft_held_across_two_pairings_keeps_both_pairings_images_when_trying_again
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&first, "typed before the first removal");
     first.adopt_image(PendingUpload::kept(png_of(1)));
     std::fs::write(device.drafts(), b"not a folder").unwrap();
     let instance = repair(&mut device);
     sessions.retain_hosts(&device.core);
+    device.settle();
     drop(first);
     assert_eq!(sessions.unkept().map(|unkept| unkept.count), Some(1));
 
@@ -501,6 +535,8 @@ fn a_draft_held_across_two_pairings_keeps_both_pairings_images_when_trying_again
             device.client.clone(),
         )
         .unwrap();
+
+    device.settle();
     assert_eq!(
         second.read(|state| state.body().text.clone()),
         "typed before the first removal",
@@ -510,11 +546,14 @@ fn a_draft_held_across_two_pairings_keeps_both_pairings_images_when_trying_again
     second.adopt_image(PendingUpload::kept(png_of(2)));
     repair(&mut device);
     sessions.retain_hosts(&device.core);
+    device.settle();
     drop(second);
     assert_eq!(sessions.unkept().map(|unkept| unkept.count), Some(1));
 
     std::fs::remove_file(device.drafts()).unwrap();
     assert_eq!(sessions.keep_unkept(), None);
+    device.settle();
+    assert_eq!(sessions.unkept(), None);
     let kept = device
         .spool()
         .take(&device.host, "new")
@@ -584,7 +623,8 @@ fn a_recovered_draft_that_could_not_be_removed_once_saved_is_removed_on_closing(
     sessions
         .sessions
         .insert((device.host.clone(), instance, "new".into()), session);
-    drop(sessions);
+    sessions.retire();
+    device.settle();
 
     assert!(
         device.spool().take(&device.host, "new").unwrap().is_none(),
@@ -614,6 +654,7 @@ fn retiring_reads_a_pasted_image_outside_the_draft_and_keeps_what_was_typed_mean
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     let session = lease.handle.clone();
     session.mutate(|shared| {
         shared.state.adopt(PendingUpload::from_path(
@@ -623,7 +664,7 @@ fn retiring_reads_a_pasted_image_outside_the_draft_and_keeps_what_was_typed_mean
     });
     let retiring = std::thread::spawn({
         let session = session.clone();
-        move || session.retire()
+        move || retire_now(&session)
     });
     let writer = std::fs::OpenOptions::new()
         .write(true)
@@ -683,6 +724,7 @@ fn a_draft_opened_beside_an_unreadable_one_that_stays_is_kept_beside_it_on_retir
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     assert!(matches!(
         lease.take_unrecovered()[..],
         [Unrecovered::Left(_)]
@@ -691,6 +733,7 @@ fn a_draft_opened_beside_an_unreadable_one_that_stays_is_kept_beside_it_on_retir
 
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
+    device.settle();
 
     assert_eq!(
         std::fs::read(device.unit("record.").join("record.json")).unwrap(),
@@ -720,10 +763,11 @@ fn a_session_kept_beside_an_unreadable_draft_again_and_again_reuses_one_slot() {
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "first");
-    assert!(lease.keep_locally().unwrap());
+    assert!(keep_locally(&lease).unwrap());
     type_into(&lease, "second");
-    assert!(lease.keep_locally().unwrap());
+    assert!(keep_locally(&lease).unwrap());
 
     let slots: Vec<_> = std::fs::read_dir(root)
         .unwrap()
@@ -749,9 +793,11 @@ fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "typed beside the unreadable one");
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
+    device.settle();
     drop(lease);
     let instance = repair(&mut device);
     drop(device.disk.arm(Rule::Refuse, named("unreadable-")));
@@ -764,6 +810,8 @@ fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
             device.client.clone(),
         )
         .unwrap();
+
+    device.settle();
     assert_eq!(
         lease.read(|state| state.body().text.clone()),
         "typed beside the unreadable one"
@@ -857,7 +905,7 @@ fn loading_the_draft_kept_beside_replaces_the_record_and_keeps_it_until_forge_ha
         device.spool().take(&device.host, "new").unwrap().is_none(),
         "the version the user didn't pick is removed"
     );
-    assert!(lease.keep_locally().unwrap());
+    assert!(keep_locally(&lease).unwrap());
     let beside = device.spool().kept_beside(&device.host, "new");
     let [Ok(beside)] = &beside[..] else {
         panic!("expected the chosen draft to stay kept beside: {beside:?}");
@@ -880,16 +928,25 @@ fn taking_a_held_draft_back_does_not_count_as_a_new_draft_the_device_could_not_k
                 device.client.clone(),
             )
             .unwrap();
+        device.settle();
         type_into(&lease, scope);
     }
     std::fs::write(device.drafts(), b"not a folder").unwrap();
     sessions.retire();
+    device.settle();
     let held = sessions.unkept().expect("both drafts are held");
     assert_eq!(held.count, 2);
 
     let _first = sessions
-        .open(device.host.clone(), instance, "first".into(), device.client)
+        .open(
+            device.host.clone(),
+            instance,
+            "first".into(),
+            device.client.clone(),
+        )
         .unwrap();
+
+    device.settle();
 
     let still = sessions.unkept().expect("the other draft is still held");
     assert_eq!(still.count, 1);
@@ -1082,12 +1139,16 @@ fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismi
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "first");
     std::fs::write(device.drafts(), b"not a folder").unwrap();
     sessions.retire();
+    device.settle();
     let dismissed = sessions.unkept().expect("the draft is held").generation;
     std::fs::remove_file(device.drafts()).unwrap();
     assert_eq!(sessions.keep_unkept(), None, "trying again keeps it");
+    device.settle();
+    assert_eq!(sessions.unkept(), None);
 
     let mut remounted = DraftSessions::with_spool(device.spool());
     remounted.take_held(sessions.hand_off_held());
@@ -1099,10 +1160,12 @@ fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismi
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     type_into(&lease, "second");
     std::fs::remove_dir_all(device.drafts()).unwrap();
     std::fs::write(device.drafts(), b"not a folder").unwrap();
     remounted.retire();
+    device.settle();
 
     assert_ne!(
         remounted
@@ -1217,9 +1280,10 @@ fn a_choice_still_being_carried_out_is_honoured_by_the_drafts_that_take_over() {
         let instance = device.core.host(&device.host).unwrap().instance();
         let client = device.client;
         move || {
-            let lease = DraftSessions::with_spool(spool)
-                .open(host, instance, "new".into(), client)
+            let lease = DraftSessions::with_spool(spool.clone())
+                .open(host.clone(), instance, "new".into(), client)
                 .unwrap();
+            drop(spool.turn(&host, "new").wait());
             lease.read(|state| (state.body().text.clone(), state.conflict()))
         }
     });
@@ -1365,17 +1429,15 @@ fn a_background_save_that_finishes_late_never_replaces_the_draft_kept_on_retirin
             device.client.clone(),
         )
         .unwrap();
+    device.settle();
     let gate = device.disk.arm(Rule::PauseBefore, named("record."));
     lease.keep_local();
     gate.reached();
     type_into(&lease, "edited while the save was stuck");
 
-    let retiring = std::thread::spawn(move || {
-        sessions.retire();
-        sessions
-    });
+    sessions.retire();
     gate.release();
-    let sessions = retiring.join().unwrap();
+    device.settle();
     assert_eq!(sessions.unkept(), None);
     drop(lease);
     device.settle();
@@ -1385,5 +1447,64 @@ fn a_background_save_that_finishes_late_never_replaces_the_draft_kept_on_retirin
         reopened.read(|state| state.body().text.clone()),
         "edited while the save was stuck",
         "the draft kept on retiring wins over the older save still on its way to disk"
+    );
+}
+
+#[test]
+fn opening_and_retiring_a_draft_do_not_wait_for_the_device() {
+    let device = Device::new();
+    device
+        .spool()
+        .keep(
+            &device.host,
+            "new",
+            kept("kept on this device"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    let busy = device.spool.turn(&device.host, "new").wait();
+    let (opened, opening) = std::sync::mpsc::channel();
+    std::thread::spawn({
+        let spool = device.spool();
+        let host = device.host.clone();
+        let instance = device.core.host(&device.host).unwrap().instance();
+        let client = device.client.clone();
+        move || {
+            let mut sessions = DraftSessions::with_spool(spool);
+            let lease = sessions.open(host, instance, "new".into(), client).unwrap();
+            let recovering = lease.read(DraftSession::recovering);
+            let refused = lease.submit(sending("too early", "early", None));
+            let typed = lease.read(|state| state.body().text.clone());
+            type_into(&lease, "typed too early");
+            sessions.retire();
+            opened
+                .send((recovering, refused, typed, lease.handle.clone(), sessions))
+                .unwrap();
+        }
+    });
+    let (recovering, refused, typed, session, mut sessions) = opening
+        .recv_timeout(Duration::from_secs(10))
+        .expect("opening and retiring return while the device is busy");
+    assert!(recovering, "the draft is still being read");
+    assert_eq!(refused, Err(SendRefusal::DraftLoading));
+    assert_eq!(typed, "");
+    assert!(!session.read(DraftSession::removed));
+
+    drop(busy);
+    device.settle();
+    assert_eq!(sessions.unkept(), None);
+    assert!(session.read(DraftSession::removed));
+    assert_eq!(
+        device
+            .spool()
+            .take(&device.host, "new")
+            .unwrap()
+            .unwrap()
+            .draft
+            .body
+            .text,
+        "kept on this device",
+        "the edit made while reading is not taken, and the recovered draft is kept again"
     );
 }

@@ -324,8 +324,12 @@ impl Workspace {
             .fold(Attention::default(), |total, host| total + host)
     }
 
-    pub(crate) fn unkept_drafts(&self) -> Option<crate::composer::persistence::UnkeptDrafts> {
+    pub(crate) fn unkept_drafts(&mut self) -> Option<crate::composer::persistence::UnkeptDrafts> {
         self.draft_sessions.unkept()
+    }
+
+    pub(crate) fn draft_wake_mailbox(&self) -> &aqua::mailbox::Mailbox<()> {
+        self.draft_sessions.wake_mailbox()
     }
 
     pub(crate) fn keep_unkept_drafts(
@@ -354,7 +358,7 @@ impl Workspace {
         )
     }
 
-    pub(crate) fn take_held_drafts(&mut self, held: crate::composer::persistence::HeldDrafts) {
+    pub(crate) fn take_held_drafts(&self, held: crate::composer::persistence::HeldDrafts) {
         self.draft_sessions.take_held(held);
     }
 

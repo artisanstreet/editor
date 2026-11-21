@@ -180,6 +180,8 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         target.clone(),
         std::rc::Rc::new(|_| {}),
     );
+    crate::recovered(owner.controller.borrow().session.as_ref().unwrap());
+    owner.drain_async(&core, &aqua::images::ImageAssets::default());
     assert!(
         !owner
             .dispatch_with_change(&mut core, ComposerAction::SelectPane(None), None)
@@ -345,6 +347,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         owner.dispose_popups(&mut app);
     }
     let mut old = Composer::new(&core, &mut sessions, target.clone());
+    old.sync(&core);
     let mut other = sessions
         .open(id.clone(), first, target.scope(), client.clone())
         .unwrap();
@@ -425,6 +428,8 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     old.sync(&core);
     assert!(old.session.is_none());
     let mut current = Composer::new(&core, &mut sessions, target);
+    crate::recovered(current.session.as_ref().unwrap());
+    current.sync(&core);
     assert_eq!(
         current
             .session
@@ -444,6 +449,8 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
             thread: artisan_api::ThreadId::new(),
         },
     );
+    crate::recovered(current.session.as_ref().unwrap());
+    current.sync(&core);
     assert!(std::rc::Rc::ptr_eq(&editor, &current.editor));
     assert_eq!(current.editor.borrow().text(), "");
     assert!(!current.editor.borrow_mut().undo());

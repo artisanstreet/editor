@@ -201,6 +201,7 @@ fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() 
         },
         std::rc::Rc::new(|_| {}),
     );
+    crate::recovered(owner.controller.borrow().session.as_ref().unwrap());
     owner
         .controller
         .borrow_mut()

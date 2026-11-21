@@ -159,6 +159,7 @@ impl Shell {
             ctx.bind_mailbox(window, mailbox);
         }
         if let Some(workspace) = self.entry.workspace() {
+            ctx.bind_mailbox(window, workspace.draft_wake_mailbox());
             workspace.inspector.bind(ctx, window);
             if let Some(mailbox) = workspace.conversation.wake_mailbox() {
                 ctx.bind_mailbox(window, mailbox);

@@ -244,7 +244,7 @@ impl RootViews {
             | self.dispatch_resource(shell, ui, ctx)
             | self.dispatch_conversation(shell, ui, ctx, window)
             | self.sync_sidebar(shell, ui, ctx, window);
-        if let Some(workspace) = shell.entry.workspace() {
+        if let Some(workspace) = shell.entry.workspace_mut() {
             shell.failures.offer_drafts(workspace.unkept_drafts());
         }
         let link_changed = match shell.failures.drain(ui) {

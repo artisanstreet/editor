@@ -158,7 +158,11 @@ impl Composer {
     pub fn new(core: &Core, sessions: &mut DraftSessions, target: ComposerTarget) -> Self {
         let (session, notice) = open_draft(core, sessions, &target);
         let mut editor = Editor::new("", Mode::Prompt);
-        editor.set_disabled(session.is_none());
+        editor.set_disabled(
+            session
+                .as_ref()
+                .is_none_or(|session| session.read(DraftSession::recovering)),
+        );
         let host_instance = core.host(target.host()).map(HostData::instance);
         let attachments = core
             .host(target.host())
@@ -246,7 +250,11 @@ impl Composer {
             .host(self.target.host())
             .map(|host| Attachments::new(host.client.clone()));
         let (session, notice) = open_draft(core, sessions, &self.target);
-        if notice.is_some() {
+        if notice.is_some()
+            || session
+                .as_ref()
+                .is_some_and(|session| session.read(DraftSession::recovering))
+        {
             self.editor.borrow_mut().set_disabled(true);
         }
         self.shown_epoch = session
@@ -426,7 +434,7 @@ impl Composer {
     pub(crate) fn draft_editable(&self) -> bool {
         self.session
             .as_ref()
-            .is_some_and(|session| session.read(|state| !state.sending()))
+            .is_some_and(|session| session.read(|state| !state.sending() && !state.recovering()))
     }
 
     pub(crate) fn metadata_ready(&self, host: &HostData) -> bool {
@@ -738,6 +746,7 @@ impl Composer {
         let events = session.drain_events();
         let lost = session.read(|state| state.lost().to_vec());
         let unrecovered = session.take_unrecovered();
+        let recovering = session.read(DraftSession::recovering);
         self.reconcile();
         self.settle_refusal(core);
         for event in &events {
@@ -755,7 +764,7 @@ impl Composer {
         }
         self.editor
             .borrow_mut()
-            .set_disabled(self.questionnaire.sending.is_some());
+            .set_disabled(self.questionnaire.sending.is_some() || recovering);
         if !unrecovered.is_empty() {
             self.notice = Some(editor_core::Problem::new(
                 unrecovered
@@ -813,14 +822,12 @@ impl Composer {
     }
 
     fn accepts_attachments(&mut self) -> bool {
-        let Some((sending, epoch)) = self
-            .session
-            .as_ref()
-            .map(|session| session.read(|state| (state.sending(), state.epoch())))
-        else {
+        let Some((busy, epoch)) = self.session.as_ref().map(|session| {
+            session.read(|state| (state.sending() || state.recovering(), state.epoch()))
+        }) else {
             return false;
         };
-        if sending {
+        if busy {
             return false;
         }
         if epoch != self.shown_epoch {
