@@ -62,6 +62,12 @@ struct Inner {
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
     cancelled: CancellationToken,
+    held_by: HeldBy,
+}
+
+struct HeldBy {
+    holdings: Weak<Mutex<Holdings>>,
+    wake: aqua::mailbox::Sender<()>,
 }
 
 pub const MAX_OPEN_DRAFTS: usize = 64;
@@ -126,9 +132,16 @@ enum Hold {
     Unkept(KeepLocallyError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Standing {
+    Retired,
+    Open,
+}
+
 struct Holding {
     session: DraftHandle,
     hold: Hold,
+    standing: Standing,
 }
 
 struct Holdings {
@@ -401,7 +414,10 @@ impl Drop for DraftSessions {
         reason = "each session settles on its own on this device, so the order sessions are handed over in is irrelevant"
     )]
     fn drop(&mut self) {
-        let held = std::mem::take(&mut lock_holdings(&self.holdings).held);
+        let held: Vec<Holding> = std::mem::take(&mut lock_holdings(&self.holdings).held)
+            .into_iter()
+            .filter(|held| held.standing == Standing::Retired)
+            .collect();
         let mut pending = pending_shutdown();
         pending.retain(DraftHandle::unsettled_on_device);
         for session in self.sessions.values() {
@@ -443,9 +459,20 @@ impl Holdings {
         let index = self.held.iter().position(|held| {
             held.session.0.host == *host
                 && held.session.0.scope == scope
+                && held.standing == Standing::Retired
                 && matches!(held.hold, Hold::Unkept(_))
         })?;
         Some(self.held.remove(index).session)
+    }
+
+    fn hold(&mut self, session: &DraftHandle, hold: Hold, standing: Standing) {
+        self.held
+            .retain(|held| !Arc::ptr_eq(&held.session.0, &session.0));
+        self.held.push(Holding {
+            session: session.clone(),
+            hold,
+            standing,
+        });
     }
 }
 
@@ -495,12 +522,10 @@ impl DraftSessions {
         }
     }
 
-    fn retire_session(&self, session: DraftHandle) {
-        let kept = session.retire(self.wake.sender());
-        self.holdings().held.push(Holding {
-            session,
-            hold: Hold::Keeping(kept),
-        });
+    fn retire_session(&self, session: &DraftHandle) {
+        let kept = session.retire();
+        self.holdings()
+            .hold(session, Hold::Keeping(kept), Standing::Retired);
     }
 
     #[must_use]
@@ -538,8 +563,14 @@ impl DraftSessions {
             holdings.held = keeping;
             unkept
         };
-        for Holding { session, .. } in retrying {
-            self.retire_session(session);
+        for Holding {
+            session, standing, ..
+        } in retrying
+        {
+            match standing {
+                Standing::Retired => self.retire_session(&session),
+                Standing::Open => session.rekeep(),
+            }
         }
         self.unkept()
     }
@@ -587,6 +618,10 @@ impl DraftSessions {
             }),
             changed,
             cancelled: CancellationToken::new(),
+            held_by: HeldBy {
+                holdings: Arc::downgrade(&self.holdings),
+                wake: self.wake.sender(),
+            },
         }));
         self.sessions.insert(key, session.clone());
         let lease = DraftLease::new(session.clone());
@@ -597,7 +632,7 @@ impl DraftSessions {
 
     pub fn retire(&mut self) {
         let retired: Vec<DraftHandle> = self.sessions.drain().map(|(_, session)| session).collect();
-        for session in retired {
+        for session in &retired {
             self.retire_session(session);
         }
     }
@@ -611,7 +646,7 @@ impl DraftSessions {
             retired.push(session.clone());
             false
         });
-        for session in retired {
+        for session in &retired {
             self.retire_session(session);
         }
     }
@@ -852,12 +887,6 @@ impl DraftHandle {
         })
     }
 
-    fn keep(&self, keeping: Keeping) -> Result<(), KeepLocallyError> {
-        let Keeping { turn, snapshot } = keeping;
-        let images = read_images(&self.0.host, snapshot);
-        self.commit(&turn.wait(), images)
-    }
-
     fn commit(
         &self,
         serving: &Serving,
@@ -910,8 +939,47 @@ impl DraftHandle {
         let Some(keeping) = Keeping::of(&self.0, &self.0.shared()) else {
             return;
         };
+        let Keeping { turn, snapshot } = keeping;
+        let kept = self.on_device(move |session| {
+            let images = read_images(&session.0.host, snapshot);
+            let serving = turn.wait();
+            (session.commit(&serving, images), serving)
+        });
+        let Some(holdings) = self.0.held_by.holdings.upgrade() else {
+            tracing::warn!(
+                host = %self.0.host,
+                scope = %self.0.scope,
+                "keeping a draft on this device after its drafts closed; a failure is only logged"
+            );
+            return;
+        };
+        lock_holdings(&holdings).hold(self, Hold::Keeping(kept), Standing::Open);
+    }
+
+    fn on_device(
+        &self,
+        keep: impl FnOnce(&Self) -> (Result<(), KeepLocallyError>, Serving) + Send + 'static,
+    ) -> std::sync::mpsc::Receiver<Result<(), KeepLocallyError>> {
+        let (sender, kept) = std::sync::mpsc::sync_channel(1);
         let session = self.clone();
-        runtime().spawn_blocking(move || drop(session.keep(keeping)));
+        runtime().spawn_blocking(move || {
+            let (result, serving) = keep(&session);
+            if sender.send(result).is_err() {
+                tracing::info!(
+                    host = %session.0.host,
+                    scope = %session.0.scope,
+                    "a draft finished on this device after its drafts were closed"
+                );
+            }
+            drop(serving);
+            match session.0.held_by.wake.send(()) {
+                Ok(())
+                | Err(
+                    aqua::mailbox::SendError::Full(()) | aqua::mailbox::SendError::Closed(()),
+                ) => {}
+            }
+        });
+        kept
     }
 
     fn forget_recovered(&self, shared: &mut Shared) {
@@ -1050,32 +1118,12 @@ impl DraftHandle {
         self.0.spool.turn(&self.0.host, &self.0.scope)
     }
 
-    fn retire(
-        &self,
-        wake: aqua::mailbox::Sender<()>,
-    ) -> std::sync::mpsc::Receiver<Result<(), KeepLocallyError>> {
+    fn retire(&self) -> std::sync::mpsc::Receiver<Result<(), KeepLocallyError>> {
         let turn = self.retiring();
-        let (sender, kept) = std::sync::mpsc::sync_channel(1);
-        let session = self.clone();
-        runtime().spawn_blocking(move || {
+        self.on_device(move |session| {
             let serving = turn.wait();
-            let retired = session.retire_within(&serving);
-            if sender.send(retired).is_err() {
-                tracing::info!(
-                    host = %session.0.host,
-                    scope = %session.0.scope,
-                    "a retired draft finished on this device after its drafts were closed"
-                );
-            }
-            drop(serving);
-            match wake.send(()) {
-                Ok(())
-                | Err(
-                    aqua::mailbox::SendError::Full(()) | aqua::mailbox::SendError::Closed(()),
-                ) => {}
-            }
-        });
-        kept
+            (session.retire_within(&serving), serving)
+        })
     }
 
     fn retire_within(&self, serving: &Serving) -> Result<(), KeepLocallyError> {

@@ -588,6 +588,10 @@ fn saved_by_forge(device: &Device) -> DraftHandle {
         }),
         changed,
         cancelled: CancellationToken::new(),
+        held_by: HeldBy {
+            holdings: Weak::new(),
+            wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN).sender(),
+        },
     }))
 }
 
@@ -1340,6 +1344,10 @@ fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and
         }),
         changed,
         cancelled: CancellationToken::new(),
+        held_by: HeldBy {
+            holdings: Weak::new(),
+            wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN).sender(),
+        },
     }));
 
     session.use_remote();
@@ -1507,4 +1515,111 @@ fn opening_and_retiring_a_draft_do_not_wait_for_the_device() {
         "kept on this device",
         "the edit made while reading is not taken, and the recovered draft is kept again"
     );
+}
+
+fn refused_for_good(submission: &Submission) -> PostMessageError {
+    use editor_core::client::{CallError, CallFailure, ResponseError};
+    let failure = artisan_api::Failure::Legacy {
+        code: artisan_api::ErrorCode::NotFound,
+    };
+    PostMessageError::Send {
+        thread: submission.thread.clone(),
+        message: submission.message.id.clone(),
+        source: CallError {
+            method: reqwest::Method::POST,
+            path: "/threads/thread/messages".to_owned(),
+            failure: Box::new(CallFailure::Answer(ResponseError::Refused {
+                status: reqwest::StatusCode::NOT_FOUND,
+                error: artisan_api::ApiError::new(failure, "the thread is gone".to_owned()),
+            })),
+        },
+    }
+}
+
+fn with_a_set_aside_message(device: &Device, sessions: &DraftSessions) -> DraftHandle {
+    let record = || KeptDraft {
+        set_aside: vec![sending("refused for good", "refused", None)],
+        ..kept("typed after")
+    };
+    device
+        .spool()
+        .keep(
+            &device.host,
+            "new",
+            record(),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    let mut state = DraftSession::new("new".into());
+    state.recover(record(), Vec::new(), Vec::new());
+    assert!(matches!(
+        state.next_operation(),
+        Some(Operation::PostSetAside(_))
+    ));
+    let (changed, _) = watch::channel(0);
+    DraftHandle(Arc::new(Inner {
+        host: device.host.clone(),
+        scope: "new".into(),
+        client: device.client.clone(),
+        spool: device.spool(),
+        kept: Mutex::new(Kept::Recovered(Slot::Record)),
+        shared: Mutex::new(Shared {
+            state,
+            viewers: Vec::new(),
+            timer: None,
+            version: 0,
+            forgetting: false,
+        }),
+        changed,
+        cancelled: CancellationToken::new(),
+        held_by: HeldBy {
+            holdings: Arc::downgrade(&sessions.holdings),
+            wake: sessions.wake.sender(),
+        },
+    }))
+}
+
+fn refuse_for_good(session: &DraftHandle) {
+    let mut handed_back = false;
+    let refused = refused_for_good(&sending("refused for good", "refused", None));
+    session.mutate(|shared| handed_back = shared.state.posted_set_aside(Err(refused)));
+    assert!(handed_back, "Forge refused the set-aside message for good");
+    session.rekeep();
+}
+
+fn kept_on_device(device: &Device) -> KeptDraft {
+    device
+        .spool()
+        .take(&device.host, "new")
+        .unwrap()
+        .expect("the draft is kept on this device")
+        .draft
+}
+
+#[test]
+fn a_hand_back_this_device_could_not_keep_is_reported_and_kept_when_trying_again() {
+    let device = Device::new();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let session = with_a_set_aside_message(&device, &sessions);
+    drop(device.disk.arm(Rule::Refuse, named("record.")));
+
+    refuse_for_good(&session);
+    device.settle();
+
+    let unkept = sessions
+        .unkept()
+        .expect("the failed device write is reported");
+    assert_eq!(unkept.count, 1);
+    assert!(
+        !session.read(DraftSession::removed),
+        "the open draft stays open"
+    );
+    assert_eq!(kept_on_device(&device).set_aside.len(), 1);
+
+    assert_eq!(sessions.keep_unkept(), None, "trying again keeps it");
+    device.settle();
+    assert_eq!(sessions.unkept(), None);
+    assert!(kept_on_device(&device).set_aside.is_empty());
+    assert!(!session.read(DraftSession::removed));
 }

@@ -38,6 +38,10 @@ fn pending_write() -> (DraftHandle, DraftBody, tempfile::TempDir) {
         }),
         changed,
         cancelled: CancellationToken::new(),
+        held_by: HeldBy {
+            holdings: Weak::new(),
+            wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN).sender(),
+        },
     }));
     (handle, *body, spool)
 }
