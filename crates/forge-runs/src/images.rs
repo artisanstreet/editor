@@ -42,12 +42,10 @@ pub(crate) enum SweepError {
     },
     #[error(transparent)]
     Threads(#[from] ThreadIdsError),
-    #[error(transparent)]
-    Remove(#[from] RemoveImagesError),
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("remove the image folder {}", path.display())]
+#[error("remove the image copies at {}", path.display())]
 pub(crate) struct RemoveImagesError {
     path: PathBuf,
     #[source]
@@ -79,12 +77,20 @@ pub(crate) fn thread_folder(data: &Path, thread: &ThreadId) -> PathBuf {
     data.join(ROOT).join(crate::scratch::folder_key(thread))
 }
 
-fn remove_folder(path: PathBuf) -> Result<(), RemoveImagesError> {
-    match std::fs::remove_dir_all(&path) {
-        Err(source) if source.kind() != io::ErrorKind::NotFound => {
-            Err(RemoveImagesError { path, source })
-        }
-        Ok(()) | Err(_) => Ok(()),
+fn remove_entry(path: &Path) -> Result<bool, RemoveImagesError> {
+    let failed = |source| RemoveImagesError {
+        path: path.to_path_buf(),
+        source,
+    };
+    let removed = match std::fs::symlink_metadata(path) {
+        Ok(entry) if entry.file_type().is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(failed(error)),
     }
 }
 
@@ -92,7 +98,50 @@ pub(crate) fn remove_thread_folder(
     data: &Path,
     thread: &ThreadId,
 ) -> Result<(), RemoveImagesError> {
-    remove_folder(thread_folder(data, thread))
+    remove_entry(&thread_folder(data, thread)).map(drop)
+}
+
+fn swept(path: &Path) -> usize {
+    match remove_entry(path) {
+        Ok(removed) => usize::from(removed),
+        Err(error) => {
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "the sweep left an image copy"
+            );
+            0
+        }
+    }
+}
+
+fn partials(folder: &Path) -> Vec<PathBuf> {
+    let is_folder =
+        std::fs::symlink_metadata(folder).is_ok_and(|folder| folder.file_type().is_dir());
+    if !is_folder {
+        return Vec::new();
+    }
+    match std::fs::read_dir(folder) {
+        Ok(entries) => entries
+            .filter_map(|entry| {
+                entry
+                    .inspect_err(|error| {
+                        tracing::warn!(folder = %folder.display(), %error, "list a live thread's image copies");
+                    })
+                    .ok()
+            })
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(PARTIAL_SUFFIX)
+            })
+            .map(|entry| entry.path())
+            .collect(),
+        Err(error) => {
+            tracing::warn!(folder = %folder.display(), %error, "list a live thread's image copies");
+            Vec::new()
+        }
+    }
 }
 
 pub(crate) async fn sweep(
@@ -120,14 +169,17 @@ pub(crate) async fn sweep(
         .iter()
         .map(crate::scratch::folder_key)
         .collect();
-    let orphans: Vec<_> = listed
+    let removed = listed
         .into_iter()
-        .filter(|name| !live.contains(name.to_string_lossy().as_ref()))
-        .collect();
-    let removed = orphans.len();
-    for name in orphans {
-        remove_folder(root.join(name))?;
-    }
+        .map(|name| {
+            let path = root.join(&name);
+            if live.contains(name.to_string_lossy().as_ref()) {
+                partials(&path).iter().map(|partial| swept(partial)).sum()
+            } else {
+                swept(&path)
+            }
+        })
+        .sum();
     Ok(removed)
 }
 

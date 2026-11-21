@@ -595,3 +595,46 @@ async fn an_image_folder_replaced_by_a_symlink_gets_no_copy() {
     assert_eq!(turns[0].images, vec![stored]);
     drop(turns);
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_exclusive_sweep_removes_stale_partials_and_stray_files_and_goes_on_past_failures() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
+    let live = image_folder(&fixture, &fixture.thread_id);
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("image.png"), png(15)).unwrap();
+    let partial = live.join(".image.png.k3Yx9a.partial");
+    std::fs::write(&partial, b"half an im").unwrap();
+    let root = live.parent().unwrap().to_path_buf();
+    let stray = root.join("stray-file");
+    std::fs::write(&stray, b"not a folder").unwrap();
+    let orphans: Vec<_> = (0..3)
+        .map(|_| image_folder(&fixture, &ThreadId::new()))
+        .collect();
+    for orphan in &orphans {
+        std::fs::create_dir_all(orphan).unwrap();
+        std::fs::write(orphan.join("image.png"), png(16)).unwrap();
+    }
+    let stuck = image_folder(&fixture, &ThreadId::new());
+    let locked = stuck.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("image.png"), png(17)).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let exclusive = forge_store::DataLock::acquire(fixture.dir.path()).unwrap();
+    let removed = images::sweep(fixture.dir.path(), fixture.hub.store(), &exclusive)
+        .await
+        .unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(removed, 5, "three orphans, the stray file and the partial");
+    assert!(live.join("image.png").exists(), "the live image went");
+    assert!(!partial.exists(), "the stale partial copy survived");
+    assert!(!stray.exists(), "the stray file survived");
+    assert!(orphans.iter().all(|orphan| !orphan.exists()));
+    assert!(
+        stuck.exists(),
+        "the locked folder could not have been removed"
+    );
+}

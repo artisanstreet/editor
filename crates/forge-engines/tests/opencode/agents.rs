@@ -52,3 +52,36 @@ fn the_sweep_removes_server_folders_this_process_does_not_own() {
     );
     assert!(unrelated.exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn the_sweep_counts_only_removals_and_goes_on_past_a_folder_it_cannot_remove() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().join("opencode");
+    let parent = servers_folder(&home);
+    let stuck = parent.join(format!("{SERVER_PREFIX}stuck"));
+    let locked = stuck.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("opencode.json"), b"{}").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let leftovers: Vec<_> = (0..4)
+        .map(|index| parent.join(format!("{SERVER_PREFIX}killed-{index}")))
+        .collect();
+    for leftover in &leftovers {
+        std::fs::create_dir_all(leftover).unwrap();
+    }
+    let stray = parent.join(format!("{SERVER_PREFIX}stray"));
+    std::fs::write(&stray, b"not a folder").unwrap();
+
+    let removed = sweep_servers(&home).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(removed, 5, "four folders and the stray file");
+    assert!(leftovers.iter().all(|leftover| !leftover.exists()));
+    assert!(!stray.exists(), "the stray file survived");
+    assert!(
+        stuck.exists(),
+        "the locked folder could not have been removed"
+    );
+}

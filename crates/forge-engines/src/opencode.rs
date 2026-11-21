@@ -712,12 +712,6 @@ pub enum SweepServersError {
         #[source]
         source: std::io::Error,
     },
-    #[error("remove the leftover OpenCode server folder {}", path.display())]
-    Remove {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 fn servers_folder(home: &Path) -> PathBuf {
@@ -752,18 +746,26 @@ fn sweep_servers(home: &Path) -> Result<usize, SweepServersError> {
                 && !own.contains(path)
         })
         .collect();
-    for path in &leftovers {
-        match std::fs::remove_dir_all(path) {
-            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
-                return Err(SweepServersError::Remove {
-                    path: path.clone(),
-                    source,
-                });
+    let removed = leftovers
+        .iter()
+        .filter(|path| match remove_leftover(path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "remove the leftover OpenCode server folder");
+                false
             }
-            Ok(()) | Err(_) => {}
-        }
+        })
+        .count();
+    Ok(removed)
+}
+
+fn remove_leftover(path: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path)?.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
     }
-    Ok(leftovers.len())
 }
 
 fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<AgentsDir, ServerError> {
