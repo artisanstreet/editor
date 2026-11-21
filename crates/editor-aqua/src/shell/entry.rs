@@ -6,6 +6,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 pub struct Entry {
     workspace: Option<(String, Workspace)>,
+    held_drafts: Option<crate::composer::persistence::HeldDrafts>,
     failure: Option<crate::core::Problem>,
     landed: bool,
     controller: crate::settings::controller::SettingsController,
@@ -32,6 +33,7 @@ impl Entry {
     ) -> Self {
         Self {
             workspace: None,
+            held_drafts: None,
             failure,
             landed: false,
             controller: crate::settings::controller::SettingsController::default(),
@@ -280,14 +282,18 @@ impl Entry {
         if self.workspace.as_ref().map(|(account, _)| account) == ready.as_ref() {
             return None;
         }
-        let retired = self
-            .workspace
-            .take()
-            .map(|(_, mut workspace)| workspace.retire());
+        let retired = self.workspace.take().map(|(_, mut workspace)| {
+            let (effects, held) = workspace.retire();
+            self.held_drafts = Some(held);
+            effects
+        });
         self.landed = false;
         let mounted = ready.map(|account| {
-            let (workspace, effects) =
+            let (mut workspace, effects) =
                 Workspace::new(core, self.failure.clone(), self.selections.workspace());
+            if let Some(held) = self.held_drafts.take() {
+                workspace.take_held_drafts(held);
+            }
             self.workspace = Some((account, workspace));
             effects
         });

@@ -233,6 +233,27 @@ impl std::fmt::Debug for DraftSessions {
     }
 }
 
+pub struct HeldDrafts {
+    spool: DraftSpool,
+    held: Vec<Unkept>,
+    generation: u64,
+}
+
+impl std::fmt::Debug for HeldDrafts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeldDrafts")
+            .field("spool", &self.spool)
+            .field("held", &self.held.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for HeldDrafts {
+    fn drop(&mut self) {
+        pending_shutdown().extend(self.held.drain(..).map(|held| held.session));
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ShutdownOutcome {
     Saved,
@@ -336,6 +357,26 @@ impl DraftSessions {
             held: Vec::new(),
             generation: 0,
         }
+    }
+
+    pub fn hand_off_held(&mut self) -> HeldDrafts {
+        HeldDrafts {
+            spool: self.spool.clone(),
+            held: std::mem::take(&mut self.held),
+            generation: self.generation,
+        }
+    }
+
+    pub fn take_held(&mut self, mut handed: HeldDrafts) {
+        if handed.spool != self.spool || handed.held.is_empty() {
+            return;
+        }
+        self.generation = if self.held.is_empty() {
+            handed.generation
+        } else {
+            handed.generation.wrapping_add(1)
+        };
+        self.held.append(&mut handed.held);
     }
 
     fn hold(&mut self, session: DraftHandle, error: KeepLocallyError) {

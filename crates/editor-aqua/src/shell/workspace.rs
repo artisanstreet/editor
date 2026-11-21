@@ -334,16 +334,28 @@ impl Workspace {
         self.draft_sessions.keep_unkept()
     }
 
-    pub(crate) fn retire(&mut self) -> NotificationEffects {
+    pub(crate) fn retire(
+        &mut self,
+    ) -> (
+        NotificationEffects,
+        crate::composer::persistence::HeldDrafts,
+    ) {
         if let Some(composer) = &self.composer {
             composer.controller.borrow_mut().release();
         }
         self.draft_sessions.retire();
-        NotificationEffects {
-            withdraw: self.notifications.retain_hosts(&[]),
-            show: Vec::new(),
-            badge: Some(Attention::default()),
-        }
+        (
+            NotificationEffects {
+                withdraw: self.notifications.retain_hosts(&[]),
+                show: Vec::new(),
+                badge: Some(Attention::default()),
+            },
+            self.draft_sessions.hand_off_held(),
+        )
+    }
+
+    pub(crate) fn take_held_drafts(&mut self, held: crate::composer::persistence::HeldDrafts) {
+        self.draft_sessions.take_held(held);
     }
 
     fn follow_hosts(&mut self, core: &Core) -> NotificationEffects {
