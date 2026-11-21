@@ -618,7 +618,10 @@ async fn images_reach_codex_inline_from_the_path_forge_reads() {
         images: vec![image],
     };
 
-    let (items, bytes) = super::user_input(&input).await.unwrap();
+    let bytes = super::image_bytes(&input).await.unwrap();
+    let items = super::user_input(std::slice::from_ref(&input))
+        .await
+        .unwrap();
 
     let url = format!(
         "data:image/webp;base64,{}",
@@ -634,14 +637,70 @@ async fn images_reach_codex_inline_from_the_path_forge_reads() {
     assert_eq!(bytes, b"pristine".len());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_queued_image_holds_no_encoded_payload_until_it_is_sent() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("image.webp");
+    std::fs::write(&image, vec![7; 4096]).unwrap();
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let input = crate::UserInput {
+        id: artisan_api::ItemId::from("item"),
+        text: "look".to_owned(),
+        images: vec![image.clone()],
+    };
+
+    let measured = super::image_bytes(&input).await;
+    let sent = super::user_input(std::slice::from_ref(&input)).await;
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert_eq!(
+        measured.unwrap(),
+        4096,
+        "admission read the image to measure it"
+    );
+    assert!(
+        matches!(sent, Err(super::RunError::Image { ref path, .. }) if *path == image),
+        "sending reads the image: {sent:?}"
+    );
+}
+
 fn queued_with(image_bytes: usize) -> super::Queued {
     super::Queued {
         admission: super::Admission(0),
         input: crate::UserInput::default(),
-        items: Vec::new(),
         image_bytes,
         acknowledge: true,
     }
+}
+
+#[test]
+fn a_full_queue_holds_every_later_steer_for_the_next_run() {
+    use super::Intake::{Holding, Open};
+    let mib = 1024 * 1024;
+    let cap = super::MAX_TURN_IMAGE_BYTES;
+    assert_eq!(
+        super::intake(Open, &[], cap * 2),
+        Open,
+        "an empty queue takes any message"
+    );
+    assert_eq!(
+        super::intake(Open, &[queued_with(100 * mib)], 28 * mib),
+        Open
+    );
+    assert_eq!(
+        super::intake(Open, &[queued_with(100 * mib)], 29 * mib),
+        Holding
+    );
+    let full: Vec<_> = (0..super::MAX_QUEUED).map(|_| queued_with(0)).collect();
+    assert_eq!(super::intake(Open, &full, 0), Holding);
+    assert_eq!(super::intake(Open, &full[1..], 0), Open);
+    assert_eq!(
+        super::intake(Holding, &[], 0),
+        Holding,
+        "a held steer keeps its place ahead of later ones"
+    );
 }
 
 #[test]

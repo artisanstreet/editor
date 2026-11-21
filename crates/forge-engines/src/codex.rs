@@ -33,6 +33,7 @@ use tokio::time::Instant;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 pub const MAX_TURN_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_QUEUED: usize = 32;
 const MAX_LINE_BYTES: usize = MAX_TURN_IMAGE_BYTES.div_ceil(3) * 4 + crate::process::MAX_LINE_BYTES;
 
 #[derive(Debug, thiserror::Error)]
@@ -168,6 +169,7 @@ impl Harness for CodexHarness {
                 decoder: Decoder::default(),
                 io,
                 queued: Vec::new(),
+                intake: Intake::Open,
                 admitted: 0,
                 phase: Phase::Idle,
                 steering: HashMap::new(),
@@ -252,9 +254,14 @@ struct Admission(u64);
 struct Queued {
     admission: Admission,
     input: UserInput,
-    items: Vec<Value>,
     image_bytes: usize,
     acknowledge: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Intake {
+    Open,
+    Holding,
 }
 
 #[derive(Debug)]
@@ -286,6 +293,7 @@ struct Run {
     decoder: Decoder,
     io: RunIo,
     queued: Vec<Queued>,
+    intake: Intake,
     admitted: u64,
     phase: Phase,
     steering: HashMap<u64, Queued>,
@@ -337,7 +345,7 @@ impl Run {
                 .await;
         }
         self.admit(turn.input.clone(), true).await?;
-        self.pump(turn)?;
+        self.pump(turn).await?;
         self.drive(turn).await
     }
 
@@ -389,7 +397,7 @@ impl Run {
                     match input {
                         Some(input) => {
                             self.input(input).await?;
-                            self.pump(turn)?;
+                            self.pump(turn).await?;
                         }
                         None => inbox_open = false,
                     }
@@ -449,7 +457,7 @@ impl Run {
                 self.input(input).await?;
             }
         }
-        self.pump(turn)?;
+        self.pump(turn).await?;
         if let Phase::Stopping {
             interrupt_sent: false,
             starting,
@@ -531,15 +539,30 @@ impl Run {
     }
 
     async fn admit(&mut self, input: UserInput, acknowledge: bool) -> Result<(), RunError> {
-        let (items, image_bytes) = user_input(&input).await?;
+        let image_bytes = image_bytes(&input).await?;
+        self.enqueue(input, image_bytes, acknowledge);
+        Ok(())
+    }
+
+    fn enqueue(&mut self, input: UserInput, image_bytes: usize, acknowledge: bool) {
         self.admitted += 1;
         self.queued.push(Queued {
             admission: Admission(self.admitted),
             input,
-            items,
             image_bytes,
             acknowledge,
         });
+    }
+
+    async fn steer(&mut self, input: UserInput) -> Result<(), RunError> {
+        let image_bytes = image_bytes(&input).await?;
+        self.intake = intake(self.intake, &self.queued, image_bytes);
+        match self.intake {
+            Intake::Open => self.enqueue(input, image_bytes, true),
+            Intake::Holding => {
+                tracing::info!(item = %input.id, queued = self.queued.len(), "Codex's queue is full; the steer waits for the next run");
+            }
+        }
         Ok(())
     }
 
@@ -556,7 +579,7 @@ impl Run {
 
     async fn input(&mut self, input: Input) -> Result<(), RunError> {
         match input {
-            Input::Steer(input) => self.admit(input, true).await?,
+            Input::Steer(input) => self.steer(input).await?,
             Input::Answer { key, answer } => {
                 let events = self.decoder.answer(&key, &answer);
                 self.emit(events).await;
@@ -573,7 +596,7 @@ impl Run {
         Ok(())
     }
 
-    fn pump(&mut self, turn: &Turn) -> Result<(), RunError> {
+    async fn pump(&mut self, turn: &Turn) -> Result<(), RunError> {
         let nudge = match &self.phase {
             Phase::Starting(_) | Phase::Stopping { .. } => return Ok(()),
             Phase::Finished { nudge, .. } => *nudge,
@@ -584,19 +607,20 @@ impl Run {
         }
         let thread = self.decoder.thread().ok_or(RunError::NoThread)?.to_owned();
         if let Phase::Active { turn: turn_id } = &self.phase {
+            let turn_id = turn_id.clone();
             for queued in std::mem::take(&mut self.queued) {
+                let input = user_input(std::slice::from_ref(&queued.input)).await?;
                 let params =
-                    json!({ "threadId": thread, "expectedTurnId": turn_id, "input": queued.items });
+                    json!({ "threadId": thread, "expectedTurnId": turn_id, "input": input });
                 let id = self.decoder.request("turn/steer", params);
+                self.flush()?;
                 self.steering.insert(id, queued);
             }
         } else if self.steering.is_empty() {
             let later = self.queued.split_off(within_turn_images(&self.queued));
             let queued = std::mem::replace(&mut self.queued, later);
-            let input: Vec<Value> = queued
-                .iter()
-                .flat_map(|queued| queued.items.iter().cloned())
-                .collect();
+            let inputs: Vec<UserInput> = queued.iter().map(|queued| queued.input.clone()).collect();
+            let input = user_input(&inputs).await?;
             let mut params = json!({ "threadId": thread, "input": input });
             turn_overrides(turn, &mut params);
             if let Some(permissions) = self.permissions {
@@ -800,32 +824,59 @@ fn within_turn_images(queued: &[Queued]) -> usize {
     fitting.max(1).min(queued.len())
 }
 
-async fn user_input(input: &UserInput) -> Result<(Vec<Value>, usize), RunError> {
-    let mut items = Vec::new();
-    if !input.text.is_empty() || input.images.is_empty() {
-        items.push(json!({ "type": "text", "text": input.text, "text_elements": [] }));
+fn intake(intake: Intake, queued: &[Queued], image_bytes: usize) -> Intake {
+    let held = queued
+        .iter()
+        .map(|queued| queued.image_bytes)
+        .fold(image_bytes, usize::saturating_add);
+    let fits = queued.is_empty() || (queued.len() < MAX_QUEUED && held <= MAX_TURN_IMAGE_BYTES);
+    match intake {
+        Intake::Open if fits => Intake::Open,
+        Intake::Open | Intake::Holding => Intake::Holding,
     }
-    if input.images.is_empty() {
-        return Ok((items, 0));
-    }
-    let (id, paths) = (input.id.clone(), input.images.clone());
-    let (images, bytes) = tokio::task::spawn_blocking(move || inline_images(&id, &paths))
-        .await
-        .map_err(|source| RunError::ImageTask {
-            item: input.id.clone(),
-            source,
-        })??;
-    items.extend(images);
-    Ok((items, bytes))
 }
 
-fn inline_images(
-    item: &ItemId,
-    paths: &[std::path::PathBuf],
-) -> Result<(Vec<Value>, usize), RunError> {
-    use base64::Engine as _;
+async fn image_bytes(input: &UserInput) -> Result<usize, RunError> {
     let mut total = 0_usize;
-    let images = paths
+    for path in &input.images {
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(|source| RunError::Image {
+                item: input.id.clone(),
+                path: path.clone(),
+                source,
+            })?
+            .len();
+        total = total.saturating_add(usize::try_from(size).unwrap_or(usize::MAX));
+    }
+    Ok(total)
+}
+
+async fn user_input(inputs: &[UserInput]) -> Result<Vec<Value>, RunError> {
+    let Some(first) = inputs.iter().find(|input| !input.images.is_empty()) else {
+        return Ok(inputs.iter().filter_map(text_item).collect());
+    };
+    let item = first.id.clone();
+    let owned = inputs.to_vec();
+    tokio::task::spawn_blocking(move || {
+        owned.iter().try_fold(Vec::new(), |mut items, input| {
+            items.extend(text_item(input));
+            items.extend(inline_images(&input.id, &input.images)?);
+            Ok::<_, RunError>(items)
+        })
+    })
+    .await
+    .map_err(|source| RunError::ImageTask { item, source })?
+}
+
+fn text_item(input: &UserInput) -> Option<Value> {
+    (!input.text.is_empty() || input.images.is_empty())
+        .then(|| json!({ "type": "text", "text": input.text, "text_elements": [] }))
+}
+
+fn inline_images(item: &ItemId, paths: &[std::path::PathBuf]) -> Result<Vec<Value>, RunError> {
+    use base64::Engine as _;
+    paths
         .iter()
         .map(|path| {
             let bytes = std::fs::read(path).map_err(|source| RunError::Image {
@@ -833,13 +884,11 @@ fn inline_images(
                 path: path.clone(),
                 source,
             })?;
-            total = total.saturating_add(bytes.len());
             let url = format!(
                 "data:image/webp;base64,{}",
                 base64::engine::general_purpose::STANDARD.encode(bytes)
             );
             Ok(json!({ "type": "image", "url": url }))
         })
-        .collect::<Result<Vec<_>, RunError>>()?;
-    Ok((images, total))
+        .collect()
 }

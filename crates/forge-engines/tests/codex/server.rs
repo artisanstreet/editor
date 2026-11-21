@@ -110,6 +110,65 @@ async fn a_stalled_handoff_does_not_hold_up_codex_threads_of_another_home() {
 }
 
 #[tokio::test]
+async fn image_steers_during_a_stalled_turn_start_fill_the_queue_and_the_rest_wait() {
+    let fixture = Fixture::with(&[("ARTISAN_TEST_START_DELAY_MS", "1000")]);
+    let image = fixture.root.join("image.webp");
+    std::fs::write(&image, b"pixels").unwrap();
+    let sent = super::super::MAX_QUEUED + 8;
+    let (inputs, inbox) = mpsc::channel(sent);
+    for index in 0..sent {
+        let steer = UserInput {
+            id: artisan_api::ItemId::from(format!("steer-{index:02}")),
+            text: format!("steer {index:02}."),
+            images: vec![image.clone()],
+        };
+        inputs.send(Input::Steer(steer)).await.unwrap();
+    }
+    let (events, mut received) = mpsc::channel(1024);
+    let io = RunIo {
+        inbox,
+        events,
+        cancel: CancellationToken::new(),
+    };
+    let harness = crate::codex::CodexHarness.run(fixture.turn("hello", None), io);
+    let outcome = tokio::time::timeout(Duration::from_secs(20), harness)
+        .await
+        .expect("the run ends");
+    drop(inputs);
+
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    let mut accepted = Vec::new();
+    while let Ok(event) = received.try_recv() {
+        if let EngineEvent::InputAccepted { id } = event {
+            accepted.push(id.to_string());
+        }
+    }
+    let admitted: Vec<String> = (0..super::super::MAX_QUEUED)
+        .map(|index| format!("steer-{index:02}"))
+        .collect();
+    assert_eq!(
+        accepted
+            .iter()
+            .filter(|id| id.starts_with("steer-"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        admitted,
+        "only the steers that fit the queue were taken"
+    );
+    let input = fixture.input();
+    assert!(input.contains(&format!("steer {:02}.", super::super::MAX_QUEUED - 1)));
+    assert!(
+        (super::super::MAX_QUEUED..sent)
+            .all(|index| !input.contains(&format!("steer {index:02}."))),
+        "a held steer reached Codex"
+    );
+}
+
+#[tokio::test]
 async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
     let fixture = Fixture::new();
     let ((outcome, _), ()) = tokio::join!(
