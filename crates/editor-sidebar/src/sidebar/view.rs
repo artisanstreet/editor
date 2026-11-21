@@ -720,7 +720,7 @@ pub(crate) fn project_picker_dialog(
                 .height(Length::Px(FOLDER_LIST_HEIGHT))
                 .width(Length::Pct(100.0)),
         )
-        .estimated_row_height(Length::Px(FOLDER_ROW.height().unwrap_or_default()))
+        .estimated_row_height(Length::Px(FOLDER_ROW.height(&theme).unwrap_or_default()))
         .virtualize()
         .build();
     let path = picker
@@ -781,9 +781,14 @@ pub(crate) fn project_picker_dialog(
 
 pub const ROOT_KEY: &str = "sidebar-root";
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a pane's entries are sized from the theme's text scale alongside the sidebar, core, viewport, pane, renderer and emitter"
+)]
 fn thread_entries(
     sidebar: &Sidebar,
     core: &Core,
+    theme: &ArtisanTheme,
     viewport_height: f32,
     entries: &[super::geometry::Entry],
     pane: ThreadPane,
@@ -799,7 +804,7 @@ fn thread_entries(
     let host = sidebar.host_data(core)?;
     let host_id = host.id.clone();
     let instance = host.instance();
-    let spacer = history_spacer(entries, viewport_height, sidebar.history_fraction);
+    let spacer = history_spacer(theme, entries, viewport_height, sidebar.history_fraction);
     let keys = entry_keys(entries);
     let items: Vec<_> = listed(entries)
         .into_iter()
@@ -814,7 +819,7 @@ fn thread_entries(
         .collect();
     let heights: Vec<_> = items
         .iter()
-        .map(|(_, _, entry, lead)| lead + entry.height())
+        .map(|(_, _, entry, lead)| lead + entry.height(theme))
         .collect();
     let viewport_entries: Rc<Vec<Entry>> =
         Rc::new(items.iter().map(|(_, _, entry, _)| entry.clone()).collect());
@@ -833,7 +838,7 @@ fn thread_entries(
                     .height(Length::Pct(100.0)),
             )
             .estimated_row_height(Length::Px(
-                super::geometry::ThreadLayout::Standalone.height(),
+                super::geometry::ThreadLayout::Standalone.height(theme),
             ))
             .initial_height(move |index| heights.get(index).copied().unwrap_or(0.0))
             .virtualize()
@@ -1035,11 +1040,11 @@ pub fn thread_entries_view(
         };
         if history_index.is_some_and(|history| index > history) {
             UiBox::new()
-                .height(entry.height())
+                .height(entry.height(theme))
                 .clip(true)
                 .child(
                     UiBox::new()
-                        .height(entry.height())
+                        .height(entry.height(theme))
                         .opacity(fraction)
                         .style(Style::new().transform(Transform2D::translate(
                             0.0,
@@ -1056,6 +1061,7 @@ pub fn thread_entries_view(
     thread_entries(
         sidebar,
         core,
+        theme,
         viewport_height,
         &row_entries,
         pane,

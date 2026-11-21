@@ -57,17 +57,17 @@ impl Row {
     }
 
     #[must_use]
-    pub const fn lines(self) -> f32 {
+    pub fn lines(self, theme: &ArtisanTheme) -> f32 {
         match self {
             Self::ListItem(Density::Tall) => {
-                TextRole::Label.spec().line + TextRole::Caption.spec().line
+                TextRole::Label.line_px(theme) + TextRole::Caption.line_px(theme)
             }
             Self::MenuItem
             | Self::ListItem(_)
             | Self::Heading
             | Self::ListHeading
             | Self::Form
-            | Self::Key => self.title().spec().line,
+            | Self::Key => self.title().line_px(theme),
         }
     }
 
@@ -95,11 +95,11 @@ impl Row {
     }
 
     #[must_use]
-    pub const fn height(self) -> Option<f32> {
+    pub fn height(self, theme: &ArtisanTheme) -> Option<f32> {
         match self {
             Self::Form => None,
             Self::MenuItem | Self::ListItem(_) | Self::Heading | Self::ListHeading | Self::Key => {
-                Some(self.lines() + 2.0 * self.pad().y.px())
+                Some(2.0f32.mul_add(self.pad().y.px(), self.lines(theme)))
             }
         }
     }
@@ -299,7 +299,7 @@ impl RowItem {
                 bottom: pad.y.px(),
             })
             .radius(Length::Px(self.radius));
-        match self.row.height() {
+        match self.row.height(&self.theme) {
             Some(height) => style.height(Length::Px(height)),
             None => style,
         }

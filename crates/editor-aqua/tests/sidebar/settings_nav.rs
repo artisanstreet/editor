@@ -60,7 +60,7 @@ fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
         .unwrap();
     resources.ui.build_frame().unwrap();
     let (expanded, expanded_access) = about(&resources.ui);
-    let children = settings_nav::children_height(4);
+    let children = settings_nav::children_height(&ArtisanTheme::resolved(), 4);
     assert!(
         (expanded.y - collapsed.y - children).abs() < 1.0 / 1.25,
         "the completion frame must expose all four General children without pointer input"

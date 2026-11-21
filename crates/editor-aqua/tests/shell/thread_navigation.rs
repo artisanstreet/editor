@@ -3,11 +3,6 @@ use crate::ui::kit::Row;
 use aqua_core::{Key, KeyEvent, NamedKey, Point, Rect};
 use artisan_api::ItemId;
 
-const PANEL_PITCH: f32 = match Row::MenuItem.height() {
-    Some(height) => height,
-    None => 0.0,
-};
-
 #[test]
 fn active_turn_tracks_latest_outline_marker_at_or_before_reader() {
     let markers: Vec<_> = [10, 40, 100]
@@ -28,10 +23,22 @@ fn active_turn_tracks_latest_outline_marker_at_or_before_reader() {
 
 #[test]
 fn panel_centering_clamps_to_the_actual_scrollable_extent() {
-    test_support::assert_near!(navigator::panel_scroll_offset(0, 50, 180.0), 0.0);
-    test_support::assert_near!(navigator::panel_scroll_offset(10, 50, 180.0), 288.0);
-    test_support::assert_near!(navigator::panel_scroll_offset(49, 50, 180.0), 1620.0);
-    test_support::assert_near!(navigator::panel_scroll_offset(1, 2, 180.0), 0.0);
+    test_support::assert_near!(
+        navigator::panel_scroll_offset(&ArtisanTheme::resolved(), 0, 50, 180.0),
+        0.0
+    );
+    test_support::assert_near!(
+        navigator::panel_scroll_offset(&ArtisanTheme::resolved(), 10, 50, 180.0),
+        288.0
+    );
+    test_support::assert_near!(
+        navigator::panel_scroll_offset(&ArtisanTheme::resolved(), 49, 50, 180.0),
+        1620.0
+    );
+    test_support::assert_near!(
+        navigator::panel_scroll_offset(&ArtisanTheme::resolved(), 1, 2, 180.0),
+        0.0
+    );
 }
 
 #[test]
@@ -193,12 +200,20 @@ fn clicks_close_the_outline_only_outside_the_drawer_and_chevron() {
 
 #[test]
 fn the_cursor_scrolls_the_panel_only_when_it_leaves_the_view() {
-    let pitch = PANEL_PITCH;
+    let pitch = Row::MenuItem
+        .height(&ArtisanTheme::resolved())
+        .unwrap_or_default();
     let view = pitch * 5.0;
-    test_support::assert_near!(navigator::panel_keep_offset(2, 0.0, view), 0.0);
-    test_support::assert_near!(navigator::panel_keep_offset(5, 0.0, view), pitch);
     test_support::assert_near!(
-        navigator::panel_keep_offset(3, pitch * 4.0, view),
+        navigator::panel_keep_offset(&ArtisanTheme::resolved(), 2, 0.0, view),
+        0.0
+    );
+    test_support::assert_near!(
+        navigator::panel_keep_offset(&ArtisanTheme::resolved(), 5, 0.0, view),
+        pitch
+    );
+    test_support::assert_near!(
+        navigator::panel_keep_offset(&ArtisanTheme::resolved(), 3, pitch * 4.0, view),
         pitch * 3.0
     );
 }

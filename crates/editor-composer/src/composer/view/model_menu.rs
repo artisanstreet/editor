@@ -21,11 +21,6 @@ const MODEL_PANE_HEIGHT: f32 = 328.0;
 
 const MODEL_SIDE_WIDTH: f32 = 164.0;
 
-pub(super) const MODEL_ITEM_HEIGHT: f32 = match Row::ListItem(Density::Tall).height() {
-    Some(height) => height,
-    None => 0.0,
-};
-
 const MODEL_ITEM_GUTTER: f32 = Inset::Menu.px();
 
 pub(super) const MODEL_ITEM_GAP: f32 = 1.0;
@@ -317,7 +312,7 @@ fn model_list_pane(
     scroll: f32,
     dispatch: &Dispatch,
 ) -> Element {
-    use super::super::model_list::{GROUP_ROW_HEIGHT, ROW_GAP, SECTION_SPACER};
+    use super::super::model_list::{ROW_GAP, SECTION_SPACER, group_row_height};
     use super::super::picker::ModelRow;
     let muted = theme.colors.text_muted;
     let mut rows = UiBox::new()
@@ -402,7 +397,7 @@ fn model_list_pane(
                     .build()
                     .style(
                         Style::new()
-                            .height(Length::Px(GROUP_ROW_HEIGHT))
+                            .height(Length::Px(group_row_height(theme)))
                             .flex_shrink(0.0),
                     )
                     .aria_expanded(is_open),
@@ -618,7 +613,7 @@ pub(crate) fn model_menu(
             .and_then(lab_icon)
             .unwrap_or_else(|| engine_icon(theme, config.engine))
     });
-    let item_height = model_item_height(items.len());
+    let item_height = model_item_height(theme, items.len());
     let panes: Vec<_> = items.iter().map(|item| item.pane).collect();
     let select = Rc::clone(dispatch);
     let mut buttons = TabList::new(
@@ -815,9 +810,12 @@ pub(crate) fn model_menu(
         )
 }
 
-pub(super) fn model_item_height(count: usize) -> f32 {
+pub(super) fn model_item_height(theme: &ArtisanTheme, count: usize) -> f32 {
     let count = super::rows(count.max(1));
-    MODEL_ITEM_HEIGHT.min((count - 1.0).mul_add(-MODEL_ITEM_GAP, MODEL_PANE_HEIGHT) / count)
+    Row::ListItem(Density::Tall)
+        .height(theme)
+        .unwrap_or_default()
+        .min((count - 1.0).mul_add(-MODEL_ITEM_GAP, MODEL_PANE_HEIGHT) / count)
 }
 
 fn lab_icon(lab: &str) -> Option<AssetId> {

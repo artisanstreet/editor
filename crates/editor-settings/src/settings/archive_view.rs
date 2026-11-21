@@ -24,10 +24,10 @@ const AGE_WIDTH: f32 = 112.0;
 const ACTION_WIDTH: f32 = 96.0;
 const VISIBLE_ROWS: u8 = 8;
 
-fn row_height() -> f32 {
+fn row_height(theme: &ArtisanTheme) -> f32 {
     2.0f32.mul_add(
         KitRow::Form.pad().y.px(),
-        KitRow::ListItem(Density::Tall).lines() + Space::S2.px(),
+        KitRow::ListItem(Density::Tall).lines(theme) + Space::S2.px(),
     )
 }
 
@@ -197,7 +197,7 @@ pub(crate) fn archived(
             .child(UiBox::new().width(ACTION_WIDTH).build())
             .build();
         let visible = u8::try_from(rows.len()).map_or(VISIBLE_ROWS, |rows| rows.min(VISIBLE_ROWS));
-        let height = f32::from(visible) * row_height();
+        let height = f32::from(visible) * row_height(theme);
         let theme = *theme;
         let row_emit = Rc::clone(emit);
         let list = List::new()
@@ -256,7 +256,7 @@ pub(crate) fn archived(
                     .width(Length::Pct(100.0))
                     .height(Length::Px(height)),
             )
-            .estimated_row_height(Length::Px(row_height()))
+            .estimated_row_height(Length::Px(row_height(&theme)))
             .build()
             .with_key("archived-threads");
         ui::card(&theme, vec![header, list])

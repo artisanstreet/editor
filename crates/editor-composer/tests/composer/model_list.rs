@@ -15,7 +15,7 @@ fn gated(engines: &[EngineId]) -> Vec<ModelRow> {
 const VIEWPORT: f32 = 300.0;
 
 fn spied_after_jump(rows: &[ModelRow], engine: EngineId, reduced: bool) -> Option<EngineId> {
-    let layout = ListLayout::new(rows);
+    let layout = ListLayout::new(&ArtisanTheme::resolved(), rows);
     let max = layout.max_scroll(VIEWPORT);
     let mut scroll = ModelScroll::default();
     scroll.open(0.0);
@@ -34,7 +34,7 @@ fn spied_after_jump(rows: &[ModelRow], engine: EngineId, reduced: bool) -> Optio
 #[test]
 fn a_jump_to_a_middle_engine_that_cannot_reach_the_top_keeps_that_engine_selected() {
     let rows = gated(&[EngineId::Claude, EngineId::Codex, EngineId::OpenCode]);
-    let layout = ListLayout::new(&rows);
+    let layout = ListLayout::new(&ArtisanTheme::resolved(), &rows);
     let anchor = layout.anchor(&rows, EngineId::Codex, VIEWPORT).unwrap();
     assert_eq!(
         anchor,
@@ -54,7 +54,7 @@ fn a_jump_to_a_middle_engine_that_cannot_reach_the_top_keeps_that_engine_selecte
 #[test]
 fn scrolling_after_a_jump_hands_the_selection_back_to_the_scroll_position() {
     let rows = gated(&[EngineId::Claude, EngineId::Codex, EngineId::OpenCode]);
-    let layout = ListLayout::new(&rows);
+    let layout = ListLayout::new(&ArtisanTheme::resolved(), &rows);
     let max = layout.max_scroll(VIEWPORT);
     let mut scroll = ModelScroll::default();
     scroll.open(0.0);

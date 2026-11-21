@@ -228,9 +228,9 @@ impl ComposerOwner {
             }
             ComposerAction::JumpEngine(engine) => {
                 self.tooltip.borrow_mut().clear();
-                let layout = super::super::model_list::ListLayout::new(&composer.picker.models);
-                if let Some(to) = layout.anchor(&composer.picker.models, engine, MODEL_LIST_HEIGHT)
-                {
+                if let Some(to) = self.model_layout.borrow().as_ref().and_then(|layout| {
+                    layout.anchor(&composer.picker.models, engine, MODEL_LIST_HEIGHT)
+                }) {
                     self.model_scroll.borrow_mut().jump(engine, to);
                 }
             }

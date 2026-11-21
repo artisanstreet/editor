@@ -54,11 +54,11 @@ fn inked(theme: &ArtisanTheme, role: TextRole, words: impl Into<String>, ink: Ok
         .gpui_source_color(ink.to_reference_text_color())
 }
 
-fn static_row(children: Vec<Element>) -> Element {
+fn static_row(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     UiBox::new()
         .width(Length::Pct(100.0))
         .height(
-            ROW.height()
+            ROW.height(theme)
                 .expect("invariant: inspector list rows have a fixed height"),
         )
         .padded(ROW.pad().x)
@@ -326,7 +326,7 @@ fn fact_row(
                 .build(),
         ),
     }
-    static_row(children)
+    static_row(theme, children)
 }
 
 fn agent_row(
@@ -406,8 +406,11 @@ fn plan_row(
             };
             let mut struck = TextRole::Label.style(theme);
             struck.strikethrough = resolved;
-            static_row(vec![fit(inked(theme, TextRole::Label, value.clone(), ink)
-                .spans(vec![StyledSpan::new(value.clone(), struck)]))])
+            static_row(
+                theme,
+                vec![fit(inked(theme, TextRole::Label, value.clone(), ink)
+                    .spans(vec![StyledSpan::new(value.clone(), struck)]))],
+            )
         }
         TextContent::Stored(source) => {
             let source = source.clone();
@@ -586,23 +589,26 @@ pub(crate) fn inspector_view(
                 }
                 Entry::Plan(index) => match &summary.plan {
                     Collection::Inline(steps) => steps.get(*index).map_or_else(
-                        || static_row(Vec::new()),
+                        || static_row(&theme, Vec::new()),
                         |step| plan_row(&theme, *index, step, Rc::clone(&row_action)),
                     ),
-                    Collection::Stored(_) => static_row(Vec::new()),
+                    Collection::Stored(_) => static_row(&theme, Vec::new()),
                 },
                 Entry::Terminal(index) => {
                     terminal_row(&theme, &summary.terminals[*index], Rc::clone(&row_action))
                 }
                 Entry::Workflow(index) => {
                     let workflow = &summary.workflows[*index];
-                    static_row(vec![
-                        muted_glyph(&theme, AssetId::TABLER_SITEMAP),
-                        fit(TextRole::Label.text(
-                            &theme,
-                            workflow.name.clone().unwrap_or_else(|| "Workflow".into()),
-                        )),
-                    ])
+                    static_row(
+                        &theme,
+                        vec![
+                            muted_glyph(&theme, AssetId::TABLER_SITEMAP),
+                            fit(TextRole::Label.text(
+                                &theme,
+                                workflow.name.clone().unwrap_or_else(|| "Workflow".into()),
+                            )),
+                        ],
+                    )
                 }
             };
             let closes = rows

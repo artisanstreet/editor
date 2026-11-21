@@ -39,7 +39,7 @@ fn a_rule_occupies_the_height_it_declares() {
         panic!("both neighbours are laid out");
     };
     assert!(
-        close(below - above - 1.0, Divider::Rule.height()),
+        close(below - above - 1.0, Divider::Rule.height(theme)),
         "a virtualized list can reserve a rule's height without measuring it"
     );
 }

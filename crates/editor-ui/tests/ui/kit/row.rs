@@ -32,8 +32,8 @@ fn list_headings_align_with_list_item_text() {
         );
     }
     assert_eq!(
-        Row::ListHeading.height(),
-        Row::Heading.height(),
+        Row::ListHeading.height(ArtisanTheme::for_mode(ThemeMode::Dark)),
+        Row::Heading.height(ArtisanTheme::for_mode(ThemeMode::Dark)),
         "list headings are as tall as menu headings"
     );
     assert!(

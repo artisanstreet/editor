@@ -47,15 +47,13 @@ pub(crate) fn view(
         .skip(1)
         .cloned()
         .collect::<Vec<_>>();
-    let inbox_height: f32 = inbox_entries
-        .iter()
-        .map(editor_sidebar::geometry::Entry::height)
-        .sum();
+    let inbox_height: f32 = inbox_entries.iter().map(|entry| entry.height(&theme)).sum();
     let history_content: f32 = history_entries
         .iter()
-        .map(editor_sidebar::geometry::Entry::height)
+        .map(|entry| entry.height(&theme))
         .sum();
     let history_height = history_height(
+        &theme,
         height,
         inbox_height,
         history_content,
@@ -100,7 +98,7 @@ pub(crate) fn view(
     if !sidebar.lists.history.is_empty() {
         column = column.child(
             Aqua::Box()
-                .height(crate::sidebar::geometry::history_height())
+                .height(crate::sidebar::geometry::history_height(&theme))
                 .styles([Aqua::Style().flex_shrink(0.0)])
                 .child(view::history_toggle(&theme, sidebar.history_fraction, emit))
                 .build(),
@@ -275,8 +273,14 @@ pub fn states(
     states
 }
 
-pub fn history_height(viewport: f32, inbox: f32, history: f32, fraction: f32) -> f32 {
-    let available = (viewport - crate::sidebar::geometry::history_height()).max(0.0);
+pub fn history_height(
+    theme: &ArtisanTheme,
+    viewport: f32,
+    inbox: f32,
+    history: f32,
+    fraction: f32,
+) -> f32 {
+    let available = (viewport - crate::sidebar::geometry::history_height(theme)).max(0.0);
     (available - inbox)
         .max(available * 0.5)
         .min(available)

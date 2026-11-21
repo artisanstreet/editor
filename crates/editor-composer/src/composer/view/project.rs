@@ -67,7 +67,7 @@ pub fn project_menu(
                             .width(Length::Pct(100.0))
                             .height(
                                 super::rows(count.min(PROJECT_ROWS_SHOWN))
-                                    * row.height().unwrap_or_default(),
+                                    * row.height(theme).unwrap_or_default(),
                             )
                             .child(rows.build())
                             .build()

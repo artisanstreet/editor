@@ -1,6 +1,7 @@
 use artisan_api::EngineId;
 use editor_aqua::composer::model_list::{ListLayout, ModelScroll};
 use editor_aqua::composer::picker::ModelRow;
+use editor_aqua::ui::theme::ArtisanTheme;
 use std::time::{Duration, Instant};
 
 const VIEWPORT: f32 = 120.0;
@@ -24,7 +25,7 @@ fn rows() -> Vec<ModelRow> {
 #[test]
 fn the_engine_bar_follows_the_section_under_it_and_lands_on_the_last_at_the_end() {
     let rows = rows();
-    let layout = ListLayout::new(&rows);
+    let layout = ListLayout::new(&ArtisanTheme::resolved(), &rows);
     assert_eq!(layout.spied(&rows, 0.0, VIEWPORT), Some(EngineId::Claude));
     let codex = layout.anchor(&rows, EngineId::Codex, VIEWPORT).unwrap();
     assert_eq!(layout.spied(&rows, codex, VIEWPORT), Some(EngineId::Codex));
@@ -41,7 +42,7 @@ fn the_engine_bar_follows_the_section_under_it_and_lands_on_the_last_at_the_end(
 #[test]
 fn opening_centres_the_current_model_without_scrolling_past_the_ends() {
     let rows = rows();
-    let layout = ListLayout::new(&rows);
+    let layout = ListLayout::new(&ArtisanTheme::resolved(), &rows);
     let first = layout
         .centred(&rows, EngineId::Claude, "c0", VIEWPORT)
         .unwrap();

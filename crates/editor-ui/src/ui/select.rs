@@ -2,10 +2,6 @@ use std::time::{Duration, Instant};
 
 use super::picker_motion::MenuMotion;
 
-const OPTION_HEIGHT: f32 = match Row::MenuItem.height() {
-    Some(height) => height,
-    None => 0.0,
-};
 const MENU_MIN_WIDTH: f32 = 160.0;
 const MENU: super::kit::Surface = super::kit::Surface::Menu;
 const FIELD: super::kit::Surface = super::kit::Surface::Field;
@@ -246,13 +242,13 @@ impl<V: Clone + Eq> SelectState<V> {
         }
     }
 
-    fn reveal(&mut self, index: usize, viewport: f32) {
+    fn reveal(&mut self, index: usize, option: f32, viewport: f32) {
         #[expect(
             clippy::cast_precision_loss,
             reason = "option indices are far below 2^23"
         )]
-        let top = OPTION_HEIGHT * index as f32;
-        let bottom = top + OPTION_HEIGHT;
+        let top = option * index as f32;
+        let bottom = top + option;
         let shown = self.scroll.offset();
         if top < shown {
             self.scroll = MenuScroll::Reveal(top);
@@ -292,7 +288,11 @@ fn select_key_name(key: InputKey) -> Option<&'static str> {
     reason = "option counts are far below 2^23"
 )]
 fn menu_height(theme: &ArtisanTheme, count: usize) -> f32 {
-    (OPTION_HEIGHT * count.max(1) as f32).min(theme.density.command_list_max_height)
+    (option_height(theme) * count.max(1) as f32).min(theme.density.command_list_max_height)
+}
+
+fn option_height(theme: &ArtisanTheme) -> f32 {
+    Row::MenuItem.height(theme).unwrap_or_default()
 }
 
 fn typeahead_form(text: &str) -> String {
@@ -502,7 +502,11 @@ impl<V: Clone + Eq + 'static> Select<V> {
                             | RoutedInput::DragEnd { .. } => return InputResponse::default(),
                         };
                         if let Some(index) = result.reveal {
-                            state.reveal(index, menu_height(&theme, entries.len()));
+                            state.reveal(
+                                index,
+                                option_height(&theme),
+                                menu_height(&theme, entries.len()),
+                            );
                         }
                         (result, before, state.open)
                     };

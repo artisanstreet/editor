@@ -25,8 +25,8 @@ mod surface;
 pub(crate) use self::model_menu::model_menu;
 use self::model_menu::{
     MODEL_BAR_GAP, MODEL_BAR_HEIGHT, MODEL_EDGE_BOTTOM, MODEL_EDGE_TOP, MODEL_ITEM_GAP,
-    MODEL_ITEM_HEIGHT, MODEL_LIST_HEIGHT, axis_options, choose_axis_config, engine_icon,
-    model_item_height, model_menu_items,
+    MODEL_LIST_HEIGHT, axis_options, choose_axis_config, engine_icon, model_item_height,
+    model_menu_items,
 };
 pub use self::project::project_menu;
 pub(crate) use self::project::project_tab;
@@ -633,6 +633,7 @@ pub struct ComposerOwner {
     model_menu_serial: std::cell::Cell<u64>,
     prompt_edges: editor_ui::scroll_edge::ScrollEdges,
     model_scroll: std::cell::RefCell<super::model_list::ModelScroll>,
+    model_layout: std::cell::RefCell<Option<super::model_list::ListLayout>>,
     model_tab: std::cell::RefCell<super::sliding_tab::SlidingTab>,
     last_visible: std::cell::RefCell<ComposerVisible>,
     tooltip: std::cell::RefCell<super::picker::PickerTooltip>,
@@ -907,10 +908,8 @@ impl ComposerOwner {
             model_menu_serial: std::cell::Cell::new(0),
             prompt_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             model_scroll: std::cell::RefCell::default(),
-            model_tab: std::cell::RefCell::new(super::sliding_tab::SlidingTab::new(
-                0.0,
-                MODEL_ITEM_HEIGHT,
-            )),
+            model_layout: std::cell::RefCell::default(),
+            model_tab: std::cell::RefCell::new(super::sliding_tab::SlidingTab::new(0.0, 0.0)),
             last_visible: std::cell::RefCell::new(last_visible),
             tooltip: std::cell::RefCell::new(super::picker::PickerTooltip::default()),
         }

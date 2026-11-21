@@ -244,6 +244,7 @@ struct Interaction {
     available: bool,
     entries: Vec<Seq>,
     cursor: Option<usize>,
+    theme: ArtisanTheme,
 }
 
 impl Default for Interaction {
@@ -257,6 +258,7 @@ impl Default for Interaction {
             available: false,
             entries: Vec::new(),
             cursor: None,
+            theme: ArtisanTheme::resolved(),
         }
     }
 }
@@ -489,6 +491,7 @@ impl ThreadNavigation {
             state.cursor = Some(active);
         }
         state.entries = markers.iter().map(|marker| marker.position).collect();
+        state.theme = *theme;
         let panel = navigator::panel(
             markers,
             Some(markers[active].position),
@@ -519,9 +522,10 @@ impl ThreadNavigation {
         {
             let offset = match reveal {
                 Reveal::Center(active, count) => {
-                    navigator::panel_scroll_offset(active, count, bounds.h)
+                    navigator::panel_scroll_offset(&self.interaction.theme, active, count, bounds.h)
                 }
                 Reveal::Keep(index) => navigator::panel_keep_offset(
+                    &self.interaction.theme,
                     index,
                     ui.tree()
                         .scroll_offset(scroll)

@@ -27,8 +27,8 @@ use crate::ui::{
 const ROW: kit::Row = kit::Row::ListItem(Density::Dense);
 const DEPTH_INDENT: f32 = 16.0;
 
-fn row_height() -> f32 {
-    ROW.height().unwrap_or_default()
+fn row_height(theme: &ArtisanTheme) -> f32 {
+    ROW.height(theme).unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -299,7 +299,7 @@ fn row(
     }
     let mut content = UiBox::new()
         .width(Length::Pct(100.0))
-        .height(row_height())
+        .height(row_height(theme))
         .spaced(ROW.gap())
         .padded(ROW.pad().x)
         .radius(kit::Row::radius_in(Surface::Card))
@@ -498,7 +498,8 @@ impl FileTree {
                 ));
             }
         }
-        let height = f32::from(u16::try_from(visible.len().min(14)).unwrap_or(14)) * row_height();
+        let height =
+            f32::from(u16::try_from(visible.len().min(14)).unwrap_or(14)) * row_height(theme);
         let tree = Self(Arc::clone(&self.0));
         let row_id = id.to_owned();
         let theme = *theme;
@@ -511,7 +512,7 @@ impl FileTree {
                     .width(Length::Pct(100.0))
                     .height(Length::Px(height)),
             )
-            .estimated_row_height(Length::Px(row_height()))
+            .estimated_row_height(Length::Px(row_height(&theme)))
             .measured_uniform_rows()
             .virtualize()
             .build()

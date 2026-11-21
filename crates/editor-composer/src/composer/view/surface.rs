@@ -34,7 +34,7 @@ impl ComposerOwner {
         let picker = &controller.picker;
         let current = controller.effective_config(host);
         let engines = super::super::picker::offered_engines(host);
-        let layout = ListLayout::new(&picker.models);
+        let layout = ListLayout::new(theme, &picker.models);
         let items = model_menu_items(host, picker, current.clone());
         let pane = picker
             .axis
@@ -76,6 +76,7 @@ impl ComposerOwner {
             .or_else(|| layout.spied(&picker.models, scroll, MODEL_LIST_HEIGHT))
             .filter(|engine| engines.iter().any(|status| status.engine == *engine));
         drop(scrolling);
+        *self.model_layout.borrow_mut() = Some(layout);
         let active = super::rows(
             items
                 .iter()
@@ -84,7 +85,7 @@ impl ComposerOwner {
         );
         let tab = {
             let mut tab = self.model_tab.borrow_mut();
-            let height = model_item_height(items.len());
+            let height = model_item_height(theme, items.len());
             tab.resize(height);
             tab.aim(active * (height + MODEL_ITEM_GAP), now);
             if opening || self.reduced_motion {

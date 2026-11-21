@@ -19,30 +19,33 @@ fn mounted(view: Element) -> aqua::UiApp {
 }
 
 fn trigger(state: &Rc<RefCell<SelectState<usize>>>) -> Element {
-    Select::new(
-        TRIGGER,
-        ArtisanTheme::resolved(),
-        Some(0),
-        entries(),
-        Rc::clone(state),
-    )
-    .label("Long")
-    .build()
+    trigger_in(&ArtisanTheme::resolved(), state)
+}
+
+fn trigger_in(theme: &ArtisanTheme, state: &Rc<RefCell<SelectState<usize>>>) -> Element {
+    Select::new(TRIGGER, *theme, Some(0), entries(), Rc::clone(state))
+        .label("Long")
+        .build()
 }
 
 fn menu(state: &Rc<RefCell<SelectState<usize>>>) -> Element {
-    SelectMenu::new(
-        ArtisanTheme::resolved(),
-        Some(0),
-        entries(),
-        Rc::clone(state),
-        240.0,
-    )
-    .build()
+    menu_in(&ArtisanTheme::resolved(), entries(), state)
+}
+
+fn menu_in(
+    theme: &ArtisanTheme,
+    entries: Vec<SelectEntry<usize>>,
+    state: &Rc<RefCell<SelectState<usize>>>,
+) -> Element {
+    SelectMenu::new(*theme, Some(0), entries, Rc::clone(state), 240.0).build()
 }
 
 fn arrow_down(state: &Rc<RefCell<SelectState<usize>>>, presses: usize) {
-    let mut app = mounted(trigger(state));
+    arrow_down_in(&ArtisanTheme::resolved(), state, presses);
+}
+
+fn arrow_down_in(theme: &ArtisanTheme, state: &Rc<RefCell<SelectState<usize>>>, presses: usize) {
+    let mut app = mounted(trigger_in(theme, state));
     state.borrow_mut().set_open(true);
     assert!(app.focus_key(TRIGGER));
     let event = KeyEvent {
@@ -188,5 +191,71 @@ fn a_screen_reader_scroll_of_the_menu_survives_a_rebuild() {
     assert!(
         option.y >= list.y && option.y + option.h <= list.y + list.h,
         "arrowing to Option 1 scrolls it back into view from where the screen reader left the list: {option:?} in {list:?}"
+    );
+}
+
+fn largest_text() -> ArtisanTheme {
+    let mut theme = ArtisanTheme::resolved();
+    theme.typography = theme.typography.scaled(2.25);
+    theme
+}
+
+fn text_rect(app: &aqua::UiApp, text: &str) -> Rect {
+    use aqua_ui::tree::NodeKind;
+    let tree = app.tree();
+    tree.traverse()
+        .into_iter()
+        .find(|node| {
+            tree.get(*node).is_some_and(
+                |shown| matches!(&shown.kind, NodeKind::Text(shown) if shown.text() == text),
+            )
+        })
+        .and_then(|node| tree.rect(node))
+        .unwrap_or_else(|| panic!("{text:?} is shown"))
+}
+
+fn list_box(app: &aqua::UiApp) -> Rect {
+    bounds(
+        &app.tree()
+            .emit_semantics()
+            .into_iter()
+            .find(|node| node.role == Role::ListBox)
+            .expect("the menu is a list box"),
+    )
+}
+
+#[test]
+fn at_the_largest_text_size_each_option_is_tall_enough_for_its_label() {
+    let state = Rc::new(RefCell::new(SelectState::new(Instant::now())));
+    let three = entries().into_iter().take(3).collect();
+    let app = mounted(menu_in(&largest_text(), three, &state));
+    let option = bounds(&node(&app, Role::Option, "Option 1"));
+    let label = text_rect(&app, "Option 1");
+    let pad = 2.0 * Row::MenuItem.pad().y.px();
+    assert!(
+        label.h + pad <= option.h + 0.5,
+        "the {}px label overflows its {}px option",
+        label.h,
+        option.h
+    );
+    let list = list_box(&app);
+    let final_option = bounds(&node(&app, Role::Option, "Option 2"));
+    assert!(
+        final_option.y + final_option.h <= list.y + list.h + 0.5,
+        "the menu at {list:?} cuts off its last option at {final_option:?}"
+    );
+}
+
+#[test]
+fn at_the_largest_text_size_arrowing_keeps_the_highlighted_option_in_view() {
+    let state = Rc::new(RefCell::new(SelectState::new(Instant::now())));
+    arrow_down_in(&largest_text(), &state, 12);
+    assert_eq!(state.borrow().highlighted(), Some(&12));
+    let app = mounted(menu_in(&largest_text(), entries(), &state));
+    let list = list_box(&app);
+    let option = bounds(&node(&app, Role::Option, "Option 12"));
+    assert!(
+        option.y >= list.y - 0.5 && option.y + option.h <= list.y + list.h + 0.5,
+        "Option 12 at {option:?} is inside the menu at {list:?}"
     );
 }

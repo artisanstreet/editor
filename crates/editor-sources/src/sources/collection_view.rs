@@ -23,9 +23,9 @@ type Activate<'a, T> = Option<&'a dyn Fn(&T, u64)>;
 const ENTRY: Row = Row::ListItem(Density::Regular);
 const READ: ButtonSize = ButtonSize::Sm;
 
-fn entry_height() -> f32 {
+fn entry_height(theme: &ArtisanTheme) -> f32 {
     ENTRY
-        .height()
+        .height(theme)
         .expect("invariant: a list item row has a fixed height")
 }
 
@@ -139,14 +139,14 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<
                 .size(READ)
                 .nested(
                     Row::radius_in(Surface::Inset),
-                    (entry_height() - READ.height()) / 2.0,
+                    (entry_height(&self.theme) - READ.height()) / 2.0,
                 )
                 .disabled(preview.disabled)
                 .build(),
             );
         }
         UiBox::new()
-            .height(entry_height())
+            .height(entry_height(&self.theme))
             .clip(true)
             .child(row.build())
             .build()
@@ -171,7 +171,7 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
             )
             .build();
     };
-    let height = viewport(entry_height(), max_height);
+    let height = viewport(entry_height(theme), max_height);
     let mut body = stack().child(
         TextRole::Title
             .text(
@@ -200,7 +200,7 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
                     .width(Length::Pct(100.0)),
             ],
             true,
-            entry_height(),
+            entry_height(theme),
             0,
         );
         let watched_browser = Rc::clone(browser);

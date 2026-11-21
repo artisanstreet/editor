@@ -68,7 +68,7 @@ pub(crate) fn surface(theme: &ArtisanTheme, seam: Seam, reduced: bool) -> Elemen
                     key,
                     Rect::from_edges(
                         rect.x,
-                        (rect.h - crate::frame::strip::HEIGHT).mul_add(0.5, rect.y),
+                        (rect.h - crate::frame::strip::height(&theme)).mul_add(0.5, rect.y),
                         rect.right(),
                         sheet.y,
                     )
@@ -105,7 +105,7 @@ pub(crate) fn surface(theme: &ArtisanTheme, seam: Seam, reduced: bool) -> Elemen
                 bounds,
                 damage: Rect::from_edges(
                     sheet.x - 24.0,
-                    sheet.y - crate::frame::strip::HEIGHT - 24.0,
+                    sheet.y - crate::frame::strip::height(&theme) - 24.0,
                     sheet.right() + 24.0,
                     sheet.y + Radius::Shell.px() + 24.0,
                 ),

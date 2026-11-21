@@ -49,10 +49,10 @@ impl Divider {
     }
 
     #[must_use]
-    pub fn height(&self) -> f32 {
+    pub fn height(&self, theme: &ArtisanTheme) -> f32 {
         let body = match self {
             Self::Rule => 2.0 * LINE,
-            Self::Labelled(_) => TextRole::Caption.spec().line,
+            Self::Labelled(_) => TextRole::Caption.line_px(theme),
         };
         2.0f32.mul_add(GAP.px(), body)
     }

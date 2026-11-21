@@ -16,9 +16,9 @@ const PANEL_ROW: Row = Row::MenuItem;
 pub const PANEL_WIDTH: f32 = 320.0;
 const DIGIT_WIDTH: f32 = 7.5;
 
-fn panel_pitch() -> f32 {
+fn panel_pitch(theme: &ArtisanTheme) -> f32 {
     PANEL_ROW
-        .height()
+        .height(theme)
         .expect("invariant: menu item rows have a fixed height")
 }
 
@@ -75,7 +75,7 @@ pub fn panel(
     dispatch: Dispatch,
 ) -> Element {
     let theme = *theme;
-    let pitch = panel_pitch();
+    let pitch = panel_pitch(&theme);
     let width = number_width(markers.len());
     let list = List::new()
         .items(markers.iter().cloned().enumerate())
@@ -110,8 +110,13 @@ pub fn panel(
 }
 
 #[must_use]
-pub fn panel_keep_offset(index: usize, offset: f32, viewport_height: f32) -> f32 {
-    let pitch = panel_pitch();
+pub fn panel_keep_offset(
+    theme: &ArtisanTheme,
+    index: usize,
+    offset: f32,
+    viewport_height: f32,
+) -> f32 {
+    let pitch = panel_pitch(theme);
     #[expect(
         clippy::cast_precision_loss,
         reason = "navigator entries are user messages in one thread, far below 2^23"
@@ -129,8 +134,13 @@ pub fn panel_keep_offset(index: usize, offset: f32, viewport_height: f32) -> f32
     clippy::cast_precision_loss,
     reason = "navigator entries are user messages in one thread, far below 2^23"
 )]
-pub fn panel_scroll_offset(active: usize, count: usize, viewport_height: f32) -> f32 {
-    let pitch = panel_pitch();
+pub fn panel_scroll_offset(
+    theme: &ArtisanTheme,
+    active: usize,
+    count: usize,
+    viewport_height: f32,
+) -> f32 {
+    let pitch = panel_pitch(theme);
     let full = count as f32 * pitch;
     (active as f32 + 0.5)
         .mul_add(pitch, -(viewport_height / 2.0))

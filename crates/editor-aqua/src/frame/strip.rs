@@ -15,11 +15,13 @@ use editor_assets::AssetId;
 use std::rc::Rc;
 
 const ROW: Row = Row::Heading;
-pub(crate) const HEIGHT: f32 = match ROW.height() {
-    Some(height) => height,
-    None => 0.0,
-};
-pub(crate) const BAR_HEIGHT: f32 = HEIGHT + Space::S4.px();
+pub(crate) fn height(theme: &ArtisanTheme) -> f32 {
+    ROW.height(theme).unwrap_or_default()
+}
+
+pub(crate) fn bar_height(theme: &ArtisanTheme) -> f32 {
+    height(theme) + Space::S4.px()
+}
 pub const RADIUS: Radius = Radius::Panel;
 const MIN_WIDTH: f32 = 96.0;
 const MAX_WIDTH: f32 = 720.0;
@@ -120,7 +122,11 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
     };
     UiBox::new()
         .layout("column")
-        .height(if tab.active { BAR_HEIGHT } else { HEIGHT })
+        .height(if tab.active {
+            bar_height(theme)
+        } else {
+            height(theme)
+        })
         .style(
             Style::new()
                 .justify(JustifyContent::END)
@@ -131,7 +137,7 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         .child(
             UiBox::new()
                 .layout("column")
-                .height(HEIGHT)
+                .height(height(theme))
                 .style(Style::new().width(Length::Pct(100.0)))
                 .child(area)
                 .build(),

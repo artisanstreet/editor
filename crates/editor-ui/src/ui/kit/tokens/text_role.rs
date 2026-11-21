@@ -61,6 +61,11 @@ impl TextRole {
     }
 
     #[must_use]
+    pub fn line_px(self, theme: &ArtisanTheme) -> f32 {
+        theme.typography.size(self.spec().line)
+    }
+
+    #[must_use]
     pub fn style(self, theme: &ArtisanTheme) -> TextStyle {
         let spec = self.spec();
         let family = match spec.face {
@@ -70,7 +75,7 @@ impl TextRole {
         TextStyle {
             families: vec![FontFamily::Named(family.to_owned())],
             size_px: theme.typography.size(spec.size),
-            line_height_px: theme.typography.size(spec.line),
+            line_height_px: self.line_px(theme),
             weight: spec.weight,
             letter_spacing_em: match self {
                 Self::Prose => Some(theme.typography.tracking_em),

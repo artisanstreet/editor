@@ -34,15 +34,18 @@ fn mention_heading(kind: super::super::mentions::Kind) -> &'static str {
     }
 }
 
-fn mention_metrics(viewport: aqua_core::Size) -> super::super::mentions::Metrics {
-    let row = Row::MenuItem.height().unwrap_or_default();
-    let heading = Row::Heading.height().unwrap_or_default();
+fn mention_metrics(
+    theme: &ArtisanTheme,
+    viewport: aqua_core::Size,
+) -> super::super::mentions::Metrics {
+    let row = Row::MenuItem.height(theme).unwrap_or_default();
+    let heading = Row::Heading.height(theme).unwrap_or_default();
     let fits = 2.0f32.mul_add(
         -MENTION_SURFACE.padding_px(),
         2.0f32.mul_add(-MENU_VIEWPORT_MARGIN, viewport.h),
     );
     super::super::mentions::Metrics {
-        divider: Divider::Rule.height(),
+        divider: Divider::Rule.height(theme),
         heading,
         row,
         viewport: row.mul_add(MENTION_ROWS_SHOWN, heading).min(fits).max(row),
@@ -148,7 +151,7 @@ fn mention_menu(
     let list = Scroll::new()
         .layout("column")
         .offset(aqua_core::Point::new(0.0, scroll))
-        .style(Style::new().max_height(Length::Px(mention_metrics(viewport).viewport)))
+        .style(Style::new().max_height(Length::Px(mention_metrics(theme, viewport).viewport)))
         .child(entries.style(inset_sides(Style::new(), inset, 0.0)).build())
         .build()
         .with_key(MENTION_SCROLL);
@@ -177,7 +180,7 @@ impl ComposerOwner {
     ) -> Option<Element> {
         let composer = self.controller.borrow();
         let mentions = &composer.mentions;
-        let scroll = mentions.scroll(kept, mention_metrics(viewport));
+        let scroll = mentions.scroll(kept, mention_metrics(theme, viewport));
         mention_menu(theme, mentions, viewport, width, scroll, &self.dispatch)
     }
 

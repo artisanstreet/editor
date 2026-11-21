@@ -100,7 +100,7 @@ impl Titlebar {
         let mut root = UiBox::new()
             .layout("row")
             .width(Length::Pct(100.0))
-            .height(crate::frame::strip::BAR_HEIGHT)
+            .height(crate::frame::strip::bar_height(theme))
             .style(Style::new().flex_shrink(0.0).align(AlignItems::CENTER))
             .child(content)
             .child(self.controls(theme, window));
@@ -108,7 +108,7 @@ impl Titlebar {
         if let Some(meter) = meter {
             root = root.child(
                 UiBox::new()
-                    .height(crate::frame::strip::BAR_HEIGHT)
+                    .height(crate::frame::strip::bar_height(theme))
                     .style(
                         Style::new()
                             .absolute_at(None, Some(0.0), Some(meter_right), None)
@@ -131,7 +131,7 @@ impl Titlebar {
             root.build().debug_selector("artisan-desktop-titlebar"),
             true,
             has_meter,
-            crate::frame::strip::BAR_HEIGHT,
+            crate::frame::strip::bar_height(theme),
         )
     }
 

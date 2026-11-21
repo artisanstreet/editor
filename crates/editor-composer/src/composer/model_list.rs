@@ -3,18 +3,9 @@ use std::time::{Duration, Instant};
 
 use super::picker::ModelRow;
 use editor_ui::kit::{Row, Space};
+use editor_ui::theme::ArtisanTheme;
 
-const fn height(row: Row) -> f32 {
-    match row.height() {
-        Some(height) => height,
-        None => 0.0,
-    }
-}
-
-const ENGINE_ROW_HEIGHT: f32 = height(Row::Heading);
 pub(crate) const GATE_ROW_HEIGHT: f32 = 84.0;
-pub(crate) const GROUP_ROW_HEIGHT: f32 = height(Row::Heading);
-const MODEL_ROW_HEIGHT: f32 = height(Row::MenuItem);
 pub(crate) const ROW_GAP: Space = Space::S2;
 pub(crate) const SECTION_SPACER: f32 = Space::S6.px();
 pub(crate) const PADDING: Space = Space::S6;
@@ -28,20 +19,29 @@ const JUMP_DURATION: Duration = Duration::from_millis(300);
 pub struct ListLayout {
     tops: Vec<f32>,
     height: f32,
+    model: f32,
 }
 
-const fn row_height(row: &ModelRow) -> f32 {
+#[must_use]
+pub fn group_row_height(theme: &ArtisanTheme) -> f32 {
+    Row::Heading.height(theme).unwrap_or_default()
+}
+
+fn model_row_height(theme: &ArtisanTheme) -> f32 {
+    Row::MenuItem.height(theme).unwrap_or_default()
+}
+
+fn row_height(theme: &ArtisanTheme, row: &ModelRow) -> f32 {
     match row {
-        ModelRow::Engine(_) => ENGINE_ROW_HEIGHT,
+        ModelRow::Engine(_) | ModelRow::Group { .. } => group_row_height(theme),
         ModelRow::Gate(_) => GATE_ROW_HEIGHT,
-        ModelRow::Group { .. } => GROUP_ROW_HEIGHT,
-        ModelRow::Model { .. } => MODEL_ROW_HEIGHT,
+        ModelRow::Model { .. } => model_row_height(theme),
     }
 }
 
 impl ListLayout {
     #[must_use]
-    pub fn new(rows: &[ModelRow]) -> Self {
+    pub fn new(theme: &ArtisanTheme, rows: &[ModelRow]) -> Self {
         let mut tops = Vec::with_capacity(rows.len());
         let mut y = PADDING_TOP;
         let mut section = None;
@@ -52,12 +52,13 @@ impl ListLayout {
             }
             section = Some(engine);
             tops.push(y);
-            y += row_height(row) + GAP;
+            y += row_height(theme, row) + GAP;
         }
         let content = if rows.is_empty() { y } else { y - GAP };
         Self {
             tops,
             height: content + PADDING_BOTTOM,
+            model: model_row_height(theme),
         }
     }
 
@@ -97,7 +98,7 @@ impl ListLayout {
             matches!(row, ModelRow::Model { engine: row_engine, id: row_id, .. }
                 if *row_engine == engine && row_id == id)
         })?;
-        let centre = self.tops[index] + MODEL_ROW_HEIGHT / 2.0 - viewport / 2.0;
+        let centre = self.tops[index] + self.model / 2.0 - viewport / 2.0;
         Some(centre.clamp(0.0, self.max_scroll(viewport)))
     }
 }

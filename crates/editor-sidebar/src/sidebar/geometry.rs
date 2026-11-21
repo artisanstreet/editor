@@ -1,5 +1,6 @@
 use super::list::{HitRow, Lists, RowData};
 use editor_ui::kit::{Density, Divider, Row, Space, Surface};
+use editor_ui::theme::ArtisanTheme;
 
 pub(crate) const RAIL_WIDTH: f32 = 48.0;
 pub(crate) const READ_AHEAD: f32 = 600.0;
@@ -23,13 +24,13 @@ impl ThreadLayout {
         }
     }
 
-    pub(crate) fn height(self) -> f32 {
-        self.row().height().unwrap_or_default()
+    pub(crate) fn height(self, theme: &ArtisanTheme) -> f32 {
+        self.row().height(theme).unwrap_or_default()
     }
 }
 
-pub fn history_height() -> f32 {
-    Divider::Rule.height() + TOGGLE.height().unwrap_or_default()
+pub fn history_height(theme: &ArtisanTheme) -> f32 {
+    Divider::Rule.height(theme) + TOGGLE.height(theme).unwrap_or_default()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,12 +48,12 @@ pub enum Entry {
 }
 
 impl Entry {
-    pub fn height(&self) -> f32 {
+    pub fn height(&self, theme: &ArtisanTheme) -> f32 {
         match self {
-            Self::Thread(_, layout) => layout.height(),
-            Self::Hit(_) => ThreadLayout::Standalone.height(),
-            Self::Project { .. } | Self::Heading(_) => HEADING.height().unwrap_or_default(),
-            Self::History => history_height(),
+            Self::Thread(_, layout) => layout.height(theme),
+            Self::Hit(_) => ThreadLayout::Standalone.height(theme),
+            Self::Project { .. } | Self::Heading(_) => HEADING.height(theme).unwrap_or_default(),
+            Self::History => history_height(theme),
             Self::Gap(height) => *height,
             Self::Spacer => 0.0,
         }
@@ -165,15 +166,20 @@ pub fn listed(entries: &[Entry]) -> Vec<Listed> {
         .collect()
 }
 
-pub fn history_spacer(entries: &[Entry], viewport_height: f32, fraction: f32) -> f32 {
+pub fn history_spacer(
+    theme: &ArtisanTheme,
+    entries: &[Entry],
+    viewport_height: f32,
+    fraction: f32,
+) -> f32 {
     let mut after_history = false;
     let mut before = 0.0;
     let mut after = 0.0;
     for entry in entries {
         if after_history {
-            after += entry.height();
+            after += entry.height(theme);
         } else {
-            before += entry.height();
+            before += entry.height(theme);
         }
         after_history |= matches!(entry, Entry::History);
     }
