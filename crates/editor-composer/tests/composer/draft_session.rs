@@ -982,3 +982,14 @@ fn a_set_aside_message_that_fails_for_now_waits_to_be_sent_again() {
         Some(Operation::PostSetAside(_))
     ));
 }
+
+#[test]
+fn a_message_sent_from_a_removed_draft_is_refused_instead_of_dropped() {
+    let mut state = loaded(1, &typed("hello"));
+    state.remove();
+
+    assert_eq!(
+        state.submit(submission("message", "hello")),
+        Err(SendRefusal::NoDraft)
+    );
+}

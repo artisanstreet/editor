@@ -1274,8 +1274,7 @@ impl DraftSession {
 
     pub fn submit(&mut self, submission: Submission) -> Result<(), SendRefusal> {
         let State::Open(draft) = &mut self.state else {
-            self.dropped("a message sent from the composer");
-            return Ok(());
+            return Err(SendRefusal::NoDraft);
         };
         if !draft.rivals.is_empty() {
             return Err(SendRefusal::ChoosingDraft);

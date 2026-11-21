@@ -1123,13 +1123,14 @@ impl Composer {
             draft: None,
         };
         self.save();
-        if let Some(session) = &self.session {
-            session.submit(Submission {
+        self.session
+            .as_ref()
+            .ok_or(SendRefusal::NoDraft)?
+            .submit(Submission {
                 message,
                 create,
                 thread,
             })?;
-        }
         self.clear_input();
         self.cleared = Some(std::time::Instant::now());
         Ok(())
