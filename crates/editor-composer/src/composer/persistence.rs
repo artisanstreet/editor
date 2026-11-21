@@ -264,19 +264,11 @@ pub enum ShutdownOutcome {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Removal {
-    Running,
-    Failed,
-}
-
 struct Rejected {
     spool: DraftSpool,
     host: HostId,
     scope: String,
     slot: Slot,
-    which: &'static str,
-    removal: Removal,
 }
 
 impl Rejected {
@@ -477,11 +469,7 @@ impl DraftSessions {
         }
         let mut state = DraftSession::new(scope.clone());
         let rejected_slots = self.rejected_slots(&host, &scope);
-        let skip = |slot: Slot| {
-            rejected_slots
-                .iter()
-                .any(|(rejected, ..)| *rejected == slot)
-        };
+        let skip = |slot: Slot| rejected_slots.contains(&slot);
         let mut beside = self
             .kept_beside(&host, &scope, skip, &mut state)
             .into_iter();
@@ -544,11 +532,7 @@ impl DraftSessions {
         }));
         self.sessions.insert(key, session.clone());
         let lease = DraftLease::new(session.clone());
-        for (slot, which, removal) in rejected_slots {
-            if removal == Removal::Failed {
-                session.forget_slot(slot, which);
-            }
-        }
+        session.sweep_tombstones();
         session.pump();
         Ok(lease)
     }
@@ -587,11 +571,11 @@ impl DraftSessions {
             .collect()
     }
 
-    fn rejected_slots(&self, host: &HostId, scope: &str) -> Vec<(Slot, &'static str, Removal)> {
+    fn rejected_slots(&self, host: &HostId, scope: &str) -> Vec<Slot> {
         rejected()
             .iter()
             .filter(|rejected| rejected.holds(&self.spool, host, scope))
-            .map(|rejected| (rejected.slot, rejected.which, rejected.removal))
+            .map(|rejected| rejected.slot)
             .collect()
     }
 
@@ -820,6 +804,15 @@ impl DraftHandle {
         let scope = shared.state.scope();
         match self.0.spool.forget(&self.0.host, scope, slot) {
             Ok(()) => shared.kept = Kept::Nothing,
+            Err(error) if error.slot_freed() => {
+                tracing::error!(
+                    host = %self.0.host,
+                    %scope,
+                    error = %::diagnostics::chain(&error),
+                    "set aside a recovered draft that Forge has saved but couldn't remove it; removing it when this draft next opens"
+                );
+                shared.kept = Kept::Nothing;
+            }
             Err(error) => {
                 tracing::error!(
                     host = %self.0.host,
@@ -1069,47 +1062,57 @@ impl DraftHandle {
 
     fn forget_slot(&self, slot: Slot, which: &'static str) {
         let inner = &self.0;
-        let rejecting = |rejected: &Rejected| {
-            rejected.slot == slot && rejected.holds(&inner.spool, &inner.host, &inner.scope)
-        };
-        {
-            let mut rejected = rejected();
-            match rejected.iter_mut().find(|rejected| rejecting(rejected)) {
-                Some(rejected) => rejected.removal = Removal::Running,
-                None => rejected.push(Rejected {
-                    spool: inner.spool.clone(),
-                    host: inner.host.clone(),
-                    scope: inner.scope.clone(),
-                    slot,
-                    which,
-                    removal: Removal::Running,
-                }),
-            }
-        }
+        rejected().push(Rejected {
+            spool: inner.spool.clone(),
+            host: inner.host.clone(),
+            scope: inner.scope.clone(),
+            slot,
+        });
         let session = self.clone();
         runtime().spawn_blocking(move || {
             let inner = &session.0;
-            let rejecting =
-                |rejected: &Rejected| rejected.slot == slot && rejected.holds(&inner.spool, &inner.host, &inner.scope);
-            let removed = inner.spool.forget(&inner.host, &inner.scope, slot);
-            {
-                let mut rejected = rejected();
-                match removed {
-                    Ok(()) => rejected.retain(|rejected| !rejecting(rejected)),
-                    Err(error) => {
-                        tracing::error!(
-                            host = %inner.host,
-                            scope = %inner.scope,
-                            which,
-                            path = %inner.spool.slot_path(&inner.host, &inner.scope, slot).display(),
-                            error = %::diagnostics::chain(&error),
-                            "couldn't remove a draft kept on this device after the user chose between two; trying again when it next opens"
-                        );
-                        for rejected in rejected.iter_mut().filter(|rejected| rejecting(rejected)) {
-                            rejected.removal = Removal::Failed;
-                        }
-                    }
-                }
+            let path = inner.spool.slot_path(&inner.host, &inner.scope, slot);
+            match inner.spool.forget(&inner.host, &inner.scope, slot) {
+                Ok(()) => {}
+                Err(error) if error.slot_freed() => tracing::error!(
+                    host = %inner.host,
+                    scope = %inner.scope,
+                    which,
+                    path = %path.display(),
+                    error = %::diagnostics::chain(&error),
+                    "set aside a draft the user chose against but couldn't remove it; removing it when this draft next opens"
+                ),
+                Err(error) => tracing::error!(
+                    host = %inner.host,
+                    scope = %inner.scope,
+                    which,
+                    path = %path.display(),
+                    error = %::diagnostics::chain(&error),
+                    "couldn't set aside a draft the user chose against; it is offered again when this draft next opens"
+                ),
+            }
+            let mut rejected = rejected();
+            if let Some(index) = rejected.iter().position(|rejected| {
+                rejected.slot == slot && rejected.holds(&inner.spool, &inner.host, &inner.scope)
+            }) {
+                rejected.remove(index);
+            }
+            drop(rejected);
+            session.mutate(|_| {});
+        });
+    }
+
+    fn sweep_tombstones(&self) {
+        let session = self.clone();
+        runtime().spawn_blocking(move || {
+            let inner = &session.0;
+            if let Err(error) = inner.spool.sweep_tombstones(&inner.host, &inner.scope) {
+                tracing::error!(
+                    host = %inner.host,
+                    scope = %inner.scope,
+                    error = %::diagnostics::chain(&error),
+                    "couldn't remove drafts set aside on this device; trying again when this draft next opens"
+                );
             }
             session.mutate(|_| {});
         });

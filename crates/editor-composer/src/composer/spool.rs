@@ -144,6 +144,19 @@ pub enum SetAsideError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgetSpooledDraftError {
+    #[error("create the folder {path} to move the discarded draft into")]
+    CreateTombstone {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("move the discarded draft {from} to {to}")]
+    Tombstone {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("remove {path}")]
     Remove {
         path: PathBuf,
@@ -162,6 +175,15 @@ pub enum ForgetSpooledDraftError {
         #[source]
         source: std::io::Error,
     },
+}
+
+impl ForgetSpooledDraftError {
+    pub(crate) const fn slot_freed(&self) -> bool {
+        match self {
+            Self::CreateTombstone { .. } | Self::Tombstone { .. } => false,
+            Self::Remove { .. } | Self::List { .. } | Self::Sync { .. } => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -423,25 +445,83 @@ impl DraftSpool {
         slot: Slot,
     ) -> Result<(), ForgetSpooledDraftError> {
         let stem = stem(host, scope);
-        match slot {
-            Slot::Record => {
-                remove(&self.dir.join(format!("{stem}.json")))?;
-                remove_images(&self.dir, &stem, &HashSet::new())?;
+        let from = self.slot_path(host, scope, slot);
+        if !occupied(&from) {
+            return Ok(());
+        }
+        let tombstone = self.new_tombstone(&stem, slot)?;
+        let moved = match slot {
+            Slot::Record => tombstone.join(format!("{stem}.json")),
+            Slot::Beside(_) => tombstone.clone(),
+        };
+        if let Err(source) = std::fs::rename(&from, &moved) {
+            if slot == Slot::Record {
+                remove_if_empty(&tombstone);
             }
-            Slot::Beside(_) => {
-                let folder = self.folder(&stem, slot);
-                match std::fs::remove_dir_all(&folder) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(source) => {
-                        return Err(ForgetSpooledDraftError::Remove {
-                            path: folder,
-                            source,
-                        });
-                    }
-                }
+            return Err(ForgetSpooledDraftError::Tombstone {
+                from,
+                to: moved,
+                source,
+            });
+        }
+        self.sync()?;
+        if slot == Slot::Record {
+            move_images(&self.dir, &stem, &tombstone)?;
+        }
+        remove_tombstone(&tombstone)?;
+        self.sync()
+    }
+
+    pub(crate) fn sweep_tombstones(
+        &self,
+        host: &HostId,
+        scope: &str,
+    ) -> Result<(), ForgetSpooledDraftError> {
+        let prefix = format!("{}.rejected-", stem(host, scope));
+        let listed = |source| ForgetSpooledDraftError::List {
+            path: self.dir.clone(),
+            source,
+        };
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => return Err(listed(source)),
+        };
+        let mut swept = false;
+        for entry in entries {
+            let entry = entry.map_err(listed)?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&prefix))
+            {
+                remove_tombstone(&entry.path())?;
+                swept = true;
             }
         }
+        if swept { self.sync() } else { Ok(()) }
+    }
+
+    fn new_tombstone(&self, stem: &str, slot: Slot) -> Result<PathBuf, ForgetSpooledDraftError> {
+        (1_u64..)
+            .map(|number| {
+                let path = self.dir.join(format!("{stem}.rejected-{number}"));
+                match slot {
+                    Slot::Record => match std::fs::create_dir(&path) {
+                        Ok(()) => Ok(Some(path)),
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+                        Err(source) => {
+                            Err(ForgetSpooledDraftError::CreateTombstone { path, source })
+                        }
+                    },
+                    Slot::Beside(_) => Ok((!occupied(&path)).then_some(path)),
+                }
+            })
+            .find_map(Result::transpose)
+            .expect("invariant: some tombstone number is free")
+    }
+
+    fn sync(&self) -> Result<(), ForgetSpooledDraftError> {
         sync_folder(&self.dir).map_err(|source| ForgetSpooledDraftError::Sync {
             path: self.dir.clone(),
             source,
@@ -611,6 +691,36 @@ fn create_beside_folder(folder: &Path) -> Result<(), KeepSpooledDraftError> {
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(source) => Err(KeepSpooledDraftError::CreateDirectory {
             path: folder.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn move_images(folder: &Path, stem: &str, into: &Path) -> Result<(), ForgetSpooledDraftError> {
+    let listed = |source| ForgetSpooledDraftError::List {
+        path: folder.to_owned(),
+        source,
+    };
+    for entry in std::fs::read_dir(folder).map_err(listed)? {
+        let path = entry.map_err(listed)?.path();
+        if let Some(name) = path.file_name().filter(|_| is_image_of(&path, stem)) {
+            std::fs::rename(&path, into.join(name)).map_err(|source| {
+                ForgetSpooledDraftError::Remove {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_tombstone(tombstone: &Path) -> Result<(), ForgetSpooledDraftError> {
+    match std::fs::remove_dir_all(tombstone) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ForgetSpooledDraftError::Remove {
+            path: tombstone.to_owned(),
             source,
         }),
     }

@@ -460,8 +460,11 @@ fn saved_by_forge(device: &Device) -> DraftHandle {
     }))
 }
 
+#[cfg(unix)]
 #[test]
 fn a_recovered_draft_that_could_not_be_removed_once_saved_is_removed_on_closing() {
+    use std::os::unix::fs::PermissionsExt;
+
     let device = Device::new();
     device
         .spool()
@@ -473,16 +476,16 @@ fn a_recovered_draft_that_could_not_be_removed_once_saved_is_removed_on_closing(
             Holder::Owner(Slot::Record),
         )
         .unwrap();
-    let record = device.drafts().join("recovering-new.json");
-    let kept_record = std::fs::read(&record).unwrap();
-    std::fs::remove_file(&record).unwrap();
-    std::fs::create_dir(&record).unwrap();
-    std::fs::write(record.join("blocker"), b"").unwrap();
+    let drafts = device.drafts();
+    std::fs::set_permissions(&drafts, std::fs::Permissions::from_mode(0o555)).unwrap();
 
     let session = saved_by_forge(&device);
     session.retry();
-    std::fs::remove_dir_all(&record).unwrap();
-    std::fs::write(&record, kept_record).unwrap();
+    std::fs::set_permissions(&drafts, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        drafts.join("recovering-new.json").exists(),
+        "the draft stays until it can be set aside"
+    );
     let instance = device.core.host(&device.host).unwrap().instance();
     let mut sessions = DraftSessions::with_spool(device.spool());
     sessions
@@ -1013,6 +1016,11 @@ fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismi
     );
 }
 
+fn settled(device: &Device) -> impl Fn() -> bool {
+    let spool = device.spool();
+    move || !rejected().iter().any(|rejected| rejected.spool == spool)
+}
+
 #[cfg(unix)]
 #[test]
 fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_next_open() {
@@ -1021,21 +1029,18 @@ fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_ne
     let device = Device::new();
     kept_beside_a_record(&device);
     let beside = device.drafts().join("recovering-new.kept-1");
+    let tombstone = device.drafts().join("recovering-new.rejected-1");
     let lease = device.reopen();
     std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let failed = || {
-        rejected()
-            .iter()
-            .any(|rejected| rejected.spool == device.spool() && rejected.removal == Removal::Failed)
-    };
     lease.keep_local();
     assert!(
         !lease.read(DraftSession::conflict),
         "the choice is made at once"
     );
-    wait_until(&lease, failed);
-    assert!(beside.exists());
-    std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wait_until(&lease, settled(&device));
+    assert!(!beside.exists());
+    assert!(tombstone.exists(), "the removal failed part way");
+    std::fs::set_permissions(&tombstone, std::fs::Permissions::from_mode(0o755)).unwrap();
     drop(lease);
 
     let lease = device.reopen();
@@ -1043,5 +1048,48 @@ fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_ne
         !lease.read(DraftSession::conflict),
         "the draft the user chose against isn't offered again"
     );
-    wait_until_removed(&lease, &beside);
+    wait_until_removed(&lease, &tombstone);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let device = Device::new();
+    kept_beside_a_record(&device);
+    let stuck = device.drafts().join("recovering-new.stuck.image");
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join("inside"), b"pinned").unwrap();
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let lease = device.reopen();
+    lease.use_remote();
+    wait_until(&lease, settled(&device));
+    drop(lease);
+    device
+        .spool()
+        .keep(
+            &device.host,
+            "new",
+            kept("saved where the old record was"),
+            &[],
+            Holder::Newcomer,
+        )
+        .unwrap();
+
+    let lease = device.reopen();
+    wait_until(&lease, || {
+        !device.drafts().join("recovering-new.rejected-1").exists()
+    });
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        lease.read(|state| state.body().text.clone()),
+        "saved where the old record was",
+        "the new draft is recovered rather than taken for the one removed"
+    );
+    drop(lease);
+    assert!(
+        device.drafts().join("recovering-new.json").exists(),
+        "the new draft stays on this device"
+    );
 }
