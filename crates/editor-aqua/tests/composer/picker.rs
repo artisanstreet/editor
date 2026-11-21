@@ -117,23 +117,22 @@ fn axes_offer_only_concrete_choices_and_resolve_inherited_selections() {
     );
 }
 
-#[test]
-fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() {
+fn picker_host(
+    name: &str,
+) -> (
+    tempfile::TempDir,
+    editor_aqua::core::Core,
+    editor_aqua::core::HostId,
+) {
     use artisan_api::tls::{Identity, fingerprint};
-    use artisan_api::{DiscoveryState, EngineStatus, InstallState, SignInState};
-    use editor_aqua::composer::controller::ComposerTarget;
-    use editor_aqua::composer::persistence::DraftSessions;
-    use editor_aqua::composer::picker::Menu;
-    use editor_aqua::composer::view::ComposerOwner;
     use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
-    use editor_aqua::ui::theme::ArtisanTheme;
 
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
-    let identity = Identity::generate("picker-gates").unwrap();
+    let identity = Identity::generate(name).unwrap();
     let print = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
-    let host = HostId("picker-gates".into());
+    let host = HostId(name.into());
     test_support::editor::core::connect_client(
         &mut core,
         &HostConfig {
@@ -145,6 +144,19 @@ fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() 
         },
         client,
     );
+    (directory, core, host)
+}
+
+#[test]
+fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() {
+    use artisan_api::{DiscoveryState, EngineStatus, InstallState, SignInState};
+    use editor_aqua::composer::controller::ComposerTarget;
+    use editor_aqua::composer::persistence::DraftSessions;
+    use editor_aqua::composer::picker::Menu;
+    use editor_aqua::composer::view::ComposerOwner;
+    use editor_aqua::ui::theme::ArtisanTheme;
+
+    let (_directory, mut core, host) = picker_host("picker-gates");
     let status = |engine, install, sign_in| EngineStatus {
         discovery: DiscoveryState::Unknown,
         engine,
@@ -214,6 +226,147 @@ fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() 
         assert!(
             texts.iter().any(|text| text == wanted),
             "the picker shows {wanted:?} among {texts:?}"
+        );
+    }
+}
+
+fn largest_text() -> editor_aqua::ui::theme::ArtisanTheme {
+    use editor_aqua::ui::preferences::{Preferences, StreamingMode, SystemAccess};
+    use editor_aqua::ui::theme::{FontSet, ThemeMode};
+    Preferences {
+        theme: ThemeMode::Dark,
+        fonts: FontSet::Spline,
+        outline_text: true,
+        reduced_motion: None,
+        high_contrast: None,
+        text_scale: Some(2.25),
+        streaming: StreamingMode::Smooth,
+        lower_frame_rate: false,
+        vsync: true,
+        system: SystemAccess::default(),
+    }
+    .theme()
+}
+
+fn every_setting_engine() -> artisan_api::EngineStatus {
+    use artisan_api::{DiscoveryState, EngineStatus, InstallState, SignInState};
+    let model = Model {
+        id: "every-setting".into(),
+        name: "Every setting".into(),
+        efforts: vec!["medium".into(), "ultra".into()],
+        variants: ["none", "thinking"]
+            .map(|id| artisan_api::Variant {
+                id: id.into(),
+                label: id.into(),
+            })
+            .into(),
+        speeds: vec![
+            artisan_api::Speed {
+                id: "standard".into(),
+                label: "Normal".into(),
+                description: None,
+                default: true,
+            },
+            artisan_api::Speed {
+                id: "fast".into(),
+                label: "Fast".into(),
+                description: None,
+                default: false,
+            },
+        ],
+        context_window: Some(1_000_000),
+        ..Model::default()
+    };
+    EngineStatus {
+        discovery: DiscoveryState::Unknown,
+        engine: EngineId::Claude,
+        install: InstallState::Installed {
+            version: "1.0.0".into(),
+            update: None,
+        },
+        sign_in: SignInState::SignedIn { account: None },
+        models: vec![model].into(),
+        default_model: None,
+        commands: Vec::new().into(),
+        usage: None,
+        integrity: None,
+        versions: Vec::new().into(),
+        claude_ai: None,
+    }
+}
+
+#[test]
+fn the_model_menus_setting_rows_keep_their_full_height_at_the_largest_text_size() {
+    use editor_aqua::composer::controller::ComposerTarget;
+    use editor_aqua::composer::persistence::DraftSessions;
+    use editor_aqua::composer::picker::Menu;
+    use editor_aqua::composer::view::ComposerOwner;
+    use editor_aqua::ui::kit::{Density, Row};
+
+    let theme = largest_text();
+    let (_directory, mut core, host) = picker_host("picker-largest-text");
+    core.host_mut(&host)
+        .unwrap()
+        .engines
+        .insert(EngineId::Claude, every_setting_engine());
+    let mut sessions = DraftSessions::default();
+    let owner = ComposerOwner::new(
+        &core,
+        &mut sessions,
+        ComposerTarget::NewThread {
+            host: host.clone(),
+            project: None,
+        },
+        std::rc::Rc::new(|_| {}),
+    );
+    {
+        let mut composer = owner.controller.borrow_mut();
+        composer.config = Some(EngineConfig {
+            model: Some("every-setting".into()),
+            ..EngineConfig::new(EngineId::Claude)
+        });
+        composer.open_picker(Menu::Model, core.host(&host).unwrap());
+    }
+    let menu = owner
+        .model_menu(
+            &theme,
+            core.host(&host).unwrap(),
+            aqua_core::Size::new(1400.0, 1400.0),
+            0.0,
+            &aqua::images::ImageAssets::default(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    let app = test_support::editor::ui::mounted(1400.0, 1400.0, menu);
+    let tree = app.tree();
+    let rows: Vec<_> = (0..)
+        .map(|position| format!("composer-pane-{position}"))
+        .map_while(|key| {
+            let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key.as_str()));
+            tree.traverse()
+                .into_iter()
+                .find(|node| {
+                    tree.get(*node)
+                        .is_some_and(|record| record.key == Some(hash))
+                })
+                .and_then(|node| tree.rect(node))
+        })
+        .collect();
+    assert!(
+        rows.len() >= 5,
+        "the model offers several settings: {rows:?}"
+    );
+    let tall = Row::ListItem(Density::Tall).height(&theme);
+    for row in &rows {
+        assert!(
+            row.h + 0.5 >= tall,
+            "a setting row is as tall as its two lines at 225%: {row:?} against {tall}"
+        );
+    }
+    for pair in rows.windows(2) {
+        assert!(
+            pair[0].y + pair[0].h <= pair[1].y + 0.5,
+            "setting rows don't overlap: {pair:?}"
         );
     }
 }

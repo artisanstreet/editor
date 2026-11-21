@@ -85,7 +85,7 @@ impl ComposerOwner {
         );
         let tab = {
             let mut tab = self.model_tab.borrow_mut();
-            let height = model_item_height(theme, items.len());
+            let height = model_item_height(theme);
             tab.resize(height);
             tab.aim(active * (height + MODEL_ITEM_GAP), now);
             if opening || self.reduced_motion {

@@ -613,7 +613,7 @@ pub(crate) fn model_menu(
             .and_then(lab_icon)
             .unwrap_or_else(|| engine_icon(theme, config.engine))
     });
-    let item_height = model_item_height(theme, items.len());
+    let item_height = model_item_height(theme);
     let panes: Vec<_> = items.iter().map(|item| item.pane).collect();
     let select = Rc::clone(dispatch);
     let mut buttons = TabList::new(
@@ -716,7 +716,7 @@ pub(crate) fn model_menu(
     });
     let mut children = vec![
         UiBox::new()
-            .height(MODEL_PANE_HEIGHT)
+            .height(model_side_height(theme, items.len()))
             .child(model_menu_tab(
                 theme,
                 tab,
@@ -810,11 +810,15 @@ pub(crate) fn model_menu(
         )
 }
 
-pub(super) fn model_item_height(theme: &ArtisanTheme, count: usize) -> f32 {
+pub(super) fn model_item_height(theme: &ArtisanTheme) -> f32 {
+    Row::ListItem(Density::Tall).height(theme)
+}
+
+fn model_side_height(theme: &ArtisanTheme, count: usize) -> f32 {
     let count = super::rows(count.max(1));
-    Row::ListItem(Density::Tall)
-        .height(theme)
-        .min((count - 1.0).mul_add(-MODEL_ITEM_GAP, MODEL_PANE_HEIGHT) / count)
+    count
+        .mul_add(model_item_height(theme), (count - 1.0) * MODEL_ITEM_GAP)
+        .max(MODEL_PANE_HEIGHT)
 }
 
 fn lab_icon(lab: &str) -> Option<AssetId> {
