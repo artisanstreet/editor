@@ -40,6 +40,7 @@ use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sse_core::{SseDecoder, SseEvent, SseStream};
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -47,6 +48,7 @@ use tokio::sync::mpsc;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const SERVER_PREFIX: &str = "server-";
 const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(process::MAX_LINE_BYTES).unwrap();
 
 #[derive(Debug, thiserror::Error)]
@@ -338,7 +340,7 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
     result
 }
 
-async fn prepare(turn: &Turn) -> Result<(EngineProcess, String, tempfile::TempDir), ServerError> {
+async fn prepare(turn: &Turn) -> Result<(EngineProcess, String, AgentsDir), ServerError> {
     let password = password()?;
     let agents = write_agents(&turn.home, &turn.launch.readable)?;
     let server = spawn(turn, &password, agents.path()).await?;
@@ -679,18 +681,104 @@ fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
     }
 }
 
-fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<tempfile::TempDir, ServerError> {
-    let parent = crate::home::forge_records(home).join("opencode");
-    let dir = std::fs::create_dir_all(&parent)
-        .and_then(|()| {
-            tempfile::Builder::new()
-                .prefix("server-")
-                .tempdir_in(&parent)
+static OWN_SERVERS: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+
+fn own_servers() -> std::sync::MutexGuard<'static, BTreeSet<PathBuf>> {
+    OWN_SERVERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Debug)]
+struct AgentsDir(tempfile::TempDir);
+
+impl AgentsDir {
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for AgentsDir {
+    fn drop(&mut self) {
+        own_servers().remove(self.0.path());
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SweepServersError {
+    #[error("list the OpenCode server folders in {}", path.display())]
+    List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove the leftover OpenCode server folder {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn servers_folder(home: &Path) -> PathBuf {
+    crate::home::forge_records(home).join("opencode")
+}
+
+pub(crate) fn sweep_servers(home: &Path) -> Result<usize, SweepServersError> {
+    let parent = servers_folder(home);
+    let own = own_servers();
+    let listed = match std::fs::read_dir(&parent) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        listed => listed
+            .and_then(|entries| {
+                entries
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect::<std::io::Result<Vec<_>>>()
+            })
+            .map_err(|source| SweepServersError::List {
+                path: parent.clone(),
+                source,
+            })?,
+    };
+    let leftovers: Vec<PathBuf> = listed
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(SERVER_PREFIX))
+                && !own.contains(path)
         })
-        .map_err(|source| ServerError::AgentsFolder {
-            path: parent.clone(),
-            source,
-        })?;
+        .collect();
+    for path in &leftovers {
+        match std::fs::remove_dir_all(path) {
+            Err(source) if source.kind() != std::io::ErrorKind::NotFound => {
+                return Err(SweepServersError::Remove {
+                    path: path.clone(),
+                    source,
+                });
+            }
+            Ok(()) | Err(_) => {}
+        }
+    }
+    Ok(leftovers.len())
+}
+
+fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<AgentsDir, ServerError> {
+    let parent = servers_folder(home);
+    let dir = {
+        let mut own = own_servers();
+        let dir = std::fs::create_dir_all(&parent)
+            .and_then(|()| {
+                tempfile::Builder::new()
+                    .prefix(SERVER_PREFIX)
+                    .tempdir_in(&parent)
+            })
+            .map_err(|source| ServerError::AgentsFolder {
+                path: parent.clone(),
+                source,
+            })?;
+        own.insert(dir.path().to_path_buf());
+        AgentsDir(dir)
+    };
     let agents: serde_json::Map<String, Value> = [Permissions::Auto, Permissions::Full]
         .into_iter()
         .map(|permissions| {

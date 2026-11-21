@@ -305,6 +305,11 @@ impl Hub {
             Ok(removed) => tracing::info!(removed, "removed the image copies of removed threads"),
             Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
         }
+        match self.engines().sweep_opencode_servers() {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "removed leftover OpenCode server folders"),
+            Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
+        }
     }
 
     #[must_use]
