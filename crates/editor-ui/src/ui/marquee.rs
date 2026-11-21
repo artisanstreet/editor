@@ -5,6 +5,7 @@ use aqua_ui::{
     tree::hash_key,
 };
 
+#[derive(Debug)]
 pub struct Marquee {
     id: String,
     text: String,
@@ -75,7 +76,7 @@ impl Marquee {
             app.tree()
                 .find_by_key(hash_key(Key::from(format!("{}-{}", self.id, suffix))))
         });
-        let (Some(first), Some(second)) = (first, second) else {
+        let [Some(first), Some(second)] = [first, second] else {
             self.animating = false;
             return false;
         };

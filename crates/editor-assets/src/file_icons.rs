@@ -1,5 +1,3 @@
-//! File and folder mappings from the JetBrains Icon Theme 2023+ variants.
-//! Generated from the bundled upstream theme JSON; names are case insensitive.
 use crate::AssetId;
 use std::path::Path;
 
@@ -243,25 +241,7 @@ const LIGHT_EXTENSIONS: &[(&str, AssetId)] = &[
     ("zip", AssetId::JETBRAINS_2023_ARCHIVE),
     ("zsh", AssetId::JETBRAINS_2023_SHELL),
 ];
-const LIGHT_FOLDERS: &[(&str, AssetId)] = &[
-    (".github", AssetId::JETBRAINS_2023_FOLDERGITHUB),
-    ("__fixtures__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("__snapshots__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("__test__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("__tests__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("controllers", AssetId::JETBRAINS_2023_FOLDERCONTROLLERS),
-    ("helpers", AssetId::JETBRAINS_2023_FOLDERHELPERS),
-    ("mailers", AssetId::JETBRAINS_2023_FOLDERMAILERS),
-    ("migrate", AssetId::JETBRAINS_2023_FOLDERMIGRATIONS),
-    ("spec", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("specs", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("test", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("tests", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("vendor", AssetId::JETBRAINS_2023_FOLDERVENDOR),
-];
 const LIGHT_FILE: AssetId = AssetId::JETBRAINS_2023_TEXT;
-const LIGHT_FOLDER: AssetId = AssetId::JETBRAINS_2023_FOLDER;
-const LIGHT_ROOT: AssetId = AssetId::JETBRAINS_2023_MODULE;
 const DARK_NAMES: &[(&str, AssetId)] = &[
     (".bunrc", AssetId::JETBRAINS_2023_BUN),
     (".dockerignore", AssetId::JETBRAINS_2023_IGNORED_DARK),
@@ -512,28 +492,7 @@ const DARK_EXTENSIONS: &[(&str, AssetId)] = &[
     ("zip", AssetId::JETBRAINS_2023_ARCHIVE_DARK),
     ("zsh", AssetId::JETBRAINS_2023_SHELL_DARK),
 ];
-const DARK_FOLDERS: &[(&str, AssetId)] = &[
-    (".github", AssetId::JETBRAINS_2023_FOLDERGITHUB_DARK),
-    ("__fixtures__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("__snapshots__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("__test__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("__tests__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    (
-        "controllers",
-        AssetId::JETBRAINS_2023_FOLDERCONTROLLERS_DARK,
-    ),
-    ("helpers", AssetId::JETBRAINS_2023_FOLDERHELPERS_DARK),
-    ("mailers", AssetId::JETBRAINS_2023_FOLDERMAILERS_DARK),
-    ("migrate", AssetId::JETBRAINS_2023_FOLDERMIGRATIONS_DARK),
-    ("spec", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("specs", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("test", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("tests", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("vendor", AssetId::JETBRAINS_2023_FOLDERVENDOR_DARK),
-];
 const DARK_FILE: AssetId = AssetId::JETBRAINS_2023_TEXT_DARK;
-const DARK_FOLDER: AssetId = AssetId::JETBRAINS_2023_FOLDER_DARK;
-const DARK_ROOT: AssetId = AssetId::JETBRAINS_2023_MODULE_DARK;
 
 fn find(table: &[(&str, AssetId)], name: &str) -> Option<AssetId> {
     table
@@ -541,7 +500,6 @@ fn find(table: &[(&str, AssetId)], name: &str) -> Option<AssetId> {
         .find_map(|(key, id)| (*key == name).then_some(*id))
 }
 
-/// Resolve a file by exact name, then its longest matching extension.
 #[must_use]
 pub fn file(path: &Path, dark: bool) -> AssetId {
     let (names, extensions, fallback) = if dark {
@@ -557,81 +515,16 @@ pub fn file(path: &Path, dark: bool) -> AssetId {
     if let Some(icon) = find(names, &name) {
         return icon;
     }
-    for (index, _) in name.match_indices('.') {
-        if let Some(icon) = find(extensions, &name[index + 1..]) {
+    let mut rest = name.as_str();
+    while let Some((_, extension)) = rest.split_once('.') {
+        if let Some(icon) = find(extensions, extension) {
             return icon;
         }
+        rest = extension;
     }
     fallback
 }
 
-/// Resolve a named folder, or the theme's generic folder/root icon.
-#[must_use]
-pub fn folder(path: &Path, dark: bool, root: bool) -> AssetId {
-    let (names, fallback) = if dark {
-        (DARK_FOLDERS, if root { DARK_ROOT } else { DARK_FOLDER })
-    } else {
-        (LIGHT_FOLDERS, if root { LIGHT_ROOT } else { LIGHT_FOLDER })
-    };
-    if root {
-        return fallback;
-    }
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-    find(names, &name).unwrap_or(fallback)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_compound_extensions_and_modes_follow_the_theme() {
-        assert_eq!(
-            file(Path::new("Cargo.toml"), false),
-            AssetId::JETBRAINS_2023_CARGO
-        );
-        assert_eq!(
-            file(Path::new("Cargo.toml"), true),
-            AssetId::JETBRAINS_2023_CARGO_DARK
-        );
-        assert_eq!(
-            file(Path::new("src/main.rs"), false),
-            AssetId::JETBRAINS_2023_RUSTFILE
-        );
-        assert_eq!(
-            file(Path::new("component.test.ts"), true),
-            AssetId::JETBRAINS_2023_TSTEST_DARK
-        );
-        assert_eq!(
-            file(Path::new("component.ts"), true),
-            AssetId::JETBRAINS_2023_TYPESCRIPT_DARK
-        );
-        assert_eq!(file(Path::new("unknown.zzz"), false), LIGHT_FILE);
-        assert_eq!(folder(Path::new("unknown"), true, false), DARK_FOLDER);
-        assert_eq!(folder(Path::new("project"), false, true), LIGHT_ROOT);
-    }
-
-    #[test]
-    fn every_bundled_icon_and_mapping_is_in_the_asset_catalog() {
-        let assets: Vec<_> = crate::ALL
-            .iter()
-            .filter(|asset| asset.id.as_str().starts_with("jetbrains.theme2023-"))
-            .collect();
-        assert_eq!(assets.len(), 211);
-        assert!(assets.iter().all(|asset| asset.source.contains("<svg")));
-        for table in [
-            LIGHT_NAMES,
-            LIGHT_EXTENSIONS,
-            LIGHT_FOLDERS,
-            DARK_NAMES,
-            DARK_EXTENSIONS,
-            DARK_FOLDERS,
-        ] {
-            assert!(table.iter().all(|(_, id)| crate::get(*id).id == *id));
-        }
-    }
-}
+#[path = "../tests/file_icons.rs"]
+mod tests;

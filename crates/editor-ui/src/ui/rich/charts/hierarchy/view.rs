@@ -1,12 +1,12 @@
 use super::{GROUP_HEADER, Layout, Tree, partition, treemap};
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of_count, percent};
 use crate::ui::rich::charts::scene::{self, Probe};
 use crate::ui::rich::kit::{format_number, with_unit};
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{
-    CornerRadii, DisplayItem, GpuiBackground, GpuiHsla, InputEvent, Insets, Key, Modifiers,
-    NamedKey, Point, Rect, Role,
+    CornerRadii, DisplayItem, GpuiBackground, GpuiHsla, InputEvent, Insets, NamedKey, Point, Rect,
 };
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -94,7 +94,7 @@ impl HierarchyState {
     fn sync(&self, id: &str, tree: &Arc<Tree>) -> (usize, Option<usize>, Probe) {
         let mut states = self.0.borrow_mut();
         let entry = states.entry(id.to_owned()).or_insert_with(|| Entry {
-            tree: tree.clone(),
+            tree: Arc::clone(tree),
             focus: 0,
             hover: None,
             probe: Rc::new(Cell::new(None)),
@@ -106,9 +106,9 @@ impl HierarchyState {
                 entry.focus = 0;
                 entry.hover = None;
             }
-            entry.tree = tree.clone();
+            entry.tree = Arc::clone(tree);
         }
-        (entry.focus, entry.hover, entry.probe.clone())
+        (entry.focus, entry.hover, Rc::clone(&entry.probe))
     }
     fn geometry(
         &self,
@@ -119,14 +119,16 @@ impl HierarchyState {
         width: f32,
     ) -> Arc<Geometry> {
         let mut states = self.0.borrow_mut();
-        let entry = states.get_mut(id).unwrap();
+        let entry = states
+            .get_mut(id)
+            .unwrap_or_else(|| panic!("invariant: hierarchy {id} is synced before its geometry"));
         if let Some(geometry) = &entry.geometry
             && geometry.layout == layout
             && geometry.focus == entry.focus
             && geometry.levels == levels
-            && geometry.width == width
+            && geometry.width.to_bits() == width.to_bits()
         {
-            return geometry.clone();
+            return Arc::clone(geometry);
         }
         let focus = entry.focus;
         let (height, parts) = match layout {
@@ -193,7 +195,7 @@ impl HierarchyState {
             parts,
             nodes,
         });
-        entry.geometry = Some(geometry.clone());
+        entry.geometry = Some(Arc::clone(&geometry));
         geometry
     }
     fn hover(&self, id: &str, value: Option<usize>) -> bool {
@@ -253,7 +255,21 @@ impl HierarchyState {
                 entry.hover = Some(nodes[current.map_or(0, |n| (n + 1).min(nodes.len() - 1))]);
                 return true;
             }
-            _ => return false,
+            NamedKey::Enter
+            | NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::Left
+            | NamedKey::Right
+            | NamedKey::Up
+            | NamedKey::Down
+            | NamedKey::Home
+            | NamedKey::End
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         if let Some(node) = target
             && entry.focus != node
@@ -314,10 +330,10 @@ fn paint(
             0.0
         };
         let rect = Rect {
-            x: bounds.x + bounds.w * part.x + pad,
-            y: bounds.y + bounds.h * part.y + vertical,
-            w: (bounds.w * part.w - pad * 2.0).max(0.0),
-            h: (bounds.h * part.h - vertical * 2.0).max(0.0),
+            x: bounds.w.mul_add(part.x, bounds.x) + pad,
+            y: bounds.h.mul_add(part.y, bounds.y) + vertical,
+            w: bounds.w.mul_add(part.w, -(pad * 2.0)).max(0.0),
+            h: bounds.h.mul_add(part.h, -(vertical * 2.0)).max(0.0),
         };
         if rect.w <= 0.0 || rect.h <= 0.0 {
             continue;
@@ -399,25 +415,30 @@ fn reading(size: f64, unit: Option<&str>) -> String {
     with_unit(&format_number(size), unit)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the hierarchy view takes its tree, layout, unit, levels, state and services"
+)]
 pub(crate) fn view(
     id: String,
     theme: &ArtisanTheme,
-    tree: Arc<Tree>,
+    tree: &Arc<Tree>,
     layout: Layout,
-    unit: Option<String>,
+    unit: Option<&String>,
     levels: usize,
     state: HierarchyState,
     services: &Services,
-    invalidate: Rc<dyn Fn()>,
+    invalidate: &Rc<dyn Fn()>,
 ) -> Element {
     let theme = *theme;
-    let (focus, hover, probe) = state.sync(&id, &tree);
+    let (focus, hover, probe) = state.sync(&id, tree);
     let width = probe.get().map_or(640.0, |bounds| bounds.w);
-    let geometry = state.geometry(&id, &tree, layout, levels, width);
+    let geometry = state.geometry(&id, tree, layout, levels, width);
     let height = geometry.height;
-    let draw_geometry = geometry.clone();
-    let draw_tree = tree.clone();
-    let draw_probe = probe.clone();
+    let draw_geometry = Arc::clone(&geometry);
+    let draw_tree = Arc::clone(tree);
+    let draw_probe = Rc::clone(&probe);
     let canvas = ui::Canvas::new()
         .style(
             Style::new()
@@ -445,7 +466,7 @@ pub(crate) fn view(
         }
         let node = tree.node(part.node);
         let value = (layout == Layout::Treemap && (part.group || h >= 36.0))
-            .then(|| reading(node.size, unit.as_deref()));
+            .then(|| reading(node.size, unit.map(String::as_str)));
         plot = plot.child((services.label)(PartLabel {
             x: part.x,
             y: part.y,
@@ -462,7 +483,7 @@ pub(crate) fn view(
         format!(
             "{}: {}",
             tree.node(node).name,
-            reading(tree.node(node).size, unit.as_deref())
+            reading(tree.node(node).size, unit.map(String::as_str))
         )
     });
     if let Some((node, part)) = hover.and_then(|node| {
@@ -484,7 +505,7 @@ pub(crate) fn view(
         let mut rows = vec![(
             Some(swatch),
             "Size".to_owned(),
-            reading(current.size, unit.as_deref()),
+            reading(current.size, unit.map(String::as_str)),
         )];
         if node != focus && focused.size > 0.0 {
             rows.push((
@@ -513,7 +534,11 @@ pub(crate) fn view(
                 .map(|child| tree.node(*child).size)
                 .sum::<f64>();
         if !current.children.is_empty() && own > current.size * 1e-9 {
-            rows.push((None, "Own".to_owned(), reading(own, unit.as_deref())));
+            rows.push((
+                None,
+                "Own".to_owned(),
+                reading(own, unit.map(String::as_str)),
+            ));
         }
         plot = plot.child((services.readout)(
             part.y + part.h / 2.0 < 0.5,
@@ -524,12 +549,12 @@ pub(crate) fn view(
     }
     let moving = state.clone();
     let moving_id = id.clone();
-    let moving_geometry = geometry.clone();
-    let moving_probe = probe.clone();
-    let moving_invalidate = invalidate.clone();
+    let moving_geometry = Arc::clone(&geometry);
+    let moving_probe = Rc::clone(&probe);
+    let moving_invalidate = Rc::clone(invalidate);
     let leaving = state.clone();
     let leaving_id = id.clone();
-    let leaving_invalidate = invalidate.clone();
+    let leaving_invalidate = Rc::clone(invalidate);
     let plot = plot
         .build()
         .with_key(format!("{id}-plot"))
@@ -557,9 +582,9 @@ pub(crate) fn view(
         });
     let clicked = state.clone();
     let clicked_id = id.clone();
-    let clicked_geometry = geometry.clone();
-    let clicked_probe = probe.clone();
-    let clicked_invalidate = invalidate.clone();
+    let clicked_geometry = Arc::clone(&geometry);
+    let clicked_probe = probe;
+    let clicked_invalidate = Rc::clone(invalidate);
     let plot = (services.click)(
         plot,
         Rc::new(move |position| {
@@ -586,42 +611,25 @@ pub(crate) fn view(
     }
     let keyboard = state.clone();
     let keyboard_id = id.clone();
-    let keyboard_nodes = geometry.nodes.clone();
-    let keyboard_invalidate = invalidate.clone();
-    let mut nav = ui::Box::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .child(plot)
-        .build()
-        .with_key(format!("{id}-navigation"))
-        .role(Role::Group)
-        .focusable(true)
-        .tab_index(0)
-        .aria_label(aria)
-        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-            let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
-                return InputResponse::default();
-            };
-            let Key::Named(code) = key.key else {
-                return InputResponse::default();
-            };
-            if !keyboard.key(
-                &keyboard_id,
-                &keyboard_nodes,
-                code,
-                key.modifiers.contains(Modifiers::ALT),
-            ) {
-                return InputResponse::default();
+    let keyboard_nodes = Arc::clone(&geometry.nodes);
+    let keyboard_invalidate = Rc::clone(invalidate);
+    let nav = navigation_group(
+        ui::Box::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
+            .child(plot)
+            .build(),
+        &id,
+        aria,
+        selection,
+        move |code, alt| {
+            let handled = keyboard.key(&keyboard_id, &keyboard_nodes, code, alt);
+            if handled {
+                keyboard_invalidate();
             }
-            keyboard_invalidate();
-            InputResponse {
-                stop_propagation: true,
-                ..InputResponse::default()
-            }
-        });
-    if let Some(value) = selection {
-        nav = nav.aria_value(value);
-    }
+            handled
+        },
+    );
     let nav = (services.navigation)(nav, theme.colors.ring.to_reference_paint());
     let path = tree.path(focus);
     let last = path.len() - 1;
@@ -630,9 +638,9 @@ pub(crate) fn view(
         .enumerate()
         .map(|(i, node)| (node, tree.node(node).name.clone(), i == last))
         .collect();
-    let trail_state = state.clone();
-    let trail_id = id.clone();
-    let trail_invalidate = invalidate.clone();
+    let trail_state = state;
+    let trail_id = id;
+    let trail_invalidate = Rc::clone(invalidate);
     let trail = (services.trail)(
         entries,
         Rc::new(move |node| {
@@ -656,74 +664,4 @@ pub(crate) fn view(
                 .build(),
         )
         .build()
-}
-
-#[cfg(feature = "test-support")]
-pub struct HierarchyFixture {
-    tree: Arc<Tree>,
-    layout: Layout,
-    levels: usize,
-    state: HierarchyState,
-}
-#[cfg(feature = "test-support")]
-impl HierarchyFixture {
-    pub fn new(json: &str) -> Self {
-        let value = serde_json::from_str(json).expect("JSON");
-        let prepared = super::prepare(&value).expect("hierarchy");
-        let levels = levels(prepared.layout, prepared.depth);
-        let tree = prepared.tree;
-        let state = HierarchyState::default();
-        state.sync("test", &tree);
-        Self {
-            tree,
-            layout: prepared.layout,
-            levels,
-            state,
-        }
-    }
-    pub fn replace(&mut self, json: &str) {
-        let value = serde_json::from_str(json).expect("JSON");
-        let prepared = super::prepare(&value).expect("hierarchy");
-        self.levels = levels(prepared.layout, prepared.depth);
-        self.layout = prepared.layout;
-        self.tree = prepared.tree;
-        self.state.sync("test", &self.tree);
-    }
-    pub fn focus(&self) -> usize {
-        self.state.sync("test", &self.tree).0
-    }
-    pub fn selected(&self) -> Option<usize> {
-        self.state.sync("test", &self.tree).1
-    }
-    pub fn key(&self, key: NamedKey, alt: bool) -> bool {
-        let geometry = self
-            .state
-            .geometry("test", &self.tree, self.layout, self.levels, 640.0);
-        self.state.key("test", &geometry.nodes, key, alt)
-    }
-    pub fn parts(&self) -> Vec<(usize, f32, f32, f32, f32, bool)> {
-        let geometry = self
-            .state
-            .geometry("test", &self.tree, self.layout, self.levels, 640.0);
-        geometry
-            .parts
-            .iter()
-            .map(|part| (part.node, part.x, part.y, part.w, part.h, part.group))
-            .collect()
-    }
-    pub fn click(&self, x: f32, y: f32) -> bool {
-        let geometry = self
-            .state
-            .geometry("test", &self.tree, self.layout, self.levels, 640.0);
-        let target = geometry
-            .parts
-            .iter()
-            .rev()
-            .find(|part| part.contains(x, y, geometry.height))
-            .and_then(|part| part.target);
-        target.is_some_and(|target| self.state.zoom("test", target))
-    }
-    pub fn resolved_levels(&self) -> usize {
-        self.levels
-    }
 }

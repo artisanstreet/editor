@@ -2,11 +2,16 @@ use std::num::NonZeroUsize;
 
 use artisan_api::{DirListing, Project, ProjectId, ThreadId, Timestamp, UpdateThread};
 
+use editor_core::client::CallError;
 use editor_core::delivery::Delivery;
 use editor_core::host::ThreadPageDirection;
-use editor_core::{Core, HostId, HostInstance, Screen};
+use editor_core::{
+    CompletionKey, CompletionScope, CompletionSlot, Core, HostId, HostInstance, Screen,
+};
 
-use super::geometry::{PageDirection, PagePosition, page_direction};
+use super::geometry::{
+    HistoryPane, PageDirection, PageLoad, PageState, PaneDistances, PaneViewports, ThreadPane,
+};
 use super::list::{Lists, lists};
 use super::picker::FolderPicker;
 use super::row::rename_value;
@@ -14,31 +19,67 @@ use super::row::rename_value;
 const MIN_TEXT_QUERY: usize = 3;
 const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
+#[derive(Debug, thiserror::Error)]
+pub enum ThreadActionError {
+    #[error("settle thread {thread}")]
+    Settle {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+    #[error("mark thread {thread} unread")]
+    MarkUnread {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+    #[error("archive thread {thread}")]
+    Archive {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+    #[error("rename thread {thread}")]
+    Rename {
+        thread: ThreadId,
+        #[source]
+        source: CallError,
+    },
+}
+
+impl ThreadActionError {
+    fn problem(&self) -> editor_core::Problem {
+        let (headline, source) = match self {
+            Self::Settle { source, .. } => ("Couldn't mark this thread as read.", source),
+            Self::MarkUnread { source, .. } => ("Couldn't mark this thread as unread.", source),
+            Self::Archive { source, .. } => ("Couldn't archive this thread.", source),
+            Self::Rename { source, .. } => ("Couldn't rename this thread.", source),
+        };
+        editor_core::Problem::caused_by(format!("{headline} {}", source.fault().sentence()), self)
+    }
+}
+
 enum Completion {
     Action {
-        host: HostId,
-        instance: HostInstance,
-        what: String,
-        result: anyhow::Result<()>,
+        key: CompletionKey,
+        result: Result<(), ThreadActionError>,
     },
     Browse {
         host: HostId,
         instance: HostInstance,
         generation: u64,
-        result: anyhow::Result<DirListing>,
+        result: Result<DirListing, CallError>,
     },
     Create {
         host: HostId,
         instance: HostInstance,
         generation: u64,
-        result: anyhow::Result<Project>,
+        result: Result<Project, CallError>,
     },
     Search {
-        host: HostId,
-        instance: HostInstance,
-        generation: u64,
+        key: CompletionKey,
         query: String,
-        result: anyhow::Result<Vec<artisan_api::TextHit>>,
+        result: Result<Vec<artisan_api::TextHit>, CallError>,
     },
 }
 
@@ -47,26 +88,43 @@ struct TextHits {
     rows: Vec<super::list::HitRow>,
 }
 
+enum TextResults {
+    Idle,
+    Searching(String),
+    Found(TextHits),
+    Failed {
+        query: String,
+        cause: editor_core::Problem,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextSearchStatus<'a> {
+    Idle,
+    Searching,
+    Failed(&'a editor_core::Problem),
+}
+
 pub struct Sidebar {
     pub host: Option<HostId>,
     host_instance: Option<HostInstance>,
     pub open: Option<ThreadId>,
     pub lists: Lists,
     pub search: std::rc::Rc<std::cell::RefCell<editor_ui::text::Editor>>,
-    pub history_open: bool,
+    pub(crate) history_open: bool,
     pub history_fraction: f32,
     history_motion: Option<(std::time::Instant, f32)>,
     motion_live: bool,
-    pub rail_motion: super::rail::RailMotion,
+    pub(crate) rail_motion: super::rail::RailMotion,
     pub settings_motion: super::settings_nav::NavMotion,
     pub threads_edges: editor_ui::scroll_edge::ScrollEdges,
     working_pulses: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<ThreadId, editor_ui::motion::WorkingPulse>>,
     >,
-    pub thread_viewport: Option<aqua_ui::collection_runtime::CollectionViewport>,
-    pub error: Option<String>,
-    pub menu: Option<ThreadMenu>,
-    pub menu_generation: u64,
+    thread_viewports: PaneViewports,
+    pub error: Option<editor_core::Problem>,
+    pub(crate) menu: Option<ThreadMenu>,
+    pub(crate) menu_generation: u64,
     pub rename: Option<ThreadId>,
     pub rename_generation: u64,
     pub(super) drag: Option<(HostId, HostInstance, ThreadId)>,
@@ -77,9 +135,9 @@ pub struct Sidebar {
     picker_generation: u64,
     browse_generation: u64,
     browse_task: Option<tokio::task::JoinHandle<()>>,
-    search_generation: u64,
-    search_task: Option<tokio::task::JoinHandle<()>>,
-    text_hits: Option<TextHits>,
+    text_search: CompletionSlot,
+    actions: CompletionScope,
+    text_results: TextResults,
     completions: Delivery<Completion>,
     workspace_background: bool,
 }
@@ -96,15 +154,15 @@ pub enum SidebarEffect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadMenu {
-    pub thread: ThreadId,
-    pub position: aqua_core::Point,
+    pub(crate) thread: ThreadId,
+    pub(crate) position: aqua_core::Point,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerIdentity {
-    pub host: HostId,
-    pub instance: HostInstance,
-    pub generation: u64,
+    host: HostId,
+    instance: HostInstance,
+    generation: u64,
 }
 
 impl Sidebar {
@@ -125,12 +183,13 @@ impl Sidebar {
     }
     pub fn thread_visual_factory(
         &self,
-        theme: editor_ui::theme::ArtisanTheme,
+        theme: &editor_ui::theme::ArtisanTheme,
         reduced_motion: bool,
     ) -> super::view::ThreadVisualFactory {
-        let pulses = self.working_pulses.clone();
-        let truncate: super::row::TruncatedText =
-            std::rc::Rc::new(move |text, role: editor_ui::kit::TextRole, color, selector| {
+        let pulses = std::rc::Rc::clone(&self.working_pulses);
+        let theme = *theme;
+        let truncate: super::row::TruncatedText = std::rc::Rc::new(
+            move |text, role: editor_ui::kit::TextRole, color, selector| {
                 role.text(&theme, text)
                     .gpui_source_color(color)
                     .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
@@ -141,85 +200,22 @@ impl Sidebar {
                     )
                     .build()
                     .debug_selector(selector)
-            });
+            },
+        );
         std::rc::Rc::new(move |row, image, host| {
             let id = row.id.clone();
-            let pulses = pulses.clone();
-            let pulse: super::row::WorkingPulse = std::rc::Rc::new(move |child, _, _, _| {
+            let pulses = std::rc::Rc::clone(&pulses);
+            let pulse: super::row::WorkingPulse = std::rc::Rc::new(move |child| {
                 pulses
                     .borrow_mut()
                     .entry(id.clone())
                     .or_default()
                     .wrap(child, false)
             });
-            super::row::visual_factory(theme, reduced_motion, truncate.clone(), pulse)(
+            super::row::visual_factory(&theme, reduced_motion, std::rc::Rc::clone(&truncate), pulse)(
                 row, image, host,
             )
         })
-    }
-
-    #[cfg(feature = "test-support")]
-    pub async fn test_action_failure(&self, host: HostId, instance: HostInstance) {
-        let _ = self
-            .completions
-            .sender()
-            .send(Completion::Action {
-                host,
-                instance,
-                what: "rename thread".to_owned(),
-                result: Err(anyhow::anyhow!("old failure")),
-            })
-            .await;
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn test_picker_generation(&self) -> u64 {
-        self.picker_generation
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn test_browse_generation(&self) -> u64 {
-        self.browse_generation
-    }
-
-    #[cfg(feature = "test-support")]
-    pub async fn test_browse_completion(
-        &self,
-        host: HostId,
-        instance: HostInstance,
-        generation: u64,
-        listing: DirListing,
-    ) {
-        let _ = self
-            .completions
-            .sender()
-            .send(Completion::Browse {
-                host,
-                instance,
-                generation,
-                result: Ok(listing),
-            })
-            .await;
-    }
-
-    #[cfg(feature = "test-support")]
-    pub async fn test_create_completion(
-        &self,
-        host: HostId,
-        instance: HostInstance,
-        generation: u64,
-        project: Project,
-    ) {
-        let _ = self
-            .completions
-            .sender()
-            .send(Completion::Create {
-                host,
-                instance,
-                generation,
-                result: Ok(project),
-            })
-            .await;
     }
 
     pub fn new(workspace_background: bool) -> Self {
@@ -240,7 +236,7 @@ impl Sidebar {
             settings_motion: super::settings_nav::NavMotion::default(),
             threads_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             working_pulses: std::rc::Rc::default(),
-            thread_viewport: None,
+            thread_viewports: PaneViewports::default(),
             error: None,
             menu: None,
             menu_generation: 0,
@@ -254,10 +250,12 @@ impl Sidebar {
             picker_generation: 0,
             browse_generation: 0,
             browse_task: None,
-            search_generation: 0,
-            search_task: None,
-            text_hits: None,
-            completions: Delivery::new(NonZeroUsize::new(64).unwrap()),
+            text_search: CompletionSlot::default(),
+            actions: CompletionScope::default(),
+            text_results: TextResults::Idle,
+            completions: Delivery::new(
+                NonZeroUsize::new(64).expect("invariant: the completion capacity is non-zero"),
+            ),
             workspace_background,
         }
     }
@@ -271,7 +269,7 @@ impl Sidebar {
         core.host_if_instance(id, instance)
     }
 
-    pub fn screen<'a>(&self, core: &'a Core) -> &'a Screen {
+    pub(crate) fn screen<'a>(&self, core: &'a Core) -> &'a Screen {
         if self.workspace_background {
             core.workspace_screen()
         } else {
@@ -279,16 +277,16 @@ impl Sidebar {
         }
     }
 
-    pub fn visible_picker(&self, core: &Core) -> Option<&FolderPicker> {
+    pub(crate) fn visible_picker(&self, core: &Core) -> Option<&FolderPicker> {
         let (id, instance) = self.picker_host.as_ref().zip(self.picker_instance)?;
         let host = core.host_if_instance(id, instance)?;
-        if core.active_host().map(|active| active.instance()) != Some(host.instance()) {
+        if core.active_host().map(editor_core::HostData::instance) != Some(host.instance()) {
             return None;
         }
         self.picker.as_ref()
     }
 
-    pub fn picker_identity(&self, core: &Core) -> Option<PickerIdentity> {
+    pub(crate) fn picker_identity(&self, core: &Core) -> Option<PickerIdentity> {
         self.visible_picker(core)?;
         Some(PickerIdentity {
             host: self.picker_host.clone()?,
@@ -297,7 +295,7 @@ impl Sidebar {
         })
     }
 
-    pub fn dismiss_picker(&mut self) {
+    pub(crate) fn dismiss_picker(&mut self) {
         if self.picker.as_ref().is_some_and(|picker| picker.creating) {
             return;
         }
@@ -313,7 +311,7 @@ impl Sidebar {
 
     pub fn sync(&mut self, core: &Core, now: Timestamp) {
         let host = core.active_host().map(|host| host.id.clone());
-        let instance = core.active_host().map(|host| host.instance());
+        let instance = core.active_host().map(editor_core::HostData::instance);
         let screen = if self.workspace_background {
             core.workspace_screen()
         } else {
@@ -321,10 +319,14 @@ impl Sidebar {
         };
         let open = match screen {
             Screen::Thread { thread, .. } => Some(thread.clone()),
-            _ => None,
+            Screen::Home
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => None,
         };
         if let Screen::Settings(page) = screen {
-            let motion_now = std::time::Instant::now();
+            let motion_now = core.clock().now();
             self.settings_motion.sync(*page, motion_now);
             self.motion_live |= self.settings_motion.animating(motion_now);
         }
@@ -337,7 +339,10 @@ impl Sidebar {
             self.menu = None;
             self.rename = None;
             self.error = None;
-            self.thread_viewport = None;
+            self.thread_viewports = PaneViewports::default();
+            self.text_search.cancel();
+            self.text_results = TextResults::Idle;
+            self.actions.renew();
         }
         let picker_alive = self
             .picker_host
@@ -361,6 +366,9 @@ impl Sidebar {
         self.host = host;
         self.host_instance = instance;
         self.open = open;
+        if host_changed {
+            self.search_text(core);
+        }
         self.lists = self
             .host
             .as_ref()
@@ -368,27 +376,51 @@ impl Sidebar {
             .map(|host| {
                 let query = self.search.borrow().text().to_owned();
                 let mut lists = lists(host, self.open.as_ref(), now).searched(&query);
-                lists.hits = self
-                    .text_hits
-                    .as_ref()
-                    .filter(|hits| hits.query == query.trim())
-                    .map(|hits| hits.rows.clone())
-                    .unwrap_or_default();
+                lists.hits = match &self.text_results {
+                    TextResults::Found(hits) if hits.query == query.trim() => hits.rows.clone(),
+                    TextResults::Found(_)
+                    | TextResults::Idle
+                    | TextResults::Searching(_)
+                    | TextResults::Failed { .. } => Vec::new(),
+                };
                 lists
             })
             .unwrap_or_default();
-        self.working_pulses.borrow_mut().retain(|id, _| {
-            self.lists
-                .inbox
-                .iter()
-                .chain(
-                    self.lists
-                        .history
-                        .iter()
-                        .flat_map(|group| group.rows.iter()),
-                )
-                .any(|row| &row.id == id && row.state == super::list::RowState::Working)
-        });
+        let working = self.lists.working();
+        self.working_pulses
+            .borrow_mut()
+            .retain(|id, _| working.contains(id));
+    }
+
+    fn finish_text_search(
+        &mut self,
+        core: &Core,
+        now: Timestamp,
+        host: &HostId,
+        query: String,
+        result: Result<Vec<artisan_api::TextHit>, CallError>,
+    ) {
+        match result {
+            Ok(hits) => {
+                self.text_results = TextResults::Found(TextHits {
+                    query,
+                    rows: hits.iter().filter_map(super::list::HitRow::of).collect(),
+                });
+                self.sync(core, now);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %host,
+                    query_chars = query.chars().count(),
+                    error = %diagnostics::chain(&error),
+                    "couldn't search message text"
+                );
+                self.text_results = TextResults::Failed {
+                    query,
+                    cause: editor_core::Problem::calling_forge("Couldn't search messages.", &error),
+                };
+            }
+        }
     }
 
     pub fn drain(&mut self, core: &mut Core, now: Timestamp) -> bool {
@@ -399,19 +431,14 @@ impl Sidebar {
         for completion in self.completions.drain() {
             match completion {
                 Completion::Action {
-                    host,
-                    instance,
-                    what,
+                    key,
                     result: Err(error),
-                } if self.host.as_ref() == Some(&host)
-                    && self.host_instance == Some(instance)
-                    && core.host_if_instance(&host, instance).is_some() =>
-                {
+                } if self.actions.accepts(core, &key) => {
                     accepted = true;
-                    tracing::error!("couldn't {what}: {error:#}");
-                    self.error = Some(format!("Couldn't {what}: {error:#}"));
+                    let host = key.host();
+                    tracing::error!(%host, error = %diagnostics::chain(&error), "a thread action failed");
+                    self.error = Some(error.problem());
                 }
-                Completion::Action { .. } => {}
                 Completion::Browse {
                     host,
                     instance,
@@ -425,44 +452,20 @@ impl Sidebar {
                     self.browse_task = None;
                     if let Some(picker) = &mut self.picker {
                         accepted = true;
-                        picker.finish_browse(result.map_err(|error| format!("{error:#}")));
+                        picker.finish_browse(result.map_err(|error| {
+                            editor_core::Problem::calling_forge(
+                                "Couldn't open this folder.",
+                                &error,
+                            )
+                        }));
                     }
                 }
-                Completion::Browse { .. } => {}
-                Completion::Search {
-                    host,
-                    instance,
-                    generation,
-                    query,
-                    result,
-                } if generation == self.search_generation
-                    && self.host.as_ref() == Some(&host)
-                    && self.host_instance == Some(instance) =>
+                Completion::Search { key, query, result }
+                    if self.text_search.finish(core, &key) =>
                 {
-                    self.search_task = None;
                     accepted = true;
-                    match result {
-                        Ok(hits) => {
-                            self.text_hits = Some(TextHits {
-                                query,
-                                rows: hits
-                                    .iter()
-                                    .filter_map(super::list::HitRow::of)
-                                    .collect(),
-                            });
-                            self.sync(core, now);
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                %host,
-                                query_chars = query.chars().count(),
-                                "couldn't search message text: {error:#}"
-                            );
-                            self.text_hits = None;
-                        }
-                    }
+                    self.finish_text_search(core, now, key.host(), query, result);
                 }
-                Completion::Search { .. } => {}
                 Completion::Create {
                     host,
                     instance,
@@ -490,11 +493,19 @@ impl Sidebar {
                                     });
                                 }
                             }
-                            Err(error) => picker.finish_create(Some(format!("{error:#}"))),
+                            Err(error) => {
+                                picker.finish_create(Some(editor_core::Problem::calling_forge(
+                                    "Couldn't add this folder.",
+                                    &error,
+                                )));
+                            }
                         }
                     }
                 }
-                Completion::Create { .. } => {}
+                Completion::Action { .. }
+                | Completion::Browse { .. }
+                | Completion::Search { .. }
+                | Completion::Create { .. } => {}
             }
         }
         if accepted {
@@ -533,10 +544,10 @@ impl Sidebar {
         core.navigate(Screen::NewThread { host, project });
     }
 
-    fn call<F, Fut>(&self, core: &Core, what: String, operation: F)
+    fn call<F, Fut>(&self, core: &Core, operation: F)
     where
         F: FnOnce(editor_core::ForgeClient) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<(), ThreadActionError>> + Send + 'static,
     {
         let Some(host) = self
             .host
@@ -546,20 +557,12 @@ impl Sidebar {
         else {
             return;
         };
-        let id = host.id.clone();
-        let instance = host.instance();
+        let key = self.actions.key(&host.id, host.instance());
         let client = host.client.clone();
         let sender = self.completions.sender();
         editor_core::runtime::runtime().spawn(async move {
             let result = operation(client).await;
-            let _ = sender
-                .send(Completion::Action {
-                    host: id,
-                    instance,
-                    what,
-                    result,
-                })
-                .await;
+            sender.offer(Completion::Action { key, result }).await;
         });
     }
 
@@ -574,22 +577,27 @@ impl Sidebar {
         else {
             return;
         };
-        let what = format!("settle thread {thread}");
-        self.call(core, what, move |client| async move {
-            client.settle_thread(&thread, activity).await.map(drop)
+        self.call(core, move |client| async move {
+            client
+                .settle_thread(&thread, activity)
+                .await
+                .map(drop)
+                .map_err(|source| ThreadActionError::Settle { thread, source })
         });
     }
 
-    pub fn mark_unread(&self, core: &Core, thread: ThreadId) {
-        let what = format!("mark thread {thread} unread");
-        self.call(core, what, move |client| async move {
-            client.mark_unread(&thread).await.map(drop)
+    pub(crate) fn mark_unread(&self, core: &Core, thread: ThreadId) {
+        self.call(core, move |client| async move {
+            client
+                .mark_unread(&thread)
+                .await
+                .map(drop)
+                .map_err(|source| ThreadActionError::MarkUnread { thread, source })
         });
     }
 
-    pub fn archive(&self, core: &Core, thread: ThreadId) {
-        let what = format!("archive thread {thread}");
-        self.call(core, what, move |client| async move {
+    pub(crate) fn archive(&self, core: &Core, thread: ThreadId) {
+        self.call(core, move |client| async move {
             client
                 .update_thread(
                     &thread,
@@ -600,18 +608,18 @@ impl Sidebar {
                 )
                 .await
                 .map(drop)
+                .map_err(|source| ThreadActionError::Archive { thread, source })
         });
     }
 
-    pub fn submit_rename(&mut self, core: &Core, text: &str) {
+    pub(crate) fn submit_rename(&mut self, core: &Core, text: &str) {
         let Some(thread) = self.rename.take() else {
             return;
         };
         let Some(title) = rename_value(text) else {
             return;
         };
-        let what = format!("rename thread {thread}");
-        self.call(core, what, move |client| async move {
+        self.call(core, move |client| async move {
             client
                 .update_thread(
                     &thread,
@@ -622,13 +630,11 @@ impl Sidebar {
                 )
                 .await
                 .map(drop)
+                .map_err(|source| ThreadActionError::Rename { thread, source })
         });
     }
 
-    pub fn slide_threads(&self, core: &mut Core, position: &PagePosition) {
-        let Some(direction) = page_direction(position) else {
-            return;
-        };
+    fn slide_threads(&self, core: &mut Core, direction: PageDirection) {
         let Some(host) = self
             .host
             .as_ref()
@@ -646,11 +652,12 @@ impl Sidebar {
         );
     }
 
-    pub fn report_thread_viewport(
+    pub(crate) fn report_thread_viewport(
         &mut self,
         core: &mut Core,
         host_id: &HostId,
         instance: HostInstance,
+        pane: ThreadPane,
         viewport: aqua_ui::collection_runtime::CollectionViewport,
         visible_projects: &[ProjectId],
     ) {
@@ -660,45 +667,57 @@ impl Sidebar {
         {
             return;
         }
-        self.thread_viewport = Some(viewport);
+        self.thread_viewports.report(
+            pane,
+            PaneDistances {
+                viewport_height: viewport.viewport_height,
+                above: viewport.distance_from_start,
+                below: viewport.distance_from_end,
+            },
+        );
         self.load_visible_projects(core, visible_projects);
         self.page_at_viewport(core, false);
     }
 
     pub fn page_at_viewport(&self, core: &mut Core, scrolled: bool) {
-        let Some(viewport) = self.thread_viewport else {
-            return;
-        };
         let Some(host) = self.host_data(core) else {
             return;
         };
         let page = host.thread_page(false);
-        let position = PagePosition {
-            viewport_height: viewport.viewport_height,
-            above: viewport.distance_from_start,
-            below: viewport.distance_from_end,
-            loading: page.loading,
-            loaded: page.loaded,
-            failed: page.error.is_some(),
-            scrolled,
-            at_latest: page.at_latest,
-            has_older: page.next.is_some(),
-            history_open: self.history_open,
-            history_empty: self.lists.history.is_empty(),
+        let load = match (page.is_loading() || !page.is_loaded(), page.error()) {
+            (true, _) => PageLoad::Pending,
+            (false, Some(_)) => PageLoad::Failed { scrolled },
+            (false, None) => PageLoad::Ready,
         };
-        self.slide_threads(core, &position);
+        let history = match (self.lists.history.is_empty(), self.history_open) {
+            (true, _) => HistoryPane::Empty,
+            (false, true) => HistoryPane::Open,
+            (false, false) => HistoryPane::Closed,
+        };
+        let direction = self.thread_viewports.direction(PageState {
+            load,
+            at_latest: page.at_latest(),
+            has_older: page.has_older(),
+            history,
+        });
+        if let Some(direction) = direction {
+            self.slide_threads(core, direction);
+        }
     }
 
     pub fn toggle_history(&mut self, core: &mut Core) {
-        self.history_motion = Some((std::time::Instant::now(), self.history_fraction));
+        self.history_motion = Some((core.clock().now(), self.history_fraction));
         self.history_open = !self.history_open;
+        if !self.history_open {
+            self.thread_viewports.forget(ThreadPane::History);
+        }
         if !self.history_open
             && let Some(host) = self
                 .host
                 .as_ref()
                 .zip(self.host_instance)
                 .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
-            && !host.thread_page(false).at_latest
+            && !host.thread_page(false).at_latest()
         {
             host.load_threads(false, ThreadPageDirection::Latest);
         }
@@ -708,7 +727,7 @@ impl Sidebar {
         self.history_open || self.history_motion.is_some()
     }
 
-    pub fn advance_history(&mut self, now: std::time::Instant, reduced_motion: bool) -> bool {
+    fn advance_history(&mut self, now: std::time::Instant, reduced_motion: bool) -> bool {
         let Some((started, from)) = self.history_motion else {
             return false;
         };
@@ -737,7 +756,7 @@ impl Sidebar {
         self.lists.next_tick
     }
 
-    pub fn load_visible_projects(&self, core: &mut Core, projects: &[ProjectId]) {
+    fn load_visible_projects(&self, core: &mut Core, projects: &[ProjectId]) {
         let Some(host) = self
             .host
             .as_ref()
@@ -752,7 +771,7 @@ impl Sidebar {
         }
     }
 
-    pub fn retry_project_icons(&self, core: &mut Core) {
+    pub(crate) fn retry_project_icons(&self, core: &mut Core) {
         if let Some(host) = self
             .host
             .as_ref()
@@ -760,6 +779,34 @@ impl Sidebar {
             .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
         {
             host.retry_project_icons();
+        }
+    }
+
+    pub(crate) fn dismiss_rollback_notice(&self, core: &mut Core) {
+        if let Some(host) = self
+            .host
+            .as_ref()
+            .zip(self.host_instance)
+            .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
+        {
+            host.dismiss_rollback_notice();
+        }
+    }
+
+    pub(crate) fn retry_threads(&self, core: &mut Core) {
+        if let Some(host) = self
+            .host
+            .as_ref()
+            .zip(self.host_instance)
+            .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
+        {
+            let page = host.thread_page(false);
+            let direction = if page.is_loaded() && page.has_older() {
+                ThreadPageDirection::Older
+            } else {
+                ThreadPageDirection::Latest
+            };
+            host.load_threads(false, direction);
         }
     }
 
@@ -782,7 +829,7 @@ impl Sidebar {
         self.browse(core, None);
     }
 
-    pub fn browse(&mut self, core: &Core, path: Option<String>) {
+    pub(crate) fn browse(&mut self, core: &Core, path: Option<String>) {
         let Some(picker) = &mut self.picker else {
             return;
         };
@@ -809,8 +856,8 @@ impl Sidebar {
         let sender = self.completions.sender();
         self.browse_task = Some(editor_core::runtime::runtime().spawn(async move {
             let result = client.list_dir(path.as_deref()).await;
-            let _ = sender
-                .send(Completion::Browse {
+            sender
+                .offer(Completion::Browse {
                     host: host_id,
                     instance,
                     generation,
@@ -821,44 +868,55 @@ impl Sidebar {
     }
 
     pub fn search_text(&mut self, core: &Core) {
-        if let Some(task) = self.search_task.take() {
-            task.abort();
-        }
-        self.search_generation = self.search_generation.wrapping_add(1);
+        self.text_search.cancel();
         let query = self.search.borrow().text().trim().to_owned();
         if query.chars().count() < MIN_TEXT_QUERY {
-            self.text_hits = None;
+            self.text_results = TextResults::Idle;
             return;
         }
         let Some(host) = self.host_data(core) else {
             return;
         };
-        let generation = self.search_generation;
-        let host_id = host.id.clone();
-        let instance = host.instance();
+        self.text_results = TextResults::Searching(query.clone());
         let client = host.client.clone();
         let sender = self.completions.sender();
-        self.search_task = Some(editor_core::runtime::runtime().spawn(async move {
-            tokio::time::sleep(SEARCH_PAUSE).await;
-            let result = client
-                .text_search(&artisan_api::TextSearchQuery {
-                    query: query.clone(),
-                    limit: None,
-                })
-                .await;
-            let _ = sender
-                .send(Completion::Search {
-                    host: host_id,
-                    instance,
-                    generation,
-                    query,
-                    result,
-                })
-                .await;
-        }));
+        self.text_search
+            .spawn(&host.id, host.instance(), move |key| async move {
+                tokio::time::sleep(SEARCH_PAUSE).await;
+                let result = client
+                    .text_search(&artisan_api::TextSearchQuery {
+                        query: query.clone(),
+                        limit: None,
+                    })
+                    .await;
+                sender
+                    .offer(Completion::Search { key, query, result })
+                    .await;
+            });
     }
 
-    pub fn create_project(&mut self, core: &Core) {
+    pub fn text_search_status(&self) -> TextSearchStatus<'_> {
+        let query = self.search.borrow().text().trim().to_owned();
+        match &self.text_results {
+            TextResults::Searching(searched) if *searched == query => TextSearchStatus::Searching,
+            TextResults::Failed {
+                query: searched,
+                cause,
+            } if *searched == query => TextSearchStatus::Failed(cause),
+            TextResults::Idle
+            | TextResults::Searching(_)
+            | TextResults::Found(_)
+            | TextResults::Failed { .. } => TextSearchStatus::Idle,
+        }
+    }
+
+    pub(crate) fn clear_search(&mut self, core: &Core, now: Timestamp) {
+        self.search.borrow_mut().set_text("");
+        self.search_text(core);
+        self.sync(core, now);
+    }
+
+    pub(crate) fn create_project(&mut self, core: &Core) {
         let Some(host) = self
             .picker_host
             .as_ref()
@@ -877,8 +935,8 @@ impl Sidebar {
         let generation = self.picker_generation;
         editor_core::runtime::runtime().spawn(async move {
             let result = client.create_project(&request).await;
-            let _ = sender
-                .send(Completion::Create {
+            sender
+                .offer(Completion::Create {
                     host: host_id,
                     instance,
                     generation,
@@ -886,5 +944,14 @@ impl Sidebar {
                 })
                 .await;
         });
+    }
+}
+
+impl std::fmt::Debug for Sidebar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sidebar")
+            .field("host", &self.host)
+            .field("open", &self.open)
+            .finish_non_exhaustive()
     }
 }

@@ -15,21 +15,22 @@ use std::collections::HashMap;
 const HEADER_TAIL: Space = Space::S8;
 const FAILURE_TAIL: Space = Space::S4;
 
-pub const fn line_role(mono: bool) -> TextRole {
-    match mono {
-        true => TextRole::Code,
-        false => TextRole::Prose,
+pub(crate) const fn line_role(mono: bool) -> TextRole {
+    if mono {
+        TextRole::Code
+    } else {
+        TextRole::Prose
     }
 }
 
 fn label(
     text: impl Into<String>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     foreground: aqua_core::GpuiTextColor,
     mono: bool,
 ) -> Element {
     line_role(mono)
-        .text(&theme, text.into())
+        .text(theme, text.into())
         .gpui_source_color(foreground)
         .build()
 }
@@ -42,15 +43,25 @@ fn spacer(space: Space) -> Element {
         .build()
 }
 
-fn activator(key: String, label: impl Into<String>, child: Element, on_activate: impl Fn() + 'static) -> Element {
-    HitArea::new(key, Role::Button, label)
+fn activator(
+    theme: &ArtisanTheme,
+    key: String,
+    label: impl Into<String>,
+    child: Element,
+    on_activate: impl Fn() + 'static,
+) -> Element {
+    HitArea::new(key, theme, Role::Button, label)
         .child(child)
         .on_activate(on_activate)
         .build()
-        .style(Style::new().height(Length::Auto).min_width(Length::Pct(0.0)))
+        .style(
+            Style::new()
+                .height(Length::Auto)
+                .min_width(Length::Pct(0.0)),
+        )
 }
 
-pub fn section_title(summary: &RunSummary, now: Timestamp) -> String {
+pub(crate) fn section_title(summary: &RunSummary, now: Timestamp) -> String {
     let end = summary.ended_at.unwrap_or(now);
     let elapsed = summary
         .started_at
@@ -59,7 +70,12 @@ pub fn section_title(summary: &RunSummary, now: Timestamp) -> String {
     phase::section_title(summary.phase, summary.worked, elapsed)
 }
 
-pub fn header(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the work header takes its run, segment, summary, label, chevron and dispatch"
+)]
+pub(crate) fn header(
+    theme: &ArtisanTheme,
     run: Option<&RunId>,
     segment: usize,
     has_work: bool,
@@ -95,26 +111,29 @@ pub fn header(
     match run.filter(|_| controlled).cloned() {
         Some(run) => {
             let open = !summary.open;
-            let words = match open {
-                true => "Show work",
-                false => "Hide work",
-            };
-            Some(activator(format!("work-header-{run}"), words, near, move || {
-                dispatch(Action::ToggleWork {
-                    run: run.clone(),
-                    open,
-                })
-            }))
+            let words = if open { "Show work" } else { "Hide work" };
+            Some(activator(
+                theme,
+                format!("work-header-{run}"),
+                words,
+                near,
+                move || {
+                    dispatch(Action::ToggleWork {
+                        run: run.clone(),
+                        open,
+                    });
+                },
+            ))
         }
         None => Some(near),
     }
 }
 
-pub fn chain(
+pub(crate) fn chain(
     ids: &[ItemId],
     items: &HashMap<ItemId, std::sync::Arc<Item>>,
     open: bool,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     phrase: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,
     chevron: impl FnOnce(bool, aqua_core::GpuiHsla) -> Element,
     dispatch: Dispatch,
@@ -144,17 +163,23 @@ pub fn chain(
         .child(phrase(text.clone(), color.to_reference_text_color()))
         .child(chevron(open, color.to_reference_paint()))
         .build();
-    Some(activator(format!("work-chain-{first}"), text, child, move || {
-        dispatch(Action::ToggleChain {
-            id: first.clone(),
-            open: !open,
-        })
-    }))
+    Some(activator(
+        theme,
+        format!("work-chain-{first}"),
+        text,
+        child,
+        move || {
+            dispatch(Action::ToggleChain {
+                id: first.clone(),
+                open: !open,
+            });
+        },
+    ))
 }
 
-pub fn agent(
+pub(crate) fn agent(
     item: &Item,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,
     dispatch: Dispatch,
 ) -> Option<Element> {
@@ -187,6 +212,7 @@ pub fn agent(
         ))
         .build();
     Some(activator(
+        theme,
         format!("work-agent-{id}"),
         "Open agent",
         content,
@@ -194,16 +220,20 @@ pub fn agent(
     ))
 }
 
-pub fn activity_row(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the activity row takes the item, its agents, and the truncate, failure and details builders"
+)]
+pub(crate) fn activity_row<E>(
     item: &Item,
     expanded: bool,
     agents: &HashMap<ItemId, String>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor, bool) -> Element,
     dispatch: Dispatch,
-    stored_failure: impl FnOnce() -> anyhow::Result<Element>,
+    stored_failure: impl FnOnce() -> Result<Element, E>,
     details: impl FnOnce(Element) -> Element,
-) -> anyhow::Result<Option<Element>> {
+) -> Result<Option<Element>, E> {
     if activity::category(item).is_none() {
         return Ok(None);
     }
@@ -213,7 +243,16 @@ pub fn activity_row(
             output: Some(output),
             ..
         } if item.status == Status::Failed && output.text.byte_len() > 0 => Some(&output.text),
-        _ => None,
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Tool { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Plan { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => None,
     };
     let has_details = failure.is_some()
         || activity::agent_message(item).is_some_and(|message| message.text.byte_len() > 0);
@@ -237,21 +276,26 @@ pub fn activity_row(
             words.code,
         ))
         .build();
-    let sentence = match has_details {
-        true => {
-            let id = item.id.clone();
-            activator(format!("work-item-{id}"), "Toggle details", line, move || {
+    let sentence = if has_details {
+        let id = item.id.clone();
+        activator(
+            theme,
+            format!("work-item-{id}"),
+            "Toggle details",
+            line,
+            move || {
                 dispatch(Action::ToggleItem {
                     id: id.clone(),
                     expanded: !expanded,
-                })
-            })
-        }
-        false => UiBox::new()
+                });
+            },
+        )
+    } else {
+        UiBox::new()
             .width(Length::Pct(100.0))
             .style(Style::new().min_width(Length::Pct(0.0)))
             .child(line)
-            .build(),
+            .build()
     };
     Ok(match failure.filter(|_| expanded && has_details) {
         Some(error) => Some(
@@ -266,7 +310,7 @@ pub fn activity_row(
                         .child(match error {
                             TextContent::Stored(_) => stored_failure()?,
                             TextContent::Inline(error) => TextRole::Label
-                                .text(&theme, error.trim().to_owned())
+                                .text(theme, error.trim().to_owned())
                                 .gpui_source_color(
                                     theme.colors.destructive_text.to_reference_text_color(),
                                 )
@@ -281,7 +325,7 @@ pub fn activity_row(
     })
 }
 
-pub fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
+pub(crate) fn plan_entry(item: &Item, theme: &ArtisanTheme) -> Option<Element> {
     let ItemKind::Plan { approval, .. } = &item.kind else {
         return None;
     };
@@ -294,7 +338,7 @@ pub fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
             artisan_api::Decision::DenyAlways => "You denied this from now on.",
             artisan_api::Decision::Cancelled => "Cancelled.",
         };
-        content = content.child(TextRole::Label.text(&theme, text).build());
+        content = content.child(TextRole::Label.text(theme, text).build());
     }
     Some(content.build())
 }

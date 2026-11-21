@@ -1,11 +1,10 @@
 use super::stored::{RangeCollector, StoredOwner, StoredSource};
-use editor_core::{delivery::Delivery, runtime};
 use aqua_text::document::{SelectionSource, SelectionSourceId};
-use artisan_api::{ContentRange, ContentRef, SourceIndexFormat, SourceLeafDescriptor};
+use artisan_api::{ContentRange, SourceIndexFormat, SourceLeafDescriptor};
+use editor_core::{delivery::Delivery, runtime};
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
-    ops::Range,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -21,10 +20,9 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FETCHES: usize = 4;
 const MAX_LEAF_BYTES: usize = 64 * 1024;
 const FETCH_HEADROOM: usize = 65_539;
-pub const MAX_NATIVE_SOURCE: usize = 16 * 1024;
-pub const NATIVE_BODY_WINDOW: usize = 64;
+const MAX_NATIVE_SOURCE: usize = 16 * 1024;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum LiteralPreparation {
     Pending,
     Ready(Arc<LiteralLeaf>),
@@ -43,20 +41,17 @@ impl Drop for Lease {
 }
 
 pub struct LiteralLeaf {
-    pub text: Arc<str>,
-    pub source_ref: ContentRef,
-    pub ordinal: usize,
-    pub source_range: Range<usize>,
-    source: StoredSource,
-    descriptor: SourceLeafDescriptor,
-    key: String,
-    generation: u64,
-    valid: Arc<AtomicBool>,
-    owner_epoch: Weak<AtomicU64>,
-    epoch: u64,
+    text: Arc<str>,
     _lease: Lease,
 }
 
+impl std::fmt::Debug for LiteralLeaf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiteralLeaf").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub struct LiteralSelection {
     source: SelectionSource,
     _leaf: Arc<LiteralLeaf>,
@@ -64,9 +59,6 @@ pub struct LiteralSelection {
 impl LiteralSelection {
     pub fn source(&self) -> &SelectionSource {
         &self.source
-    }
-    pub fn leaf(&self) -> &Arc<LiteralLeaf> {
-        &self._leaf
     }
 }
 
@@ -102,8 +94,8 @@ impl LiteralLeaf {
         separator: &str,
     ) -> LiteralSelection {
         LiteralSelection {
-            source: selection_source(self.text.clone(), id, order, separator),
-            _leaf: self.clone(),
+            source: selection_source(Arc::clone(&self.text), id, order, separator),
+            _leaf: Arc::clone(self),
         }
     }
 }
@@ -135,7 +127,7 @@ impl Drop for Entry {
 struct Completion {
     key: String,
     generation: u64,
-    result: anyhow::Result<ContentRange>,
+    result: Result<ContentRange, editor_core::client::RangeError>,
 }
 
 #[derive(Default)]
@@ -177,6 +169,12 @@ pub struct LiteralOwner {
     capacity: Arc<Semaphore>,
     delivery: Delivery<Completion>,
 }
+
+impl std::fmt::Debug for LiteralOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiteralOwner").finish_non_exhaustive()
+    }
+}
 impl Default for LiteralOwner {
     fn default() -> Self {
         Self {
@@ -185,29 +183,15 @@ impl Default for LiteralOwner {
             generation: 0,
             epoch: Arc::new(AtomicU64::new(0)),
             capacity: Arc::new(Semaphore::new(MAX_BYTES)),
-            delivery: Delivery::new(NonZeroUsize::new(MAX_FETCHES).unwrap()),
+            delivery: Delivery::new(
+                const { NonZeroUsize::new(MAX_FETCHES).expect("invariant: MAX_FETCHES is nonzero") },
+            ),
         }
     }
 }
 impl LiteralOwner {
     pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
         self.delivery.wake_mailbox()
-    }
-    pub fn release(&mut self, key: &str) {
-        self.epochs.release(key);
-        self.epochs.prune();
-        self.entries.retain(|entry| {
-            if entry.key == key {
-                entry.valid.store(false, Ordering::Relaxed);
-                false
-            } else {
-                true
-            }
-        });
-    }
-    pub fn retry(&mut self, key: &str) {
-        self.release(key);
-        self.delivery.wake();
     }
     pub fn clear(&mut self) {
         self.epochs.clear();
@@ -218,20 +202,10 @@ impl LiteralOwner {
         self.entries.clear();
         self.generation = self.generation.wrapping_add(1);
     }
-    pub fn is_current(&self, owner: &StoredOwner, leaf: &LiteralLeaf) -> bool {
-        leaf.valid.load(Ordering::Relaxed)
-            && leaf.owner_epoch.upgrade().is_some_and(|epoch| {
-                Arc::ptr_eq(&epoch, &self.epoch) && epoch.load(Ordering::Relaxed) == leaf.epoch
-            })
-            && owner.source_is_current(&leaf.source)
-            && leaf.source.format() == SourceIndexFormat::Literal
-            && leaf.source.descriptor(leaf.ordinal) == Some(&leaf.descriptor)
-            && self
-                .entries
-                .iter()
-                .find(|entry| entry.key == leaf.key)
-                .is_none_or(|entry| entry.generation == leaf.generation)
-    }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one literal preparation walking retention, index, page and leaf states"
+    )]
     pub fn prepare(
         &mut self,
         owner: &StoredOwner,
@@ -254,7 +228,7 @@ impl LiteralOwner {
         if !owner.source_is_current(source) {
             return LiteralPreparation::Pending;
         }
-        let Some(descriptor) = source.descriptor(ordinal).cloned() else {
+        let Some(descriptor) = owner.descriptor(source, ordinal).cloned() else {
             return LiteralPreparation::Pending;
         };
         let (Ok(start), Ok(end)) = (
@@ -279,14 +253,18 @@ impl LiteralOwner {
                     .to_owned(),
             );
         }
-        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+        let found = self.entries.iter().position(|entry| entry.key == key);
+        if let Some(index) = found {
             let same = self.entries[index].source.revision() == source.revision()
                 && self.entries[index].source.source_ref() == source.source_ref()
                 && self.entries[index].descriptor == descriptor;
             if same {
-                let entry = self.entries.remove(index).unwrap();
+                let entry = self
+                    .entries
+                    .remove(index)
+                    .unwrap_or_else(|| panic!("invariant: literal {key} was found at {index}"));
                 let result = match &entry.phase {
-                    Phase::Ready(leaf) => LiteralPreparation::Ready(leaf.clone()),
+                    Phase::Ready(leaf) => LiteralPreparation::Ready(Arc::clone(leaf)),
                     Phase::Failed(error) => LiteralPreparation::Failed(error.clone()),
                     Phase::Loading { .. } => LiteralPreparation::Pending,
                 };
@@ -312,10 +290,9 @@ impl LiteralOwner {
         }
         let requested = (end - start) * 2 + FETCH_HEADROOM;
         let capacity = loop {
-            if let Ok(permit) = self
-                .capacity
-                .clone()
-                .try_acquire_many_owned(requested as u32)
+            if let Ok(permit) = Arc::clone(&self.capacity).try_acquire_many_owned(
+                u32::try_from(requested).unwrap_or_else(|_| panic!("invariant: literal {key} requests {requested} bytes, bounded by MAX_LEAF_BYTES")),
+            )
             {
                 break permit;
             }
@@ -366,13 +343,13 @@ impl LiteralOwner {
         true
     }
     fn result(&self, key: &str) -> LiteralPreparation {
-        match self
+        let phase = self
             .entries
             .iter()
             .find(|entry| entry.key == key)
-            .map(|entry| &entry.phase)
-        {
-            Some(Phase::Ready(leaf)) => LiteralPreparation::Ready(leaf.clone()),
+            .map(|entry| &entry.phase);
+        match phase {
+            Some(Phase::Ready(leaf)) => LiteralPreparation::Ready(Arc::clone(leaf)),
             Some(Phase::Failed(error)) => LiteralPreparation::Failed(error.clone()),
             _ => LiteralPreparation::Pending,
         }
@@ -406,8 +383,8 @@ impl LiteralOwner {
                 runtime::runtime()
                     .spawn(async move {
                         let result = future.await;
-                        let _ = sender
-                            .send(Completion {
+                        sender
+                            .offer(Completion {
                                 key,
                                 generation,
                                 result,
@@ -417,31 +394,25 @@ impl LiteralOwner {
                     .abort_handle(),
             );
         } else {
-            let text = match collector.take().unwrap().finish() {
+            let text = match collector
+                .take()
+                .unwrap_or_else(|| panic!("invariant: literal {key} is loading with its collector"))
+                .finish()
+            {
                 Ok(text) => text,
                 Err(error) => {
                     entry.phase = Phase::Failed(error);
                     return;
                 }
             };
-            let mut permit = capacity.take().unwrap();
+            let mut permit = capacity
+                .take()
+                .unwrap_or_else(|| panic!("invariant: literal {key} is loading with its capacity"));
             let retained = text.len().max(1);
             let release = permit.num_permits() - retained;
             drop(permit.split(release));
-            let start = usize::try_from(entry.descriptor.source_start).unwrap();
-            let end = usize::try_from(entry.descriptor.source_end).unwrap();
             let leaf = LiteralLeaf {
                 text: Arc::from(text),
-                source_ref: entry.source.source_ref().clone(),
-                ordinal: entry.descriptor.ordinal as usize,
-                source_range: start..end,
-                source: entry.source.clone(),
-                descriptor: entry.descriptor.clone(),
-                key: entry.key.clone(),
-                generation: entry.generation,
-                valid: entry.valid.clone(),
-                owner_epoch: Arc::downgrade(&self.epoch),
-                epoch: self.epoch.load(Ordering::Relaxed),
                 _lease: Lease {
                     permit: Some(permit),
                     wake: self.delivery.waker(),
@@ -481,7 +452,7 @@ impl LiteralOwner {
             let result = completion
                 .result
                 .map_err(|error| error.to_string())
-                .and_then(|page| collector.push(page));
+                .and_then(|page| collector.push(&page));
             if let Err(error) = result {
                 entry.phase = Phase::Failed(error);
             } else {

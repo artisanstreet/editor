@@ -1,24 +1,47 @@
-use super::fixture::VerifiedBootstrap;
-use crate::core::{Core, EditorFiles, HostId, Screen, hosts};
-use anyhow::{Context, Result};
+use super::fixture::{LoadBootstrapError, PairingError, VerifiedBootstrap, VerifyInputsError};
+use crate::core::config_file::WriteConfigError;
+use crate::core::hosts::PairError;
+use crate::core::{Core, EditorFiles, HostId, IdentityError, Screen, hosts};
 use std::path::Path;
 
-pub struct Bootstrap {
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapError {
+    #[error("load the qualification request")]
+    Load(#[source] LoadBootstrapError),
+    #[error("invite the qualification Editor to Forge")]
+    Invite(#[source] PairingError),
+    #[error("load the qualification Editor's identity")]
+    Identity(#[source] IdentityError),
+    #[error("pair the qualification Editor with Forge")]
+    Pair(#[source] PairError),
+    #[error("save the qualification Editor's host {host}")]
+    SaveHosts {
+        host: HostId,
+        #[source]
+        source: WriteConfigError,
+    },
+    #[error("check that the qualification inputs are unchanged")]
+    Inputs(#[source] VerifyInputsError),
+}
+
+pub(crate) struct Bootstrap {
     verified: VerifiedBootstrap,
     files: EditorFiles,
-    host: HostId,
-    thread: artisan_api::ThreadId,
 }
 
 impl Bootstrap {
-    pub fn load(path: &Path) -> Result<Self> {
+    pub(crate) fn load(path: &Path) -> Result<Self, BootstrapError> {
         let runtime = crate::core::runtime::runtime();
-        let verified = runtime.block_on(VerifiedBootstrap::load(path))?;
-        let pairing = runtime.block_on(verified.server.pairing_input())?;
+        let verified = runtime
+            .block_on(VerifiedBootstrap::load(path))
+            .map_err(BootstrapError::Load)?;
+        let pairing = runtime
+            .block_on(verified.pairing_input())
+            .map_err(BootstrapError::Invite)?;
         let files = EditorFiles {
-            dir: verified.editor_dir.clone(),
+            dir: verified.editor_dir().to_owned(),
         };
-        let identity = files.identity()?;
+        let identity = files.identity().map_err(BootstrapError::Identity)?;
         let mut config = runtime
             .block_on(hosts::pair(
                 &pairing.address,
@@ -29,76 +52,34 @@ impl Bootstrap {
                 "Forge".to_owned(),
                 hosts::HostKind::Local,
             ))
-            .context("pair qualification Editor with Forge")?;
-        let host = HostId(verified.request.host_id.clone());
+            .map_err(BootstrapError::Pair)?;
+        let host = verified.host().clone();
         config.id = host.clone();
-        files.save_hosts(&hosts::HostsFile {
-            hosts: vec![config],
-            last: Some(host.clone()),
-        })?;
-        verified.verify_inputs()?;
-        let thread = artisan_api::ThreadId::from(verified.request.thread_id.clone());
-        Ok(Self {
-            verified,
-            files,
-            host,
-            thread,
-        })
+        files
+            .save_hosts(&hosts::HostsFile {
+                hosts: vec![config],
+                last: Some(host.clone()),
+            })
+            .map_err(|source| BootstrapError::SaveHosts { host, source })?;
+        verified.verify_inputs().map_err(BootstrapError::Inputs)?;
+        Ok(Self { verified, files })
     }
 
-    pub fn core(&self) -> Result<Core> {
-        let mut core = Core::for_tests(self.files.clone())?;
+    pub(crate) fn core(&self) -> Result<Core, super::sign_in::OpenSignedInError> {
+        let mut core = super::sign_in::open_signed_in(self.files.clone())?;
         core.navigate(Screen::Thread {
-            host: self.host.clone(),
-            thread: self.thread.clone(),
+            host: self.verified.host().clone(),
+            thread: self.verified.thread().clone(),
         });
         Ok(core)
     }
 
-    pub fn dimensions(&self) -> (f64, f64) {
-        (
-            f64::from(self.verified.request.width),
-            f64::from(self.verified.request.height),
-        )
+    pub(crate) fn dimensions(&self) -> (f64, f64) {
+        let (width, height) = self.verified.dimensions();
+        (f64::from(width), f64::from(height))
     }
 
-    pub fn editor_directory(&self) -> &Path {
+    pub(crate) fn editor_directory(&self) -> &Path {
         &self.files.dir
-    }
-
-    pub fn core_snapshot_ready(&self, core: &Core) -> bool {
-        let Some(host) = core.host(&self.host) else {
-            return false;
-        };
-        host.is_live()
-            && matches!(core.screen(), Screen::Thread { host, thread } if host == &self.host && thread == &self.thread)
-            && host.projects.len() == self.verified.snapshot.projects.len()
-            && self
-                .verified
-                .snapshot
-                .projects
-                .iter()
-                .all(|project| host.projects.get(&project.id) == Some(project))
-            && host.threads.len() == self.verified.snapshot.threads.len()
-            && self
-                .verified
-                .snapshot
-                .threads
-                .iter()
-                .all(|thread| host.threads.get(&thread.id) == Some(thread))
-            && host.runs.len() == self.verified.snapshot.runs.len()
-            && self
-                .verified
-                .snapshot
-                .runs
-                .iter()
-                .all(|run| host.runs.get(&run.thread_id) == Some(run))
-            && host.settings.len() == self.verified.snapshot.settings.len()
-            && self
-                .verified
-                .snapshot
-                .settings
-                .iter()
-                .all(|(key, value)| host.settings.get(key) == Some(value))
     }
 }

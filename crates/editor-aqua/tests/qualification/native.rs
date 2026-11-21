@@ -1,5 +1,4 @@
 use super::*;
-use crate::core::{Core, EditorFiles};
 use crate::shell::{host::ShellResources, root::RootViews};
 use aqua::prelude::{ObservedWindowState, WindowOptions};
 use aqua::{Aqua, AquaConfig};
@@ -7,10 +6,7 @@ use aqua::{Aqua, AquaConfig};
 #[test]
 fn qualification_frames_never_initialize_native_notifications() {
     let directory = tempfile::tempdir().unwrap();
-    let core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let core = test_support::editor::core::test_core(directory.path());
     let resources = ShellResources::new(1.0).unwrap();
     let mut app = ShellApplication::for_qualification(core, resources, RootViews::default());
     let mut runtime = Aqua::new(AquaConfig {
@@ -29,5 +25,9 @@ fn qualification_frames_never_initialize_native_notifications() {
         runtime.dispatch_frame_completed(&mut app, id, sequence);
     }
     assert!(app.notifications.is_none());
-    assert!(!app.notifications_started);
+    assert_eq!(
+        app.notifications_start,
+        NotificationStart::Disabled,
+        "a qualification run never starts native notifications"
+    );
 }

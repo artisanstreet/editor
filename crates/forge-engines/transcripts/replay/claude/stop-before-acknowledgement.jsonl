@@ -1,0 +1,19 @@
+{"kind":"transcript","source":"synthetic"}
+{"kind":"launch"}
+{"kind":"in","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Refactor the parser\"}]},\"parent_tool_use_id\":null,\"session_id\":\"\"}"}
+{"kind":"in","text":"{\"type\":\"control_request\",\"request_id\":\"artisan-title\",\"request\":{\"subtype\":\"generate_session_title\",\"description\":\"Refactor the parser\",\"persist\":true}}"}
+{"kind":"out","text":"{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/work\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"model\":\"claude-haiku-5-5\",\"permissionMode\":\"default\",\"tools\":[],\"mcp_servers\":[]}"}
+{"kind":"out","text":"{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"artisan-title\",\"response\":{\"title\":\"Refactoring the parser\"}}}"}
+{"kind":"in","text":"{\"type\":\"control_request\",\"request_id\":\"artisan-interrupt\",\"request\":{\"subtype\":\"interrupt\"}}"}
+{"kind":"out","text":"{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Refactor the parser\"}]},\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"artisan-interrupt\",\"response\":{}}}"}
+{"kind":"out","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user]\"}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"terminal_reason\":\"aborted_streaming\",\"errors\":[],\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"usage\":{}}"}
+{"kind":"closed"}
+{"kind":"launch"}
+{"kind":"in","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Continue from where you left off.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"\"}"}
+{"kind":"out","text":"{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/work\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"model\":\"claude-haiku-5-5\",\"permissionMode\":\"default\",\"tools\":[],\"mcp_servers\":[]}"}
+{"kind":"out","text":"{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Continue from where you left off.\"}]},\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_continued\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Picked the parser refactor back up.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Picked the parser refactor back up.\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"usage\":{}}"}
+{"kind":"closed"}

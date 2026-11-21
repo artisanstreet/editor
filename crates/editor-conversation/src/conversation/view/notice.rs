@@ -1,15 +1,15 @@
 use crate::conversation::content::SourceField;
-use editor_ui::kit::{IconSize, Space, Spaced, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::AlignItems;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{Item, ItemKind, NoticeKind, TextContent};
 use editor_assets::AssetId;
+use editor_ui::kit::{IconSize, Space, Spaced, TextRole};
+use editor_ui::theme::ArtisanTheme;
 
-pub fn render<E>(
+pub(crate) fn render<E>(
     item: &Item,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,
     source: impl FnOnce(SourceField) -> Result<Element, E>,
 ) -> Result<Option<Element>, E> {
@@ -34,7 +34,7 @@ pub fn render<E>(
         ),
         TextContent::Stored(_) => {
             let prefix = TextRole::Prose
-                .text(&theme, prefix)
+                .text(theme, prefix)
                 .gpui_source_color(muted)
                 .build();
             UiBox::new()

@@ -25,12 +25,12 @@ pub enum ActivityCategory {
 }
 
 impl ActivityCategory {
-    pub(crate) fn count_label(self, count: usize) -> String {
+    fn count_label(self, count: usize) -> String {
         let counted = |one: &str, many: &str| {
             if count == 1 {
                 one.to_owned()
             } else {
-                many.replace("{n}", &count.to_string())
+                many.replace("{n}", &editor_ui::locale::integer(count))
             }
         };
         match self {
@@ -55,7 +55,7 @@ impl ActivityCategory {
     }
 }
 
-pub fn category(item: &Item) -> Option<ActivityCategory> {
+pub(crate) fn category(item: &Item) -> Option<ActivityCategory> {
     use ActivityCategory as C;
     match &item.kind {
         ItemKind::Agent { .. } => Some(C::Subagent),
@@ -87,7 +87,7 @@ pub fn category(item: &Item) -> Option<ActivityCategory> {
             },
             ToolKind::Mcp { .. } => C::Integration,
             ToolKind::AgentMessage { .. } => C::Message,
-            ToolKind::Agents { .. } | ToolKind::Other { .. } => C::Tool,
+            ToolKind::Agents { .. } | ToolKind::Workflow { .. } | ToolKind::Other { .. } => C::Tool,
         }),
         ItemKind::UserMessage { .. }
         | ItemKind::AssistantMessage { .. }
@@ -135,16 +135,16 @@ fn is_image_path(path: &str) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
-    pub verb: String,
-    pub object: String,
-    pub code: bool,
+    pub(crate) verb: String,
+    pub(crate) object: String,
+    pub(crate) code: bool,
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per kind of call, each its own words"
 )]
-pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
+pub(crate) fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
     let live = matches!(item.status, Status::Running | Status::AwaitingUser);
     let tense = |done: &str, running: &str| if live { running } else { done }.to_owned();
     let agent = |id: Option<&ItemId>| id.and_then(|id| agents.get(id)).cloned();
@@ -200,7 +200,9 @@ pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
                     _ => tense("Edited", "Editing"),
                 };
                 let object = match changes {
-                    artisan_api::Collection::Stored(source) => format!("{} files", source.count),
+                    artisan_api::Collection::Stored(source) => {
+                        editor_ui::locale::count(source.count, "file", "files")
+                    }
                     artisan_api::Collection::Inline(changes) => match changes.as_slice() {
                         [] => "a file".to_owned(),
                         [one] => match &one.op {
@@ -342,6 +344,19 @@ pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
                     ),
                 }
             }
+            ToolKind::Workflow { name, input } => (
+                "Workflow".to_owned(),
+                title
+                    .clone()
+                    .or_else(|| name.clone())
+                    .or_else(|| {
+                        input
+                            .as_ref()
+                            .and_then(|input| first_field(input.inline()?))
+                    })
+                    .map(|text| first_line(&text))
+                    .unwrap_or_default(),
+            ),
             ToolKind::Other { name, input } => (
                 sentence(&words(name)),
                 title
@@ -417,7 +432,7 @@ fn doing_one(item: &Item, agents: &HashMap<ItemId, String>) -> String {
     }
 }
 
-pub fn doing(items: &[&Item], agents: &HashMap<ItemId, String>) -> Option<String> {
+pub(crate) fn doing(items: &[&Item], agents: &HashMap<ItemId, String>) -> Option<String> {
     let running: Vec<&Item> = items
         .iter()
         .copied()
@@ -427,11 +442,18 @@ pub fn doing(items: &[&Item], agents: &HashMap<ItemId, String>) -> Option<String
     match running.as_slice() {
         [] => None,
         [one] => Some(doing_one(one, agents)),
-        many if all(ActivityCategory::Command) => Some(format!("Running {} commands", many.len())),
-        many if all(ActivityCategory::Subagent) => {
-            Some(format!("Waiting on {} agents", many.len()))
-        }
-        many => Some(format!("Using {} tools", many.len())),
+        many if all(ActivityCategory::Command) => Some(format!(
+            "Running {}",
+            editor_ui::locale::count(many.len(), "command", "commands")
+        )),
+        many if all(ActivityCategory::Subagent) => Some(format!(
+            "Waiting on {}",
+            editor_ui::locale::count(many.len(), "agent", "agents")
+        )),
+        many => Some(format!(
+            "Using {}",
+            editor_ui::locale::count(many.len(), "tool", "tools")
+        )),
     }
 }
 
@@ -501,12 +523,7 @@ fn artisan(
             String::new(),
             false,
         ),
-        "harnesses" => (
-            "Listed harnesses",
-            "Listing harnesses",
-            String::new(),
-            false,
-        ),
+        "harnesses" => ("Listed engines", "Listing engines", String::new(), false),
         "agent_spawn" => ("Delegated", "Delegating", field("task"), false),
         "agent_wait" => ("Waited for", "Waiting for", agents(), false),
         "agent_message" => ("Messaged", "Messaging", agents(), false),
@@ -526,10 +543,10 @@ fn artisan(
             format!("{} to {}", words(&field("key")), field("value")),
             false,
         ),
-        "hosts_list" => ("Listed hosts", "Listing hosts", String::new(), false),
+        "hosts_list" => ("Listed Forges", "Listing Forges", String::new(), false),
         "host_add" => (
-            "Added a host",
-            "Adding a host",
+            "Added a Forge",
+            "Adding a Forge",
             [field("distro"), field("address")]
                 .into_iter()
                 .find(|text| !text.is_empty())
@@ -537,8 +554,8 @@ fn artisan(
             false,
         ),
         "host_remove" => (
-            "Removed the host",
-            "Removing the host",
+            "Removed the Forge",
+            "Removing the Forge",
             field("host"),
             false,
         ),
@@ -633,7 +650,7 @@ fn counted_agents(count: usize) -> String {
     match count {
         0 => "agents".to_owned(),
         1 => "an agent".to_owned(),
-        count => format!("{count} agents"),
+        count => editor_ui::locale::count(count, "agent", "agents"),
     }
 }
 
@@ -695,13 +712,13 @@ fn first_field(input: &str) -> Option<String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentMessage {
-    pub to: Option<artisan_api::ItemId>,
-    pub direction: MessageDirection,
-    pub summary: Option<String>,
-    pub text: artisan_api::TextContent,
+    pub(crate) to: Option<ItemId>,
+    pub(crate) direction: MessageDirection,
+    pub(crate) summary: Option<String>,
+    pub(crate) text: artisan_api::TextContent,
 }
 
-pub fn agent_message(item: &Item) -> Option<AgentMessage> {
+pub(crate) fn agent_message(item: &Item) -> Option<AgentMessage> {
     if let ItemKind::UserMessage {
         text,
         from_agent: Some(from),
@@ -737,11 +754,11 @@ pub fn agent_message(item: &Item) -> Option<AgentMessage> {
     })
 }
 
-pub fn chain_categories<'a>(items: impl Iterator<Item = &'a Item>) -> Vec<ActivityCategory> {
+pub(crate) fn chain_categories<'a>(items: impl Iterator<Item = &'a Item>) -> Vec<ActivityCategory> {
     items.filter_map(category).collect()
 }
 
-pub fn chain_clause(categories: impl Iterator<Item = ActivityCategory>) -> String {
+pub(crate) fn chain_clause(categories: impl Iterator<Item = ActivityCategory>) -> String {
     let mut composition: Vec<(ActivityCategory, usize)> = Vec::new();
     for category in categories {
         match composition.iter_mut().find(|(known, _)| *known == category) {
@@ -766,7 +783,9 @@ pub fn chain_clause(categories: impl Iterator<Item = ActivityCategory>) -> Strin
     text
 }
 
-pub fn chain_icon(categories: impl Iterator<Item = ActivityCategory>) -> editor_assets::AssetId {
+pub(crate) fn chain_icon(
+    categories: impl Iterator<Item = ActivityCategory>,
+) -> editor_assets::AssetId {
     use editor_assets::AssetId;
     let mut categories = categories;
     let Some(first) = categories.next() else {
@@ -794,3 +813,7 @@ pub fn chain_icon(categories: impl Iterator<Item = ActivityCategory>) -> editor_
         | ActivityCategory::Tool => AssetId::TABLER_TOOL,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/activity.rs"]
+mod tests;

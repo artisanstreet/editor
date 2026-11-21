@@ -14,18 +14,6 @@ pub enum Space {
 }
 
 impl Space {
-    pub const ALL: [Self; 9] = [
-        Self::S2,
-        Self::S4,
-        Self::S6,
-        Self::S8,
-        Self::S12,
-        Self::S16,
-        Self::S20,
-        Self::S24,
-        Self::S32,
-    ];
-
     #[must_use]
     pub const fn px(self) -> f32 {
         match self {
@@ -39,11 +27,6 @@ impl Space {
             Self::S24 => 24.0,
             Self::S32 => 32.0,
         }
-    }
-
-    #[must_use]
-    pub fn of(px: f32) -> Option<Self> {
-        Self::ALL.into_iter().find(|space| space.px() == px)
     }
 }
 

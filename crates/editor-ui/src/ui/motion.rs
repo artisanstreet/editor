@@ -1,15 +1,12 @@
+use std::rc::Rc;
 use std::time::Duration;
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkingPulse {
-    started: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+    started: Rc<std::cell::Cell<Option<u32>>>,
 }
 
 impl WorkingPulse {
-    pub fn reset(&self) {
-        self.started.set(None);
-    }
-
     pub fn wrap(
         &self,
         child: aqua_ui::element::Element,
@@ -20,8 +17,8 @@ impl WorkingPulse {
             element::{Canvas, Element},
             style::Style,
         };
-        let started = self.started.clone();
-        let prepaint = started.clone();
+        let started = Rc::clone(&self.started);
+        let prepaint = Rc::clone(&started);
         let before = Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .on_prepaint(move |_, _| {
@@ -58,26 +55,7 @@ impl WorkingPulse {
         Element::fragment(vec![before, child, after])
     }
 }
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum MotionPolicy {
-    Full,
-    Reduced,
-}
 
-impl MotionPolicy {
-    #[must_use]
-    pub const fn resolve(self, recipe: MotionRecipe) -> MotionPlan {
-        match self {
-            Self::Full => MotionPlan::Animate(recipe.animation()),
-            Self::Reduced => MotionPlan::Immediate,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MotionPlan {
-    Immediate,
-    Animate(MotionAnimation),
-}
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MotionDuration {
     Quick,
@@ -95,10 +73,11 @@ impl MotionDuration {
         }
     }
 }
-pub const SHIMMER_CYCLE: Duration = Duration::from_secs(3);
-pub const SHIMMER_DELAY: Duration = Duration::from_millis(1_500);
-pub const FADE_ARC_ROTATION: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the names are the CSS easing curves these implement"
+)]
 pub enum MotionCurve {
     SmoothOut,
     EaseOut,
@@ -163,41 +142,4 @@ fn cubic_axis(t: f64, first: f64, second: f64) -> f64 {
         t,
         (3.0 * inverse * t * t).mul_add(second, 3.0 * inverse * inverse * t * first),
     )
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MotionAnimation {
-    duration: Duration,
-    curve: MotionCurve,
-}
-impl MotionAnimation {
-    pub const fn duration(self) -> Duration {
-        self.duration
-    }
-    pub const fn curve(self) -> MotionCurve {
-        self.curve
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum MotionRecipe {
-    IconSwap,
-    AccordionExpand,
-    TextSwap,
-}
-impl MotionRecipe {
-    const fn animation(self) -> MotionAnimation {
-        match self {
-            Self::IconSwap => MotionAnimation {
-                duration: MotionDuration::Fast.as_duration(),
-                curve: MotionCurve::EaseInOut,
-            },
-            Self::AccordionExpand => MotionAnimation {
-                duration: MotionDuration::Fast.as_duration(),
-                curve: MotionCurve::SmoothOut,
-            },
-            Self::TextSwap => MotionAnimation {
-                duration: MotionDuration::Quick.as_duration(),
-                curve: MotionCurve::EaseInOut,
-            },
-        }
-    }
 }

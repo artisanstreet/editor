@@ -1,6 +1,7 @@
 use editor_aqua::conversation::compaction::{CompactionMotion, CompactionPhase};
 use editor_aqua::conversation::scroll::{SmoothScroll, Step, wants_older};
 use std::time::{Duration, Instant};
+use test_support::editor::ui::twenty_row_transcript as transcript;
 
 #[test]
 fn scroll_easing_uses_elapsed_time_and_preserves_tail_following() {
@@ -27,7 +28,7 @@ fn scroll_easing_uses_elapsed_time_and_preserves_tail_following() {
         panic!("expected eased scrolling")
     };
     assert!(continue_animation);
-    assert!((offset - (-100.0 * (1.0 - (-1.0_f32).exp()))).abs() < 0.001);
+    assert!((-100.0f32).mul_add(-(1.0 - (-1.0_f32).exp()), offset).abs() < 0.001);
     assert_eq!(
         scroll.step(true, true, false, false, false, offset, 100.0, now),
         Step::FollowTail
@@ -42,13 +43,13 @@ fn compaction_completes_entrance_and_plays_checkpoint_after_settling() {
     let mut motion = CompactionMotion::first_seen(CompactionPhase::Running, true, now);
     let (start, active) = motion.advance(CompactionPhase::Running, true, now);
     assert!(active);
-    assert_eq!(start.open, 0.0);
+    test_support::assert_near!(start.open, 0.0);
     let (rest, _) = motion.advance(
         CompactionPhase::Running,
         true,
         now + Duration::from_millis(600),
     );
-    assert_eq!(rest.open, 1.0);
+    test_support::assert_near!(rest.open, 1.0);
     let (swap, _) = motion.advance(
         CompactionPhase::Done,
         true,
@@ -64,6 +65,10 @@ fn compaction_completes_entrance_and_plays_checkpoint_after_settling() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one entrance scenario walked step by step through eviction"
+)]
 fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::element::{Box as UiBox, Key};
@@ -80,9 +85,9 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     let first = motion
         .entrance(key.clone(), true, true, false, now)
         .unwrap();
-    assert!(first.settling);
+    assert!(first.settling());
     let invalidated = Rc::new(Cell::new(false));
-    let notification = invalidated.clone();
+    let notification = Rc::clone(&invalidated);
     let element = first
         .wrap(
             UiBox::new()
@@ -113,7 +118,7 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
             now + Duration::from_millis(125),
         )
         .unwrap();
-    assert!(halfway.settling);
+    assert!(halfway.settling());
     let element = halfway
         .wrap(
             UiBox::new()
@@ -144,7 +149,12 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
         })
         .unwrap();
     let height = next.tree().pre_transform_rect(node).unwrap().h;
-    assert!((height - 32.0 * MotionCurve::SmoothOut.sample_f32(0.5)).abs() < 0.01);
+    assert!(
+        32.0f32
+            .mul_add(-MotionCurve::SmoothOut.sample_f32(0.5), height)
+            .abs()
+            < 0.01
+    );
 
     let scale = 1.25_f32;
     let grow = MotionCurve::SmoothOut.sample_f32(0.5);
@@ -226,13 +236,7 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     );
     assert!(
         motion
-            .entrance(
-                key.clone(),
-                true,
-                true,
-                false,
-                now + Duration::from_millis(403)
-            )
+            .entrance(key, true, true, false, now + Duration::from_millis(403))
             .is_none()
     );
 
@@ -244,82 +248,11 @@ fn work_entrance_measures_unclipped_content_and_restarts_only_after_eviction() {
     );
     assert!(
         motion
-            .entrance(
-                history.clone(),
-                true,
-                true,
-                false,
-                now + Duration::from_millis(1)
-            )
+            .entrance(history, true, true, false, now + Duration::from_millis(1))
             .is_none()
     );
     let reduced = RowKey::Item(artisan_api::ItemId("reduced".into()));
     assert!(motion.entrance(reduced, true, true, true, now).is_none());
-}
-
-struct Rows;
-
-impl aqua_ui::collection::CollectionSource for Rows {
-    fn len(&self) -> usize {
-        20
-    }
-    fn key(&self, index: usize) -> aqua_ui::element::Key {
-        index.into()
-    }
-    fn layout(&self, width: f32) -> aqua_ui::collection::CollectionLayout {
-        aqua_ui::collection::CollectionLayout {
-            content_width: width,
-            column_widths: Vec::new(),
-        }
-    }
-    fn header(
-        &self,
-        _: &aqua_ui::collection::CollectionLayout,
-    ) -> Option<aqua_ui::element::Element> {
-        None
-    }
-    fn row(
-        &self,
-        _: usize,
-        _: &aqua_ui::collection::CollectionLayout,
-    ) -> aqua_ui::element::Element {
-        aqua_ui::element::Box::new()
-            .style(
-                aqua_ui::style::Style::new()
-                    .height(aqua_ui::style::px(20.0))
-                    .flex_shrink(0.0),
-            )
-            .build()
-    }
-    fn role(&self) -> aqua_ui::collection::CollectionRole {
-        aqua_ui::collection::CollectionRole::List
-    }
-    fn validate(&self) -> Result<(), aqua_ui::collection::CollectionError> {
-        Ok(())
-    }
-}
-
-fn transcript() -> aqua::UiApp {
-    use aqua_text::{SharedFonts, SharedRuns};
-    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.set_viewport(100.0, 100.0, 1.0);
-    app.mount(|_| {
-        aqua_ui::element::Element::collection(aqua_ui::collection::CollectionDescriptor::new(
-            std::rc::Rc::new(Rows),
-            vec![
-                aqua_ui::style::Style::new()
-                    .width(aqua_ui::style::px(100.0))
-                    .height(aqua_ui::style::px(100.0)),
-            ],
-            true,
-            20.0,
-            2,
-        ))
-        .with_key("conversation-transcript")
-    })
-    .unwrap();
-    app.build_frame().unwrap();
-    app
 }
 
 #[test]
@@ -339,7 +272,7 @@ fn transcript_follows_the_native_tail_and_yields_to_glides_and_the_reader() {
     app.build_frame().unwrap();
     assert!(following_tail(&app));
     let root = app.tree().root().unwrap();
-    assert_eq!(app.tree().scroll_offset(root).unwrap().y, 300.0);
+    test_support::assert_near!(app.tree().scroll_offset(root).unwrap().y, 300.0);
     assert!(!apply_step(&mut app, Step::FollowTail, 0.0));
 
     assert_eq!(
@@ -362,7 +295,7 @@ fn transcript_follows_the_native_tail_and_yields_to_glides_and_the_reader() {
         0.0
     ));
     app.build_frame().unwrap();
-    assert_eq!(app.tree().scroll_offset(root).unwrap().y, 120.0);
+    test_support::assert_near!(app.tree().scroll_offset(root).unwrap().y, 120.0);
     assert!(!following_tail(&app));
 
     assert_eq!(
@@ -371,7 +304,7 @@ fn transcript_follows_the_native_tail_and_yields_to_glides_and_the_reader() {
     );
     app.build_frame().unwrap();
     assert!(following_tail(&app));
-    assert_eq!(app.tree().scroll_offset(root).unwrap().y, 300.0);
+    test_support::assert_near!(app.tree().scroll_offset(root).unwrap().y, 300.0);
 
     assert!(pause_tail(&mut app));
     assert_eq!(
@@ -428,7 +361,10 @@ fn details_grow_in_only_when_they_open() {
     use editor_aqua::conversation::view::motion::RowMotion;
     let now = Instant::now();
     let mut motion = RowMotion::default();
-    assert!(motion.disclosed("tool".into(), true, false, now).is_none(), "already open on first sight");
+    assert!(
+        motion.disclosed("tool".into(), true, false, now).is_none(),
+        "already open on first sight"
+    );
     assert!(motion.disclosed("tool".into(), false, false, now).is_none());
     assert!(motion.disclosed("tool".into(), true, false, now).is_some());
     assert!(motion.animating());
@@ -438,7 +374,10 @@ fn details_grow_in_only_when_they_open() {
             .is_none()
     );
     motion.disclosed("tool".into(), false, false, now);
-    assert!(motion.disclosed("tool".into(), true, true, now).is_none(), "reduced motion");
+    assert!(
+        motion.disclosed("tool".into(), true, true, now).is_none(),
+        "reduced motion"
+    );
 }
 
 #[test]
@@ -446,20 +385,46 @@ fn status_labels_swap_only_between_labels() {
     use editor_aqua::conversation::view::motion::RowMotion;
     let now = Instant::now();
     let mut motion = RowMotion::default();
-    assert_eq!(motion.swap("status".into(), Some("Thinking".into()), false, now), None);
-    assert_eq!(motion.swap("status".into(), Some("Thinking".into()), false, now), None);
-    assert_eq!(motion.swap("status".into(), Some("Reading".into()), false, now), Some(0.0));
+    assert_eq!(
+        motion.swap("status".into(), Some("Thinking".into()), false, now),
+        None
+    );
+    assert_eq!(
+        motion.swap("status".into(), Some("Thinking".into()), false, now),
+        None
+    );
+    assert_eq!(
+        motion.swap("status".into(), Some("Reading".into()), false, now),
+        Some(0.0)
+    );
     assert!(
         motion
-            .swap("status".into(), Some("Reading".into()), false, now + Duration::from_millis(75))
+            .swap(
+                "status".into(),
+                Some("Reading".into()),
+                false,
+                now + Duration::from_millis(75)
+            )
             .is_some_and(|progress| progress > 0.0 && progress < 1.0)
     );
     assert_eq!(
-        motion.swap("status".into(), Some("Reading".into()), false, now + Duration::from_millis(150)),
+        motion.swap(
+            "status".into(),
+            Some("Reading".into()),
+            false,
+            now + Duration::from_millis(150)
+        ),
         None
     );
-    assert_eq!(motion.swap("status".into(), None, false, now), None, "streamed reasoning");
-    assert_eq!(motion.swap("status".into(), Some("Writing".into()), false, now), None);
+    assert_eq!(
+        motion.swap("status".into(), None, false, now),
+        None,
+        "streamed reasoning"
+    );
+    assert_eq!(
+        motion.swap("status".into(), Some("Writing".into()), false, now),
+        None
+    );
 }
 
 #[test]
@@ -469,9 +434,17 @@ fn images_fade_in_when_they_finish_loading_but_not_when_cached() {
     let mut motion = RowMotion::default();
     assert_eq!(motion.arrival("cached".into(), true, false, now), None);
     assert_eq!(motion.arrival("loading".into(), false, false, now), None);
-    assert_eq!(motion.arrival("loading".into(), true, false, now), Some(0.0));
     assert_eq!(
-        motion.arrival("loading".into(), true, false, now + Duration::from_millis(350)),
+        motion.arrival("loading".into(), true, false, now),
+        Some(0.0)
+    );
+    assert_eq!(
+        motion.arrival(
+            "loading".into(),
+            true,
+            false,
+            now + Duration::from_millis(350)
+        ),
         None
     );
 }
@@ -489,8 +462,11 @@ fn a_sticker_plays_on_paint_without_rebuilding_the_transcript() {
     let key = RowKey::Item(artisan_api::ItemId("prompt".into()));
     let start = Instant::now();
     let mut motion = RowMotion::default();
-    let sticker = motion.sticker(key.clone(), true, false, start).unwrap();
-    assert!(!motion.animating(), "a sticker must not rebuild every frame");
+    let sticker = motion.sticker(key, true, false, start).unwrap();
+    assert!(
+        !motion.animating(),
+        "a sticker must not rebuild every frame"
+    );
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.set_viewport(400.0, 200.0, 1.0);
     app.advance_clock(1.0);
@@ -514,7 +490,9 @@ fn a_sticker_plays_on_paint_without_rebuilding_the_transcript() {
     let paint = |app: &aqua::UiApp| {
         let node = app
             .tree()
-            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from("bubble")))
+            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+                "bubble",
+            )))
             .unwrap();
         app.tree().paint(node).unwrap()
     };

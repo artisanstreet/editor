@@ -20,7 +20,17 @@ pub struct Switch {
     on_change: Option<Box<dyn Fn(bool)>>,
 }
 
+impl std::fmt::Debug for Switch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Switch").finish_non_exhaustive()
+    }
+}
+
 impl Switch {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the switch stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
@@ -38,16 +48,13 @@ impl Switch {
         }
     }
 
+    #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 
-    pub const fn focus_visible(mut self, focus_visible: bool) -> Self {
-        self.focus_visible = focus_visible;
-        self
-    }
-
+    #[must_use]
     pub fn on_change(mut self, handler: impl Fn(bool) + 'static) -> Self {
         self.on_change = Some(Box::new(handler));
         self
@@ -113,9 +120,9 @@ impl Switch {
         if self.focus_visible && !self.disabled {
             style.merge(&focus_style);
         }
-        let outer = height + 2.0 * reach;
+        let outer = 2.0f32.mul_add(reach, height);
         let mut root = Button::new()
-            .width(width + 2.0 * reach)
+            .width(2.0f32.mul_add(reach, width))
             .height(outer)
             .radius(Corner::Full.resolve(outer))
             .style(style)

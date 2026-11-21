@@ -4,11 +4,10 @@ use aqua_core::{InputEvent, Point, PointerButton, PointerEvent, PointerKind};
 use aqua_ime_tsf::double::TsfDouble;
 use aqua_protocol::{Instant, Machine, PixelSize, RuntimeInput, ShellEvent, WindowId};
 use aqua_text::{SharedFonts, SharedRuns};
-use artisan_api::tls::{fingerprint, Identity};
+use artisan_api::tls::{Identity, fingerprint};
 use editor_aqua::composer::controller::ComposerTarget;
-use editor_aqua::composer::persistence::DraftSessions;
 use editor_aqua::composer::view::ComposerOwner;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::{ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::ui::text::editor::Mode;
 use editor_aqua::ui::theme::ArtisanTheme;
 use std::rc::Rc;
@@ -28,15 +27,13 @@ struct Rig {
 impl Rig {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let mut core = Core::for_tests(EditorFiles {
-            dir: directory.path().join("editor"),
-        })
-        .unwrap();
+        let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
         let identity = Identity::generate("composer-tsf").unwrap();
         let print = fingerprint(identity.certificate_der().unwrap().as_ref());
         let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
         let host = HostId("tsf-host".into());
-        core.add_test_host(
+        test_support::editor::core::connect_client(
+            &mut core,
             &HostConfig {
                 id: host.clone(),
                 name: "Forge".into(),
@@ -46,7 +43,7 @@ impl Rig {
             },
             client,
         );
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let owner = ComposerOwner::new(
             &core,
             &mut sessions,
@@ -112,9 +109,9 @@ impl Rig {
         for _ in 0..4 {
             let mut events = Vec::new();
             self.tsf.drain(&mut events);
-            events
-                .into_iter()
-                .for_each(|event| self.step(RuntimeInput::Ime(event)));
+            for event in events {
+                self.step(RuntimeInput::Ime(event));
+            }
             self.frame();
         }
     }

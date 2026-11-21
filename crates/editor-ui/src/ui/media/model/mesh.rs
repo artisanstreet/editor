@@ -1,13 +1,13 @@
-pub use glam::{DMat4 as Mat4, Vec3};
+pub(super) use glam::{DMat4 as Mat4, Vec3};
 
-pub const MAX_TRIANGLES: usize = 100_000;
+pub(super) const MAX_TRIANGLES: usize = 100_000;
 
-pub fn normal_matrix(world: Mat4) -> glam::DMat3 {
+pub(super) fn normal_matrix(world: Mat4) -> glam::DMat3 {
     let linear = glam::DMat3::from_mat4(world);
     linear.inverse_or_zero().transpose() * linear.determinant().signum()
 }
 
-pub fn transform_normal(matrix: &glam::DMat3, normal: Vec3) -> Vec3 {
+pub(super) fn transform_normal(matrix: &glam::DMat3, normal: Vec3) -> Vec3 {
     (*matrix * normal.as_dvec3())
         .try_normalize()
         .map_or(Vec3::ZERO, glam::DVec3::as_vec3)
@@ -22,14 +22,14 @@ pub enum Up {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Corner {
+pub(super) struct Corner {
     pub position: Vec3,
     pub normal: Option<Vec3>,
     pub color: Option<Vec3>,
 }
 
 impl Corner {
-    pub fn at(position: Vec3) -> Self {
+    pub(super) fn at(position: Vec3) -> Self {
         Self {
             position,
             ..Self::default()
@@ -39,19 +39,19 @@ impl Corner {
 
 #[derive(Debug)]
 pub struct Mesh {
-    pub positions: Vec<Vec3>,
-    pub normals: Vec<Vec3>,
-    pub colors: Option<Vec<Vec3>>,
+    pub(crate) positions: Vec<Vec3>,
+    pub(crate) normals: Vec<Vec3>,
+    pub(crate) colors: Option<Vec<Vec3>>,
 }
 
 impl Mesh {
-    pub const fn triangles(&self) -> usize {
+    pub(crate) const fn triangles(&self) -> usize {
         self.positions.len() / 3
     }
 }
 
 #[derive(Default)]
-pub struct MeshBuilder {
+pub(super) struct MeshBuilder {
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
     colors: Vec<Option<Vec3>>,
@@ -60,7 +60,7 @@ pub struct MeshBuilder {
 }
 
 impl MeshBuilder {
-    pub fn polygon(&mut self, corners: &[Corner]) -> Result<(), String> {
+    pub(super) fn polygon(&mut self, corners: &[Corner]) -> Result<(), String> {
         let Some((first, rest)) = corners.split_first() else {
             return Ok(());
         };
@@ -70,7 +70,7 @@ impl MeshBuilder {
         Ok(())
     }
 
-    pub fn triangle(&mut self, corners: [Corner; 3]) -> Result<(), String> {
+    pub(super) fn triangle(&mut self, corners: [Corner; 3]) -> Result<(), String> {
         if self.positions.len() / 3 >= MAX_TRIANGLES {
             return Err(format!("the model has more than {MAX_TRIANGLES} triangles"));
         }
@@ -104,7 +104,7 @@ impl MeshBuilder {
         Ok(())
     }
 
-    pub fn finish(self, up: Up) -> Result<Mesh, String> {
+    pub(super) fn finish(self, up: Up) -> Result<Mesh, String> {
         if self.positions.is_empty() {
             return Err(if self.skipped > 0 {
                 "every face of the model has an invalid vertex".to_owned()
@@ -150,7 +150,7 @@ impl MeshBuilder {
     }
 }
 
-pub fn srgb_to_linear(channel: f32) -> f32 {
+pub(crate) fn srgb_to_linear(channel: f32) -> f32 {
     if channel <= 0.040_45 {
         channel / 12.92
     } else {

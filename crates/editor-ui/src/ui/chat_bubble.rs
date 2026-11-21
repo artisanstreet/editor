@@ -40,6 +40,7 @@ impl SegmentPosition {
     }
 }
 
+#[derive(Debug)]
 pub struct ChatBubbleSegment {
     theme: ArtisanTheme,
     position: SegmentPosition,
@@ -53,6 +54,10 @@ pub struct ChatBubbleSegment {
 impl ChatBubbleSegment {
     pub const MAX_WIDTH: f32 = 576.0;
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the bubble segment stores this theme copy and paints from it when built"
+    )]
     pub fn new(theme: ArtisanTheme, position: SegmentPosition, content: Element) -> Self {
         Self {
             theme,
@@ -65,11 +70,13 @@ impl ChatBubbleSegment {
         }
     }
 
+    #[must_use]
     pub const fn answer(mut self) -> Self {
         self.answer = true;
         self
     }
 
+    #[must_use]
     pub const fn tinted(mut self, tint: Oklch) -> Self {
         self.tint = Some(tint);
         self
@@ -81,11 +88,10 @@ impl ChatBubbleSegment {
         self
     }
 
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.selector = Some(selector.into());
-        self
-    }
-
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one bubble build with its layers, segment corners and content insets"
+    )]
     pub fn build(self) -> Element {
         let first = self.position.first();
         let last = self.position.last();
@@ -139,7 +145,7 @@ impl ChatBubbleSegment {
                 .into_iter()
                 .map(aqua_ui::style::GpuiShadowLayer::from)
                 .collect(),
-            _ => Vec::new(),
+            SegmentPosition::Head | SegmentPosition::Body | SegmentPosition::Tail => Vec::new(),
         };
         if !shadows.is_empty() {
             style = style.gpui_shadows(shadows);

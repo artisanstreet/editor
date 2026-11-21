@@ -1,3 +1,4 @@
+use crate::shell::application::BuildError;
 use crate::shell::layout::{self, Size};
 use crate::ui::kit::pane::sheet;
 use crate::ui::kit::surface::frame;
@@ -16,7 +17,7 @@ const STRIP_PAD: Space = Space::S8;
 const CONVERSATION_WIDTH: f32 = 768.0;
 const FORGES_WIDTH: f32 = 560.0;
 
-pub struct WorkspaceElements {
+pub(crate) struct WorkspaceElements {
     pub body: Element,
     pub settings_dialog: Option<Element>,
     pub palette: Option<Element>,
@@ -26,15 +27,15 @@ pub struct WorkspaceElements {
 }
 
 pub fn settings_dialog(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport: Size,
     sidebar: Element,
     page: Element,
     dismiss: std::rc::Rc<dyn Fn()>,
 ) -> crate::ui::dialog::Dialog {
     let dimensions = layout::settings_layout(viewport);
-    let panel = settings_panel(theme, viewport, sidebar, page, std::rc::Rc::clone(&dismiss));
-    crate::ui::dialog::Dialog::new("settings-dialog", theme, "Settings", panel)
+    let panel = settings_panel(theme, viewport, sidebar, page, &dismiss);
+    crate::ui::dialog::Dialog::new("settings-dialog", *theme, "Settings", panel)
         .bare()
         .soft_backdrop()
         .max_width(dimensions.size.width)
@@ -42,17 +43,17 @@ pub fn settings_dialog(
 }
 
 pub fn settings_panel(
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport: Size,
     sidebar: Element,
     page: Element,
-    dismiss: std::rc::Rc<dyn Fn()>,
+    dismiss: &std::rc::Rc<dyn Fn()>,
 ) -> Element {
     let dimensions = layout::settings_layout(viewport);
-    let close = std::rc::Rc::clone(&dismiss);
+    let close = std::rc::Rc::clone(dismiss);
     let close = IconButton::new(
         "settings-close",
-        theme,
+        *theme,
         editor_assets::AssetId::TABLER_X,
         "Close settings",
         IconButtonSize::Md,
@@ -70,8 +71,8 @@ pub fn settings_panel(
                 .min_height(Length::Pct(0.0)),
         )
         .style(Corners::TopLeft.style(Radius::Panel.px()))
-        .style(Seam::TopLeft.style(&theme))
-        .style(sheet(&theme))
+        .style(Seam::TopLeft.style(theme))
+        .style(sheet(theme))
         .clip(true)
         .child(page)
         .build();
@@ -92,8 +93,8 @@ pub fn settings_panel(
         .height(dimensions.size.height)
         .clip(true)
         .style(Radius::Shell.style())
-        .style(frame(&theme))
-        .style(Seam::Around.style(&theme))
+        .style(frame(theme))
+        .style(Seam::Around.style(theme))
         .child(
             UiBox::new()
                 .width(dimensions.navigation_width)
@@ -119,7 +120,11 @@ pub fn settings_panel(
         .build()
 }
 
-pub fn workspace(workspace_key: u64, theme: &ArtisanTheme, elements: WorkspaceElements) -> Element {
+pub(crate) fn workspace(
+    workspace_key: u64,
+    theme: &ArtisanTheme,
+    elements: WorkspaceElements,
+) -> Element {
     let mut root = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -144,106 +149,51 @@ pub fn workspace(workspace_key: u64, theme: &ArtisanTheme, elements: WorkspaceEl
         .debug_selector("workspace-root")
 }
 
-pub struct ComposerParts {
-    pub nested: bool,
-    pub placeholder: String,
+pub(crate) struct ComposerParts {
     pub questionnaires: Option<Element>,
     pub attachments: Option<Element>,
     pub mention_overlay: Option<Element>,
     pub thread_error: Option<Element>,
     pub shift: f32,
+    pub measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    pub above: Option<Element>,
 }
 
-pub fn conversation(
+pub(crate) type InitialHeight =
+    std::rc::Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>;
+
+pub(crate) struct Transcript {
+    pub estimated_height: f32,
+    pub row: crate::conversation::view::transcript::LayoutBatchedRowFactory,
+    pub revision: crate::conversation::view::transcript::RowRevision,
+    pub viewport: std::rc::Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
+    pub initial_height: InitialHeight,
+    pub overlays: Vec<Element>,
+    pub drawer: Option<Element>,
+}
+
+pub(crate) fn conversation_virtual(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
     viewport_width: f32,
-    transcript: Element,
-    overlays: Vec<Element>,
+    transcript: Transcript,
     parts: ComposerParts,
-) -> anyhow::Result<Element> {
-    let owner = workspace
-        .composer
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("conversation composer is not mounted"))?;
-    let (host_id, instance, placeholder) = {
-        let mut composer = owner.controller.borrow_mut();
-        let question = workspace
-            .conversation
-            .question_pages
-            .current_question(&composer.questionnaire)
-            .cloned();
-        (
-            composer.target.host().clone(),
-            composer.host_instance(),
-            composer.placeholder(question.as_ref()),
-        )
-    };
-    let host = core
-        .host_if_instance(
-            &host_id,
-            instance.ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?,
-        )
-        .ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?;
-    let card = owner.surface(
-        *theme,
-        host,
-        placeholder,
-        parts.questionnaires,
-        parts.attachments,
-        parts.mention_overlay,
-        parts.thread_error,
-        std::time::Instant::now(),
-    );
-    Ok(crate::conversation::view::thread_frame(
-        transcript,
+) -> Result<Element, BuildError> {
+    let Transcript {
+        estimated_height,
+        row,
+        revision,
+        viewport,
+        initial_height,
         overlays,
-        Some(card),
-        None,
-        viewport_width,
-        workspace.conversation.reveal(std::time::Instant::now()),
-    ))
-}
-
-pub fn conversation_virtual(
-    workspace: &crate::shell::workspace::Workspace,
-    core: &crate::core::Core,
-    theme: &ArtisanTheme,
-    viewport_width: f32,
-    estimated_height: f32,
-    row: crate::conversation::view::transcript::LayoutBatchedRowFactory,
-    revision: crate::conversation::view::transcript::RowRevision,
-    viewport: std::rc::Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: std::rc::Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    drawer: Option<Element>,
-    parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
-    above_composer: Option<Element>,
-) -> anyhow::Result<Element> {
-    if workspace.conversation.agent.is_some() {
-        return Ok(crate::conversation::view::layout_batched_thread_element(
-            &workspace.conversation,
-            estimated_height,
-            row,
-            revision,
-            viewport,
-            initial_height,
-            overlays,
-            None,
-            drawer,
-            viewport_width,
-        ));
-    }
-    let card = measured_composer(
-        workspace,
-        core,
-        theme,
-        parts,
-        composer_measurement,
-        above_composer,
-    )?;
+        drawer,
+    } = transcript;
+    let card = if workspace.conversation.agent.is_some() {
+        None
+    } else {
+        Some(measured_composer(workspace, core, theme, parts)?)
+    };
     Ok(crate::conversation::view::layout_batched_thread_element(
         &workspace.conversation,
         estimated_height,
@@ -252,7 +202,7 @@ pub fn conversation_virtual(
         viewport,
         initial_height,
         overlays,
-        Some(card),
+        card,
         drawer,
         viewport_width,
     ))
@@ -262,15 +212,12 @@ fn measured_composer(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
-    parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
-    above_composer: Option<Element>,
-) -> anyhow::Result<Element> {
+    mut parts: ComposerParts,
+) -> Result<Element, BuildError> {
+    let composer_measurement = std::rc::Rc::clone(&parts.measurement);
+    let above_composer = parts.above.take();
     let shift = parts.shift;
-    let owner = workspace
-        .composer
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("conversation composer is not mounted"))?;
+    let owner = workspace.composer.as_ref().ok_or(BuildError::NoComposer)?;
     let (host_id, instance, placeholder) = {
         let mut composer = owner.controller.borrow_mut();
         let question = workspace
@@ -284,21 +231,18 @@ fn measured_composer(
             composer.placeholder(question.as_ref()),
         )
     };
-    let host = core
-        .host_if_instance(
-            &host_id,
-            instance.ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?,
-        )
-        .ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?;
+    let host = instance
+        .and_then(|instance| core.host_if_instance(&host_id, instance))
+        .ok_or(BuildError::ComposerHostGone { host: host_id })?;
     let card = owner.surface(
-        *theme,
+        theme,
         host,
         placeholder,
         parts.questionnaires,
         parts.attachments,
         parts.mention_overlay,
         parts.thread_error,
-        std::time::Instant::now(),
+        core.clock().now(),
     );
     let measure = aqua_ui::element::Canvas::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
@@ -307,10 +251,10 @@ fn measured_composer(
                 .get(node)
                 .and_then(|node| node.parent)
                 .and_then(|parent| tree.rect(parent))
+                && rect.h.is_finite()
+                && rect.h >= 0.0
             {
-                if rect.h.is_finite() && rect.h >= 0.0 {
-                    composer_measurement.set(Some(rect.h));
-                }
+                composer_measurement.set(Some(rect.h));
             }
         })
         .build()
@@ -334,7 +278,7 @@ fn measured_composer(
         .with_key(crate::shell::composer_glide::DOCK_KEY))
 }
 
-pub fn conversation_body(
+pub(crate) fn conversation_body(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
@@ -342,20 +286,11 @@ pub fn conversation_body(
     body: Element,
     overlays: Vec<Element>,
     parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
-    above_composer: Option<Element>,
-) -> anyhow::Result<Element> {
+) -> Result<Element, BuildError> {
     let card = if workspace.conversation.agent.is_some() {
         None
     } else {
-        Some(measured_composer(
-            workspace,
-            core,
-            theme,
-            parts,
-            composer_measurement,
-            above_composer,
-        )?)
+        Some(measured_composer(workspace, core, theme, parts)?)
     };
     Ok(crate::conversation::view::thread_frame(
         body,
@@ -367,7 +302,7 @@ pub fn conversation_body(
     ))
 }
 
-pub fn centered_body(content: Element) -> Element {
+pub(crate) fn centered_body(content: Element) -> Element {
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -381,7 +316,7 @@ pub fn centered_body(content: Element) -> Element {
         .build()
 }
 
-pub fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
+pub(crate) fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
     let radius = concentric(Radius::Shell.px(), EDGE_INSET);
     let (top, bottom, corners) = match edge {
         crate::ui::scroll_edge::Edge::Top => (Some(EDGE_INSET), None, Corners::Top),
@@ -393,38 +328,16 @@ pub fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
         .with(&corners.style(radius))
 }
 
-pub fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
-    UiBox::new()
-        .width(Length::Pct(100.0))
-        .style(
-            Style::new()
-                .absolute_at(Some(0.0), Some(Space::S8.px()), Some(0.0), None)
-                .justify(JustifyContent::CENTER),
-        )
-        .child(
-            TextRole::Label
-                .text(theme, text)
-                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .build(),
-        )
-        .build()
-}
-
-pub fn conversation_notice(theme: &ArtisanTheme, text: String, error: bool) -> Element {
-    let color = if error {
-        theme.colors.destructive_text
-    } else {
-        theme.colors.text_muted
-    };
+pub(crate) fn conversation_notice(theme: &ArtisanTheme, text: String) -> Element {
     centered_body(
         TextRole::Label
             .text(theme, text)
-            .gpui_source_color(color.to_reference_text_color())
+            .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
             .build(),
     )
 }
 
-pub struct Sky {
+pub(crate) struct Sky {
     pub opacity: f32,
     pub transform: aqua_core::Transform2D,
 }
@@ -439,18 +352,25 @@ fn sky(
         .style(Style::new().opacity(look.opacity).transform(look.transform))
 }
 
-pub fn new_conversation(
+pub(crate) fn new_conversation(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
     theme: &ArtisanTheme,
     parts: ComposerParts,
-    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     reduced_motion: bool,
     docked: Option<f32>,
     look: Option<&Sky>,
-) -> anyhow::Result<Element> {
-    let artwork = look.map(|look| sky(theme, composer_measurement.clone(), reduced_motion, look));
-    let card = measured_composer(workspace, core, theme, parts, composer_measurement, None)?;
+) -> Result<Element, BuildError> {
+    let composer_measurement = std::rc::Rc::clone(&parts.measurement);
+    let artwork = look.map(|look| {
+        sky(
+            theme,
+            std::rc::Rc::clone(&composer_measurement),
+            reduced_motion,
+            look,
+        )
+    });
+    let card = measured_composer(workspace, core, theme, parts)?;
     let body = match docked {
         Some(width) => crate::conversation::view::thread_frame(
             UiBox::new().build(),
@@ -472,7 +392,7 @@ pub fn new_conversation(
         .with_key(crate::shell::composer_glide::STAGE_KEY))
 }
 
-pub fn under_setting_sky(
+pub(crate) fn under_setting_sky(
     theme: &ArtisanTheme,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     reduced_motion: bool,
@@ -496,7 +416,7 @@ pub fn under_setting_sky(
         .build()
 }
 
-pub fn centered_conversation(content: Element) -> Element {
+pub(crate) fn centered_conversation(content: Element) -> Element {
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -517,12 +437,17 @@ pub fn centered_conversation(content: Element) -> Element {
         .build()
 }
 
-pub fn home(theme: &ArtisanTheme, forges: Element) -> Element {
+pub(crate) fn home(theme: &ArtisanTheme, forges: Element) -> Element {
     let content = UiBox::new()
         .layout("column")
         .spaced(Space::S8)
         .style(Style::new().align(AlignItems::CENTER))
-        .child(TextRole::Heading.text(theme, "Choose a Forge").build())
+        .child(
+            TextRole::Heading
+                .text(theme, "Choose a Forge")
+                .build()
+                .role(aqua_core::Role::Heading(1)),
+        )
         .child(
             UiBox::new()
                 .width(Length::Pct(100.0))

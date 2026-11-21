@@ -3,20 +3,21 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
   workflow_dispatch:
   workflow_call:
 permissions:
   contents: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
   INSTA_UPDATE: 'no'
   CI: 'true'
+  NEXTEST_PROFILE: ci
+  SAVE_TARGET_CACHE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
   SCCACHE_BUCKET: artisan-sccache
   SCCACHE_ENDPOINT: ${{ vars.SCCACHE_ENDPOINT }}
   SCCACHE_REGION: auto
@@ -27,9 +28,69 @@ env:
   AWS_ACCESS_KEY_ID: ${{ github.event_name != 'pull_request' && secrets.SCCACHE_R2_WRITE_ACCESS_KEY_ID || secrets.SCCACHE_R2_READ_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ github.event_name != 'pull_request' && secrets.SCCACHE_R2_WRITE_SECRET_ACCESS_KEY || secrets.SCCACHE_R2_READ_SECRET_ACCESS_KEY }}
 jobs:
-  linux:
+  checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Validate workflows
+        run: nix shell --inputs-from . nixpkgs#actionlint --command actionlint
+      - run: rustup show
+      - name: Formatting
+        run: cargo fmt -- --check
+      - name: Dependency advisories, licences and bans
+        run: nix shell --inputs-from . nixpkgs#cargo-deny --command cargo deny --locked check advisories licenses bans
+      - name: Unused dependencies
+        run: nix shell --inputs-from . nixpkgs#cargo-machete --command cargo machete
+      - name: Third-party notices match Cargo.lock
+        run: |
+          nix shell --inputs-from . nixpkgs#cargo-about --command bash -c '
+            set -euo pipefail
+            about() { cargo about generate notices/about.hbs -c notices/about.toml --locked --fail "$@"; }
+            about -m crates/forge/Cargo.toml -o notices/forge.txt
+            about -m crates/ae/Cargo.toml -o notices/ae.txt
+            about -m crates/editor-aqua/Cargo.toml --target x86_64-pc-windows-msvc --target aarch64-pc-windows-msvc -o notices/editor.txt
+          '
+          git diff --exit-code -- notices
+      - name: Release tooling tests
+        run: python3 tests/release.py
+      - name: Benchmark gate tests
+        run: python3 tests/benches.py
+      - name: Repository rule tests
+        run: python3 tests/rules.py
+      - name: Repository rules
+        run: python3 src/rules.py
+      - name: Present a WSL interop registration to the dev launcher
+        shell: bash
+        run: |
+          mountpoint -q /proc/sys/fs/binfmt_misc || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+          echo ':WSLInterop:M::MZ::/bin/false:' | sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null
+          test -e /proc/sys/fs/binfmt_misc/WSLInterop
+      - name: Dev launcher tests
+        shell: bash
+        run: |
+          python3 tests/nix/dev.py 2>&1 | tee dev.log
+          if grep -q 'skipped' dev.log; then echo 'dev launcher tests were skipped' >&2; exit 1; fi
+      - name: Vendored highlighting provenance tests
+        run: python3 tests/vendor/highlighting/verify.py
+      - name: Vendored highlighting provenance
+        run: python3 vendor/highlighting/verify.py
+      - name: Vendored Mermaid provenance
+        run: python3 vendor/mermaid-rs-renderer/verify.py
+  linux:
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_COMMAND: nix develop .#cargo-linux --command cargo
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -45,30 +106,284 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      - name: Validate workflows
-        run: nix shell --inputs-from . nixpkgs#actionlint --command actionlint
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-nextest@0.9.152
+      - name: Restore the build cache
+        id: target-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock', '.cargo/config.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
-      - name: Release tooling tests
-        if: ${{ hashFiles('tests/release.py') != '' }}
-        run: python3 tests/release.py
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock', '.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock', '.cargo/config.toml') }}-
+            cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
       - name: Clippy
         run: nix develop .#cargo-linux --command cargo clippy --locked --workspace --all-targets
+      - name: Clippy with qualification
+        run: nix develop .#cargo-linux --command cargo clippy --locked -p editor-aqua --all-targets --features qualification
       - name: Build service integration fixtures
         run: nix develop .#cargo-linux --command cargo build --locked -p ae -p forge
       - name: Tests
-        run: nix develop .#cargo-linux --command cargo test --locked --workspace
-      - name: sccache stats
+        run: nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'not binary(budgets) and not binary(contract)'
+      - &delegated-cgroup-tests
+        name: Cgroup tests as the main process of a delegated service
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          $CARGO_COMMAND test --locked -p forge-isolation -p forge-engines --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .executable != null and .profile.test) | [.target.name, .executable, (.manifest_path | rtrimstr("/Cargo.toml"))] | @tsv' \
+            > "$RUNNER_TEMP/cgroup-tests.tsv"
+          test "$(cut -f1 "$RUNNER_TEMP/cgroup-tests.tsv" | grep -cxE 'forge_engines|unix|linux')" -eq 3
+          while IFS=$'\t' read -r target executable crate; do
+            case "$target" in
+              forge_engines) filters=(process::) ;;
+              unix | linux) filters=() ;;
+              *) continue ;;
+            esac
+            sudo systemd-run --uid="$(id -u)" --gid="$(id -g)" \
+              -p Delegate=yes -p DelegateSubgroup=forge \
+              --wait --pipe --collect --quiet \
+              --working-directory="$crate" \
+              -E ARTISAN_DELEGATION_REQUIRED=1 -E HOME="$HOME" -E PATH="$PATH" -E CARGO_MANIFEST_DIR="$crate" \
+              "$executable" "${filters[@]}" --test-threads=1
+          done < "$RUNNER_TEMP/cgroup-tests.tsv"
+      - name: Qualification tests
+        run: nix develop .#cargo-linux --command cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'not binary(budgets)'
+      - name: Performance budgets
+        run: |
+          echo '## Performance budgets' >> "$GITHUB_STEP_SUMMARY"
+          nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'binary(budgets)'
+          nix develop .#cargo-linux --command cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'binary(budgets)'
+      - name: Benchmarks against the checked-in baseline
+        run: |
+          echo '## Benchmarks' >> "$GITHUB_STEP_SUMMARY"
+          nix develop .#cargo-linux --command python3 src/benches.py
+      - &save-target
+        name: Save the build cache
+        if: ${{ !cancelled() && env.SAVE_TARGET_CACHE == 'true' && steps.target-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.target-cache.outputs.cache-primary-key }}
+      - &prune-target
+        name: Keep only the newest build cache for this job
+        if: ${{ !cancelled() && env.SAVE_TARGET_CACHE == 'true' && steps.target-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ steps.target-cache.outputs.cache-primary-key }}
+        run: |
+          prefix="${KEEP%-*-*}-"
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "$prefix" --limit 100 --json id,key \
+            --jq ".[] | select(.key != env.KEEP) | .id" |
+            while read -r id; do gh cache delete --repo "$GITHUB_REPOSITORY" "$id"; done
+      - &sccache-stats
+        name: sccache stats
         if: always() && env.RUSTC_WRAPPER != ''
         shell: bash
         run: '"$SCCACHE_PATH" --show-stats'
+  hawk:
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      HAWK_VERSION: 0.1.18
+      HAWK_SHA256: 84e2b65a8571d0aaa84fe1fea154abdbf88effff64e59a890abfb1d554ad78a1
+      HAWK_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Install Hawk
+        shell: bash
+        run: |
+          rustup toolchain install "$HAWK_TOOLCHAIN" --profile minimal --target x86_64-pc-windows-gnu
+          archive="$RUNNER_TEMP/cargo-hawk.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$archive" \
+            "https://github.com/astral-sh/hawk/releases/download/$HAWK_VERSION/cargo-hawk-x86_64-unknown-linux-gnu.tar.gz"
+          echo "$HAWK_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/hawk"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/hawk" --strip-components=1
+          echo "$RUNNER_TEMP/hawk" >> "$GITHUB_PATH"
+      - name: Restore the build cache
+        id: target-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', '.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', '.cargo/config.toml') }}-
+            cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
+      - name: Unnecessary public items on Linux
+        run: |
+          nix develop .#cargo-linux --command bash -c "PATH=\"\$HOME/.cargo/bin:\$PATH\" cargo +$HAWK_TOOLCHAIN hawk check \
+            --target-dir target/hawk -D warnings"
+      - name: Unnecessary public items on Windows
+        run: |
+          nix develop .#cargo-windows --command bash -c "PATH=\"\$HOME/.cargo/bin:\$PATH\" cargo +$HAWK_TOOLCHAIN hawk check \
+            --target x86_64-pc-windows-gnu --target-dir target/hawk-windows -D warnings"
+      - *save-target
+      - *prune-target
   windows:
+    permissions:
+      contents: read
+      actions: write
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.19.0
+      - name: Compile through sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
+        shell: bash
+        run: echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-nextest@0.9.152
+      - &restore-target-cargo
+        name: Restore the build cache
+        id: target-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}-
+            cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
+      - run: rustup show
+      - run: cargo clippy --locked --workspace --all-targets
+      - name: Clippy with capture
+        run: cargo clippy --locked -p editor-aqua --all-targets --features capture
+      - name: Build service integration fixtures
+        run: cargo build --locked -p ae -p forge
+      - name: Tests
+        run: cargo nextest run --locked --workspace --no-fail-fast
+      - name: Installer scenarios that write the user's registry
+        run: cargo nextest run --locked -p ae --run-ignored only --no-fail-fast --test-threads 1
+      - name: Qualification and capture tests
+        run: cargo nextest run --locked -p editor-aqua --features capture --no-fail-fast -E 'not binary(budgets)'
+      - name: Performance budgets with a screen reader connected
+        shell: bash
+        run: |
+          echo '## Performance budgets on Windows' >> "$GITHUB_STEP_SUMMARY"
+          cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'binary(budgets)'
+      - name: Screens match their baselines on the WARP reference renderer
+        shell: bash
+        env:
+          SCREENS: ${{ runner.temp }}/screens
+        run: |
+          cargo build --locked -p editor-aqua --features capture --bin editor-aqua
+          AQUA_BIN="$PWD/target/debug/editor-aqua.exe" crates/editor-aqua/tests/qualification/capture.sh "$SCREENS/candidate"
+          AQUA_SCREENS_CANDIDATE="$SCREENS/candidate" AQUA_SCREENS_HEATMAPS="$SCREENS/heatmaps" \
+            AQUA_SCREENS_REPORT="$SCREENS/report.json" \
+            cargo nextest run --locked -p editor-aqua --test screens --run-ignored only --no-fail-fast
+      - name: Keep the captured screens
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: screens
+          path: ${{ runner.temp }}/screens
+          if-no-files-found: ignore
+      - *save-target
+      - *prune-target
+      - *sccache-stats
+  macos:
+    permissions:
+      contents: read
+      actions: write
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.19.0
+      - name: Compile through sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
+        shell: bash
+        run: echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-nextest@0.9.152
+      - *restore-target-cargo
+      - run: rustup show
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets
+      - name: Build service integration fixtures
+        run: cargo build --locked -p ae -p forge
+      - name: Tests
+        run: cargo nextest run --locked --workspace --no-fail-fast
+      - *save-target
+      - *prune-target
+      - *sccache-stats
+  arm:
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_COMMAND: cargo
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.19.0
+      - name: Compile through sccache
+        if: env.AWS_ACCESS_KEY_ID != ''
+        run: echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-nextest@0.9.152
+      - *restore-target-cargo
+      - run: rustup show
+      - name: Build service integration fixtures
+        run: cargo build --locked -p ae -p forge
+      - name: Engine, isolation and run tests on the shipped ARM target
+        run: cargo nextest run --locked -p forge-engines -p forge-isolation -p forge-runs -p forge -p ae --no-fail-fast
+      - *delegated-cgroup-tests
+      - *save-target
+      - *prune-target
+      - *sccache-stats
+  shipping:
+    permissions:
+      contents: read
+      actions: write
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -82,25 +397,33 @@ jobs:
         if: env.AWS_ACCESS_KEY_ID != ''
         shell: bash
         run: echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - *restore-target-cargo
       - run: rustup show
-      - run: cargo clippy --locked --workspace --all-targets
-      - run: cargo build --locked -p ae -p forge
-      - run: cargo test --locked --workspace --no-fail-fast
-      - name: sccache stats
-        if: always() && env.RUSTC_WRAPPER != ''
-        shell: bash
-        run: '"$SCCACHE_PATH" --show-stats'
-  macos:
-    runs-on: macos-15
+      - name: Build the shipped binaries with default features and no test support
+        run: cargo build --locked -p ae -p forge -p editor-aqua --bins
+      - *save-target
+      - *prune-target
+      - *sccache-stats
+  nix-packages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build the packages the NixOS module installs
+        run: nix build --no-link --print-build-logs .#ae .#forge
+      - name: Build the Windows packages
+        run: nix build --no-link --print-build-logs .#ae-windows .#forge-windows .#artisan-editor-windows
+  highlighting:
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      CARGO_TARGET_DIR: target/highlighting
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -112,20 +435,12 @@ jobs:
         if: env.AWS_ACCESS_KEY_ID != ''
         shell: bash
         run: echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
-          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+          tool: cargo-nextest@0.9.152
       - run: rustup show
-      - name: Build the CLI and Forge without Aqua
-        run: cargo build --locked -p ae -p forge
-      - name: Test shared backend contracts
-        run: cargo test --locked -p artisan-api -p artisan-account -p artisan-paths -p forge-store
-      - name: sccache stats
-        if: always() && env.RUSTC_WRAPPER != ''
-        shell: bash
-        run: '"$SCCACHE_PATH" --show-stats'
+      - name: Highlighting regression tests
+        run: cargo nextest run --manifest-path vendor/highlighting/validation/Cargo.toml --config-file .config/nextest.toml --locked --cargo-profile release --no-fail-fast
+      - name: Highlighting pattern coverage
+        run: cargo run --manifest-path vendor/highlighting/validation/Cargo.toml --locked --release --bin check_patterns
+      - *sccache-stats

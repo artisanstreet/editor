@@ -2,46 +2,58 @@ use artisan_api::EngineId;
 use std::time::{Duration, Instant};
 
 use super::picker::ModelRow;
-use editor_ui::kit::{Row, Space};
+use editor_ui::kit::{Row, Space, TextRole};
+use editor_ui::theme::ArtisanTheme;
 
-const fn height(row: Row) -> f32 {
-    match row.height() {
-        Some(height) => height,
-        None => 0.0,
-    }
-}
-
-pub const ENGINE_ROW_HEIGHT: f32 = height(Row::Heading);
-pub const GATE_ROW_HEIGHT: f32 = 84.0;
-pub const GROUP_ROW_HEIGHT: f32 = height(Row::Heading);
-pub const MODEL_ROW_HEIGHT: f32 = height(Row::MenuItem);
-pub const ROW_GAP: Space = Space::S2;
-pub const SECTION_SPACER: f32 = Space::S6.px();
-pub const PADDING: Space = Space::S6;
+pub(crate) const ROW_GAP: Space = Space::S2;
+pub(crate) const SECTION_SPACER: f32 = Space::S6.px();
+pub(crate) const PADDING: Space = Space::S6;
 const GAP: f32 = ROW_GAP.px();
 const PADDING_TOP: f32 = PADDING.px();
 const PADDING_BOTTOM: f32 = PADDING.px();
-const SPY_LINE: f32 = 28.0;
 const JUMP_DURATION: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ListLayout {
     tops: Vec<f32>,
     height: f32,
+    model: f32,
+    spy_line: f32,
 }
 
-const fn row_height(row: &ModelRow) -> f32 {
+#[must_use]
+pub(crate) fn group_row_height(theme: &ArtisanTheme) -> f32 {
+    Row::Heading.height(theme)
+}
+
+pub(crate) const GATE_PADDING: Space = Space::S12;
+pub(crate) const GATE_GAP: Space = Space::S4;
+const GATE_REASON_LINES: f32 = 2.0;
+
+#[must_use]
+pub(crate) fn gate_row_height(theme: &ArtisanTheme) -> f32 {
+    let line = TextRole::Label.line_px(theme);
+    2.0f32.mul_add(
+        GATE_PADDING.px(),
+        GATE_REASON_LINES.mul_add(line, GATE_GAP.px() + line),
+    )
+}
+
+fn model_row_height(theme: &ArtisanTheme) -> f32 {
+    Row::MenuItem.height(theme)
+}
+
+fn row_height(theme: &ArtisanTheme, row: &ModelRow) -> f32 {
     match row {
-        ModelRow::Engine(_) => ENGINE_ROW_HEIGHT,
-        ModelRow::Gate(_) => GATE_ROW_HEIGHT,
-        ModelRow::Group { .. } => GROUP_ROW_HEIGHT,
-        ModelRow::Model { .. } => MODEL_ROW_HEIGHT,
+        ModelRow::Engine(_) | ModelRow::Group { .. } => group_row_height(theme),
+        ModelRow::Gate(_) => gate_row_height(theme),
+        ModelRow::Model { .. } => model_row_height(theme),
     }
 }
 
 impl ListLayout {
     #[must_use]
-    pub fn new(rows: &[ModelRow]) -> Self {
+    pub fn new(theme: &ArtisanTheme, rows: &[ModelRow]) -> Self {
         let mut tops = Vec::with_capacity(rows.len());
         let mut y = PADDING_TOP;
         let mut section = None;
@@ -52,12 +64,14 @@ impl ListLayout {
             }
             section = Some(engine);
             tops.push(y);
-            y += row_height(row) + GAP;
+            y += row_height(theme, row) + GAP;
         }
         let content = if rows.is_empty() { y } else { y - GAP };
         Self {
             tops,
             height: content + PADDING_BOTTOM,
+            model: model_row_height(theme),
+            spy_line: group_row_height(theme),
         }
     }
 
@@ -79,7 +93,7 @@ impl ListLayout {
         }
         rows.iter()
             .zip(&self.tops)
-            .take_while(|(_, top)| **top - scroll <= SPY_LINE)
+            .take_while(|(_, top)| **top - scroll <= self.spy_line)
             .last()
             .or_else(|| rows.iter().zip(&self.tops).next())
             .map(|(row, _)| row.engine())
@@ -97,7 +111,7 @@ impl ListLayout {
             matches!(row, ModelRow::Model { engine: row_engine, id: row_id, .. }
                 if *row_engine == engine && row_id == id)
         })?;
-        let centre = self.tops[index] + MODEL_ROW_HEIGHT / 2.0 - viewport / 2.0;
+        let centre = self.tops[index] + self.model / 2.0 - viewport / 2.0;
         Some(centre.clamp(0.0, self.max_scroll(viewport)))
     }
 }
@@ -110,8 +124,16 @@ struct Jump {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Aim {
+    #[default]
+    Free,
+    Jumping(Jump),
+    Landed(EngineId),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ModelScroll {
-    jump: Option<Jump>,
+    aim: Aim,
     written: Option<f32>,
     saved: f32,
     hidden: bool,
@@ -120,7 +142,7 @@ pub struct ModelScroll {
 impl ModelScroll {
     pub fn open(&mut self, offset: f32) {
         *self = Self {
-            jump: None,
+            aim: Aim::Free,
             written: Some(offset),
             saved: offset,
             hidden: false,
@@ -128,7 +150,7 @@ impl ModelScroll {
     }
 
     pub fn jump(&mut self, engine: EngineId, to: f32) {
-        self.jump = Some(Jump {
+        self.aim = Aim::Jumping(Jump {
             engine,
             to,
             from: None,
@@ -137,19 +159,22 @@ impl ModelScroll {
     }
 
     pub fn hide(&mut self) {
-        self.jump = None;
+        self.aim = Aim::Free;
         self.written = None;
         self.hidden = true;
     }
 
     #[must_use]
     pub const fn jumping(&self) -> bool {
-        self.jump.is_some()
+        matches!(self.aim, Aim::Jumping(_))
     }
 
     #[must_use]
-    pub fn target(&self) -> Option<EngineId> {
-        self.jump.map(|jump| jump.engine)
+    pub(crate) const fn target(&self) -> Option<EngineId> {
+        match self.aim {
+            Aim::Free => None,
+            Aim::Jumping(Jump { engine, .. }) | Aim::Landed(engine) => Some(engine),
+        }
     }
 
     pub fn offset(&mut self, kept: f32, max: f32, now: Instant, reduced: bool) -> f32 {
@@ -159,14 +184,16 @@ impl ModelScroll {
         } else {
             kept
         };
-        let moved_by_reader = self.written.is_some_and(|written| (written - kept).abs() > 1.5);
+        let moved_by_reader = self
+            .written
+            .is_some_and(|written| (written - kept).abs() > 1.5);
         if moved_by_reader {
-            self.jump = None;
+            self.aim = Aim::Free;
         }
-        let value = match &mut self.jump {
-            None => kept,
-            Some(jump) if reduced => jump.to,
-            Some(jump) => {
+        let value = match &mut self.aim {
+            Aim::Free | Aim::Landed(_) => kept,
+            Aim::Jumping(jump) if reduced => jump.to,
+            Aim::Jumping(jump) => {
                 let (from, started) = *jump.from.get_or_insert((kept, now));
                 let progress = (now.saturating_duration_since(started).as_secs_f32()
                     / JUMP_DURATION.as_secs_f32())
@@ -175,11 +202,17 @@ impl ModelScroll {
             }
         }
         .clamp(0.0, max);
-        if self.jump.is_some_and(|jump| (value - jump.to.min(max)).abs() < 0.25) {
-            self.jump = None;
+        if let Aim::Jumping(jump) = self.aim
+            && (value - jump.to.min(max)).abs() < 0.25
+        {
+            self.aim = Aim::Landed(jump.engine);
         }
         self.written = Some(value);
         self.saved = value;
         value
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/model_list.rs"]
+mod tests;

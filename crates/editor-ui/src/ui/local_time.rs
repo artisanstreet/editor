@@ -1,63 +1,26 @@
+use crate::ui::locale::{self, Formats};
 use artisan_api::Timestamp;
-use chrono::{DateTime, Local, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 
-pub fn moment(at: Timestamp) -> String {
+pub(crate) fn occasion(at: Timestamp) -> String {
     let Some(local) = DateTime::from_timestamp_millis(at).map(|at| at.with_timezone(&Local)) else {
         return String::new();
     };
-    let local = local.naive_local();
-    let time = clock(local);
-    if local.date() == Local::now().date_naive() {
-        time
-    } else {
-        format!("{} {time}", short_date(local))
-    }
+    locale::with_system(|formats| {
+        occasion_on(formats, local.naive_local(), Local::now().date_naive())
+    })
 }
 
-pub fn occasion(at: Timestamp) -> String {
-    let Some(local) = DateTime::from_timestamp_millis(at).map(|at| at.with_timezone(&Local)) else {
-        return String::new();
-    };
-    let local = local.naive_local();
-    let time = clock(local);
-    match (local.date() - Local::now().date_naive()).num_days() {
+pub(crate) fn occasion_on(formats: &Formats, at: NaiveDateTime, today: NaiveDate) -> String {
+    let time = formats.clock(at);
+    match (at.date() - today).num_days() {
         0 => format!("today at {time}"),
         1 => format!("tomorrow at {time}"),
-        2..=6 => format!("on {} at {time}", local.format("%A")),
-        _ => format!("on {} at {time}", short_date(local)),
+        2..=6 => format!("on {} at {time}", at.format("%A")),
+        _ => format!("on {} at {time}", formats.date(at.date())),
     }
 }
 
-#[cfg(windows)]
-fn parts(at: NaiveDateTime) -> aqua::local_time::LocalDateParts {
-    use chrono::{Datelike as _, Timelike as _};
-    let word = |value: u32| u16::try_from(value).unwrap_or(0);
-    aqua::local_time::LocalDateParts {
-        year: u16::try_from(at.year()).unwrap_or(0),
-        month: word(at.month()),
-        weekday: word(at.weekday().num_days_from_sunday()),
-        day: word(at.day()),
-        hour: word(at.hour()),
-        minute: word(at.minute()),
-    }
-}
-
-#[cfg(windows)]
-fn clock(at: NaiveDateTime) -> String {
-    aqua::local_time::clock(parts(at)).unwrap_or_else(|| at.format("%H:%M").to_string())
-}
-
-#[cfg(windows)]
-fn short_date(at: NaiveDateTime) -> String {
-    aqua::local_time::short_date(parts(at)).unwrap_or_else(|| at.format("%Y-%m-%d").to_string())
-}
-
-#[cfg(not(windows))]
-fn clock(at: NaiveDateTime) -> String {
-    at.format("%H:%M").to_string()
-}
-
-#[cfg(not(windows))]
-fn short_date(at: NaiveDateTime) -> String {
-    at.format("%Y-%m-%d").to_string()
-}
+#[cfg(test)]
+#[path = "../../tests/ui/local_time.rs"]
+mod tests;

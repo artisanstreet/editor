@@ -1,10 +1,10 @@
 use crate::frame::scramble::{self, Cell, Rows};
 use std::time::{Duration, Instant};
 
-pub const REST: [&str; 3] = ["AR", "TIS", "AN"];
-pub const SWAP: [&str; 3] = ["TO", "GG", "LE"];
-pub const REST_SQUEEZED: [&str; 3] = ["AR", "TS", "AN"];
-pub const LINE_HEIGHTS: [f32; 3] = [0.71, 0.8, 0.7];
+const REST: [&str; 3] = ["AR", "TIS", "AN"];
+const SWAP: [&str; 3] = ["TO", "GG", "LE"];
+const REST_SQUEEZED: [&str; 3] = ["AR", "TS", "AN"];
+pub(crate) const LINE_HEIGHTS: [f32; 3] = [0.71, 0.8, 0.7];
 pub const LEAVE_DELAY: Duration = Duration::from_millis(120);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

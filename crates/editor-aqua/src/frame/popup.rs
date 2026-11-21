@@ -12,8 +12,14 @@ pub struct Popup {
     host: Option<AnimatedPickerHost>,
 }
 
+impl std::fmt::Debug for Popup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Popup").finish_non_exhaustive()
+    }
+}
+
 impl Popup {
-    pub fn sync(
+    pub(crate) fn sync(
         &mut self,
         ui: &mut UiApp,
         open: bool,
@@ -56,7 +62,7 @@ impl Popup {
         Ok(())
     }
 
-    pub fn advance(&mut self, ui: &mut UiApp, now: f64) -> Result<bool, String> {
+    pub(crate) fn advance(&mut self, ui: &mut UiApp, now: f64) -> Result<bool, String> {
         let Some(host) = &mut self.host else {
             return Ok(false);
         };
@@ -68,7 +74,7 @@ impl Popup {
         Ok(host.is_animating(ui))
     }
 
-    pub fn dismiss(
+    pub(crate) fn dismiss(
         &mut self,
         ui: &mut UiApp,
         input: &aqua_core::InputEvent,
@@ -79,7 +85,7 @@ impl Popup {
         }
     }
 
-    pub fn dispose(&mut self, ui: &mut UiApp) {
+    pub(crate) fn dispose(&mut self, ui: &mut UiApp) {
         if let Some(host) = self.host.take() {
             host.dispose(ui);
         }

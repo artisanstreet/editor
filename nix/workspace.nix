@@ -13,9 +13,9 @@ let
   craneLib = (crane.mkLib pkgs).overrideToolchain rust;
   shaderTools = import ./shaders.nix { inherit pkgs; };
 
-  # The crates plus what they embed (skills/) and Cargo's configuration.
   roots = [
     "crates"
+    "notices"
     "vendor/highlighting"
     "vendor/mermaid-rs-renderer"
     "skills"
@@ -23,6 +23,7 @@ let
     ".config"
   ];
   topFiles = [
+    "LICENSE.md"
     "Cargo.toml"
     "Cargo.lock"
     "clippy.toml"
@@ -128,6 +129,7 @@ let
       rustflags = [
         "-C target-cpu=x86-64-v3"
         "-C target-feature=+crt-static"
+        "-C split-debuginfo=off"
         "-C link-arg=-l:libmcfgthread.a"
         "-C link-arg=-lntdll"
         "-C link-arg=-lkernel32"
@@ -252,20 +254,6 @@ let
       bin = "editor-aqua";
     };
   };
-  release = lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
-    release = import ./release.nix {
-      inherit pkgs version;
-      linux = {
-        inherit ae forge;
-      };
-      windows = {
-        ae = windows.ae-windows;
-        forge = windows.forge-windows;
-        editor = windows.artisan-editor-windows;
-      };
-    };
-  };
-
   # Checks: clippy and the tests over the workspace, in the dev profile, on
   # one shared dependency cache.
   checkBase = platforms.linux.environment // {
@@ -385,9 +373,7 @@ let
         '';
       };
   };
-  # `nix run .#release`: the dev loop with Cargo's release profile. The
-  # signed release archives stay `nix build .#release` (packages, not apps).
-  devRelease = import ./dev.nix {
+  devLoopWithReleaseProfile = import ./dev.nix {
     inherit pkgs;
     profile = "release";
   };
@@ -418,11 +404,10 @@ in
     default = ae;
     inherit ae forge;
   }
-  // windows
-  // release;
+  // windows;
   apps = {
     default = dev;
     inherit dev devfast;
-    release = devRelease;
+    release = devLoopWithReleaseProfile;
   };
 }

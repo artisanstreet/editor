@@ -2,14 +2,12 @@ pub mod controller;
 pub mod presentation;
 pub mod view;
 
-use editor_core::{ForgeClient, HostId, Screen, SettingsPage};
 use artisan_api::{CatalogSkill, Listing, McpServer, SkillAction};
-use presentation::{Item, Kind};
+use editor_core::{ForgeClient, HostId, Problem, Screen, SettingsPage, client::CallError};
+use presentation::{Item, ItemKey, Kind};
 use std::time::{Duration, Instant};
 
-pub const MARKETPLACE_SCREEN_SELECTOR: &str = "route-marketplace";
-pub const MARKETPLACE_SEARCH_SELECTOR: &str = "marketplace-search";
-pub const REMOTE_SEARCH_DELAY: Duration = Duration::from_millis(250);
+const REMOTE_SEARCH_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Remote {
@@ -17,7 +15,7 @@ pub enum Remote {
     Idle,
     Searching,
     Found(Vec<Listing>),
-    Failed(String),
+    Failed(Problem),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +24,7 @@ pub enum Entry {
     Notices,
     Found(String),
     Group(String),
+    SearchFailed(Problem),
     Empty(String),
     Item {
         item: Item,
@@ -37,19 +36,36 @@ pub enum Entry {
 
 #[derive(Clone, Debug)]
 pub struct SearchRequest {
-    pub query: String,
+    query: String,
     serial: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
     Listing(String),
     Skill { id: String, action: SkillAction },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum OperationError {
+    #[error("install listing {listing}")]
+    Install {
+        listing: String,
+        #[source]
+        source: CallError,
+    },
+    #[error("{verb} skill {skill}", verb = action.as_str())]
+    Skill {
+        skill: String,
+        action: SkillAction,
+        #[source]
+        source: CallError,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct OperationRequest {
-    pub operation: Operation,
+    operation: Operation,
     generation: u64,
 }
 
@@ -67,20 +83,20 @@ pub enum ListKey {
     Dismiss,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Marketplace {
     pub host: Option<HostId>,
-    pub generation: u64,
+    generation: u64,
     pub query: String,
-    pub kind: Kind,
-    pub selected: usize,
+    kind: Kind,
+    selected: Option<ItemKey>,
     pub found_open: bool,
-    pub focus_search: bool,
+    focus_search: bool,
     pub items: Vec<Item>,
     pub listings: Remote,
-    pub pending: Option<String>,
-    pub notice: Option<String>,
-    pub shown: bool,
+    pub pending: Option<Operation>,
+    pub notice: Option<Problem>,
+    shown: bool,
     search_serial: u64,
     search_due: Option<Instant>,
 }
@@ -117,15 +133,25 @@ impl Marketplace {
             return;
         }
         self.query = query;
-        self.selected = 0;
+        self.selected = None;
+        self.restart_search(now);
+    }
+
+    fn restart_search(&mut self, now: Instant) -> bool {
         self.search_serial = self.search_serial.wrapping_add(1);
         self.search_due = None;
         if self.host.is_some() && self.query.trim().chars().count() >= 2 {
             self.listings = Remote::Searching;
             self.search_due = Some(now + REMOTE_SEARCH_DELAY);
+            true
         } else {
             self.listings = Remote::Idle;
+            false
         }
+    }
+
+    fn retry_search(&mut self, now: Instant) -> bool {
+        matches!(self.listings, Remote::Failed(_)) && self.restart_search(now)
     }
 
     pub fn cancel_search(&mut self) {
@@ -139,37 +165,41 @@ impl Marketplace {
     }
 
     pub fn take_search(&mut self, now: Instant) -> Option<SearchRequest> {
-        if self.search_due.is_some_and(|due| now >= due) {
+        self.search_due.is_some_and(|due| now >= due).then(|| {
             self.search_due = None;
-            Some(SearchRequest {
+            SearchRequest {
                 query: self.query.trim().to_owned(),
                 serial: self.search_serial,
-            })
-        } else {
-            None
-        }
+            }
+        })
     }
 
-    pub async fn search(
+    async fn search(
         client: &ForgeClient,
         request: &SearchRequest,
-    ) -> anyhow::Result<Vec<Listing>> {
+    ) -> Result<Vec<Listing>, CallError> {
         client.marketplace_search(&request.query).await
     }
 
-    pub fn finish_search(&mut self, request: &SearchRequest, result: anyhow::Result<Vec<Listing>>) {
+    pub fn finish_search(
+        &mut self,
+        request: &SearchRequest,
+        result: Result<Vec<Listing>, CallError>,
+    ) {
         if request.serial != self.search_serial || self.query.trim() != request.query {
             return;
         }
         self.listings = match result {
             Ok(listings) => Remote::Found(listings),
-            Err(error) => Remote::Failed(format!("Couldn't search skills.sh: {error:#}")),
+            Err(error) => {
+                Remote::Failed(Problem::calling_forge("Couldn't search skills.sh.", &error))
+            }
         };
     }
 
     pub fn set_kind(&mut self, kind: Kind) {
         self.kind = kind;
-        self.selected = 0;
+        self.selected = None;
     }
 
     pub fn results(&self) -> Vec<Item> {
@@ -183,7 +213,9 @@ impl Marketplace {
                 presentation::by_name(listings)
                     .into_iter()
                     .filter(|(listing, _)| {
-                        !self.items.iter().any(|item| item.name() == listing.name)
+                        !self.items.iter().any(
+                            |item| matches!(item, Item::Skill(skill) if skill.name == listing.name),
+                        )
                     })
                     .map(|(listing, others)| presentation::listing_item(listing, others)),
             );
@@ -194,20 +226,46 @@ impl Marketplace {
             .collect()
     }
 
+    pub fn selected_index(&self) -> Option<usize> {
+        self.resolve_selection(&self.results())
+    }
+
+    fn resolve_selection(&self, results: &[Item]) -> Option<usize> {
+        if results.is_empty() {
+            return None;
+        }
+        Some(
+            self.selected
+                .as_ref()
+                .and_then(|key| results.iter().position(|item| &item.key() == key))
+                .unwrap_or(0),
+        )
+    }
+
+    fn select(&mut self, results: &[Item], index: Option<usize>) {
+        self.selected = index.and_then(|index| results.get(index)).map(Item::key);
+    }
+
     pub fn list_key(&mut self, key: ListKey, now: Instant) -> Option<Action> {
         let results = self.results();
+        let current = self.resolve_selection(&results);
         match key {
-            ListKey::Up => self.selected = self.selected.saturating_sub(1),
-            ListKey::Down => {
-                self.selected = (self.selected + 1).min(results.len().saturating_sub(1))
+            ListKey::Up => self.select(&results, current.map(|index| index.saturating_sub(1))),
+            ListKey::Down => self.select(
+                &results,
+                current.map(|index| (index + 1).min(results.len() - 1)),
+            ),
+            ListKey::Accept => {
+                return current
+                    .and_then(|index| results.get(index))
+                    .and_then(Self::act);
             }
-            ListKey::Accept => return results.get(self.selected).and_then(Self::act),
             ListKey::Dismiss => self.set_query(String::new(), now),
         }
         None
     }
 
-    pub fn act(item: &Item) -> Option<Action> {
+    fn act(item: &Item) -> Option<Action> {
         match item {
             Item::Skill(row) if !item.managed() => Some(Action::Operation(Operation::Skill {
                 id: row.id.clone(),
@@ -223,10 +281,7 @@ impl Marketplace {
         if self.pending.is_some() || self.host.is_none() {
             return None;
         }
-        let id = match &operation {
-            Operation::Listing(id) | Operation::Skill { id, .. } => id,
-        };
-        self.pending = Some(id.clone());
+        self.pending = Some(operation.clone());
         self.notice = None;
         Some(OperationRequest {
             operation,
@@ -234,20 +289,37 @@ impl Marketplace {
         })
     }
 
-    pub async fn execute(
+    async fn execute(
         client: &ForgeClient,
         request: &OperationRequest,
-    ) -> anyhow::Result<Vec<CatalogSkill>> {
+    ) -> Result<Vec<CatalogSkill>, OperationError> {
         match &request.operation {
-            Operation::Listing(id) => client.marketplace_install(id).await,
-            Operation::Skill { id, action } => client.skill_action(id, *action).await,
+            Operation::Listing(id) => {
+                client
+                    .marketplace_install(id)
+                    .await
+                    .map_err(|source| OperationError::Install {
+                        listing: id.clone(),
+                        source,
+                    })
+            }
+            Operation::Skill { id, action } => {
+                client
+                    .skill_action(id, *action)
+                    .await
+                    .map_err(|source| OperationError::Skill {
+                        skill: id.clone(),
+                        action: *action,
+                        source,
+                    })
+            }
         }
     }
 
     pub fn finish_operation(
         &mut self,
         request: &OperationRequest,
-        result: anyhow::Result<Vec<CatalogSkill>>,
+        result: Result<Vec<CatalogSkill>, OperationError>,
     ) -> bool {
         if self.generation != request.generation {
             return false;
@@ -264,7 +336,10 @@ impl Marketplace {
                     } => "install",
                     Operation::Skill { action, .. } => action.as_str(),
                 };
-                self.notice = Some(format!("Couldn't {verb} the skill: {error:#}"));
+                self.notice = Some(Problem::caused_by(
+                    format!("Couldn't {verb} the skill."),
+                    &error,
+                ));
                 false
             }
         }
@@ -289,23 +364,27 @@ pub fn entries(page: &Marketplace) -> Vec<Entry> {
         );
     };
     if !page.query.trim().is_empty() {
-        let selected = page.selected.min(results.len().saturating_sub(1));
+        let selected = page.resolve_selection(&results);
         let (local, remote): (Vec<&Item>, Vec<&Item>) = results
             .iter()
             .partition(|item| !matches!(item, Item::Listing(_)));
         let local_count = local.len();
         if !local.is_empty() {
-            entries.push(Entry::Group("On this host".to_owned()));
-            group(&mut entries, local, Some(selected));
+            entries.push(Entry::Group("On this Forge".to_owned()));
+            group(&mut entries, local, selected);
         }
         match &page.listings {
             Remote::Searching => {
                 entries.push(Entry::Group("Searching skills.sh\u{2026}".to_owned()));
             }
-            Remote::Failed(error) => entries.push(Entry::Group(error.clone())),
+            Remote::Failed(error) => entries.push(Entry::SearchFailed(error.clone())),
             Remote::Found(_) if !remote.is_empty() => {
                 entries.push(Entry::Group("skills.sh".to_owned()));
-                group(&mut entries, remote, selected.checked_sub(local_count));
+                group(
+                    &mut entries,
+                    remote,
+                    selected.and_then(|selected| selected.checked_sub(local_count)),
+                );
             }
             Remote::Found(_) | Remote::Idle => {}
         }

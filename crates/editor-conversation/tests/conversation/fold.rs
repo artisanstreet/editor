@@ -1,5 +1,7 @@
-use super::{Item, ItemKind, TextSection};
-use artisan_api::{ContentId, ContentRef, ItemId, Status, TextContent, ThreadId};
+use super::{Item, ItemKind, TextSection, ThreadView, fold};
+use artisan_api::{
+    ContentId, ContentRef, ItemId, Run, RunId, RunStatus, Status, TextContent, ThreadId,
+};
 
 fn agent(name: &str, description: TextContent, prompt: Option<TextContent>) -> Item {
     Item {
@@ -76,7 +78,7 @@ fn missing_native_task_text_has_an_explanation() {
     let item = agent("reviewer", "".into(), None);
     assert_eq!(
         TextSection::AgentTask.inline_text(&item),
-        Some("Task message not provided by the harness.")
+        Some("Task message not provided by the engine.")
     );
 }
 
@@ -112,13 +114,14 @@ fn a_resumed_agent_shows_its_status_until_it_reports_again() {
             *result = Some("Earlier report".into());
         }
         let id = item.id.clone();
-        let (mut view, _) = super::ThreadView::open(ThreadId("thread".into()));
-        view.context.insert(id.clone(), std::sync::Arc::new(item));
-        super::fold(&view, None, Some(&id))
+        let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
+        view.context
+            .make_mut()
+            .insert(id.clone(), std::sync::Arc::new(item));
+        fold(&view, None, Some(&id))
             .rows
             .into_iter()
             .skip(1)
-            .map(|(row, _)| row)
             .collect::<Vec<_>>()
     };
     assert!(matches!(
@@ -178,4 +181,179 @@ fn the_status_line_names_what_runs_in_the_foreground() {
         Some("Using 2 tools")
     );
     assert_eq!(doing(&[&detached, &finished]), None);
+}
+
+fn run(id: &str, status: RunStatus, started_at: artisan_api::Timestamp, carried: bool) -> Run {
+    Run {
+        config: None,
+        id: RunId(id.into()),
+        thread_id: ThreadId("thread".into()),
+        engine: artisan_api::EngineId::Claude,
+        model: None,
+        input_cutoff: 0,
+        state: artisan_api::RunOutcome::of(status).map_or(
+            artisan_api::RunState::Running,
+            |outcome| artisan_api::RunState::Finished {
+                outcome,
+                error: None,
+                ended_at: started_at,
+            },
+        ),
+        usage: artisan_api::Usage::default(),
+        session_id: None,
+        seq: 1,
+        started_at,
+        continuation: carried.then_some(artisan_api::Continuation::Restart),
+    }
+}
+
+fn reply_in(run: &str, position: u64) -> Item {
+    Item {
+        id: ItemId(format!("reply-{position}")),
+        thread_id: ThreadId("thread".into()),
+        position,
+        seq: position,
+        run_id: Some(RunId(run.into())),
+        parent_id: None,
+        status: Status::Done,
+        created_at: 0,
+        updated_at: 0,
+        kind: ItemKind::AssistantMessage {
+            text: format!("Reply {position}.").into(),
+            phase: artisan_api::Phase::Final,
+        },
+    }
+}
+
+fn thread_with(runs: Vec<Run>) -> ThreadView {
+    let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
+    for (index, run) in runs.into_iter().enumerate() {
+        let position = u64::try_from(index).expect("a handful of runs") + 1;
+        assert!(view.apply_item(reply_in(run.id.as_str(), position), None));
+        view.remember_run(run);
+    }
+    view
+}
+
+#[test]
+fn a_continuation_started_in_the_same_millisecond_carries_on_the_stopped_turn() {
+    let view = thread_with(vec![
+        run("run-a", RunStatus::Cancelled, 1_000, false),
+        run("run-b", RunStatus::Running, 1_000, true),
+    ]);
+
+    let folded = fold(&view, None, None);
+    assert_eq!(
+        folded.turns.of(&RunId("run-b".into())),
+        RunId("run-a".into())
+    );
+    assert!(
+        folded.runs[&RunId("run-a".into())].live(),
+        "the stopped turn shows its continuation running, not Stopped"
+    );
+}
+
+#[test]
+fn the_latest_of_two_same_millisecond_continuations_sets_the_turn_status() {
+    for _ in 0..32 {
+        let view = thread_with(vec![
+            run("run-a", RunStatus::Cancelled, 1_000, false),
+            run("run-b", RunStatus::Cancelled, 2_000, true),
+            run("run-c", RunStatus::Running, 2_000, true),
+        ]);
+
+        let folded = fold(&view, None, None);
+        for id in ["run-a", "run-b", "run-c"] {
+            assert!(
+                folded.runs[&RunId(id.into())].live(),
+                "{id} belongs to a turn whose latest continuation is running"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_finished_turn_ends_the_continuation_chain() {
+    let view = thread_with(vec![
+        run("run-a", RunStatus::Cancelled, 1_000, false),
+        run("run-b", RunStatus::Cancelled, 2_000, true),
+        run("run-c", RunStatus::Done, 3_000, true),
+        run("run-d", RunStatus::Running, 4_000, true),
+    ]);
+    let turns = super::Turns::new(&view, None);
+    for (id, root) in [
+        ("run-a", "run-a"),
+        ("run-b", "run-a"),
+        ("run-c", "run-a"),
+        ("run-d", "run-d"),
+    ] {
+        let id = RunId(id.into());
+        assert_eq!(turns.of(&id), RunId(root.into()), "{id}");
+    }
+}
+
+fn prompt_in(run: &str, position: u64) -> Item {
+    Item {
+        id: ItemId(format!("prompt-{position}")),
+        kind: ItemKind::UserMessage {
+            text: format!("Prompt {position}.").into(),
+            images: Vec::new(),
+            steer: false,
+            from_agent: None,
+            sender: None,
+        },
+        ..reply_in(run, position)
+    }
+}
+
+#[test]
+fn every_turn_without_tools_gets_its_header_right_after_its_prompt() {
+    let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
+    for (index, id) in ["run-a", "run-b", "run-c"].into_iter().enumerate() {
+        let position = u64::try_from(index).expect("three turns") * 2 + 1;
+        assert!(view.apply_item(prompt_in(id, position), None));
+        assert!(view.apply_item(reply_in(id, position + 1), None));
+        view.remember_run(run(
+            id,
+            RunStatus::Done,
+            1_000 * (position + 1).cast_signed(),
+            false,
+        ));
+    }
+    let rows = fold(&view, None, None).rows;
+    let shape = rows
+        .iter()
+        .map(|row| match row {
+            super::Row::WorkHeader(run) => format!("header {run}"),
+            other @ (super::Row::Projected { .. }
+            | super::Row::Work { .. }
+            | super::Row::EarlierWork { .. }
+            | super::Row::WorkEntry { .. }
+            | super::Row::Chain { .. }
+            | super::Row::Text { .. }
+            | super::Row::Prompt(_)
+            | super::Row::Compaction(_)
+            | super::Row::Image(_)
+            | super::Row::Gap
+            | super::Row::Status(_)
+            | super::Row::AgentResult(_)
+            | super::Row::AgentStatus(..)) => {
+                other.anchor().map_or("-", |id| id.as_str()).to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        [
+            "prompt-1",
+            "header run-a",
+            "reply-2",
+            "prompt-3",
+            "header run-b",
+            "reply-4",
+            "prompt-5",
+            "header run-c",
+            "reply-6",
+        ]
+    );
 }

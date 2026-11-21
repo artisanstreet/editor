@@ -1,0 +1,550 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "name": "mermaid-rs-renderer",
+    "version": "0.3.1",
+    "archive_url": "https://static.crates.io/crates/mermaid-rs-renderer/mermaid-rs-renderer-0.3.1.crate",
+    "archive_sha256": "6cb5b469222ce6b9896edf0a969cf68464f5a028ef394fd6643f00bd943df117",
+    "archive_root": "mermaid-rs-renderer-0.3.1",
+    "repository": "https://github.com/1jehuang/mermaid-rs-renderer",
+    "vcs": {
+      "git": {
+        "sha1": "2f993bd79a55235eb59a34d807852276ba25bea7"
+      },
+      "path_in_vcs": ""
+    },
+    "license": "MIT",
+    "license_file": "LICENSE"
+  },
+  "reproduce": "Extract the archive, keep the retained_files paths, then run patch -p1 < fork.patch inside archive_root.",
+  "changes": [
+    {
+      "file": "Cargo.toml",
+      "reason": "Rewritten manifest: library target only, no cli/png features, no anyhow, fontdb, ttf-parser, resvg, usvg or clap dependencies."
+    },
+    {
+      "file": "src/text_metrics.rs",
+      "reason": "Font-database measurement removed; text width always uses the built-in estimate."
+    },
+    {
+      "file": "src/lib.rs",
+      "reason": "cli module, run and write_output_png re-exports and their feature documentation removed; render, measure and timing entry points return typed errors instead of anyhow."
+    },
+    {
+      "file": "src/render.rs",
+      "reason": "PNG output (write_output_png, resvg colour and font helpers and their tests) removed; write_output_svg returns WriteOutputSvgError instead of anyhow."
+    },
+    {
+      "file": "src/parser.rs",
+      "reason": "Dead parse_xy_series_line removed; parse_mermaid returns ParseMermaidError instead of anyhow."
+    },
+    {
+      "file": "src/error.rs",
+      "reason": "anyhow bridge and its test removed; ParseMermaidError, LoadConfigError, WriteLayoutDumpError and WriteOutputSvgError added."
+    },
+    {
+      "file": "src/config.rs",
+      "reason": "load_config and load_config_with_theme return LoadConfigError instead of anyhow."
+    },
+    {
+      "file": "src/layout_dump.rs",
+      "reason": "write_layout_dump returns WriteLayoutDumpError instead of anyhow."
+    }
+  ],
+  "omitted_upstream_files": [
+    ".cargo_vcs_info.json",
+    ".gitignore",
+    "CHANGELOG.md",
+    "Cargo.lock",
+    "Cargo.toml.orig",
+    "README.md",
+    "benches/fixtures/architecture_medium.mmd",
+    "benches/fixtures/block_medium.mmd",
+    "benches/fixtures/c4_medium.mmd",
+    "benches/fixtures/class.mmd",
+    "benches/fixtures/class_medium.mmd",
+    "benches/fixtures/class_tiny.mmd",
+    "benches/fixtures/er_medium.mmd",
+    "benches/fixtures/expanded/architecture_sys.mmd",
+    "benches/fixtures/expanded/block_architecture.mmd",
+    "benches/fixtures/expanded/class_inheritance_mix.mmd",
+    "benches/fixtures/expanded/class_relations_dense.mmd",
+    "benches/fixtures/expanded/er_inventory_large.mmd",
+    "benches/fixtures/expanded/flowchart_bipartite_dense.mmd",
+    "benches/fixtures/expanded/flowchart_starburst.mmd",
+    "benches/fixtures/expanded/flowchart_subgraph_cross.mmd",
+    "benches/fixtures/expanded/gantt_release_plan.mmd",
+    "benches/fixtures/expanded/gitgraph_hotfix.mmd",
+    "benches/fixtures/expanded/journey_onboarding.mmd",
+    "benches/fixtures/expanded/kanban_wip.mmd",
+    "benches/fixtures/expanded/mindmap_program.mmd",
+    "benches/fixtures/expanded/packet_network.mmd",
+    "benches/fixtures/expanded/pie_many_slices.mmd",
+    "benches/fixtures/expanded/quadrant_strategy.mmd",
+    "benches/fixtures/expanded/radar_tech.mmd",
+    "benches/fixtures/expanded/requirement_traceability.mmd",
+    "benches/fixtures/expanded/sankey_energy.mmd",
+    "benches/fixtures/expanded/sequence_frames_notes.mmd",
+    "benches/fixtures/expanded/sequence_long_labels.mmd",
+    "benches/fixtures/expanded/state_nested_choice.mmd",
+    "benches/fixtures/expanded/timeline_phases.mmd",
+    "benches/fixtures/expanded/treemap_portfolio.mmd",
+    "benches/fixtures/flowchart.mmd",
+    "benches/fixtures/flowchart_asymmetric_components.mmd",
+    "benches/fixtures/flowchart_backedges_subgraphs.mmd",
+    "benches/fixtures/flowchart_component_packing.mmd",
+    "benches/fixtures/flowchart_direction_conflict.mmd",
+    "benches/fixtures/flowchart_fanout_returns.mmd",
+    "benches/fixtures/flowchart_flow_direction_backtrack.mmd",
+    "benches/fixtures/flowchart_grid_feedback.mmd",
+    "benches/fixtures/flowchart_label_collision.mmd",
+    "benches/fixtures/flowchart_lanes_crossfeed.mmd",
+    "benches/fixtures/flowchart_large.mmd",
+    "benches/fixtures/flowchart_long_edge_labels.mmd",
+    "benches/fixtures/flowchart_medium.mmd",
+    "benches/fixtures/flowchart_mega_braid_feedback.mmd",
+    "benches/fixtures/flowchart_mega_crosslane_subgraphs.mmd",
+    "benches/fixtures/flowchart_mega_event_mesh.mmd",
+    "benches/fixtures/flowchart_mega_multihub_control.mmd",
+    "benches/fixtures/flowchart_mega_nested_regions.mmd",
+    "benches/fixtures/flowchart_nested_clusters.mmd",
+    "benches/fixtures/flowchart_parallel_edges_bundle.mmd",
+    "benches/fixtures/flowchart_parallel_label_stack.mmd",
+    "benches/fixtures/flowchart_parallel_merges.mmd",
+    "benches/fixtures/flowchart_path_occlusion_maze.mmd",
+    "benches/fixtures/flowchart_port_alignment_matrix.mmd",
+    "benches/fixtures/flowchart_ports_heavy.mmd",
+    "benches/fixtures/flowchart_selfloop_bidi.mmd",
+    "benches/fixtures/flowchart_small.mmd",
+    "benches/fixtures/flowchart_sparse_components.mmd",
+    "benches/fixtures/flowchart_subgraph_boundary_intrusion.mmd",
+    "benches/fixtures/flowchart_tiny.mmd",
+    "benches/fixtures/flowchart_weave.mmd",
+    "benches/fixtures/gantt_medium.mmd",
+    "benches/fixtures/gitgraph_medium.mmd",
+    "benches/fixtures/journey_medium.mmd",
+    "benches/fixtures/kanban_medium.mmd",
+    "benches/fixtures/mindmap_medium.mmd",
+    "benches/fixtures/packet_medium.mmd",
+    "benches/fixtures/pie_medium.mmd",
+    "benches/fixtures/quadrant_medium.mmd",
+    "benches/fixtures/radar_medium.mmd",
+    "benches/fixtures/requirement_medium.mmd",
+    "benches/fixtures/sankey_medium.mmd",
+    "benches/fixtures/sequence.mmd",
+    "benches/fixtures/sequence_medium.mmd",
+    "benches/fixtures/sequence_tiny.mmd",
+    "benches/fixtures/state.mmd",
+    "benches/fixtures/state_medium.mmd",
+    "benches/fixtures/state_tiny.mmd",
+    "benches/fixtures/timeline_medium.mmd",
+    "benches/fixtures/treemap_medium.mmd",
+    "benches/fixtures/xychart_medium.mmd",
+    "benches/fixtures/zenuml_medium.mmd",
+    "benches/renderer.rs",
+    "benches/typical/class.mmd",
+    "benches/typical/flowchart.mmd",
+    "benches/typical/sequence.mmd",
+    "benches/typical/state.mmd",
+    "clippy.toml",
+    "examples/flowchart_visual_report.rs",
+    "examples/port_quality.rs",
+    "flake.nix",
+    "src/cli.rs",
+    "src/main.rs",
+    "tests/aspect_fold_suite.rs",
+    "tests/cli_suite.rs",
+    "tests/correctness_suite.rs",
+    "tests/determinism_suite.rs",
+    "tests/fixtures/architecture/basic.mmd",
+    "tests/fixtures/architecture/bends.mmd",
+    "tests/fixtures/architecture/junctions.mmd",
+    "tests/fixtures/architecture/ports.mmd",
+    "tests/fixtures/block/basic.mmd",
+    "tests/fixtures/block/nested_groups.mmd",
+    "tests/fixtures/c4/basic.mmd",
+    "tests/fixtures/class/basic.mmd",
+    "tests/fixtures/class/multiplicity.mmd",
+    "tests/fixtures/er/basic.mmd",
+    "tests/fixtures/flowchart/aspect_chain.layout.golden.txt",
+    "tests/fixtures/flowchart/aspect_chain.mmd",
+    "tests/fixtures/flowchart/basic.mmd",
+    "tests/fixtures/flowchart/bidirectional_labels.mmd",
+    "tests/fixtures/flowchart/complex.mmd",
+    "tests/fixtures/flowchart/cycles.mmd",
+    "tests/fixtures/flowchart/decision_shapes.mmd",
+    "tests/fixtures/flowchart/dense.mmd",
+    "tests/fixtures/flowchart/edges.mmd",
+    "tests/fixtures/flowchart/ports.mmd",
+    "tests/fixtures/flowchart/ports_arrow_pathing_regression.mmd",
+    "tests/fixtures/flowchart/styles.mmd",
+    "tests/fixtures/flowchart/subgraph.mmd",
+    "tests/fixtures/flowchart/subgraph_direction.mmd",
+    "tests/fixtures/flowchart/subgraph_empty.mmd",
+    "tests/fixtures/gantt/basic.mmd",
+    "tests/fixtures/gitgraph/basic.mmd",
+    "tests/fixtures/journey/basic.mmd",
+    "tests/fixtures/kanban/basic.mmd",
+    "tests/fixtures/mindmap/basic.mmd",
+    "tests/fixtures/mindmap/lr_tree.mmd",
+    "tests/fixtures/mindmap/tidy_tree.mmd",
+    "tests/fixtures/modern-config.json",
+    "tests/fixtures/packet/basic.mmd",
+    "tests/fixtures/pie/basic.mmd",
+    "tests/fixtures/quadrant/basic.mmd",
+    "tests/fixtures/radar/basic.mmd",
+    "tests/fixtures/requirement/basic.mmd",
+    "tests/fixtures/sankey/basic.mmd",
+    "tests/fixtures/sequence/basic.mmd",
+    "tests/fixtures/sequence/frames.mmd",
+    "tests/fixtures/sequence/nested_alt.mmd",
+    "tests/fixtures/sequence/par_alt.mmd",
+    "tests/fixtures/state/basic.mmd",
+    "tests/fixtures/state/note.mmd",
+    "tests/fixtures/timeline/basic.mmd",
+    "tests/fixtures/treemap/basic.mmd",
+    "tests/fixtures/xychart/basic.mmd",
+    "tests/fixtures/zenuml/basic.mmd",
+    "tests/hard_gate_baseline.json",
+    "tests/invariant_suite.rs",
+    "tests/layout_suite.rs",
+    "tests/output_shape_suite.rs",
+    "tests/parse_errors.rs",
+    "tests/quality_baseline.json",
+    "tests/robustness_suite.rs",
+    "tests/semantic_suite.rs",
+    "tests/visual_issue_suite.rs"
+  ],
+  "retained_files": [
+    {
+      "path": "Cargo.toml",
+      "upstream_sha256": "bb6608279e265d7e7cca1b34bd04a3cae00e565dbce9f58f5aa42db691398098",
+      "sha256": "de83130136ce0315760cdd7750a28989451ac156e90528924271ecfc4e4953f3",
+      "modified": true
+    },
+    {
+      "path": "LICENSE",
+      "upstream_sha256": "57ed7943c34463678a150769d4a4f6c95d2a190fe2c1977f74bc883492c94b86",
+      "sha256": "57ed7943c34463678a150769d4a4f6c95d2a190fe2c1977f74bc883492c94b86",
+      "modified": false
+    },
+    {
+      "path": "src/config.rs",
+      "upstream_sha256": "6a96d686f0482607b094dee08200df384a539773d1e826028f40b8418a03a8db",
+      "sha256": "1d3c36efba9747c44b77c2bc08b0302fa25d4c8f215422174e834c0f4df70194",
+      "modified": true
+    },
+    {
+      "path": "src/edge_geometry.rs",
+      "upstream_sha256": "9b21d23287b08e0ad7b2c9b21f24eb7b340f57e0bb39be53e731c060df5ebddc",
+      "sha256": "9b21d23287b08e0ad7b2c9b21f24eb7b340f57e0bb39be53e731c060df5ebddc",
+      "modified": false
+    },
+    {
+      "path": "src/error.rs",
+      "upstream_sha256": "c11ee889b0736e26d3b83cd5a686c10d2b96c3221b1f64e70e1b4c39cf92164a",
+      "sha256": "1e353bc880396726fa5ac91812e92dfb49771a112d45686ad9c7f561a0d29373",
+      "modified": true
+    },
+    {
+      "path": "src/ir.rs",
+      "upstream_sha256": "918c69373c52e46c1315f948c5c1a7425eefde2444a3bb915214dc93307e33cf",
+      "sha256": "918c69373c52e46c1315f948c5c1a7425eefde2444a3bb915214dc93307e33cf",
+      "modified": false
+    },
+    {
+      "path": "src/layout/architecture.rs",
+      "upstream_sha256": "d1c8213a0b72416483063f09a0256c9327f6feff992ce61e1818b76eebef047a",
+      "sha256": "d1c8213a0b72416483063f09a0256c9327f6feff992ce61e1818b76eebef047a",
+      "modified": false
+    },
+    {
+      "path": "src/layout/block.rs",
+      "upstream_sha256": "2011b0e477100a3fc208b2d76944a99db644fb0d00e18d503c4733b5a22dd1db",
+      "sha256": "2011b0e477100a3fc208b2d76944a99db644fb0d00e18d503c4733b5a22dd1db",
+      "modified": false
+    },
+    {
+      "path": "src/layout/c4.rs",
+      "upstream_sha256": "013a97cc7171ca74553f5438b6df5ee63916f091728e98939672a4d708d8e410",
+      "sha256": "013a97cc7171ca74553f5438b6df5ee63916f091728e98939672a4d708d8e410",
+      "modified": false
+    },
+    {
+      "path": "src/layout/error.rs",
+      "upstream_sha256": "a8a08f70a47c0c21e91da13d007335a623ba5e298b222c5c1f92072a25e16027",
+      "sha256": "a8a08f70a47c0c21e91da13d007335a623ba5e298b222c5c1f92072a25e16027",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/analysis.rs",
+      "upstream_sha256": "7a1204f5073e2b78c9a40db04322ba5a9a3f06169721375b02857545e466fd62",
+      "sha256": "7a1204f5073e2b78c9a40db04322ba5a9a3f06169721375b02857545e466fd62",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/aspect_fold.rs",
+      "upstream_sha256": "0453f46fbdd8865cfde4d2043c96701af5aedb1dfc65bf0ede040ad301cd1a8e",
+      "sha256": "0453f46fbdd8865cfde4d2043c96701af5aedb1dfc65bf0ede040ad301cd1a8e",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/edge_pipeline.rs",
+      "upstream_sha256": "374815fa4409946977a4e5799b0622f6c26ef971446acb54f5acf30f8c38d066",
+      "sha256": "374815fa4409946977a4e5799b0622f6c26ef971446acb54f5acf30f8c38d066",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/finalize.rs",
+      "upstream_sha256": "c9f6c857ee86e26e5c04120961161be4f3224373642b4bfe34d80350b4f8457d",
+      "sha256": "c9f6c857ee86e26e5c04120961161be4f3224373642b4bfe34d80350b4f8457d",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/manual_layout.rs",
+      "upstream_sha256": "81b7d0a2e4949bbdf2ed193e8bbb10220accb70b1fa87510f97e5396806c5ba0",
+      "sha256": "81b7d0a2e4949bbdf2ed193e8bbb10220accb70b1fa87510f97e5396806c5ba0",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/mod.rs",
+      "upstream_sha256": "34092e055a39de1c609e306755dc1139f07fe0de4db643a3a237ef3c7a65d808",
+      "sha256": "34092e055a39de1c609e306755dc1139f07fe0de4db643a3a237ef3c7a65d808",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/objectives.rs",
+      "upstream_sha256": "2111dfd2eefa4bed643e4c9ebc6b907e8b781cd404c413168a92ce43f24a9c4e",
+      "sha256": "2111dfd2eefa4bed643e4c9ebc6b907e8b781cd404c413168a92ce43f24a9c4e",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/path_cleanup.rs",
+      "upstream_sha256": "89682ea84747681e636d3d9115a28889c0165af60aab7b79a0a01f084879c6cb",
+      "sha256": "89682ea84747681e636d3d9115a28889c0165af60aab7b79a0a01f084879c6cb",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/plan.rs",
+      "upstream_sha256": "9e0942fbde5e7780db0c7d34437a21459f5d54178254123111a1be041b768015",
+      "sha256": "9e0942fbde5e7780db0c7d34437a21459f5d54178254123111a1be041b768015",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/policy.rs",
+      "upstream_sha256": "07936ea060804720cbd9a6bdb4f96724ca691b0a135833fad9e07b6de42cf949",
+      "sha256": "07936ea060804720cbd9a6bdb4f96724ca691b0a135833fad9e07b6de42cf949",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/post_route.rs",
+      "upstream_sha256": "b4347dacd850f0cb1919a885c43aa50c7851f3cc83d6e2e8715b21c2bac68d22",
+      "sha256": "b4347dacd850f0cb1919a885c43aa50c7851f3cc83d6e2e8715b21c2bac68d22",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/roles.rs",
+      "upstream_sha256": "8bf036e3cf6224e301ec058df05b8d83ca880ac4cbd5e0730cd5ed7d6f9a97eb",
+      "sha256": "8bf036e3cf6224e301ec058df05b8d83ca880ac4cbd5e0730cd5ed7d6f9a97eb",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/route_labels.rs",
+      "upstream_sha256": "8c9aa604500b8ffa6321821104e254eb07d6f667c52d2e23a36e144bc7d5cada",
+      "sha256": "8c9aa604500b8ffa6321821104e254eb07d6f667c52d2e23a36e144bc7d5cada",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/stage_validation.rs",
+      "upstream_sha256": "dae998590016c4c0601bacc0b83f5c90a015cf7f8b8047762a05d5ea0bf2486b",
+      "sha256": "dae998590016c4c0601bacc0b83f5c90a015cf7f8b8047762a05d5ea0bf2486b",
+      "modified": false
+    },
+    {
+      "path": "src/layout/flowchart/subgraph_spacing.rs",
+      "upstream_sha256": "683d02c9be4e4899fb345b81b7f884f0e8fdba9f754eeca285523109c2b7774d",
+      "sha256": "683d02c9be4e4899fb345b81b7f884f0e8fdba9f754eeca285523109c2b7774d",
+      "modified": false
+    },
+    {
+      "path": "src/layout/gantt.rs",
+      "upstream_sha256": "580a7aa6790a6f8bb29525abd0cf71f70a2da982a7cc099065d7058ed47c613c",
+      "sha256": "580a7aa6790a6f8bb29525abd0cf71f70a2da982a7cc099065d7058ed47c613c",
+      "modified": false
+    },
+    {
+      "path": "src/layout/geometry.rs",
+      "upstream_sha256": "36f76da7beb19aba2c07e162c81e9ac13b43e5175f7bcfc3cb607781748e5509",
+      "sha256": "36f76da7beb19aba2c07e162c81e9ac13b43e5175f7bcfc3cb607781748e5509",
+      "modified": false
+    },
+    {
+      "path": "src/layout/gitgraph.rs",
+      "upstream_sha256": "ff715b8117c9501e26a36017ad06c69872cb4238897eb72997c73e1362739260",
+      "sha256": "ff715b8117c9501e26a36017ad06c69872cb4238897eb72997c73e1362739260",
+      "modified": false
+    },
+    {
+      "path": "src/layout/invariants.rs",
+      "upstream_sha256": "bbef38259d8a3e83bc1071c35a92a73a2044afafcd2a5a1709b3e1ba8c94cbdd",
+      "sha256": "bbef38259d8a3e83bc1071c35a92a73a2044afafcd2a5a1709b3e1ba8c94cbdd",
+      "modified": false
+    },
+    {
+      "path": "src/layout/journey.rs",
+      "upstream_sha256": "81387db1fe8378e04bfd67fd33efde730109051f6fbe00dcb4918a0297d0fc21",
+      "sha256": "81387db1fe8378e04bfd67fd33efde730109051f6fbe00dcb4918a0297d0fc21",
+      "modified": false
+    },
+    {
+      "path": "src/layout/kanban.rs",
+      "upstream_sha256": "4e21682de799a6b134a905c7dd82c79c18393419fcb2f0c6b3111d05e413b284",
+      "sha256": "4e21682de799a6b134a905c7dd82c79c18393419fcb2f0c6b3111d05e413b284",
+      "modified": false
+    },
+    {
+      "path": "src/layout/label_placement.rs",
+      "upstream_sha256": "1a357d527e943a6eb582e5063a452d353c8b15006e9410d1c653af0a026395f1",
+      "sha256": "1a357d527e943a6eb582e5063a452d353c8b15006e9410d1c653af0a026395f1",
+      "modified": false
+    },
+    {
+      "path": "src/layout/mindmap.rs",
+      "upstream_sha256": "648288f278b49d51fcf53590e73724ea160cce5450a7fe5a86f62de18ee58cce",
+      "sha256": "648288f278b49d51fcf53590e73724ea160cce5450a7fe5a86f62de18ee58cce",
+      "modified": false
+    },
+    {
+      "path": "src/layout/mod.rs",
+      "upstream_sha256": "2e2ffb1df1d4cd0f893173ad2a86a69acd6868ae8d56f53c4f4f982c5ee91e60",
+      "sha256": "2e2ffb1df1d4cd0f893173ad2a86a69acd6868ae8d56f53c4f4f982c5ee91e60",
+      "modified": false
+    },
+    {
+      "path": "src/layout/pie.rs",
+      "upstream_sha256": "538eabd56252ef4ba1334ceb8dad026c40738986b9b6e56a1bdf384e5b1c0563",
+      "sha256": "538eabd56252ef4ba1334ceb8dad026c40738986b9b6e56a1bdf384e5b1c0563",
+      "modified": false
+    },
+    {
+      "path": "src/layout/quadrant.rs",
+      "upstream_sha256": "fd828d4b4a2a7cb3a2aa08a6a043803ecd308ea9fc4a8968cda8bc14080ab094",
+      "sha256": "fd828d4b4a2a7cb3a2aa08a6a043803ecd308ea9fc4a8968cda8bc14080ab094",
+      "modified": false
+    },
+    {
+      "path": "src/layout/radar.rs",
+      "upstream_sha256": "f2dbe75296c291aa356f9b39a12d46ea5fbc3545e2971dd6c79f5343123209b9",
+      "sha256": "f2dbe75296c291aa356f9b39a12d46ea5fbc3545e2971dd6c79f5343123209b9",
+      "modified": false
+    },
+    {
+      "path": "src/layout/ranking.rs",
+      "upstream_sha256": "d303d0ce92e63a0c704e9023ee1461701534ef27c35b853ee9c84f7455cc4e0d",
+      "sha256": "d303d0ce92e63a0c704e9023ee1461701534ef27c35b853ee9c84f7455cc4e0d",
+      "modified": false
+    },
+    {
+      "path": "src/layout/routing.rs",
+      "upstream_sha256": "f8c4590a8f3dd02b043da38cea7b5273ff3508ded9c8e958f3dabf9a47e82f04",
+      "sha256": "f8c4590a8f3dd02b043da38cea7b5273ff3508ded9c8e958f3dabf9a47e82f04",
+      "modified": false
+    },
+    {
+      "path": "src/layout/sankey.rs",
+      "upstream_sha256": "82e1bf2cd29b4f41e3a342ea5c482695b363cde456e6dc3656c0f458cc2f6c22",
+      "sha256": "82e1bf2cd29b4f41e3a342ea5c482695b363cde456e6dc3656c0f458cc2f6c22",
+      "modified": false
+    },
+    {
+      "path": "src/layout/sequence.rs",
+      "upstream_sha256": "c8207f15b041a9b1e09c9fae68d51580b2bcdd5a9d4c391fb5880593c062e541",
+      "sha256": "c8207f15b041a9b1e09c9fae68d51580b2bcdd5a9d4c391fb5880593c062e541",
+      "modified": false
+    },
+    {
+      "path": "src/layout/subgraphs.rs",
+      "upstream_sha256": "0362a3f07b29629245a3ba2bc0172178b6f79ec5523d3da7d3dc48cc72b57802",
+      "sha256": "0362a3f07b29629245a3ba2bc0172178b6f79ec5523d3da7d3dc48cc72b57802",
+      "modified": false
+    },
+    {
+      "path": "src/layout/text.rs",
+      "upstream_sha256": "dd2e6d8c74588e5e3cc2c769d61b4bb6e28b8e90c26e7d42b0b15a8e7ba7f172",
+      "sha256": "dd2e6d8c74588e5e3cc2c769d61b4bb6e28b8e90c26e7d42b0b15a8e7ba7f172",
+      "modified": false
+    },
+    {
+      "path": "src/layout/timeline.rs",
+      "upstream_sha256": "dfd95f065f487237803c51d0f2af62fbd62ce8f68455bceedfe479884a1f3631",
+      "sha256": "dfd95f065f487237803c51d0f2af62fbd62ce8f68455bceedfe479884a1f3631",
+      "modified": false
+    },
+    {
+      "path": "src/layout/treemap.rs",
+      "upstream_sha256": "ec3a9932c62af74d6d63ae40e7dcc83bf89e19b7fbefced6acefe57bf3078ea2",
+      "sha256": "ec3a9932c62af74d6d63ae40e7dcc83bf89e19b7fbefced6acefe57bf3078ea2",
+      "modified": false
+    },
+    {
+      "path": "src/layout/types.rs",
+      "upstream_sha256": "f0a6da95b0dfbb35e506f84efa6ff0d98c4d0467d9925d79c05e5be685f77b3f",
+      "sha256": "f0a6da95b0dfbb35e506f84efa6ff0d98c4d0467d9925d79c05e5be685f77b3f",
+      "modified": false
+    },
+    {
+      "path": "src/layout/xychart.rs",
+      "upstream_sha256": "5e77bd9a7c0e69c9648416fec71ceac26e1ad3ada706c9b2ad50b55488f732f1",
+      "sha256": "5e77bd9a7c0e69c9648416fec71ceac26e1ad3ada706c9b2ad50b55488f732f1",
+      "modified": false
+    },
+    {
+      "path": "src/layout_dump.rs",
+      "upstream_sha256": "f5c879b68c7132e229d2db8d29657b9766cc0dbd0779f73a06747a32ac8dc628",
+      "sha256": "0dee2d45a05eedf8c80f669d633bf1435b9165e789b6962d7409788067f3cb95",
+      "modified": true
+    },
+    {
+      "path": "src/lib.rs",
+      "upstream_sha256": "9a1c36a3b8c2f4288370b6fe7d6757289c44a2e86e2c36c14a342e28887b4981",
+      "sha256": "756bb635a9ded452fc738331b7a0803f99c639acabca0bb0438474debf726a7d",
+      "modified": true
+    },
+    {
+      "path": "src/parser.rs",
+      "upstream_sha256": "043aa5df6e944be02e50d879a2c4c384fae4dd9a06ad540b5e8c8b55d6972dd1",
+      "sha256": "72ec809e476da4fb3976d92c22febb310a7690ad913bd60de58c69f22cd14f47",
+      "modified": true
+    },
+    {
+      "path": "src/render.rs",
+      "upstream_sha256": "026efceab06b86752789ea2b5c37ecac569b8cd020f97c776f444bec0a2166b4",
+      "sha256": "4ca17dd6ab6df2a3d2da2c56498602c1c06a24d3034f00e2bb0dc94db2034ece",
+      "modified": true
+    },
+    {
+      "path": "src/text_metrics.rs",
+      "upstream_sha256": "8f290d1f0ef970c84d9d6e24ba697a7bf890f53c801c8b4a4e76bd738f2c6dff",
+      "sha256": "fc820d542f3e98555efe51e28bdf43cbf1ba21271593f8dec5ec2702a42e4fea",
+      "modified": true
+    },
+    {
+      "path": "src/theme.rs",
+      "upstream_sha256": "ce95f8a04b874883625e87290aaaba9fd479a1ffd8ec1da1b5232fb521818176",
+      "sha256": "ce95f8a04b874883625e87290aaaba9fd479a1ffd8ec1da1b5232fb521818176",
+      "modified": false
+    },
+    {
+      "path": "src/unicode_width.rs",
+      "upstream_sha256": "8a3cb05866ccb94c479f4f1cf767ce7e1c661c82707a5960192dd7d23f1165c9",
+      "sha256": "8a3cb05866ccb94c479f4f1cf767ce7e1c661c82707a5960192dd7d23f1165c9",
+      "modified": false
+    },
+    {
+      "path": "src/validator.rs",
+      "upstream_sha256": "5666cab595214a3a2b60eb069248416effa26bdec9b38c4743cec54d1f2c83ef",
+      "sha256": "5666cab595214a3a2b60eb069248416effa26bdec9b38c4743cec54d1f2c83ef",
+      "modified": false
+    }
+  ]
+}

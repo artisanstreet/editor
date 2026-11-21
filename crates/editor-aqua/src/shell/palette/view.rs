@@ -10,12 +10,13 @@ use aqua_ui::{
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
 };
 
-use super::Palette;
+use super::{Palette, SearchProblem};
 use crate::{
-    core::Screen,
+    core::{Screen, SettingsPage},
     ui::{
-        dialog::{Dialog, DialogDismissReason},
-        kit::{Density, Row, RowItem, Space, Spaced, Surface, TextRole},
+        kit::{
+            Button, ButtonSize, ButtonTone, Density, Row, RowItem, Space, Spaced, Surface, TextRole,
+        },
         text::{
             Editor, Mode,
             mount::{EditorController, EditorEvent},
@@ -35,13 +36,14 @@ pub enum Action {
     Down,
     Submit,
     Select(Screen),
+    RetrySearch,
     Dismiss,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
-    pub session: u64,
-    pub action: Action,
+    pub(crate) session: u64,
+    pub(crate) action: Action,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,8 +55,8 @@ pub enum Effect {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
-    pub changed: bool,
-    pub effect: Effect,
+    pub(crate) changed: bool,
+    pub(crate) effect: Effect,
 }
 
 pub struct PaletteView {
@@ -63,8 +65,14 @@ pub struct PaletteView {
     active: Rc<Cell<bool>>,
 }
 
+impl std::fmt::Debug for PaletteView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaletteView").finish_non_exhaustive()
+    }
+}
+
 impl PaletteView {
-    pub fn new(emit: Rc<dyn Fn(Event)>) -> Self {
+    pub(crate) fn new(emit: Rc<dyn Fn(Event)>) -> Self {
         let session = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let active = Rc::new(Cell::new(true));
         let query = Rc::new(RefCell::new(Editor::new("", Mode::SingleLine)));
@@ -96,19 +104,19 @@ impl PaletteView {
         }
     }
 
-    pub fn session(&self) -> u64 {
+    pub(crate) fn session(&self) -> u64 {
         self.session
     }
 
-    pub fn close(&self) {
+    pub(crate) fn close(&self) {
         self.active.set(false);
     }
 
-    pub fn focus_query(&self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn focus_query(&self, app: &mut aqua::UiApp) -> bool {
         self.active.get() && app.focus_key(QUERY_KEY)
     }
 
-    pub fn sync_query(&self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_query(&self, app: &mut aqua::UiApp) -> bool {
         if !self.active.get() {
             return false;
         }
@@ -118,7 +126,7 @@ impl PaletteView {
             .is_some_and(|node| self.editor.sync(app.tree_mut(), node))
     }
 
-    pub fn dispatch(&self, palette: &mut Palette, event: Event) -> Outcome {
+    pub(crate) fn dispatch(&self, palette: &mut Palette, event: Event) -> Outcome {
         if !self.active.get() || event.session != self.session {
             return Outcome {
                 changed: false,
@@ -167,6 +175,10 @@ impl PaletteView {
                 changed: true,
                 effect: Effect::Close(Some(screen)),
             },
+            Action::RetrySearch => Outcome {
+                changed: true,
+                effect: Effect::Search(palette.query.clone()),
+            },
             Action::Dismiss => Outcome {
                 changed: true,
                 effect: Effect::Close(None),
@@ -174,7 +186,7 @@ impl PaletteView {
         }
     }
 
-    pub fn content(
+    pub(crate) fn content(
         &self,
         palette: &Palette,
         theme: &ArtisanTheme,
@@ -189,12 +201,56 @@ impl PaletteView {
             false,
         );
         let mut content = UiBox::new().layout("column").spaced(Space::S4).child(query);
-        if let Some(error) = &palette.search_error {
-            content = content.child(TextRole::Caption.text(theme, error.clone()).build());
+        if let Some(problem) = palette.search_error {
+            let callback = guarded(self.session, &self.active, Rc::clone(&emit));
+            let (text, label, action) = match problem {
+                SearchProblem::NoForge => (
+                    "Connect to a Forge to search older threads.".to_owned(),
+                    "Forges",
+                    Action::Select(Screen::Settings(SettingsPage::Hosts)),
+                ),
+                SearchProblem::Unreachable(1) => (
+                    "Search couldn't reach 1 Forge.".to_owned(),
+                    "Try again",
+                    Action::RetrySearch,
+                ),
+                SearchProblem::Unreachable(count) => (
+                    format!("Search couldn't reach {count} Forges."),
+                    "Try again",
+                    Action::RetrySearch,
+                ),
+            };
+            content = content.child(
+                crate::ui::kit::ProblemNotice::new(
+                    "command-palette-search-problem",
+                    *theme,
+                    &crate::core::Problem::new(text),
+                )
+                .action(
+                    Button::text(
+                        "command-palette-search-action",
+                        *theme,
+                        ButtonTone::Neutral,
+                        label,
+                    )
+                    .size(ButtonSize::Sm)
+                    .on_activate(move |_| callback(action.clone()))
+                    .build(),
+                )
+                .build(),
+            );
+        }
+        if palette.searching() {
+            content = content.child(caption(theme, "Searching threads…".to_owned()));
+        } else if palette.entries.is_empty() && !palette.query.trim().is_empty() {
+            content = content.child(caption(
+                theme,
+                format!("Nothing matches “{}”.", palette.query.trim()),
+            ));
         }
         for (index, entry) in palette.entries.iter().enumerate() {
             let screen = entry.screen.clone();
-            let callback = guarded(self.session, &self.active, emit.clone());
+            let callback = guarded(self.session, &self.active, Rc::clone(&emit));
             content = content.child(
                 row(theme, index, entry, index == palette.highlighted)
                     .on_activate(move || callback(Action::Select(screen.clone())))
@@ -215,7 +271,7 @@ impl PaletteView {
                     Key::Named(NamedKey::Escape) => Action::Dismiss,
                     Key::Named(NamedKey::Up) => Action::Up,
                     Key::Named(NamedKey::Down) => Action::Down,
-                    _ => return InputResponse::default(),
+                    Key::Char(_) | Key::Named(_) => return InputResponse::default(),
                 };
                 callback(action);
                 InputResponse {
@@ -223,22 +279,6 @@ impl PaletteView {
                     ..InputResponse::handled()
                 }
             })
-    }
-
-    pub fn dialog(
-        &self,
-        palette: &Palette,
-        theme: &ArtisanTheme,
-        emit: Rc<dyn Fn(Event)>,
-    ) -> Dialog {
-        let dismiss = guarded(self.session, &self.active, emit.clone());
-        Dialog::new(
-            "command-palette",
-            *theme,
-            "Search threads and commands",
-            self.content(palette, theme, emit),
-        )
-        .on_dismiss(move |_: DialogDismissReason| dismiss(Action::Dismiss))
     }
 }
 
@@ -249,24 +289,32 @@ impl Drop for PaletteView {
 }
 
 fn row(theme: &ArtisanTheme, index: usize, entry: &super::Entry, selected: bool) -> RowItem {
-    let row = match entry.detail.is_empty() {
-        true => RowItem::new(
+    let row = if entry.detail.is_empty() {
+        RowItem::new(
             index,
             *theme,
             Row::ListItem(Density::Regular),
             Surface::Dialog,
             entry.label.clone(),
-        ),
-        false => RowItem::new(
+        )
+    } else {
+        RowItem::new(
             index,
             *theme,
             Row::ListItem(Density::Tall),
             Surface::Dialog,
             entry.label.clone(),
         )
-        .detail(entry.detail.clone()),
+        .detail(entry.detail.clone())
     };
     row.selected(selected)
+}
+
+fn caption(theme: &ArtisanTheme, text: String) -> Element {
+    TextRole::Caption
+        .text(theme, text)
+        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+        .build()
 }
 
 fn guarded(

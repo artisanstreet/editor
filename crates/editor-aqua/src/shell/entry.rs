@@ -1,26 +1,39 @@
 use crate::core::{AccountPhase, Core, CoreEvent, EntryGate, Screen};
 
-const AUTH_ORIGIN: &str = "https://auth.artisan.st";
+use crate::core::AUTH_ORIGIN;
 use crate::shell::workspace::{NotificationEffects, Workspace};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 pub struct Entry {
     workspace: Option<(String, Workspace)>,
-    failure: Option<String>,
+    held_drafts: Option<crate::composer::persistence::HeldDrafts>,
+    failure: Option<crate::core::Problem>,
     landed: bool,
     controller: crate::settings::controller::SettingsController,
     actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
     selections: crate::shell::selection::SelectionAllocator,
-    pub sign_in: crate::frame::sign_in::SignIn,
+    pub(crate) sign_in: crate::frame::sign_in::SignIn,
+}
+
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Entry").finish_non_exhaustive()
+    }
 }
 
 impl Entry {
+    #[must_use]
+    pub const fn sign_in(&self) -> &crate::frame::sign_in::SignIn {
+        &self.sign_in
+    }
+
     pub fn new(
-        failure: Option<String>,
+        failure: Option<crate::core::Problem>,
         selections: crate::shell::selection::SelectionAllocator,
     ) -> Self {
         Self {
             workspace: None,
+            held_drafts: None,
             failure,
             landed: false,
             controller: crate::settings::controller::SettingsController::default(),
@@ -30,12 +43,12 @@ impl Entry {
         }
     }
 
-    pub fn emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
+    fn emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
         let actions = Rc::clone(&self.actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
+    pub(crate) fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
         ctx.bind_mailbox(window, self.controller.wake_mailbox());
     }
 
@@ -46,15 +59,7 @@ impl Entry {
         let mut effects = Vec::new();
         let mut changed = false;
         for action in std::mem::take(&mut *self.actions.borrow_mut()) {
-            match &action {
-                crate::settings::view::ViewAction::OpenUrl(url) => effects.push(
-                    crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url.clone()),
-                ),
-                crate::settings::view::ViewAction::CopyText(text) => effects.push(
-                    crate::shell::workspace::SettingsPlatformEffect::CopyText(text.clone()),
-                ),
-                _ => {}
-            }
+            effects.extend(crate::shell::workspace::SettingsPlatformEffect::of(&action));
             changed |= crate::settings::view::dispatch(&mut self.controller, core, action);
         }
         changed |= self.dispatch_sign_in(core, &mut effects);
@@ -78,24 +83,33 @@ impl Entry {
                         Err(problem) => self.sign_in.problem = Some(problem),
                         Ok(email) => {
                             self.sign_in.problem = None;
-                            let device = core.device_name.clone();
+                            let device = core.device_name().to_owned();
                             core.account_mut().request_link(email, device);
                         }
                     }
                 }
                 Event::SubmitCode
-                    if matches!(view, model::View::SecondFactor { .. }) && !model::locked(&view) =>
+                    if matches!(view, model::View::SecondFactor { .. })
+                        && !model::locked(&view) =>
                 {
-                    let typed = self.controller.sign_in.second_factor.borrow().text().to_owned();
-                    core.account_mut().finish_sign_in(SecondFactor::parse(&typed));
+                    let typed = self
+                        .controller
+                        .sign_in
+                        .second_factor
+                        .borrow()
+                        .text()
+                        .to_owned();
+                    core.account_mut()
+                        .finish_sign_in(SecondFactor::parse(&typed));
                 }
                 Event::Provider(provider) if !model::locked(&view) => {
                     self.sign_in.problem = None;
                     if let Some(url) = core.account_mut().sign_in_with(provider, AUTH_ORIGIN) {
-                        effects.push(crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url));
+                        effects.push(crate::shell::workspace::SettingsPlatformEffect::OpenUrl(
+                            url,
+                        ));
                     }
                 }
-                Event::SubmitEmail | Event::SubmitCode | Event::Provider(_) => {}
                 Event::Edited => {
                     self.sign_in.problem = None;
                     match core.account().phase() {
@@ -103,21 +117,29 @@ impl Entry {
                         AccountPhase::EmailApproved {
                             rejected: Some(_), ..
                         } => core.account_mut().clear_rejection(),
-                        _ => {}
+                        AccountPhase::SignedOut
+                        | AccountPhase::Restoring
+                        | AccountPhase::Requesting
+                        | AccountPhase::Browser { .. }
+                        | AccountPhase::Pending { .. }
+                        | AccountPhase::EmailApproved { .. }
+                        | AccountPhase::Finalizing { .. }
+                        | AccountPhase::Authenticated { .. } => {}
                     }
                 }
                 Event::Open(link) => effects.push(
-                    crate::shell::workspace::SettingsPlatformEffect::OpenUrl(format!(
-                        "{AUTH_ORIGIN}{}",
-                        link.path()
-                    )),
+                    crate::shell::workspace::SettingsPlatformEffect::OpenUrl(link.url()),
                 ),
                 Event::Cancel if model::cancellable(&view) => {
                     self.sign_in.problem = None;
                     core.account_mut().dismiss_error();
-                    self.controller.sign_in.second_factor.borrow_mut().set_text("");
+                    self.controller
+                        .sign_in
+                        .second_factor
+                        .borrow_mut()
+                        .set_text("");
                 }
-                Event::Cancel => {}
+                Event::SubmitEmail | Event::SubmitCode | Event::Provider(_) | Event::Cancel => {}
             }
             changed = true;
         }
@@ -125,11 +147,10 @@ impl Entry {
             approval,
             rejected: None,
         } = core.account().phase()
+            && !approval.totp_required
         {
-            if !approval.totp_required {
-                core.account_mut().finish_sign_in(None);
-                changed = true;
-            }
+            core.account_mut().finish_sign_in(None);
+            changed = true;
         }
         let view = model::view_of(core.account().phase(), self.sign_in.problem);
         let feedback = model::feedback_of(&view);
@@ -144,16 +165,16 @@ impl Entry {
                 model::page_of(&view),
                 model::locked(&view),
                 slots,
-                std::time::Instant::now(),
+                core.clock().now(),
                 reduced,
             )
     }
 
-    pub fn drain(&mut self, core: &mut Core) -> bool {
+    pub(crate) fn drain(&mut self, core: &mut Core) -> bool {
         self.controller.drain(core)
     }
 
-    pub fn view(
+    pub(crate) fn view(
         &self,
         core: &Core,
         theme: &crate::ui::theme::ArtisanTheme,
@@ -192,18 +213,27 @@ impl Entry {
                 EditorEvent::PresentationChanged => {
                     settings(crate::settings::view::ViewAction::AccountPresentationChanged);
                 }
-                _ => {}
+                EditorEvent::SelectionChanged { .. }
+                | EditorEvent::List(_)
+                | EditorEvent::PastedFiles { .. } => {}
             })
-            .element_with_notice_keyed(key, Mode::SingleLine, theme, placeholder, true, false)
+            .element_with_notice_keyed(
+                key,
+                Mode::SingleLine,
+                theme,
+                placeholder,
+                true,
+                false,
+            )
         };
         let email = editor(
-            self.controller.sign_in.email.clone(),
+            Rc::clone(&self.controller.sign_in.email),
             "artisan-sign-in-email",
             "you@artisan.email",
             Event::SubmitEmail,
         );
-        let code = editor(
-            self.controller.sign_in.second_factor.clone(),
+        let code_field = editor(
+            Rc::clone(&self.controller.sign_in.second_factor),
             "artisan-sign-in-code",
             "123456",
             Event::SubmitCode,
@@ -214,17 +244,17 @@ impl Entry {
                 view: &view,
                 sign_in: &self.sign_in,
                 email,
-                code,
+                code: code_field,
                 busy: model::locked(&view),
                 width: card::WIDTH,
-                now: std::time::Instant::now(),
+                now: core.clock().now(),
                 emit,
             },
         );
-        card::screen(theme, titlebar.entry(*theme, window), card)
+        card::screen(theme, titlebar.entry(theme, window), card)
     }
 
-    pub fn sync_editors(&self, ui: &mut aqua::UiApp) {
+    pub(crate) fn sync_editors(&self, ui: &mut aqua::UiApp) {
         if self.workspace.is_some() {
             return;
         }
@@ -236,7 +266,7 @@ impl Entry {
     }
 
     #[cfg(feature = "qualification")]
-    pub fn qualification_account(&self) -> Option<&str> {
+    pub(crate) fn qualification_account(&self) -> Option<&str> {
         self.workspace.as_ref().map(|(account, _)| account.as_str())
     }
 
@@ -252,17 +282,32 @@ impl Entry {
         if self.workspace.as_ref().map(|(account, _)| account) == ready.as_ref() {
             return None;
         }
-        self.workspace = None;
+        let retired = self.workspace.take().map(|(_, mut workspace)| {
+            let (effects, held) = workspace.retire();
+            self.held_drafts = Some(held);
+            effects
+        });
         self.landed = false;
-        ready.map(|account| {
-            let (workspace, effects) =
+        let mounted = ready.map(|account| {
+            let (mut workspace, effects) =
                 Workspace::new(core, self.failure.clone(), self.selections.workspace());
+            if let Some(held) = self.held_drafts.take() {
+                workspace.take_held_drafts(held);
+            }
             self.workspace = Some((account, workspace));
             effects
-        })
+        });
+        match (retired, mounted) {
+            (Some(mut retired), Some(mounted)) => {
+                retired.show = mounted.show;
+                retired.badge = mounted.badge.or(retired.badge);
+                Some(retired)
+            }
+            (retired, mounted) => retired.or(mounted),
+        }
     }
 
-    pub fn land(&mut self, core: &mut Core) {
+    pub(crate) fn land(&mut self, core: &mut Core) {
         if self.workspace.is_none() || self.landed {
             return;
         }
@@ -276,11 +321,15 @@ impl Entry {
                     });
                 }
             }
-            _ => self.landed = true,
+            Screen::Thread { .. }
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => self.landed = true,
         }
     }
 
-    pub fn finish_events(&mut self, core: &mut Core, ui: &mut aqua::UiApp) {
+    pub(crate) fn finish_events(&mut self, core: &mut Core, ui: &mut aqua::UiApp) {
         if let Some(workspace) = self.workspace_mut() {
             workspace.finish_events(core, ui);
         }
@@ -296,21 +345,16 @@ impl Entry {
         self.controller.core_event(core, event);
         let ready = match core.entry_gate() {
             EntryGate::Ready { account_id } => Some(account_id),
-            _ => None,
+            EntryGate::Restoring | EntryGate::SignedOut => None,
         };
-        if self.workspace.as_ref().map(|(account, _)| account) != ready {
-            if let Some((_, workspace)) = &mut self.workspace {
-                workspace.dispose_composer_popups(ui);
-                workspace.conversation_selection.clear(ui);
-                workspace.markdown.borrow_mut().rebind(ui, None);
-                workspace.dispose_terminal_dialog(ui);
-                workspace.inspector.release(ui);
-            }
-        }
-        if let CoreEvent::OpenUrl(url) = event {
-            if let Err(error) = crate::shell::open_url(url) {
-                tracing::warn!(%error, "could not open URL");
-            }
+        if self.workspace.as_ref().map(|(account, _)| account) != ready
+            && let Some((_, workspace)) = &mut self.workspace
+        {
+            workspace.dispose_composer_popups(ui);
+            workspace.conversation_selection.clear(ui);
+            workspace.markdown.borrow_mut().rebind(ui, None);
+            workspace.dispose_terminal_dialog(ui);
+            workspace.inspector.release(ui);
         }
         let mounted = self.sync(core);
         self.land(core);

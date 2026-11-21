@@ -332,9 +332,7 @@ impl Model {
                         label,
                         semantic: ChoiceSemantic::Default,
                         binding,
-                        description: Some(
-                            "Use the harness default without pinning a value.".into(),
-                        ),
+                        description: Some("Use the engine default without pinning a value.".into()),
                         advisory: None,
                         origin: OptionOrigin::HarnessPolicy,
                         hidden: false,

@@ -9,20 +9,22 @@ fn the_outline_does_not_cross_the_tab_opening() {
         let tab = Rect::from_edges(left, 8.0, left + 140.0, 48.0);
         for inset in [0.0, 1.0, 2.0] {
             let mut from = Point::ZERO;
-            let center = (tab.x + tab.w * 0.5).min(body.right() - 4.0);
+            let center = tab.w.mul_add(0.5, tab.x).min(body.right() - 4.0);
             for command in trace(body, Some(tab), inset) {
                 from = match command {
                     PathCommand::Move(to) | PathCommand::Arc { to, .. } => to,
                     PathCommand::Line(to) => {
                         assert!(
-                            from.y != body.y + inset
-                                || to.y != from.y
+                            (from.y - (body.y + inset)).abs() > 1e-3
+                                || (to.y - from.y).abs() > 1e-3
                                 || !(from.x.min(to.x) < center && center < from.x.max(to.x)),
                             "the card's horizontal outline must stop at the selected tab"
                         );
                         to
                     }
-                    _ => from,
+                    PathCommand::Quadratic { .. }
+                    | PathCommand::Cubic { .. }
+                    | PathCommand::Close => from,
                 };
             }
         }
@@ -38,7 +40,11 @@ fn insets_keep_the_same_width_around_convex_and_concave_corners() {
             .into_iter()
             .filter_map(|command| match command {
                 PathCommand::Arc { radii, sweep, .. } => Some((radii.x, sweep)),
-                _ => None,
+                PathCommand::Move(_)
+                | PathCommand::Line(_)
+                | PathCommand::Quadratic { .. }
+                | PathCommand::Cubic { .. }
+                | PathCommand::Close => None,
             })
             .collect::<Vec<_>>();
         let cap = editor_aqua::frame::strip::RADIUS.px();
@@ -77,14 +83,16 @@ fn moving_lips_only_rasterize_the_top_of_the_sheet() {
                         PathCommand::Move(to)
                         | PathCommand::Line(to)
                         | PathCommand::Arc { to, .. } => Some(to.y),
-                        _ => None,
+                        PathCommand::Quadratic { .. }
+                        | PathCommand::Cubic { .. }
+                        | PathCommand::Close => None,
                     })
                     .fold(f32::NEG_INFINITY, f32::max);
-                assert_eq!(max_y, body.y + 1.0);
+                test_support::assert_near!(max_y, body.y + 1.0);
                 assert!(max_y <= sheet.y + 20.0);
-                assert_eq!(body.bottom(), sheet.bottom() - inset);
-                assert_eq!(body.x, sheet.x + inset);
-                assert_eq!(body.right(), sheet.right() - inset);
+                test_support::assert_near!(body.bottom(), sheet.bottom() - inset);
+                test_support::assert_near!(body.x, sheet.x + inset);
+                test_support::assert_near!(body.right(), sheet.right() - inset);
                 assert_eq!(top.last(), Some(&PathCommand::Close));
             }
         }

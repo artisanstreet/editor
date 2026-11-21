@@ -1,18 +1,17 @@
 use super::{
     record::{CaptureRecord, Context as RecordContext},
-    scenario::{Route, Scenario},
-    script::{Button, Keystroke, Step, parse, types_text},
-    surface::Surface,
+    scenario::{NoThread, Route, Scenario, ScenarioError},
+    script::{Button, Keystroke, ScriptError, Step, parse, types_text},
+    surface::{SaveError, Surface, SurfaceError},
 };
 use crate::shell::{application::ShellApplication, host::ShellResources, root::RootViews};
-use anyhow::{Context, Result, bail, ensure};
-use aqua_protocol::{LogicalSize, WindowEvent};
 use aqua::prelude::{AquaWindowId, ObservedWindowState};
 use aqua::{Application, Aqua, AquaConfig};
 use aqua_core::{
     ColorProfile, InputEvent, Key, KeyEvent, Modifiers, Point, PointerButton, PointerEvent,
     PointerKind, ScrollDelta,
 };
+use aqua_protocol::{LogicalSize, WindowEvent};
 use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -22,16 +21,71 @@ const STABLE_FRAMES: usize = 5;
 const STABLE_FOR: Duration = Duration::from_millis(400);
 const PUMP_INTERVAL: Duration = Duration::from_millis(8);
 
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error("a {width}x{height} capture is below the Editor's minimum size")]
+    Viewport { width: f64, height: f64 },
+    #[error("capture scale {scale} is not positive")]
+    Scale { scale: f64 },
+    #[error("start the window system: {message}")]
+    Start { message: String },
+    #[error("set up the capture scenario")]
+    Scenario(#[source] ScenarioError),
+    #[error("choose the screen to capture")]
+    Screen(#[source] NoThread),
+    #[error("configure the Editor layout at scale {scale}")]
+    Layout { scale: f64 },
+    #[error("render the window")]
+    Surface(#[source] SurfaceError),
+    #[error("the window did not settle within {timeout:?}")]
+    Unsettled { timeout: Duration },
+    #[error("the capture path {} has no file name", path.display())]
+    NoFileName { path: PathBuf },
+    #[error("save the capture")]
+    Save(#[source] SaveError),
+    #[error("encode the capture record {name}")]
+    EncodeRecord {
+        name: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("write the capture record {}", path.display())]
+    WriteRecord {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("script step {step} failed")]
+    Step {
+        step: usize,
+        #[source]
+        source: Box<Self>,
+    },
+    #[error("repeat captures differ: {}", names.join(", "))]
+    Unstable { names: Vec<String> },
+    #[error("parse the capture script")]
+    Script(#[source] ScriptError),
+}
+
 #[derive(Clone, Debug)]
 pub struct Options {
-    pub fixture: PathBuf,
-    pub route: Route,
-    pub route_name: String,
-    pub logical: (f64, f64),
-    pub scale: f64,
-    pub focused: bool,
-    pub out_dir: PathBuf,
-    pub latency: Option<std::time::Duration>,
+    pub(crate) fixture: PathBuf,
+    pub(crate) route: Route,
+    pub(crate) route_name: String,
+    pub(crate) logical: (f64, f64),
+    pub(crate) scale: f64,
+    pub(crate) focused: bool,
+    pub(crate) out_dir: PathBuf,
+    pub(crate) latency: Option<Duration>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("id", &self.id)
+            .field("surface", &self.surface)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct Session {
@@ -59,25 +113,35 @@ fn pointer(at: Point, buttons: u8) -> PointerEvent {
 }
 
 impl Session {
-    pub fn start(options: Options) -> Result<Self> {
-        ensure!(
-            options.logical.0 >= 480.0 && options.logical.1 >= 420.0,
-            "capture viewport is below the Editor minimum"
-        );
-        ensure!(
-            options.scale.is_finite() && options.scale > 0.0,
-            "capture scale must be positive"
-        );
+    fn start(options: Options) -> Result<Self, SessionError> {
+        if options.logical.0 < 480.0 || options.logical.1 < 420.0 {
+            return Err(SessionError::Viewport {
+                width: options.logical.0,
+                height: options.logical.1,
+            });
+        }
+        if !(options.scale.is_finite() && options.scale > 0.0) {
+            return Err(SessionError::Scale {
+                scale: options.scale,
+            });
+        }
         let mut config = AquaConfig {
             headless: true,
             ..AquaConfig::default()
         };
-        config.window.title = "Artisan Editor".to_owned();
-        let mut aqua = Aqua::new(config).map_err(anyhow::Error::msg)?;
-        let (scenario, mut core) = Scenario::start(&options.fixture, options.latency)?;
-        core.navigate(scenario.screen(&options.route)?);
-        let resources = ShellResources::for_runtime(&aqua, options.scale as f32)
-            .context("could not configure Editor layout")?
+        "Artisan Editor".clone_into(&mut config.window.title);
+        let mut aqua = Aqua::new(config).map_err(|message| SessionError::Start { message })?;
+        let (scenario, mut core) =
+            Scenario::start(&options.fixture, options.latency).map_err(SessionError::Scenario)?;
+        core.navigate(
+            scenario
+                .screen(&options.route)
+                .map_err(SessionError::Screen)?,
+        );
+        let resources = ShellResources::for_runtime(&aqua, crate::measure::narrow(options.scale))
+            .ok_or(SessionError::Layout {
+                scale: options.scale,
+            })?
             .with_color_profile(ColorProfile::GpuiWindowsEncoded);
         let surface = Surface::new(
             options.logical.0,
@@ -85,10 +149,11 @@ impl Session {
             options.scale,
             aqua.fonts().clone(),
             aqua.runs().clone(),
-        )?;
+        )
+        .map_err(SessionError::Surface)?;
         let mut app = ShellApplication::for_qualification(core, resources, RootViews::default());
         let tap = app.tap_render();
-        let id = AquaWindowId::new(1).context("window id")?;
+        let id = AquaWindowId::new(1).expect("invariant: window id 1 is nonzero");
         let mut size = aqua::prelude::WindowOptions::default().inner_size;
         size.width = options.logical.0;
         size.height = options.logical.1;
@@ -122,7 +187,7 @@ impl Session {
         })
     }
 
-    fn frame(&mut self) -> Result<()> {
+    fn frame(&mut self) -> Result<(), SessionError> {
         self.aqua.dispatch_wake(&mut self.app, self.id);
         let now = self.aqua.clock();
         self.aqua.draw_ready(&mut self.app, now);
@@ -136,21 +201,23 @@ impl Session {
             feedback: Vec::new(),
             present_at: now,
         });
-        self.surface.draw(self.render.scene(), now)?;
+        self.surface
+            .draw(self.render.scene(), now)
+            .map_err(SessionError::Surface)?;
         self.sequence += 1;
         self.aqua
             .dispatch_frame_completed(&mut self.app, self.id, self.sequence);
         Ok(())
     }
 
-    fn dispatch(&mut self, events: &[InputEvent]) -> Result<()> {
+    fn dispatch(&mut self, events: &[InputEvent]) -> Result<(), SessionError> {
         for event in events {
             self.aqua.dispatch_input(&mut self.app, self.id, event);
         }
         self.frame()
     }
 
-    pub fn settle(&mut self, timeout: Duration) -> Result<()> {
+    fn settle(&mut self, timeout: Duration) -> Result<(), SessionError> {
         let deadline = Instant::now() + timeout;
         let mut previous: Option<Vec<u8>> = None;
         let mut identical = 0;
@@ -162,9 +229,9 @@ impl Session {
                 .shell
                 .core
                 .host(&self.scenario.host)
-                .is_some_and(|host| host.is_live())
-                && !self.app.shell.core.test_startup_pending();
-            let pixels = self.surface.read()?.rgba;
+                .is_some_and(|host| host.is_live() && !host.has_requests_in_flight())
+                && self.app.shell.core.pending_work() == 0;
+            let pixels = self.surface.read().map_err(SessionError::Surface)?.rgba;
             if ready && previous.as_ref() == Some(&pixels) {
                 identical += 1;
             } else {
@@ -175,15 +242,14 @@ impl Session {
             if identical >= STABLE_FRAMES && stable_since.elapsed() >= STABLE_FOR {
                 return Ok(());
             }
-            ensure!(
-                Instant::now() < deadline,
-                "the window did not settle within {timeout:?}"
-            );
+            if Instant::now() >= deadline {
+                return Err(SessionError::Unsettled { timeout });
+            }
             std::thread::sleep(PUMP_INTERVAL);
         }
     }
 
-    fn wait(&mut self, duration: Duration) -> Result<()> {
+    fn wait(&mut self, duration: Duration) -> Result<(), SessionError> {
         let until = Instant::now() + duration;
         while Instant::now() < until {
             self.frame()?;
@@ -192,7 +258,7 @@ impl Session {
         self.frame()
     }
 
-    fn click(&mut self, at: Point, button: Button) -> Result<()> {
+    fn click(&mut self, at: Point, button: Button) -> Result<(), SessionError> {
         let (core_button, mask) = match button {
             Button::Left => (PointerButton::Primary, 1),
             Button::Right => (PointerButton::Secondary, 2),
@@ -205,7 +271,7 @@ impl Session {
         ])
     }
 
-    fn key(&mut self, keystroke: &Keystroke) -> Result<()> {
+    fn key(&mut self, keystroke: &Keystroke) -> Result<(), SessionError> {
         let event = KeyEvent {
             key: keystroke.key,
             modifiers: keystroke.modifiers,
@@ -221,7 +287,7 @@ impl Session {
         self.dispatch(&events)
     }
 
-    fn type_text(&mut self, text: &str) -> Result<()> {
+    fn type_text(&mut self, text: &str) -> Result<(), SessionError> {
         for character in text.chars() {
             self.key(&Keystroke {
                 key: Key::Char(character),
@@ -231,15 +297,17 @@ impl Session {
         Ok(())
     }
 
-    fn capture(&mut self, path: &Path) -> Result<()> {
+    fn capture(&mut self, path: &Path) -> Result<(), SessionError> {
         self.frame()?;
-        let first = self.surface.read()?;
+        let first = self.surface.read().map_err(SessionError::Surface)?;
         self.frame()?;
-        let second = self.surface.read()?;
+        let second = self.surface.read().map_err(SessionError::Surface)?;
         let name = path
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .context("capture path has no file name")?
+            .ok_or_else(|| SessionError::NoFileName {
+                path: path.to_owned(),
+            })?
             .to_owned();
         let record = CaptureRecord::describe(
             &RecordContext {
@@ -256,18 +324,23 @@ impl Session {
         } else {
             self.options.out_dir.join(path)
         };
-        first.save(&path)?;
-        std::fs::write(
-            path.with_extension("json"),
-            serde_json::to_vec_pretty(&record)?,
-        )
-        .context("write capture record")?;
+        first.save(&path).map_err(SessionError::Save)?;
+        let bytes =
+            serde_json::to_vec_pretty(&record).map_err(|source| SessionError::EncodeRecord {
+                name: name.clone(),
+                source,
+            })?;
+        let record_path = path.with_extension("json");
+        std::fs::write(&record_path, bytes).map_err(|source| SessionError::WriteRecord {
+            path: record_path,
+            source,
+        })?;
         tracing::info!(path = %path.display(), identical = record.repeat_identical, "captured the window");
         self.records.push(record);
         Ok(())
     }
 
-    pub fn perform(&mut self, step: &Step) -> Result<bool> {
+    fn perform(&mut self, step: &Step) -> Result<bool, SessionError> {
         match step {
             Step::Wait(duration) => self.wait(*duration)?,
             Step::Move(at) => {
@@ -292,44 +365,48 @@ impl Session {
             Step::Key(keystroke) => self.key(keystroke)?,
             Step::Settle(timeout) => self.settle(*timeout)?,
             Step::Capture(path) => self.capture(path)?,
+            Step::StopForge => self.scenario.shutdown(),
             Step::Quit => return Ok(false),
         }
         Ok(true)
     }
 
-    pub fn run(&mut self, steps: &[Step]) -> Result<()> {
+    fn run(&mut self, steps: &[Step]) -> Result<(), SessionError> {
         for (index, step) in steps.iter().enumerate() {
             tracing::info!(step = index + 1, ?step, "script step");
-            if !self
-                .perform(step)
-                .with_context(|| format!("script step {} failed", index + 1))?
-            {
+            if !self.perform(step).map_err(|source| SessionError::Step {
+                step: index + 1,
+                source: Box::new(source),
+            })? {
                 break;
             }
         }
-        let unstable: Vec<_> = self
+        let names: Vec<_> = self
             .records
             .iter()
             .filter(|record| !record.repeat_identical)
-            .map(|record| record.name.as_str())
+            .map(|record| record.name.clone())
             .collect();
-        if !unstable.is_empty() {
-            bail!("repeat captures differ: {}", unstable.join(", "));
+        if !names.is_empty() {
+            return Err(SessionError::Unstable { names });
         }
         Ok(())
     }
 
-    pub fn records(&self) -> &[CaptureRecord] {
+    fn records(&self) -> &[CaptureRecord] {
         &self.records
     }
 
-    pub fn finish(mut self) {
+    fn finish(mut self) {
         self.scenario.shutdown();
     }
 }
 
-pub fn run_script(options: Options, script: &str) -> Result<Vec<CaptureRecord>> {
-    let steps = parse(script)?;
+pub(crate) fn run_script(
+    options: Options,
+    script: &str,
+) -> Result<Vec<CaptureRecord>, SessionError> {
+    let steps = parse(script).map_err(SessionError::Script)?;
     let mut session = Session::start(options)?;
     let result = session.run(&steps);
     let records = session.records().to_vec();

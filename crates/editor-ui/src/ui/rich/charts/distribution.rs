@@ -3,8 +3,6 @@ use super::scale::{Domain, f64_of, index_of, nice_step, quantile, sorted_finite}
 use serde::Deserialize;
 
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::DistributionFixture;
 pub(crate) use view::{DistributionState, PlotFrame, ReadoutRow, Services, Tick, view};
 
 const MAX_AUTO_BINS: usize = 50;
@@ -42,19 +40,19 @@ pub(crate) struct DistributionSpec {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Sample {
-    pub(crate) name: String,
-    pub(crate) sorted: Vec<f64>,
-    pub(crate) summary: Option<Summary>,
-    pub(crate) counts: Vec<usize>,
+    name: String,
+    sorted: Vec<f64>,
+    summary: Option<Summary>,
+    counts: Vec<usize>,
 }
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct Distribution {
-    pub(crate) mode: Mode,
-    pub(crate) unit: Option<String>,
-    pub(crate) threshold: Option<f64>,
-    pub(crate) samples: Vec<Sample>,
-    pub(crate) bins: Bins,
+    mode: Mode,
+    unit: Option<String>,
+    threshold: Option<f64>,
+    samples: Vec<Sample>,
+    bins: Bins,
     domain: Domain,
     slider: (Domain, f64, f64),
 }
@@ -72,7 +70,7 @@ pub(crate) fn prepare(value: &serde_json::Value) -> Result<Distribution, String>
 impl Distribution {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_optional(self.unit.as_ref())
             + retained_vec(&self.samples)
             + self
@@ -89,13 +87,13 @@ impl Distribution {
                 })
                 .sum::<usize>()
     }
-    pub(crate) fn from_spec(spec: DistributionSpec) -> Self {
+    fn from_spec(spec: DistributionSpec) -> Self {
         let mut samples: Vec<Sample> = spec
             .series
             .into_iter()
             .enumerate()
             .map(|(index, series)| Sample {
-                name: series_name(&series.name, index).to_string(),
+                name: series_name(&series.name, index),
                 sorted: sorted_finite(series.values.into_iter().flatten()),
                 summary: None,
                 counts: Vec::new(),
@@ -129,27 +127,27 @@ impl Distribution {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.samples.iter().all(|sample| sample.sorted.is_empty())
     }
 
-    pub(crate) const fn domain(&self) -> Domain {
+    const fn domain(&self) -> Domain {
         self.domain
     }
 
-    pub(crate) const fn slider(&self) -> (Domain, f64, f64) {
+    const fn slider(&self) -> (Domain, f64, f64) {
         self.slider
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Bins {
-    pub(crate) domain: Domain,
-    pub(crate) count: usize,
+    domain: Domain,
+    count: usize,
 }
 
 impl Bins {
-    pub(crate) fn new(pooled: &[f64], requested: Option<usize>) -> Self {
+    fn new(pooled: &[f64], requested: Option<usize>) -> Self {
         let domain = Domain::of(pooled.iter().copied()).unwrap_or_else(|| Domain::new(0.0, 1.0));
         let count = requested.map_or_else(
             || auto_bins(pooled, domain).clamp(1, MAX_AUTO_BINS),
@@ -158,20 +156,20 @@ impl Bins {
         Self { domain, count }
     }
 
-    pub(crate) fn width(self) -> f64 {
+    fn width(self) -> f64 {
         self.domain.span() / f64_of(self.count)
     }
 
-    pub(crate) fn index(self, value: f64) -> usize {
+    fn index(self, value: f64) -> usize {
         index_of((value - self.domain.lo) / self.width()).min(self.count - 1)
     }
 
-    pub(crate) fn edges(self, index: usize) -> (f64, f64) {
+    fn edges(self, index: usize) -> (f64, f64) {
         let lo = f64_of(index).mul_add(self.width(), self.domain.lo);
         (lo, lo + self.width())
     }
 
-    pub(crate) fn counts(self, sorted: &[f64]) -> Vec<usize> {
+    fn counts(self, sorted: &[f64]) -> Vec<usize> {
         let mut counts = vec![0; self.count];
         for value in sorted {
             counts[self.index(*value)] += 1;
@@ -199,18 +197,18 @@ fn auto_bins(pooled: &[f64], domain: Domain) -> usize {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Summary {
-    pub(crate) count: usize,
-    pub(crate) min: f64,
-    pub(crate) q1: f64,
-    pub(crate) median: f64,
-    pub(crate) q3: f64,
-    pub(crate) max: f64,
-    pub(crate) mean: f64,
-    pub(crate) whiskers: (f64, f64),
-    pub(crate) outliers: Vec<f64>,
+    count: usize,
+    min: f64,
+    q1: f64,
+    median: f64,
+    q3: f64,
+    max: f64,
+    mean: f64,
+    whiskers: (f64, f64),
+    outliers: Vec<f64>,
 }
 
-pub(crate) fn summary(sorted: &[f64]) -> Option<Summary> {
+fn summary(sorted: &[f64]) -> Option<Summary> {
     let (min, max) = (*sorted.first()?, *sorted.last()?);
     let q1 = quantile(sorted, 0.25)?;
     let median = quantile(sorted, 0.5)?;

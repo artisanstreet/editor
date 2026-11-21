@@ -1,5 +1,12 @@
 use super::*;
+use crate::ui::markdown::presenter::BodyServices;
+use crate::ui::markdown::presenter::RevealSlot;
+use crate::ui::markdown::presenter::{MarkdownPresenter, PresenterError, StoredProjectedMarkdown};
+use crate::ui::markdown::visual::BodyContext;
+use crate::ui::markdown::visual::BodyTone;
+use crate::ui::text::slice::slice;
 use artisan_api::{SourceIndexHeader, SourceLeafDescriptor};
+use std::sync::Arc;
 
 fn page(source: &ContentRef, metadata: &ContentRef) -> SourceIndexRange {
     SourceIndexRange {
@@ -31,12 +38,97 @@ fn page(source: &ContentRef, metadata: &ContentRef) -> SourceIndexRange {
     }
 }
 
+type PreparedLeaf = (
+    artisan_markdown_index::LeafContext,
+    bool,
+    IndexedLeafContent,
+    Arc<str>,
+    usize,
+);
+
+fn cached_source(provider: ScopedSourceProvider) -> (StoredOwner, StoredSource) {
+    let reference = ContentRef::from_text("abc");
+    let metadata = ContentRef::from_text("{}");
+    let mut owner = StoredOwner::default();
+    owner.remember_page(provider.clone(), Arc::new(page(&reference, &metadata)));
+    let StoredPreparation::Ready(source) =
+        owner.ensure("row", provider, reference, SourceIndexFormat::Markdown)
+    else {
+        panic!("expected cached page")
+    };
+    (owner, source)
+}
+
+fn prepared(
+    owner: &mut StoredOwner,
+    source: &StoredSource,
+    key: &str,
+    ordinal: usize,
+    generation: u64,
+    result: PreparedLeaf,
+) -> LeafPreparation {
+    let descriptor = owner.descriptor(source, ordinal).unwrap().clone();
+    owner.leaves.push_back(LeafEntry {
+        key: key.into(),
+        source: source.clone(),
+        descriptor,
+        generation,
+        capacity: None,
+        phase: LeafPhase::Working,
+        task: None,
+    });
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Prepared {
+            key: key.into(),
+            generation,
+            _worker: None,
+            _capacity: None,
+            result: Ok(result),
+        }))
+        .unwrap();
+    owner.drain();
+    owner.leaf(key, source, ordinal)
+}
+
+fn render_leaf(
+    presenter: &MarkdownPresenter,
+    owner: &StoredOwner,
+    ordinal: usize,
+    slot_start: usize,
+) -> Result<StoredProjectedMarkdown, PresenterError> {
+    let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
+    presenter.render_stored_leaf(
+        owner,
+        "row",
+        ordinal,
+        RevealSlot {
+            start: slot_start,
+            last: true,
+        },
+        BodyContext {
+            theme: crate::ui::theme::ArtisanTheme::for_mode(crate::ui::theme::ThemeMode::Dark),
+            tone: BodyTone::Foreground,
+            on_link: None,
+            on_color: None,
+            scope: None,
+        },
+        BodyServices {
+            glyph: &glyph,
+            invalidate: &invalidate,
+            charts: None,
+            code: None,
+        },
+    )
+}
+
 #[test]
 fn descriptor_page_rejects_identity_offsets_and_metadata_corruption() {
     let source = ContentRef::from_text("αx");
     let metadata = ContentRef::from_text("{}");
     let valid = page(&source, &metadata);
-    assert!(validate_page(&source, SourceIndexFormat::Markdown, None, &valid).is_ok());
+    validate_page(&source, SourceIndexFormat::Markdown, None, &valid).unwrap();
     let mut corrupted = valid.clone();
     corrupted.leaves[1].ordinal = 0;
     assert!(validate_page(&source, SourceIndexFormat::Markdown, None, &corrupted).is_err());
@@ -54,28 +146,28 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
     let mut collector = RangeCollector::new(reference.clone(), 3..full.len() - 3).unwrap();
     assert_eq!(collector.next_request(), Some((3, 6)));
     collector
-        .push(ContentRange {
+        .push(&ContentRange {
             id: reference.id.clone(),
             total: reference.bytes,
             start: 2,
             end: 5,
-            text: full[2..5].to_owned(),
+            text: slice(full, 2..5).to_owned(),
         })
         .unwrap();
     collector
-        .push(ContentRange {
+        .push(&ContentRange {
             id: reference.id.clone(),
             total: reference.bytes,
             start: 5,
             end: 9,
-            text: full[5..9].to_owned(),
+            text: slice(full, 5..9).to_owned(),
         })
         .unwrap();
     assert_eq!(collector.finish().unwrap(), "β🙂");
     let mut incomplete = RangeCollector::new(reference.clone(), 3..9).unwrap();
     assert!(
         incomplete
-            .push(ContentRange {
+            .push(&ContentRange {
                 id: reference.id.clone(),
                 total: reference.bytes,
                 start: 3,
@@ -87,7 +179,7 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
     let mut split = RangeCollector::new(reference.clone(), 4..9).unwrap();
     assert!(
         split
-            .push(ContentRange {
+            .push(&ContentRange {
                 id: reference.id.clone(),
                 total: reference.bytes,
                 start: 3,
@@ -99,36 +191,91 @@ fn exact_range_accepts_utf8_overlap_and_rejects_nonprogress_or_split_boundary() 
 }
 
 fn owner_fixture() -> (
-    tempfile::TempDir,
+    (tempfile::TempDir, test_support::net::SilentListener),
     editor_core::Core,
     editor_core::HostConfig,
     ScopedSourceProvider,
 ) {
-    use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+    use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let forge = test_support::net::SilentListener::bind();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("stored".into()),
         name: "stored".into(),
-        address: "127.0.0.1:1".into(),
+        address: forge.address().to_string(),
         fingerprint: "0".repeat(64),
         kind: HostKind::Remote,
     };
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let provider = core
         .source_provider(&config.id, core.host(&config.id).unwrap().instance())
         .unwrap();
-    (directory, core, config, provider)
+    ((directory, forge), core, config, provider)
+}
+
+fn long_page(
+    source: &ContentRef,
+    metadata: &ContentRef,
+    leaves: u64,
+    range: Range<u64>,
+) -> SourceIndexRange {
+    SourceIndexRange {
+        index: SourceIndexHeader {
+            format: SourceIndexFormat::Markdown,
+            source: source.clone(),
+            metadata: metadata.clone(),
+            version: artisan_api::SOURCE_INDEX_VERSION,
+            leaves,
+        },
+        start: range.start,
+        end: range.end,
+        leaves: range
+            .map(|ordinal| SourceLeafDescriptor {
+                ordinal,
+                source_start: 0,
+                source_end: source.bytes,
+                metadata_start: 0,
+                metadata_end: metadata.bytes,
+            })
+            .collect(),
+    }
+}
+
+fn hold_fetch(owner: &mut StoredOwner, start: u64) {
+    owner.indices[0].fetches = vec![PageFetch {
+        start,
+        state: FetchState::Loading {
+            _task: Task(
+                runtime::runtime()
+                    .spawn(std::future::pending::<()>())
+                    .abort_handle(),
+            ),
+        },
+    }];
+}
+
+fn deliver_page(
+    owner: &mut StoredOwner,
+    revision: u64,
+    offset: u64,
+    result: Result<SourceIndexRange, String>,
+) -> Vec<StoredUpdate> {
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Index {
+            owner: "row".into(),
+            revision,
+            offset: Some(offset),
+            result,
+        }))
+        .unwrap();
+    owner.drain()
 }
 
 #[test]
@@ -137,21 +284,21 @@ fn cached_pages_obey_global_and_per_source_capacity() {
     let mut owner = StoredOwner::default();
     let metadata = ContentRef::from_text("{}");
     let source = ContentRef::from_text("abc");
-    for start in 0..3 {
+    for start in 0..=PAGES_PER_SOURCE as u64 {
         let mut item = page(&source, &metadata);
         item.start = start;
         owner.remember_page(provider.clone(), Arc::new(item));
     }
-    assert_eq!(owner.pages.len(), 2);
+    assert_eq!(owner.pages.len(), PAGES_PER_SOURCE);
     assert_eq!(owner.pages.front().unwrap().1.start, 1);
-    for index in 0..50 {
+    for index in 0..MAX_CACHED_PAGES {
         let item = page(
             &ContentRef::from_text(&format!("source {index}")),
             &metadata,
         );
         owner.remember_page(provider.clone(), Arc::new(item));
     }
-    assert_eq!(owner.pages.len(), MAX_INDEX_ENTRIES);
+    assert_eq!(owner.pages.len(), MAX_CACHED_PAGES);
     assert!(
         owner
             .pages
@@ -161,61 +308,70 @@ fn cached_pages_obey_global_and_per_source_capacity() {
 }
 
 #[test]
-fn moved_window_survives_ensure_and_stale_completion() {
+fn a_failed_page_reports_its_offset_and_cause_until_retried() {
     let (_directory, mut core, config, provider) = owner_fixture();
     let source = ContentRef::from_text("abc");
     let metadata = ContentRef::from_text("{}");
-    let mut first = page(&source, &metadata);
-    first.end = 1;
-    first.leaves.truncate(1);
-    let mut second = page(&source, &metadata);
-    second.start = 1;
-    second.leaves.remove(0);
     let mut owner = StoredOwner::default();
-    owner.remember_page(provider.clone(), Arc::new(first.clone()));
-    owner.remember_page(provider.clone(), Arc::new(second));
-    let StoredPreparation::Ready(tail) = owner.ensure(
-        "row",
+    owner.remember_page(
         provider.clone(),
-        source.clone(),
-        SourceIndexFormat::Markdown,
-    ) else {
-        panic!("expected cached tail")
-    };
-    let StoredPreparation::Ready(moved) = owner.move_window("row", &tail, 0) else {
-        panic!("expected cached window")
-    };
-    let StoredPreparation::Ready(current) =
-        owner.ensure("row", provider.clone(), source, SourceIndexFormat::Markdown)
-    else {
-        panic!("expected retained window")
-    };
-    assert_eq!(current.loaded_range(), moved.loaded_range());
-    assert!(!owner.source_is_current(&tail));
-    let old_revision = current.revision();
-    owner.indices[0].revision = old_revision + 1;
-    owner.indices[0].pending_offset = Some(Some(0));
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Index {
-                owner: "row".into(),
-                revision: old_revision,
-                result: Ok(first),
-            }))
-            .is_ok()
+        Arc::new(long_page(&source, &metadata, 130, 66..130)),
     );
-    assert!(owner.drain().is_empty());
-    assert_eq!(owner.indices[0].pending_offset, Some(Some(0)));
+    let StoredPreparation::Ready(tail) =
+        owner.ensure("row", provider, source.clone(), SourceIndexFormat::Markdown)
+    else {
+        panic!("expected the cached tail page")
+    };
+    assert_eq!(tail.block_count(), 130);
+    assert!(matches!(
+        owner.page(&tail, 129),
+        PagePreparation::Ready(descriptor) if descriptor.ordinal == 129
+    ));
+    assert_eq!(owner.page(&tail, 10), PagePreparation::Pending);
+    hold_fetch(&mut owner, 0);
+    let failed = PagePreparation::Failed {
+        offset: 0,
+        cause: "connection refused".to_owned(),
+    };
+    assert!(
+        !deliver_page(
+            &mut owner,
+            tail.revision(),
+            0,
+            Err("connection refused".into())
+        )
+        .is_empty()
+    );
+    assert_eq!(owner.page(&tail, 10), failed);
+    assert_eq!(owner.page(&tail, 63), failed);
+    assert!(matches!(
+        owner.page(&tail, 70),
+        PagePreparation::Ready(descriptor) if descriptor.ordinal == 70
+    ));
+    assert!(!owner.retry_page("row", 64));
+    assert!(owner.retry_page("row", 0));
+    assert_eq!(owner.page(&tail, 10), PagePreparation::Pending);
+    assert!(!owner.retry_page("row", 0));
+    hold_fetch(&mut owner, 0);
+    let first = long_page(&source, &metadata, 130, 0..64);
+    assert!(deliver_page(&mut owner, tail.revision() + 1, 0, Ok(first.clone())).is_empty());
+    assert_eq!(owner.page(&tail, 10), PagePreparation::Pending);
+    assert!(!deliver_page(&mut owner, tail.revision(), 0, Ok(first)).is_empty());
+    assert!(matches!(
+        owner.page(&tail, 10),
+        PagePreparation::Ready(descriptor) if descriptor.ordinal == 10
+    ));
     let client = editor_core::ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
+    core.remove_host(&config.id).unwrap();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     owner.drain();
     assert!(owner.indices.is_empty());
-    assert!(!owner.source_is_current(&current));
+    assert!(!owner.source_is_current(&tail));
 }
 
 #[test]
@@ -230,10 +386,8 @@ fn leaf_admission_precedes_collector_allocation() {
     else {
         panic!("expected cached page")
     };
-    let held = owner
-        .capacity
-        .clone()
-        .try_acquire_many_owned(PREPARED_BYTES as u32)
+    let held = Arc::clone(&owner.capacity)
+        .try_acquire_many_owned(u32::try_from(PREPARED_BYTES).expect("budget fits u32"))
         .unwrap();
     assert!(matches!(
         owner.leaf("leaf", &current, 0),
@@ -246,16 +400,8 @@ fn leaf_admission_precedes_collector_allocation() {
 #[test]
 fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation() {
     let (_directory, _core, _config, provider) = owner_fixture();
-    let reference = ContentRef::from_text("abc");
-    let metadata = ContentRef::from_text("{}");
-    let mut owner = StoredOwner::default();
-    owner.remember_page(provider.clone(), Arc::new(page(&reference, &metadata)));
-    let StoredPreparation::Ready(source) =
-        owner.ensure("row", provider, reference, SourceIndexFormat::Markdown)
-    else {
-        panic!("expected cached page")
-    };
-    let descriptor = source.descriptor(0).unwrap().clone();
+    let (mut owner, source) = cached_source(provider);
+    let descriptor = owner.descriptor(&source, 0).unwrap().clone();
     owner.leaves.push_back(LeafEntry {
         key: "leaf".into(),
         source: source.clone(),
@@ -276,30 +422,26 @@ fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation(
             123,
         ))
     };
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "leaf".into(),
-                generation: 8,
-                result: make_result(),
-                _worker: None,
-                _capacity: None,
-            }))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Prepared {
+            key: "leaf".into(),
+            generation: 8,
+            result: make_result(),
+            _worker: None,
+            _capacity: None,
+        }))
+        .unwrap();
     assert!(owner.drain().is_empty());
     assert_eq!(owner.prepared_capacity.available_permits(), PREPARED_BYTES);
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "leaf".into(),
-                generation: 9,
-                result: make_result(),
-                _worker: None,
-                _capacity: None,
-            }))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(Completion::Prepared {
+            key: "leaf".into(),
+            generation: 9,
+            result: make_result(),
+            _worker: None,
+            _capacity: None,
+        }))
+        .unwrap();
     assert_eq!(
         owner.drain(),
         vec![StoredUpdate::Leaf {
@@ -329,14 +471,12 @@ fn worker_reuses_engine_across_jobs() {
     let (send, receive) = std::sync::mpsc::channel();
     for _ in 0..2 {
         let send = send.clone();
-        assert!(
-            worker
-                .try_send(Box::new(move |engine| {
-                    let engine = engine.as_ref().unwrap();
-                    send.send(std::ptr::from_ref(engine) as usize).unwrap();
-                }))
-                .is_ok()
-        );
+        worker
+            .try_send(Box::new(move |engine| {
+                let engine = engine.as_ref().unwrap();
+                send.send(std::ptr::from_ref(engine) as usize).unwrap();
+            }))
+            .unwrap();
     }
     assert_eq!(receive.recv().unwrap(), receive.recv().unwrap());
 }
@@ -372,16 +512,16 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
     let StoredPreparation::Ready(source) = owner.ensure(
         "row",
         provider,
-        page.index.source.clone(),
+        page.index.source,
         SourceIndexFormat::Markdown,
     ) else {
         panic!("expected cached page")
     };
     let permit = Arc::new(
-        owner
-            .capacity
-            .clone()
-            .try_acquire_many_owned((metadata.len() + RANGE_BYTES as usize) as u32)
+        Arc::clone(&owner.capacity)
+            .try_acquire_many_owned(
+                u32::try_from(metadata.len() + RANGE_BYTES as usize).expect("budget fits u32"),
+            )
             .unwrap(),
     );
     owner.leaves.push_back(LeafEntry {
@@ -406,11 +546,9 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
             text: metadata,
         }),
     };
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(completion))
-            .is_ok()
-    );
+    runtime::runtime()
+        .block_on(owner.delivery.sender().send(completion))
+        .unwrap();
     owner.drain();
     assert!(matches!(
         owner.leaves[0].phase,
@@ -419,32 +557,17 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario walking a stored leaf from retention through revoked proof"
+)]
 fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
-    use crate::ui::markdown::presenter::MarkdownPresenter;
-    use crate::ui::markdown::visual::BodyTone;
     use crate::ui::markdown::{Block, Span};
     use crate::ui::theme::{ArtisanTheme, ThemeMode};
     use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
     use std::rc::Rc;
     let (_directory, _core, _config, provider) = owner_fixture();
-    let reference = ContentRef::from_text("abc");
-    let metadata = ContentRef::from_text("{}");
-    let mut owner = StoredOwner::default();
-    owner.remember_page(provider.clone(), Arc::new(page(&reference, &metadata)));
-    let StoredPreparation::Ready(source) =
-        owner.ensure("row", provider, reference, SourceIndexFormat::Markdown)
-    else {
-        panic!("expected page")
-    };
-    owner.leaves.push_back(LeafEntry {
-        key: "leaf".into(),
-        source: source.clone(),
-        descriptor: source.descriptor(0).unwrap().clone(),
-        generation: 4,
-        capacity: None,
-        phase: LeafPhase::Working,
-        task: None,
-    });
+    let (mut owner, source) = cached_source(provider);
     let context = artisan_markdown_index::LeafContext {
         lists: vec![artisan_markdown_index::ListLevel {
             source_start: 0,
@@ -454,7 +577,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         }],
         ..Default::default()
     };
-    let result = Ok((
+    let result = (
         context,
         false,
         IndexedLeafContent::Block(Block::Paragraph {
@@ -463,20 +586,8 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         }),
         Arc::<str>::from("abc"),
         256,
-    ));
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "leaf".into(),
-                generation: 4,
-                _worker: None,
-                _capacity: None,
-                result
-            }))
-            .is_ok()
     );
-    owner.drain();
-    let LeafPreparation::Ready(leaf) = owner.leaf("leaf", &source, 0) else {
+    let LeafPreparation::Ready(leaf) = prepared(&mut owner, &source, "leaf", 0, 4, result) else {
         panic!("expected leaf")
     };
     let mut presenter = MarkdownPresenter::default();
@@ -486,31 +597,15 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             &owner,
             "row",
             0,
-            leaf.clone(),
-            &theme,
+            leaf,
+            theme,
             SelectionDocumentId(9),
             &[7],
             |part| SelectionSourceId(100 + part as u64),
         )
         .unwrap();
-    let render = |presenter: &MarkdownPresenter, owner: &StoredOwner| {
-        presenter.render_stored_leaf(
-            owner,
-            "row",
-            0,
-            0,
-            true,
-            &theme,
-            BodyTone::Foreground,
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-    };
+    let render =
+        |presenter: &MarkdownPresenter, owner: &StoredOwner| render_leaf(presenter, owner, 0, 0);
     let first = render(&presenter, &owner).unwrap();
     let second = render(&presenter, &owner).unwrap();
     assert!(Arc::ptr_eq(&first.selection_batch, &second.selection_batch));
@@ -518,12 +613,11 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     assert_eq!(selected.id, SelectionSourceId(100));
     assert_eq!(selected.order, [7, 0]);
     assert_eq!(selected.separator.as_ref(), "\n");
-    assert_eq!(first.list_depth, 1);
     assert_eq!(first.geometry.text[0].text.as_ref(), "abc");
     let reveal = Rc::new(crate::ui::markdown::reveal::PreparedReveal::default());
     let now = std::time::Instant::now();
     reveal.begin_frame(now, true, true, false, false);
-    presenter.set_projected_reveal("row", 0, Some(reveal.clone()));
+    presenter.set_projected_reveal("row", 0, Some(Rc::clone(&reveal)));
     let initial = render(&presenter, &owner).unwrap();
     assert!(Arc::ptr_eq(
         &first.selection_batch,
@@ -542,9 +636,14 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
                 let node = app.tree().get(id)?;
                 match &node.kind {
                     aqua_ui::tree::NodeKind::Text(text) if text.text() == "abc" => {
-                        Some(text.gpui_text_opacity.clone())
+                        Some(Arc::clone(&text.gpui_text_opacity))
                     }
-                    _ => None,
+                    aqua_ui::tree::NodeKind::Box(_)
+                    | aqua_ui::tree::NodeKind::Text(_)
+                    | aqua_ui::tree::NodeKind::Media(_)
+                    | aqua_ui::tree::NodeKind::Scroll(_)
+                    | aqua_ui::tree::NodeKind::Canvas(_)
+                    | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
                 }
             })
             .unwrap()
@@ -553,7 +652,8 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     assert_eq!(initial_ranges.len(), 1);
     assert_eq!(initial_ranges[0].bytes, 0..3);
     assert_eq!(
-        initial_ranges[0].opacity, 0.35,
+        initial_ranges[0].opacity.to_bits(),
+        0.35_f32.to_bits(),
         "fresh stored text starts readable while its fade begins"
     );
     reveal.begin_frame(
@@ -596,15 +696,6 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         ranges(&app).is_empty(),
         "settled stored text must release its completed fade ranges"
     );
-    owner.leaves.push_back(LeafEntry {
-        key: "table".into(),
-        source: source.clone(),
-        descriptor: source.descriptor(1).unwrap().clone(),
-        generation: 5,
-        capacity: None,
-        phase: LeafPhase::Working,
-        task: None,
-    });
     let table = IndexedLeafContent::TableRow {
         header: false,
         alignments: vec![
@@ -620,20 +711,14 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             },
         ],
     };
-    let result = Ok((Default::default(), false, table, Arc::<str>::from("c"), 256));
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "table".into(),
-                generation: 5,
-                _worker: None,
-                _capacity: None,
-                result
-            }))
-            .is_ok()
+    let result = (
+        artisan_markdown_index::LeafContext::default(),
+        false,
+        table,
+        Arc::<str>::from("c"),
+        256,
     );
-    owner.drain();
-    let LeafPreparation::Ready(table) = owner.leaf("table", &source, 1) else {
+    let LeafPreparation::Ready(table) = prepared(&mut owner, &source, "table", 1, 5, result) else {
         panic!("expected table")
     };
     presenter
@@ -642,30 +727,13 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             "row",
             1,
             table,
-            &theme,
+            theme,
             SelectionDocumentId(9),
             &[7],
             |part| SelectionSourceId(200 + part as u64),
         )
         .unwrap();
-    let table_row = presenter
-        .render_stored_leaf(
-            &owner,
-            "row",
-            1,
-            10,
-            true,
-            &theme,
-            BodyTone::Foreground,
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+    let table_row = render_leaf(&presenter, &owner, 1, 10).unwrap();
     let table_sources = table_row.selection_batch.sources();
     assert_eq!(
         table_sources
@@ -688,59 +756,21 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         [10, 11]
     );
     presenter.release_stored_leaf("row", 1);
-    assert!(
-        presenter
-            .render_stored_leaf(
-                &owner,
-                "row",
-                1,
-                10,
-                true,
-                &theme,
-                BodyTone::Foreground,
-                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                Rc::new(|| {}),
-                None,
-                None,
-                None,
-                None,
-                None
-            )
-            .is_err()
-    );
-    owner.leaves.push_back(LeafEntry {
-        key: "oversized".into(),
-        source: source.clone(),
-        descriptor: source.descriptor(0).unwrap().clone(),
-        generation: 6,
-        capacity: None,
-        phase: LeafPhase::Working,
-        task: None,
-    });
+    render_leaf(&presenter, &owner, 1, 10).expect_err("a released leaf no longer renders");
     let oversized = IndexedLeafContent::Block(Block::Paragraph {
         spans: vec![Span::Text("x".repeat(PREPARED_BYTES / 2 + 1))],
         range: 0..1,
     });
-    let result = Ok((
-        Default::default(),
+    let result = (
+        artisan_markdown_index::LeafContext::default(),
         false,
         oversized,
         Arc::<str>::from("x"),
         1,
-    ));
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "oversized".into(),
-                generation: 6,
-                _worker: None,
-                _capacity: None,
-                result
-            }))
-            .is_ok()
     );
-    owner.drain();
-    let LeafPreparation::Ready(oversized) = owner.leaf("oversized", &source, 0) else {
+    let LeafPreparation::Ready(oversized) =
+        prepared(&mut owner, &source, "oversized", 0, 6, result)
+    else {
         panic!("expected oversized fixture")
     };
     assert!(
@@ -750,7 +780,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
                 "row",
                 0,
                 oversized,
-                &theme,
+                theme,
                 SelectionDocumentId(9),
                 &[7],
                 |part| SelectionSourceId(300 + part as u64)
@@ -758,5 +788,38 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             .is_err()
     );
     owner.release("row");
-    assert!(render(&presenter, &owner).is_err());
+    render(&presenter, &owner).expect_err("a released row no longer renders");
+}
+
+fn tampered_record(token: &serde_json::Value) -> artisan_markdown_index::LeafRecord {
+    let mut record =
+        serde_json::to_value(artisan_markdown_index::LeafRecord::literal(0..1)).unwrap();
+    record["leaf"]["events"] = serde_json::json!([
+        { "token": token, "range": { "start": 0, "end": 2 } }
+    ]);
+    serde_json::from_value(record).unwrap()
+}
+
+#[test]
+fn stored_metadata_with_an_event_beyond_its_leaf_is_rejected_instead_of_aborting() {
+    let engine = MarkdownEngine::new().unwrap();
+    for token in [
+        serde_json::json!({ "Structural": { "Html": "<" } }),
+        serde_json::json!({ "Html": { "Range": { "start": 0, "end": 1 } } }),
+    ] {
+        let result = normalize_record(
+            &tampered_record(&token),
+            0,
+            "<",
+            &engine,
+            &mut crate::ui::markdown::NoFenceTokenMemo,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(crate::ui::markdown::MarkdownIndexError::Replay(_))
+            ),
+            "{result:?}"
+        );
+    }
 }

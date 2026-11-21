@@ -1,0 +1,297 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "fixture-session-tools",
+        },
+        Model {
+            id: "claude-sonnet-5",
+        },
+        Item {
+            key: "toolu_fixture_01",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Read {
+                    path: "/project/numbers.txt",
+                    range: None,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    30426,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Item {
+            key: "toolu_fixture_01",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Read {
+                    path: "/project/numbers.txt",
+                    range: None,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "1\talpha 17\n2\tbeta 42\n3\tgamma 9\n4\tdelta 31\n5\t",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+        Live {
+            target: Reasoning,
+            text: "Checking the pair sums",
+            append: false,
+        },
+        Item {
+            key: "toolu_fixture_02",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Read {
+                    path: "/project/numbers.txt",
+                    range: None,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    32012,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Item {
+            key: "toolu_fixture_02",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Read {
+                    path: "/project/numbers.txt",
+                    range: None,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "1\talpha 17\n2\tbeta 42\n3\tgamma 9\n4\tdelta 31\n5\t",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "msg_fixture_03:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: "The two",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " values clos",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: "est to 50 are beta",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " (42) and gamma (",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: "9), which sum to 51",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: ", and",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " a second",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " read",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " of",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " the file confirmed the same",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " numbers; the next closest",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " pair is al",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: "pha (17) and delta",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: " (31), which sum to ",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: "48.",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
+            },
+            text: "The two values closest to 50 are beta (42) and gamma (9), which sum to 51, and a second read of the file confirmed the same numbers; the next closest pair is alpha (17) and delta (31), which sum to 48.",
+            append: false,
+        },
+        Item {
+            key: "msg_fixture_03:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "The two values closest to 50 are beta (42) and gamma (9), which sum to 51, and a second read of the file confirmed the same numbers; the next closest pair is alpha (17) and delta (31), which sum to 48.",
+                ),
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    32266,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 6,
+                output: 333,
+                reasoning: 94,
+                cache_read: 62434,
+                cache_write: Some(
+                    32264,
+                ),
+                context_used: Some(
+                    32266,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.1448848,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Done,
+    ),
+)

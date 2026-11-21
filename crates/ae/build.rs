@@ -1,29 +1,25 @@
-//! Build info for `--version`: the commit (from `ARTISAN_COMMIT`, e.g. set by
-//! the release build, else git) and the target triple.
+use std::path::PathBuf;
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     artisan_payload::embed("ARTISAN_FORGE_PAYLOAD", "forge.gz")?;
-    println!("cargo:rerun-if-env-changed=ARTISAN_COMMIT");
-    let commit = std::env::var("ARTISAN_COMMIT")
-        .ok()
-        .filter(|commit| !commit.is_empty())
-        .or_else(|| {
-            let output = std::process::Command::new("git")
-                .args(["rev-parse", "--short=10", "HEAD"])
-                .output()
-                .ok()?;
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        });
-    println!(
-        "cargo:rustc-env=ARTISAN_COMMIT={}",
-        commit.as_deref().unwrap_or("unknown")
-    );
-    println!(
-        "cargo:rustc-env=ARTISAN_TARGET={}",
-        std::env::var("TARGET").unwrap_or_default()
-    );
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let files =
+        |names: &[&str]| -> Vec<PathBuf> { names.iter().map(|name| root.join(name)).collect() };
+    artisan_payload::embed_notices(
+        "forge-notices.gz",
+        &root,
+        &files(&["LICENSE.md", "notices/forge.txt", "notices/fff-MIT.txt"]),
+    )?;
+    artisan_payload::embed_notices(
+        "ae-notices.gz",
+        &root,
+        &files(&[
+            "LICENSE.md",
+            "notices/ae.txt",
+            "notices/forge.txt",
+            "notices/fff-MIT.txt",
+        ]),
+    )?;
+    build_info::emit();
     Ok(())
 }

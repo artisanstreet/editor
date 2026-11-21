@@ -14,7 +14,7 @@ pub(crate) struct ImageBlock {
 impl ImageBlock {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_vec(&self.images)
             + self
                 .images

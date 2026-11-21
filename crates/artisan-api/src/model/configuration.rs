@@ -127,7 +127,7 @@ impl ModelSpecification {
                     changes.push(ResolutionChange {
                         axis,
                         requested: value,
-                        reason: "No longer advertised; using the harness default.".into(),
+                        reason: "No longer advertised; using the engine default.".into(),
                     });
                 }
             }
@@ -161,7 +161,7 @@ impl ModelSpecification {
                     changes.push(ResolutionChange {
                         axis,
                         requested: requested.options[key].to_string(),
-                        reason: "No longer offered; using the harness default.".into(),
+                        reason: "No longer offered; using the engine default.".into(),
                     });
                 }
             }

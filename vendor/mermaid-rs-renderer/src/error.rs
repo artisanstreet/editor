@@ -1,14 +1,9 @@
 //! Structured parse errors for mermaid diagrams.
 //!
-//! The library historically returns [`anyhow::Error`] for every
-//! parse or layout failure. That is ergonomic but erases error
-//! kind. [`ParseError`] sits alongside the `anyhow` surface as a
-//! typed enum so callers (CMSs, editors, LLM correction loops)
-//! can classify failures and produce actionable diagnostics
-//! without scraping error strings.
-//!
 //! See `docs/error_tracking.md` for the line/column conventions
 //! detection paths follow.
+
+use std::path::PathBuf;
 
 use thiserror::Error;
 
@@ -89,27 +84,67 @@ pub enum ParseError {
     },
 }
 
-/// Bridge [`ParseError`] into [`anyhow::Error`] so the legacy
-/// [`render`]/[`render_with_options`] façade can keep its
-/// `anyhow::Result<_>` signature.
-///
-/// The derived [`std::error::Error`] from `thiserror` is enough
-/// on its own (via `anyhow`'s blanket `From<E: Error>`), so this
-/// impl exists solely to pin the semantic contract in one place
-/// and to make intent explicit at call sites such as
-/// `parse_mermaid(input).map_err(Into::into)`.
-///
-/// [`render`]: crate::render
-/// [`render_with_options`]: crate::render_with_options
-#[cfg(test)]
-mod anyhow_bridge_is_derived {
-    use super::ParseError;
-    // Compile-time check: ParseError implements std::error::Error
-    // via thiserror, which is all anyhow needs for auto-conversion.
-    const _: fn() = || {
-        fn assert_error<E: std::error::Error + Send + Sync + 'static>() {}
-        assert_error::<ParseError>();
-    };
+#[derive(Debug, Error)]
+pub enum ParseMermaidError {
+    #[error("unknown or missing Mermaid diagram header")]
+    MissingHeader,
+    #[error("invalid Mermaid init directive: could not parse JSON/JSON5 config")]
+    InitDirectiveConfig {
+        #[source]
+        source: json5::Error,
+    },
+    #[error("invalid Mermaid init directive: missing config object")]
+    InitDirectiveMissingConfig,
+    #[error("invalid Mermaid init directive syntax")]
+    InitDirectiveSyntax,
+    #[error("invalid flowchart edge syntax: {line}")]
+    FlowchartEdge { line: String },
+}
+
+#[derive(Debug, Error)]
+pub enum LoadConfigError {
+    #[error(
+        "unknown theme preset '{name}' (expected one of: default, dark, forest, neutral, modern)"
+    )]
+    UnknownTheme { name: String },
+    #[error("read the config file {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("decode the config file {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum WriteLayoutDumpError {
+    #[error("create the layout dump {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write the layout dump {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum WriteOutputSvgError {
+    #[error("write the SVG to {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
@@ -148,11 +183,5 @@ mod tests {
             format!("{e}"),
             "invalid directive 'init' at 1:1: JSON parse error: expected '}'"
         );
-    }
-
-    #[test]
-    fn parse_error_is_anyhow_convertible() {
-        let e: anyhow::Error = ParseError::UnclosedSubgraph { opened_at: 2 }.into();
-        assert!(e.to_string().contains("unclosed subgraph"));
     }
 }

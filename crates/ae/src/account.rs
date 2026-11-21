@@ -1,174 +1,314 @@
-//! `ae account`: enroll this Forge machine into an AST account.
-//!
-//! The machine keypair is local (persisted in Forge's data dir, not in the
-//! database). Core owns enrollment lifecycle; this CLI only builds the exact
-//! proofs Core specifies, polls the authenticated status, and — after the
-//! operator explicitly approves the shown accountId + verified email —
-//! confirms the exact account/key binding. No parallel enrollment logic.
-
-use anyhow::{Context, Result, bail};
+use crate::paths::{self, LocateError};
+use crate::service::RestartError;
+use crate::ui::AskError;
+use artisan_account::{MachineAccount, MachineFileError, MachineKeyError, MachineKeypair};
 use artisan_paths::App;
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use forge_http::core::{BuildCoreClientError, CoreCallError};
+use std::path::{Path, PathBuf};
 
 #[derive(Args)]
-pub struct AccountArgs {
-    /// Core base URL (else `AST_CORE_BASE_URL`, else production default).
-    #[arg(long)]
+pub(crate) struct AccountArgs {
+    #[arg(
+        long,
+        help = "Core base URL (else `AST_CORE_BASE_URL`, else production default)"
+    )]
     pub core: Option<String>,
     #[command(subcommand)]
     pub command: AccountCommand,
 }
 
 #[derive(Subcommand)]
-pub enum AccountCommand {
-    /// Start an enrollment: prints a code to claim in a signed-in session.
+pub(crate) enum AccountCommand {
+    #[command(about = "Start an enrollment: prints a code to claim in a signed-in session")]
     Enroll {
-        /// Human label for this machine (default: hostname).
-        #[arg(long)]
+        #[arg(long, help = "Human label for this machine (default: hostname)")]
         label: Option<String>,
-        /// Print machine-readable enrollment (code, ids, expiry) instead of
-        /// human text, for the Editor's binding check.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Print machine-readable enrollment (code, ids, expiry) instead of human text, for the Editor's binding check"
+        )]
         json: bool,
-        /// Replace a removed enrollment with a fresh machine key.
-        #[arg(long)]
+        #[arg(long, help = "Replace a removed enrollment with a fresh machine key")]
         replace: bool,
     },
-    /// Poll the enrollment: shows pending/claimed + account when claimed.
+    #[command(about = "Poll the enrollment: shows pending/claimed + account when claimed")]
     Status {
-        /// Print machine-readable JSON (stable keys; never secrets) instead
-        /// of human text, for the Editor's binding check.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Print machine-readable JSON (stable keys; never secrets) instead of human text, for the Editor's binding check"
+        )]
         json: bool,
     },
-    /// Confirm after explicit local approval of the shown account.
+    #[command(about = "Confirm after explicit local approval of the shown account")]
     Confirm {
-        /// Approve without asking (the account was already shown + approved).
-        #[arg(long, short)]
+        #[arg(
+            long,
+            short,
+            help = "Approve without asking (the account was already shown + approved)"
+        )]
         yes: bool,
-        /// Only confirm into this account id; refuse on mismatch before the RPC.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Only confirm into this account id; refuse on mismatch before the RPC"
+        )]
         account_id: Option<String>,
     },
-    /// Fetch and apply the latest account config bundle now.
+    #[command(about = "Fetch and apply the latest account config bundle now")]
     Sync,
 }
 
-/// What `ae account` persists beside `forge.sqlite3` (0600 on unix).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct AccountFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    secret_b64u: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    public_b64u: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    enrollment_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    machine_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    account_id: Option<String>,
+type Account = MachineAccount;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AccountFileError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read the machine account in {}; if it is damaged, move it aside and enroll again", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: MachineFileError,
+    },
+    #[error("save {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
-fn account_path() -> Result<PathBuf> {
-    Ok(App::Forge.data()?.join("ast_account.json"))
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AccountError {
+    #[error(transparent)]
+    Enroll(#[from] EnrollError),
+    #[error(transparent)]
+    Status(#[from] StatusError),
+    #[error(transparent)]
+    Confirm(#[from] ConfirmError),
+    #[error(transparent)]
+    Sync(#[from] SyncError),
 }
 
-fn load_account() -> Result<AccountFile> {
-    let path = account_path()?;
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EnrollError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] crate::service::RunningError),
+    #[error(transparent)]
+    File(#[from] AccountFileError),
+    #[error("this Forge is already enrolled; see `ae account status`")]
+    AlreadyEnrolled,
+    #[error("generate a machine key")]
+    Key(#[source] MachineKeyError),
+    #[error("give this machine a label with --label")]
+    NoLabel,
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Client(#[from] BuildCoreClientError),
+    #[error("start an enrollment for {label:?}")]
+    Start {
+        label: String,
+        #[source]
+        source: CoreCallError,
+    },
+    #[error("restart Forge with the new machine key")]
+    Restart(#[source] RestartError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StatusError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    File(#[from] AccountFileError),
+    #[error("no enrollment started; run `ae account enroll`")]
+    NotStarted,
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Client(#[from] BuildCoreClientError),
+    #[error("read the status of enrollment {enrollment_id}")]
+    Status {
+        enrollment_id: String,
+        #[source]
+        source: CoreCallError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ConfirmError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] crate::service::RunningError),
+    #[error(transparent)]
+    File(#[from] AccountFileError),
+    #[error(transparent)]
+    Mismatch(#[from] AccountMismatch),
+    #[error("no enrollment started; run `ae account enroll`")]
+    NotStarted,
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Client(#[from] BuildCoreClientError),
+    #[error("read the status of enrollment {enrollment_id}")]
+    Status {
+        enrollment_id: String,
+        #[source]
+        source: CoreCallError,
+    },
+    #[error("the enrollment is not claimed yet; claim the code in a signed-in session first")]
+    Unclaimed,
+    #[error(
+        "refusing to enroll without explicit approval: re-run with --yes to confirm account {account_id}"
+    )]
+    NeedsApproval { account_id: String },
+    #[error(transparent)]
+    Ask(#[from] AskError),
+    #[error("confirm enrollment {enrollment_id} into account {account_id}")]
+    Confirm {
+        enrollment_id: String,
+        account_id: String,
+        #[source]
+        source: CoreCallError,
+    },
+    #[error("restart Forge as an enrolled machine")]
+    Restart(#[source] RestartError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AccountMismatch {
+    #[error("--account-id must not be blank")]
+    Blank,
+    #[error("account mismatch: expected {expected}, found {actual}; refusing to confirm")]
+    Other { expected: String, actual: String },
+    #[error("account mismatch: expected {expected}, found none; refusing to confirm")]
+    Missing { expected: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SyncError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] crate::service::RunningError),
+    #[error("read this machine's identity")]
+    Identity(#[source] forge_http::sync::MachineIdentityError),
+    #[error("this Forge is not enrolled; run `ae account enroll` first")]
+    NotEnrolled,
+    #[error("restart Forge to sync the account config")]
+    Restart(#[source] RestartError),
+    #[error(transparent)]
+    Lock(#[from] forge_http::LockDataError),
+    #[error("open the Forge store in {}", data.display())]
+    Store {
+        data: PathBuf,
+        #[source]
+        source: Box<forge_store::OpenStoreError>,
+    },
+    #[error("build the Core HTTP client")]
+    Http(#[source] reqwest::Error),
+    #[error("start the account runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error("sync the account config of machine {machine_id}")]
+    Sync {
+        machine_id: String,
+        #[source]
+        source: forge_http::sync::SyncConfigError,
+    },
+}
+
+fn account_path() -> Result<PathBuf, LocateError> {
+    Ok(paths::data(App::Forge)?.join("ast_account.json"))
+}
+
+fn load_account(path: &Path) -> Result<Account, AccountFileError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Account::Unkeyed),
+        Err(source) => {
+            return Err(AccountFileError::Read {
+                path: path.to_owned(),
+                source,
+            });
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AccountFile::default()),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-    }
+    };
+    Account::decode(&bytes).map_err(|source| AccountFileError::Decode {
+        path: path.to_owned(),
+        source,
+    })
 }
 
-fn save_account(account: &AccountFile) -> Result<()> {
+fn save_account(path: &Path, account: &Account) -> Result<(), AccountFileError> {
+    write_private(path, &account.encode()).map_err(|source| AccountFileError::Write {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let path = account_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    let folder = path
+        .parent()
+        .expect("invariant: the account file lives in Forge's data folder");
+    std::fs::create_dir_all(folder)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".ast_account-")
+        .tempfile_in(folder)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&path)
-        .with_context(|| format!("write {}", path.display()))?;
-    serde_json::to_writer_pretty(&mut file, account)?;
-    file.flush()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    std::fs::File::open(folder)?.sync_all()?;
     Ok(())
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("start the account runtime")
 }
 
-fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient> {
+fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient, BuildCoreClientError> {
     forge_http::core::CoreClient::new(&forge_http::core::core_base_url(core))
 }
 
-pub fn run(args: &AccountArgs) -> Result<()> {
+pub(crate) fn run(args: &AccountArgs) -> Result<(), AccountError> {
     match &args.command {
         AccountCommand::Enroll {
             label,
             json,
             replace,
-        } => enroll(args.core.as_deref(), label.as_deref(), *json, *replace),
-        AccountCommand::Status { json } => status(args.core.as_deref(), *json),
+        } => Ok(enroll(
+            args.core.as_deref(),
+            label.as_deref(),
+            *json,
+            *replace,
+        )?),
+        AccountCommand::Status { json } => Ok(status(args.core.as_deref(), *json)?),
         AccountCommand::Confirm { yes, account_id } => {
-            confirm(args.core.as_deref(), *yes, account_id.as_deref())
+            Ok(confirm(args.core.as_deref(), *yes, account_id.as_deref())?)
         }
-        AccountCommand::Sync => sync_config_now(args.core.as_deref()),
+        AccountCommand::Sync => Ok(sync_config_now(args.core.as_deref())?),
     }
 }
 
-fn keypair(account: &mut AccountFile) -> Result<artisan_account::MachineKeypair> {
-    use base64::Engine as _;
-    if let (Some(secret), Some(public)) = (
-        account.secret_b64u.as_deref(),
-        account.public_b64u.as_deref(),
-    ) {
-        use base64::Engine as _;
-        let secret: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(secret)
-            .context("read the machine secret")?
-            .try_into()
-            .map_err(|_secret| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
-        let public: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(public)
-            .context("read the machine key")?
-            .try_into()
-            .map_err(|_key| anyhow::anyhow!("the machine key is not 32 bytes"))?;
-        let keypair = artisan_account::MachineKeypair::from_secret(secret)
-            .map_err(|_secret| anyhow::anyhow!("the machine secret is invalid"))?;
-        if keypair.public() != &public {
-            bail!("the stored machine key does not match its secret");
-        }
-        return Ok(keypair);
+fn keyed(path: &Path, account: Account) -> Result<(Account, MachineKeypair), EnrollError> {
+    if let Some(key) = account.key() {
+        let key = key.clone();
+        return Ok((account, key));
     }
-    let keypair = artisan_account::MachineKeypair::generate()
-        .map_err(|_rand| anyhow::anyhow!("random key failed"))?;
-    account.secret_b64u =
-        Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(keypair.secret()));
-    account.public_b64u = Some(keypair.public_b64u());
-    save_account(account)?;
-    Ok(keypair)
+    let key = MachineKeypair::generate().map_err(EnrollError::Key)?;
+    let account = Account::Keyed { key: key.clone() };
+    save_account(path, &account)?;
+    Ok((account, key))
 }
 
 fn label_default(label: Option<&str>) -> String {
@@ -189,60 +329,61 @@ fn label_default(label: Option<&str>) -> String {
         .to_owned()
 }
 
-fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) -> Result<()> {
-    let mut account = load_account()?;
-    if account.machine_id.is_some() && !replace {
-        bail!("this Forge is already enrolled; see `ae account status`");
+fn enroll(
+    core: Option<&str>,
+    label: Option<&str>,
+    json: bool,
+    replace: bool,
+) -> Result<(), EnrollError> {
+    let path = account_path()?;
+    let account = load_account(&path)?;
+    let enrolled = matches!(account, Account::Enrolled { .. });
+    if enrolled && !replace {
+        return Err(EnrollError::AlreadyEnrolled);
     }
-    let restart = replace && account.machine_id.is_some() && crate::service::is_running();
-    let keypair = if replace {
-        use base64::Engine as _;
-        // Core keeps revoked account/key pairs unique. Re-enrollment needs
-        // a new key, not just a new code for the revoked key. Keep the old
-        // binding on disk until Core accepts the replacement enrollment.
-        let fresh = artisan_account::MachineKeypair::generate()
-            .map_err(|_rand| anyhow::anyhow!("random key failed"))?;
-        account = AccountFile {
-            secret_b64u: Some(
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fresh.secret()),
-            ),
-            public_b64u: Some(fresh.public_b64u()),
-            ..AccountFile::default()
-        };
-        fresh
+    let restart =
+        replace && enrolled && crate::service::is_running().map_err(EnrollError::Running)?;
+    let key = if replace {
+        MachineKeypair::generate().map_err(EnrollError::Key)?
     } else {
-        keypair(&mut account)?
+        keyed(&path, account)?.1
     };
     let label = label_default(label);
     if label.is_empty() {
-        bail!("give this machine a label with --label");
+        return Err(EnrollError::NoLabel);
     }
-    let created = runtime()?.block_on(async {
-        client(core)?
-            .enroll_start(keypair.public(), &label, keypair.secret())
-            .await
-    })?;
-    account.enrollment_id = Some(created.enrollment_id.clone());
-    save_account(&account)?;
+    let client = client(core)?;
+    let created = runtime()
+        .map_err(EnrollError::Runtime)?
+        .block_on(client.enroll_start(key.public(), &label, key.secret()))
+        .map_err(|source| EnrollError::Start {
+            label: label.clone(),
+            source,
+        })?;
+    save_account(
+        &path,
+        &Account::Pending {
+            key,
+            enrollment_id: created.enrollment_id.clone(),
+        },
+    )?;
     if restart {
-        // The old daemon holds its machine identity in memory. Restart
-        // into the pending state so it observes the new confirmation.
-        crate::service::restart()?;
+        crate::service::restart().map_err(EnrollError::Restart)?;
     }
     if json {
-        println!("{}", enroll_report(&created));
+        crate::ui::print(format_args!("{}", enroll_report(&created)));
         return Ok(());
     }
-    println!(
+    crate::ui::print(format_args!(
         "Claim this code in a signed-in session: {} (expires {})",
         created.code, created.expires_at
-    );
-    println!("Then run `ae account status`, and `ae account confirm`.");
+    ));
+    crate::ui::print(format_args!(
+        "Then run `ae account status`, and `ae account confirm`."
+    ));
     Ok(())
 }
 
-/// Machine-readable enrollment for the Editor: the exact Core-created
-/// fields it needs to track the request. Never key material.
 fn enroll_report(created: &forge_http::core::EnrollmentCreated) -> serde_json::Value {
     serde_json::json!({
         "code": created.code.clone(),
@@ -252,143 +393,163 @@ fn enroll_report(created: &forge_http::core::EnrollmentCreated) -> serde_json::V
     })
 }
 
-fn status(core: Option<&str>, json: bool) -> Result<()> {
-    let account = load_account()?;
-    // Enrolled machines report their binding even though confirming clears
-    // the pending enrollment id.
-    if let Some(machine_id) = account.machine_id.as_deref() {
-        if json {
-            println!(
-                "{}",
-                enrolled_report(machine_id, account.account_id.as_deref())
-            );
+fn status(core: Option<&str>, json: bool) -> Result<(), StatusError> {
+    let (key, enrollment_id) = match load_account(&account_path()?)? {
+        Account::Enrolled {
+            machine_id,
+            account_id,
+            ..
+        } => {
+            if json {
+                crate::ui::print(format_args!(
+                    "{}",
+                    enrolled_report(&machine_id, Some(&account_id))
+                ));
+            } else {
+                crate::ui::print(format_args!(
+                    "Enrolled: machine {machine_id} in account {account_id}."
+                ));
+            }
             return Ok(());
         }
-        println!(
-            "Enrolled: machine {machine_id} in account {}.",
-            account.account_id.as_deref().unwrap_or("?")
-        );
-        return Ok(());
-    }
-    let Some(enrollment_id) = account.enrollment_id.as_deref() else {
-        if json {
-            println!("{}", no_enrollment_report());
-            return Ok(());
+        Account::Unkeyed | Account::Keyed { .. } => {
+            if json {
+                crate::ui::print(format_args!("{}", no_enrollment_report()));
+                return Ok(());
+            }
+            return Err(StatusError::NotStarted);
         }
-        bail!("no enrollment started; run `ae account enroll`");
+        Account::Pending { key, enrollment_id } => (key, enrollment_id),
     };
-    let keypair = keypair(&mut load_account()?)?;
-    let status = runtime()?.block_on(async {
-        client(core)?
-            .enrollment_status(enrollment_id, keypair.secret())
-            .await
-    })?;
+    let client = client(core)?;
+    let status = runtime()
+        .map_err(StatusError::Runtime)?
+        .block_on(client.enrollment_status(&enrollment_id, key.secret()))
+        .map_err(|source| StatusError::Status {
+            enrollment_id: enrollment_id.clone(),
+            source,
+        })?;
     if json {
-        println!("{}", pending_report(enrollment_id, &status));
+        crate::ui::print(format_args!("{}", pending_report(&enrollment_id, &status)));
         return Ok(());
     }
-    println!("Enrollment status: {}", status.status);
+    crate::ui::print(format_args!("Enrollment status: {}", status.status));
     match (status.account_id, status.email) {
         (Some(account_id), email) => {
-            println!("Claimed by account: {account_id}");
+            crate::ui::print(format_args!("Claimed by account: {account_id}"));
             if let Some(email) = email {
-                println!("Verified email: {email}");
+                crate::ui::print(format_args!("Verified email: {email}"));
             }
             if let Some(display_name) = status.display_name {
-                println!("Display name: {display_name}");
+                crate::ui::print(format_args!("Display name: {display_name}"));
             }
-            println!("If that identity is correct, run `ae account confirm`.");
+            crate::ui::print(format_args!(
+                "If that identity is correct, run `ae account confirm`."
+            ));
         }
-        (None, _) => println!("Not claimed yet; claim the code first."),
+        (None, _) => crate::ui::print(format_args!("Not claimed yet; claim the code first.")),
     }
     Ok(())
 }
 
-fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Result<()> {
-    let mut account = load_account()?;
-    if let Some(machine_id) = account.machine_id.clone() {
-        check_expected_account(expected_account, account.account_id.as_deref())?;
-        println!("Already enrolled as {machine_id}.");
-        return Ok(());
-    }
-    let enrollment_id = account
-        .enrollment_id
-        .clone()
-        .context("no enrollment started; run `ae account enroll`")?;
-    let keypair = keypair(&mut account)?;
-    let status = runtime()?.block_on(async {
-        client(core)?
-            .enrollment_status(&enrollment_id, keypair.secret())
-            .await
-    })?;
-    let account_id = status.account_id.clone().context(
-        "the enrollment is not claimed yet; claim the code in a signed-in session first",
-    )?;
+fn confirm(
+    core: Option<&str>,
+    yes: bool,
+    expected_account: Option<&str>,
+) -> Result<(), ConfirmError> {
+    let path = account_path()?;
+    let (key, enrollment_id) = match load_account(&path)? {
+        Account::Enrolled {
+            machine_id,
+            account_id,
+            ..
+        } => {
+            check_expected_account(expected_account, Some(&account_id))?;
+            crate::ui::print(format_args!("Already enrolled as {machine_id}."));
+            return Ok(());
+        }
+        Account::Unkeyed | Account::Keyed { .. } => return Err(ConfirmError::NotStarted),
+        Account::Pending { key, enrollment_id } => (key, enrollment_id),
+    };
+    let client = client(core)?;
+    let runtime = runtime().map_err(ConfirmError::Runtime)?;
+    let status = runtime
+        .block_on(client.enrollment_status(&enrollment_id, key.secret()))
+        .map_err(|source| ConfirmError::Status {
+            enrollment_id: enrollment_id.clone(),
+            source,
+        })?;
+    let account_id = status.account_id.clone().ok_or(ConfirmError::Unclaimed)?;
     check_expected_account(expected_account, Some(&account_id))?;
-    println!("Enrollment claimed by account: {account_id}");
+    crate::ui::print(format_args!("Enrollment claimed by account: {account_id}"));
     if let Some(email) = status.email.as_deref() {
-        println!("Verified email: {email}");
+        crate::ui::print(format_args!("Verified email: {email}"));
     }
     if let Some(display_name) = status.display_name.as_deref() {
-        println!("Display name: {display_name}");
+        crate::ui::print(format_args!("Display name: {display_name}"));
     }
     let approved = if yes {
         true
     } else if !crate::ui::interactive() {
-        bail!(
-            "refusing to enroll without explicit approval: re-run with --yes to confirm account {account_id}"
-        );
+        return Err(ConfirmError::NeedsApproval { account_id });
     } else {
         ask(&account_id)?
     };
     if !approved {
-        println!("Not confirmed.");
+        crate::ui::print(format_args!("Not confirmed."));
         return Ok(());
     }
-    let confirmed = runtime()?.block_on(async {
-        client(core)?
-            .confirm_enrollment(
-                &enrollment_id,
-                &account_id,
-                keypair.public(),
-                keypair.secret(),
-            )
-            .await
-    })?;
-    account.machine_id = Some(confirmed.machine_id.clone());
-    account.account_id = Some(confirmed.account_id);
-    account.enrollment_id = None;
-    save_account(&account)?;
-    if crate::service::is_running() {
-        crate::service::restart()?;
+    let confirmed = runtime
+        .block_on(client.confirm_enrollment(
+            &enrollment_id,
+            &account_id,
+            key.public(),
+            key.secret(),
+        ))
+        .map_err(|source| ConfirmError::Confirm {
+            enrollment_id: enrollment_id.clone(),
+            account_id: account_id.clone(),
+            source,
+        })?;
+    let machine_id = confirmed.machine_id.clone();
+    save_account(
+        &path,
+        &Account::Enrolled {
+            key,
+            machine_id: confirmed.machine_id,
+            account_id: confirmed.account_id,
+        },
+    )?;
+    if crate::service::is_running().map_err(ConfirmError::Running)? {
+        crate::service::restart().map_err(ConfirmError::Restart)?;
     }
-    crate::ui::success(format!("Enrolled this Forge as {}.", confirmed.machine_id));
+    crate::ui::success(format!("Enrolled this Forge as {machine_id}."));
     Ok(())
 }
 
-/// Refuses to confirm into an unexpected account. `None` expected means no
-/// constraint (standalone CLI); a blank flag never silently disables the
-/// check, and a missing stored/claimed id never satisfies a constraint.
-fn check_expected_account(expected: Option<&str>, actual: Option<&str>) -> Result<()> {
+fn check_expected_account(
+    expected: Option<&str>,
+    actual: Option<&str>,
+) -> Result<(), AccountMismatch> {
     let Some(expected) = expected else {
         return Ok(());
     };
     let expected = expected.trim();
     if expected.is_empty() {
-        bail!("--account-id must not be blank");
+        return Err(AccountMismatch::Blank);
     }
     match actual {
         Some(actual) if actual == expected => Ok(()),
-        Some(actual) => {
-            bail!("account mismatch: expected {expected}, found {actual}; refusing to confirm")
-        }
-        None => bail!("account mismatch: expected {expected}, found none; refusing to confirm"),
+        Some(actual) => Err(AccountMismatch::Other {
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+        }),
+        None => Err(AccountMismatch::Missing {
+            expected: expected.to_owned(),
+        }),
     }
 }
 
-/// No-enrollment report: the pending keys with nulls and `status "none"`,
-/// exit 0, so the Editor distinguishes "nothing started" from failure.
-/// Human output keeps the nonzero error.
 fn no_enrollment_report() -> serde_json::Value {
     serde_json::json!({
         "enrolled": false,
@@ -400,9 +561,6 @@ fn no_enrollment_report() -> serde_json::Value {
     })
 }
 
-/// Machine-readable enrollment state for the Editor's binding check.
-/// Only identifiers Core already shows the operator: never secrets, keys,
-/// codes, or tokens. Compact single line so WSL forwarding stays parseable.
 fn enrolled_report(machine_id: &str, account_id: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "enrolled": true,
@@ -411,8 +569,6 @@ fn enrolled_report(machine_id: &str, account_id: Option<&str>) -> serde_json::Va
     })
 }
 
-/// Pending-enrollment report: the server's verbatim `status` plus the
-/// claimed identity when present (`None` reads as JSON null).
 fn pending_report(enrollment_id: &str, status: &artisan_account::PairStatus) -> serde_json::Value {
     serde_json::json!({
         "enrolled": false,
@@ -424,7 +580,7 @@ fn pending_report(enrollment_id: &str, status: &artisan_account::PairStatus) -> 
     })
 }
 
-fn ask(account_id: &str) -> Result<bool> {
+fn ask(account_id: &str) -> Result<bool, AskError> {
     cliclack::confirm(format!(
         "Enroll this Forge into account {account_id}? The code alone is not enough: this binds the local key."
     ))
@@ -433,203 +589,68 @@ fn ask(account_id: &str) -> Result<bool> {
     .map_err(crate::ui::prompt_error)
 }
 
-/// Fetch and apply the latest account config bundle now (same path the
-/// Forge daemon runs on its interval).
-fn sync_config_now(core: Option<&str>) -> Result<()> {
-    let data_dir = artisan_paths::App::Forge.data()?;
-    let Some(identity) = forge_http::sync::load_machine_identity(&data_dir)? else {
-        bail!("this Forge is not enrolled; run `ae account enroll` first");
+fn sync_config_now(core: Option<&str>) -> Result<(), SyncError> {
+    let data_dir = paths::data(App::Forge)?;
+    let Some(identity) =
+        forge_http::sync::load_machine_identity(&data_dir).map_err(SyncError::Identity)?
+    else {
+        return Err(SyncError::NotEnrolled);
     };
-    if identity.account_id.is_none() {
-        bail!("no account recorded; re-run `ae account confirm`");
-    }
-    // A serving Forge owns the store and syncs on startup; opening the store
-    // here would recover (cancel) its live runs.
-    if crate::service::is_running() {
-        crate::service::restart()?;
+    if crate::service::is_running().map_err(SyncError::Running)? {
+        crate::service::restart().map_err(SyncError::Restart)?;
         crate::ui::success("Restarted Forge; it syncs the account config on startup.");
         return Ok(());
     }
     let _lock = forge_http::lock_data_dir(&data_dir)?;
-    let store = forge_store::Store::open(&data_dir).context("open the Forge store")?;
+    let store = forge_store::Store::open_current(&data_dir).map_err(|source| SyncError::Store {
+        data: data_dir.clone(),
+        source: Box::new(source),
+    })?;
     let engines = forge_engines::Engines::new(&data_dir);
-    let hub = forge_runs::Hub::new(store, engines, data_dir.clone());
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .context("build the Core HTTP client")?;
-    let outcome = runtime()?.block_on(async {
-        forge_http::sync::sync_config(
-            &http,
-            &forge_http::core::core_base_url(core),
-            &identity.machine_id,
-            &identity.secret,
-            &hub,
-            &data_dir,
-        )
-        .await
-    })?;
+        .map_err(SyncError::Http)?;
+    let outcome = runtime()
+        .map_err(SyncError::Runtime)?
+        .block_on(async {
+            let hub = forge_runs::Hub::new(store, engines, data_dir.clone());
+            let outcome = forge_http::sync::sync_config(
+                &http,
+                &forge_http::core::core_base_url(core),
+                &identity.machine_id,
+                &identity.secret,
+                &hub,
+                &data_dir,
+            )
+            .await;
+            hub.shutdown();
+            outcome
+        })
+        .map_err(|source| SyncError::Sync {
+            machine_id: identity.machine_id.clone(),
+            source,
+        })?;
     match outcome {
-        forge_http::sync::ConfigOutcome::Updated(state) => {
+        forge_http::sync::ConfigOutcome::Updated { state, kept_local } => {
             crate::ui::success(format!("Applied config bundle version {}.", state.version));
+            for kept in kept_local {
+                crate::ui::warning(format!(
+                    "Kept the MCP server {} created on this machine; the account's server of the same name was not applied. Rename one of them to use both.",
+                    kept.name
+                ));
+            }
         }
         forge_http::sync::ConfigOutcome::Current(state) => {
-            println!("Config is current (version {}).", state.version);
+            crate::ui::print(format_args!(
+                "Config is current (version {}).",
+                state.version
+            ));
         }
     }
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn labels_fall_back_to_a_bounded_hostname() {
-        assert_eq!(label_default(Some("  srv-1  ")), "srv-1");
-        assert!(label_default(Some("")).is_empty());
-        assert!(label_default(None).len() <= 64);
-    }
-
-    #[test]
-    fn account_file_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ast_account.json");
-        let account = AccountFile {
-            machine_id: Some("mch_1".into()),
-            account_id: Some("acct_1".into()),
-            ..AccountFile::default()
-        };
-        std::fs::write(&path, serde_json::to_string(&account).unwrap()).unwrap();
-        let read: AccountFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(read, account);
-    }
-
-    #[test]
-    fn expected_account_gate_rejects_mismatch_before_rpc() {
-        assert!(check_expected_account(None, None).is_ok());
-        assert!(check_expected_account(None, Some("acct_a")).is_ok());
-        assert!(check_expected_account(Some("acct_a"), Some("acct_a")).is_ok());
-        assert!(check_expected_account(Some(" acct_a "), Some("acct_a")).is_ok());
-        assert!(check_expected_account(Some("acct_a"), Some("acct_b")).is_err());
-        assert!(check_expected_account(Some("acct_a"), None).is_err());
-        assert!(check_expected_account(Some(""), Some("acct_a")).is_err());
-        assert!(check_expected_account(Some("   "), Some("acct_a")).is_err());
-    }
-
-    fn sorted_keys(value: &serde_json::Value) -> Vec<String> {
-        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
-        keys.sort_unstable();
-        keys
-    }
-
-    #[test]
-    fn status_json_reports_ids_with_exact_keys() {
-        let enrolled = enrolled_report("mch_1", Some("acct_1"));
-        assert_eq!(enrolled["enrolled"], true);
-        assert_eq!(enrolled["machine_id"], "mch_1");
-        assert_eq!(enrolled["account_id"], "acct_1");
-        assert_eq!(
-            sorted_keys(&enrolled),
-            ["account_id", "enrolled", "machine_id"]
-        );
-        let pending = pending_report(
-            "enr_1",
-            &artisan_account::PairStatus {
-                enrollment_id: None,
-                status: "claimed".to_owned(),
-                account_id: Some("acct_9".to_owned()),
-                email: Some("op@example.invalid".to_owned()),
-                display_name: None,
-                expires_at: None,
-            },
-        );
-        assert_eq!(pending["enrolled"], false);
-        assert_eq!(pending["enrollment_id"], "enr_1");
-        assert_eq!(pending["status"], "claimed");
-        assert_eq!(pending["account_id"], "acct_9");
-        assert_eq!(pending["email"], "op@example.invalid");
-        assert!(pending["display_name"].is_null());
-        assert_eq!(
-            sorted_keys(&pending),
-            [
-                "account_id",
-                "display_name",
-                "email",
-                "enrolled",
-                "enrollment_id",
-                "status"
-            ]
-        );
-    }
-
-    #[test]
-    fn status_json_never_carries_secrets() {
-        // Even with every secret field populated on disk, the reports only
-        // see identifiers: the builders take ids, never the file.
-        let secret = "SECRET-B64U-abcdefghijklmnopqrstuvwxyz012345";
-        let public = "PUBLIC-B64U-abcdefghijklmnopqrstuvwxyz012345";
-        let enrolled = enrolled_report("mch_1", Some("acct_1"));
-        let pending = pending_report(
-            "enr_1",
-            &artisan_account::PairStatus {
-                enrollment_id: None,
-                status: "pending".to_owned(),
-                account_id: None,
-                email: None,
-                display_name: None,
-                expires_at: None,
-            },
-        );
-        for report in [
-            serde_json::to_string(&enrolled).unwrap(),
-            serde_json::to_string(&pending).unwrap(),
-        ] {
-            assert!(!report.contains(secret));
-            assert!(!report.contains(public));
-            assert!(!report.contains("secret"));
-            assert!(!report.contains("token"));
-            assert!(!report.contains("code"));
-        }
-    }
-
-    #[test]
-    fn enroll_report_carries_the_created_dto_fields() {
-        let report = enroll_report(&forge_http::core::EnrollmentCreated {
-            enrollment_id: "enr_1".to_owned(),
-            code: "ABCDEFGH".to_owned(),
-            expires_at: "2030-01-01T00:00:00.000Z".to_owned(),
-            key_fingerprint: "fp".to_owned(),
-        });
-        assert_eq!(report["code"], "ABCDEFGH");
-        assert_eq!(report["enrollment_id"], "enr_1");
-        assert_eq!(report["expires_at"], "2030-01-01T00:00:00.000Z");
-        assert_eq!(report["key_fingerprint"], "fp");
-        assert_eq!(
-            sorted_keys(&report),
-            ["code", "enrollment_id", "expires_at", "key_fingerprint"]
-        );
-    }
-
-    #[test]
-    fn no_enrollment_json_uses_pending_keys_with_nulls() {
-        let report = no_enrollment_report();
-        assert_eq!(report["enrolled"], false);
-        assert!(report["enrollment_id"].is_null());
-        assert_eq!(report["status"], "none");
-        assert!(report["account_id"].is_null());
-        assert!(report["email"].is_null());
-        assert!(report["display_name"].is_null());
-        assert_eq!(
-            sorted_keys(&report),
-            [
-                "account_id",
-                "display_name",
-                "email",
-                "enrolled",
-                "enrollment_id",
-                "status"
-            ]
-        );
-    }
-}
+#[path = "../tests/account/state.rs"]
+mod tests;

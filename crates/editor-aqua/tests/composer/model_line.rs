@@ -32,14 +32,22 @@ fn claude_shows_the_latest_of_each_class_with_the_top_class_first() {
     ]);
     assert_eq!(
         shown(EngineId::Claude, &models, false),
-        ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+        [
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5"
+        ],
     );
 }
 
 #[test]
 fn a_dated_claude_id_does_not_count_its_date_as_a_version() {
     let models = catalog(&["claude-haiku-4-5-20251001", "claude-haiku-4-6"]);
-    assert_eq!(shown(EngineId::Claude, &models, false), ["claude-haiku-4-6"]);
+    assert_eq!(
+        shown(EngineId::Claude, &models, false),
+        ["claude-haiku-4-6"]
+    );
 }
 
 #[test]
@@ -64,7 +72,14 @@ fn codex_shows_the_latest_of_each_class_with_astra_first() {
     ]);
     assert_eq!(
         shown(EngineId::Codex, &models, false),
-        ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-reserve", "codex-auto-review"],
+        [
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-luna",
+            "gpt-reserve",
+            "codex-auto-review"
+        ],
     );
 }
 
@@ -104,5 +119,8 @@ fn opencode_has_no_standard_line_and_keeps_everything() {
 #[test]
 fn newly_discovered_families_are_not_hidden_by_the_known_family_filter() {
     let models = catalog(&["gpt-6-sol", "gpt-6.1-sol", "new-native-model"]);
-    assert_eq!(shown(EngineId::Codex, &models, false), ["gpt-6.1-sol", "new-native-model"]);
+    assert_eq!(
+        shown(EngineId::Codex, &models, false),
+        ["gpt-6.1-sol", "new-native-model"]
+    );
 }

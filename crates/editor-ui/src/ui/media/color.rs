@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 
 use crate::ui::rich::actions::CopyEntry;
@@ -21,7 +22,7 @@ pub enum Notation {
 }
 
 impl Notation {
-    pub const ALL: [Self; 6] = [
+    const ALL: [Self; 6] = [
         Self::Hex,
         Self::Rgb,
         Self::Hsl,
@@ -30,7 +31,7 @@ impl Notation {
         Self::P3,
     ];
 
-    pub const fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Hex => "HEX",
             Self::Rgb => "RGB",
@@ -49,7 +50,7 @@ impl Color {
         clippy::cast_possible_truncation,
         reason = "GPUI converts the clipped channels to f32 before HSL conversion"
     )]
-    pub fn reference_paint(self) -> aqua_core::GpuiHsla {
+    pub(crate) fn reference_paint(self) -> aqua_core::GpuiHsla {
         use palette::IntoColor;
         let c = self.clipped();
         let hsla: palette::Hsla =
@@ -65,7 +66,7 @@ impl Color {
         Self { r, g, b, alpha }
     }
 
-    pub const fn clipped(self) -> Self {
+    pub(crate) const fn clipped(self) -> Self {
         Self::srgb(
             self.r.clamp(0.0, 1.0),
             self.g.clamp(0.0, 1.0),
@@ -96,13 +97,13 @@ impl Color {
     fn to_p3(self) -> [f64; 3] {
         self.converted::<color::DisplayP3>()
     }
-    pub fn to_oklab(self) -> [f64; 3] {
+    fn to_oklab(self) -> [f64; 3] {
         self.converted::<color::Oklab>()
     }
-    pub fn to_oklch(self) -> [f64; 3] {
+    fn to_oklch(self) -> [f64; 3] {
         self.converted::<color::Oklch>()
     }
-    pub fn to_hsl(self) -> [f64; 3] {
+    fn to_hsl(self) -> [f64; 3] {
         let [h, s, l] = self.clipped().converted::<color::Hsl>();
         [h, s / 100.0, l / 100.0]
     }
@@ -230,7 +231,7 @@ pub fn color_ranges(text: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
             let letters = bytes[at + 1..end].iter().any(u8::is_ascii_alphabetic);
             let plausible =
                 matches!(digits, 6 | 8) || (matches!(digits, 3 | 4) && (in_code || letters));
-            if bounded && plausible && parse(&text[at..end]).is_some() {
+            if bounded && plausible && parse(slice(text, at..end)).is_some() {
                 found.push(at..end);
             }
             at = end.max(at + 1);
@@ -242,7 +243,7 @@ pub fn color_ranges(text: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
                     .iter()
                     .take_while(|byte| byte.is_ascii_alphabetic() || **byte == b'-')
                     .count();
-            let name = text[at..name_end].to_ascii_lowercase();
+            let name = slice(text, at..name_end).to_ascii_lowercase();
             if bytes.get(name_end) == Some(&b'(') && COLOR_FUNCTIONS.contains(&name.as_str()) {
                 let close = bytes[name_end..]
                     .iter()
@@ -251,7 +252,7 @@ pub fn color_ranges(text: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
                     .position(|byte| *byte == b')')
                     .map(|offset| name_end + offset + 1);
                 if let Some(end) = close
-                    && parse(&text[at..end]).is_some()
+                    && parse(slice(text, at..end)).is_some()
                 {
                     found.push(at..end);
                     at = end;

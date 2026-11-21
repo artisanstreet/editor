@@ -17,6 +17,7 @@ let
       [
         git
         coreutils
+        findutils
         gnused
         gnugrep
         procps

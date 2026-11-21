@@ -2,8 +2,15 @@
 name = "artisan-paths"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Where Artisan's apps (ae, Forge, the Editor) are installed and keep their data."
+
+[lib]
+doctest = false
+
+[dependencies]
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

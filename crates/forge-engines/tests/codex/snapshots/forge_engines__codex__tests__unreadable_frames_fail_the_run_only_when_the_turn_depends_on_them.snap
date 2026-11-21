@@ -1,0 +1,40 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+expression: "replay(\"malformed\")"
+---
+[
+    Event(
+        Session {
+            id: "root",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    ProtocolError(
+        "decode a Codex protocol frame: key must be a string at line 1 column 2",
+    ),
+    ProtocolError(
+        "decode a Codex protocol frame: invalid type: null, expected struct Frame at line 1 column 4",
+    ),
+    ProtocolError(
+        "decode a Codex protocol frame: invalid length 0, expected struct Frame with 5 elements at line 1 column 2",
+    ),
+    ProtocolError(
+        "Codex protocol frame has neither a method nor an id",
+    ),
+    ProtocolError(
+        "read Codex turn/completed of thread Some(\"root\"): missing field `status`",
+    ),
+    TurnEnd(
+        Done,
+    ),
+]

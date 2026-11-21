@@ -1,5 +1,7 @@
 use crate::ui::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens};
-use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Role};
+use aqua_core::{
+    GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, NumericRangeSemantics, Role,
+};
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{GpuiShadowLayer, Length, Style};
 
@@ -14,7 +16,7 @@ pub enum Tone {
 
 impl Tone {
     #[must_use]
-    pub fn of(percent: f64) -> Self {
+    fn of(percent: f64) -> Self {
         if percent > 80.0 {
             Self::Danger
         } else if percent > 50.0 {
@@ -26,6 +28,10 @@ impl Tone {
 }
 
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a percentage is in 0..=100"
+)]
 pub fn bar(theme: &ArtisanTheme, percent: f64, height: f32) -> Element {
     let percent = percent.clamp(0.0, 100.0);
     let fill = match Tone::of(percent) {
@@ -65,7 +71,11 @@ pub fn bar(theme: &ArtisanTheme, percent: f64, height: f32) -> Element {
         .style(
             Style::new()
                 .gpui_background(GpuiBackground::Solid(
-                    theme.colors.text.at(Opacity::MeterTrack).to_reference_paint(),
+                    theme
+                        .colors
+                        .text
+                        .at(Opacity::MeterTrack)
+                        .to_reference_paint(),
                 ))
                 .gpui_shadows(vec![hairline(theme.colors.text.at(Opacity::GlassBorder))]),
         )
@@ -84,4 +94,14 @@ pub fn bar(theme: &ArtisanTheme, percent: f64, height: f32) -> Element {
         .build()
         .role(Role::ProgressIndicator)
         .aria_value(format!("{percent:.0}%"))
+        .aria_range(NumericRangeSemantics {
+            min: 0.0,
+            max: 100.0,
+            value: percent,
+            step: 1.0,
+        })
 }
+
+#[cfg(test)]
+#[path = "../../tests/ui/progress.rs"]
+mod tests;

@@ -1,31 +1,11 @@
-use editor_ui::kit::button::special::{RIM, SEGMENTS, sample, svg, wedges};
-
-#[test]
-fn the_rim_samples_the_web_stops_exactly_at_their_positions() {
-    for (at, color) in RIM {
-        assert_eq!(sample(at), color, "stop at {at}");
-    }
-}
-
-#[test]
-fn the_rim_is_mirror_symmetric_around_the_navy_bottom() {
-    for step in 0..=20 {
-        let fraction = step as f32 / 40.0;
-        let (left, right) = (sample(fraction), sample(1.0 - fraction));
-        for channel in 0..3 {
-            assert!(
-                left[channel].abs_diff(right[channel]) <= 1,
-                "{fraction} and its mirror differ: {left:?} vs {right:?}"
-            );
-        }
-    }
-}
+use super::close;
+use editor_ui::kit::button::special::{SEGMENTS, svg, wedges};
 
 #[test]
 fn wedges_tile_the_full_turn_without_gaps() {
     let fan = wedges(0.0, SEGMENTS);
     assert_eq!(fan.len(), SEGMENTS, "one wedge per segment");
-    assert_eq!(fan[0].from_degrees, 0.0, "starts at the top");
+    assert!(close(fan[0].from_degrees, 0.0), "starts at the top");
     assert!(
         (fan[SEGMENTS - 1].to_degrees - 360.0).abs() < 1e-3,
         "ends a full turn later"

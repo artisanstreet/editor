@@ -1,16 +1,10 @@
-//! Tool results as short markdown, which the calling model reads and the
-//! user sees when they open the call: titles and words first, ids in code
-//! spans where a follow-up call needs them.
-
 use crate::transcript::time;
 use artisan_api::{Thread, ThreadId};
 use forge_runs::{AgentInfo, AgentState, Hub};
-use forge_store::{GrepPage, SearchPage, Touch};
+use forge_store::{GrepPage, RecallIndex, RecallKind, SearchPage, Touch};
 use std::fmt::Write as _;
 
-/// Serialize the shared catalog directly so new model settings are exposed
-/// without maintaining a second, incomplete representation for MCP.
-pub fn models(models: &[artisan_api::Model]) -> anyhow::Result<String> {
+pub(crate) fn models(models: &[artisan_api::Model]) -> Result<String, serde_json::Error> {
     Ok(format!(
         "Use effort, speed and variant ids exactly as listed. OpenCode reasoning choices use variant. \
          Defaults are default_effort, default_variant and speeds[].default. \
@@ -20,23 +14,21 @@ pub fn models(models: &[artisan_api::Model]) -> anyhow::Result<String> {
     ))
 }
 
-/// Who an indexed item's text is from.
-fn who(kind: &str) -> &'static str {
+const fn who(kind: RecallKind) -> &'static str {
     match kind {
-        "user" => "You",
-        "assistant" => "Reply",
-        "tool" => "Tool",
-        "agent" => "Agent",
-        "plan" => "Plan",
-        "question" => "Question",
-        "notice" => "Note",
-        "error" => "Error",
-        "image" => "Image",
-        _ => "Item",
+        RecallKind::User => "You",
+        RecallKind::Assistant => "Reply",
+        RecallKind::Tool => "Tool",
+        RecallKind::Agent => "Agent",
+        RecallKind::Plan => "Plan",
+        RecallKind::Question => "Question",
+        RecallKind::Notice => "Note",
+        RecallKind::Error => "Error",
+        RecallKind::Image => "Image",
+        RecallKind::Compaction => "Checkpoint",
     }
 }
 
-/// `text` on one line, whitespace collapsed.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -47,15 +39,27 @@ fn title(title: Option<&str>) -> &str {
         .unwrap_or("Untitled thread")
 }
 
-/// Starts a group under its thread's title when the thread changes.
 fn group(out: &mut String, last: &mut Option<ThreadId>, thread: &ThreadId, name: Option<&str>) {
     if last.as_ref() != Some(thread) {
-        writeln!(out, "\n### {}\n", title(name)).ok();
+        writeln!(out, "\n### {}\n", title(name))
+            .expect("invariant: writing to a String cannot fail");
         *last = Some(thread.clone());
     }
 }
 
-pub fn search(page: &SearchPage, offset: u32) -> String {
+pub(crate) fn with_coverage(index: RecallIndex, answer: String) -> String {
+    match index {
+        RecallIndex::Built => answer,
+        RecallIndex::Building => format!(
+            "{answer}\n\nForge is still indexing older items for search, so some may be missing."
+        ),
+        RecallIndex::Incomplete => format!(
+            "{answer}\n\nForge couldn't finish indexing older items for search, so some may be missing until it restarts."
+        ),
+    }
+}
+
+pub(crate) fn search(page: &SearchPage, continued: bool) -> String {
     let mut out = String::new();
     let mut last = None;
     for hit in &page.hits {
@@ -68,23 +72,24 @@ pub fn search(page: &SearchPage, offset: u32) -> String {
         writeln!(
             out,
             "- **{}**, {}: {} `{}`",
-            who(&hit.kind),
+            who(hit.kind),
             time(hit.created_at),
             one_line(&hit.snippet),
             hit.item_id,
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     if let Some(next) = page.next {
-        writeln!(out, "\nMore hits: call again with offset {next}.").ok();
-    } else if offset > 0 {
+        writeln!(out, "\nMore hits: call again with cursor {next}.")
+            .expect("invariant: writing to a String cannot fail");
+    } else if continued {
         out.push_str("\nNo more hits.\n");
     }
     out.push_str("\nRead around a hit with thread_read and its item id.\n");
     out.trim_start().to_owned()
 }
 
-pub fn grep(page: &GrepPage) -> String {
+pub(crate) fn grep(page: &GrepPage) -> String {
     let mut out = String::new();
     let mut last = None;
     for found in &page.matches {
@@ -97,28 +102,25 @@ pub fn grep(page: &GrepPage) -> String {
         writeln!(
             out,
             "**{}**, {}, line {} `{}`\n",
-            who(&found.kind),
+            who(found.kind),
             time(found.created_at),
             found.line,
             found.item_id,
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
         for line in found.before.iter().chain([&found.text]).chain(&found.after) {
-            writeln!(out, "> {line}").ok();
+            writeln!(out, "> {line}").expect("invariant: writing to a String cannot fail");
         }
         out.push('\n');
     }
     if let Some(next) = page.next {
-        writeln!(
-            out,
-            "Older items not searched yet: call again with cursor {next}."
-        )
-        .ok();
+        writeln!(out, "More matches: call again with cursor {next}.")
+            .expect("invariant: writing to a String cannot fail");
     }
     out.trim().to_owned()
 }
 
-pub fn touches(touches: &[Touch]) -> String {
+pub(crate) fn touches(touches: &[Touch]) -> String {
     let mut out = String::new();
     let mut last = None;
     for touch in touches {
@@ -141,13 +143,12 @@ pub fn touches(touches: &[Touch]) -> String {
             time(touch.created_at),
             touch.item_id
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     out.trim_start().to_owned()
 }
 
-/// One thread as a list line: title, harness and model, state, id.
-pub fn thread(hub: &Hub, thread: &Thread) -> String {
+pub(crate) fn thread(hub: &Hub, thread: &Thread) -> String {
     let mut states = Vec::new();
     if hub.is_live(&thread.id) {
         states.push("working");
@@ -180,26 +181,13 @@ pub fn thread(hub: &Hub, thread: &Thread) -> String {
     )
 }
 
-pub fn threads<'a>(hub: &Hub, threads: impl IntoIterator<Item = &'a Thread>) -> String {
-    let lines: Vec<String> = threads
-        .into_iter()
-        .map(|found| format!("- {}", thread(hub, found)))
-        .collect();
-    if lines.is_empty() {
-        "No threads.".to_owned()
-    } else {
-        lines.join("\n")
-    }
-}
-
-pub fn warnings(out: &mut String, warnings: &[String]) {
+pub(crate) fn warnings(out: &mut String, warnings: &[String]) {
     for warning in warnings {
-        writeln!(out, "\nNote: {warning}").ok();
+        writeln!(out, "\nNote: {warning}").expect("invariant: writing to a String cannot fail");
     }
 }
 
-/// One agent: what it works on, where, how it stands, and its reply.
-pub fn agent(info: &AgentInfo) -> String {
+pub(crate) fn agent(info: &AgentInfo) -> String {
     let state = match info.state {
         AgentState::Working => "working",
         AgentState::WaitingForUser => "waiting for the user",
@@ -228,16 +216,16 @@ pub fn agent(info: &AgentInfo) -> String {
         info.agent,
     );
     if let Some(error) = &info.error {
-        writeln!(out, "\nError: {error}").ok();
+        writeln!(out, "\nError: {error}").expect("invariant: writing to a String cannot fail");
     }
     if let Some(result) = &info.result {
-        writeln!(out, "\n{}", result.trim()).ok();
+        writeln!(out, "\n{}", result.trim()).expect("invariant: writing to a String cannot fail");
     }
     warnings(&mut out, &info.warnings);
     out
 }
 
-pub fn agents(infos: &[AgentInfo]) -> String {
+pub(crate) fn agents(infos: &[AgentInfo]) -> String {
     infos
         .iter()
         .map(agent)
@@ -245,71 +233,10 @@ pub fn agents(infos: &[AgentInfo]) -> String {
         .join("\n---\n\n")
 }
 
-/// A markdown table cell: one line, pipes escaped.
-pub fn cell(text: &str) -> String {
+pub(crate) fn cell(text: &str) -> String {
     one_line(text).replace('|', "\\|")
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn opencode_agent_reports_variant_even_with_legacy_effort() {
-        let mut info = forge_runs::AgentInfo {
-            agent: artisan_api::ItemId::new(),
-            thread: artisan_api::ThreadId::new(),
-            task: "Review".into(),
-            harness: artisan_api::EngineId::OpenCode,
-            model: Some("opencode-go/muse".into()),
-            effort: Some("medium".into()),
-            variant: Some("xhigh".into()),
-            permissions: artisan_api::Permissions::Auto,
-            state: forge_runs::AgentState::Working,
-            result: None,
-            error: None,
-            warnings: Vec::new(),
-        };
-        let output = super::agent(&info);
-        assert!(output.contains("opencode-go/muse, xhigh"));
-        assert!(!output.contains("medium"));
-        info.variant = None;
-        assert!(!super::agent(&info).contains("medium"));
-        info.harness = artisan_api::EngineId::Codex;
-        assert!(super::agent(&info).contains("medium"));
-    }
-
-    #[test]
-    fn catalog_exposes_variant_ids_defaults_and_exact_context_choices() {
-        let models: Vec<artisan_api::Model> = serde_json::from_value(serde_json::json!([{
-            "id": "opencode/muse", "name": "Muse", "efforts": [], "default_effort": null,
-            "variants": [{"id": "xhigh", "label": "Extra high"}], "default_variant": "xhigh",
-            "context_window": 262_144,
-            "context_windows": [{"tokens": 262_144}, {"tokens": 1_048_576, "override_tokens": 1_000_000}],
-            "supports_images": true, "description": "Contributor", "lab": "Meta", "group": "OpenCode",
-            "speeds": [{"id": "fast", "label": "Fast", "description": "Lower latency", "default": true}],
-            "effort_notes": [{"effort": "max", "special": true, "advisory": "More usage", "description": "Maximum effort"}]
-        }])).unwrap();
-        let output = super::models(&models).unwrap();
-        assert!(output.contains("OpenCode reasoning choices use variant"));
-        let json = output
-            .split("```json\n")
-            .nth(1)
-            .unwrap()
-            .split("\n```")
-            .next()
-            .unwrap();
-        let catalog: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(catalog[0]["variants"][0]["id"], "xhigh");
-        assert_eq!(catalog[0]["default_variant"], "xhigh");
-        assert_eq!(catalog[0]["context_window"], 262_144);
-        assert_eq!(
-            catalog[0]["context_windows"][1]["override_tokens"],
-            1_000_000
-        );
-        assert_eq!(catalog[0]["speeds"][0]["default"], true);
-        assert_eq!(catalog[0]["effort_notes"][0]["advisory"], "More usage");
-        assert_eq!(catalog[0]["supports_images"], true);
-        assert_eq!(catalog[0]["description"], "Contributor");
-        assert_eq!(catalog[0]["lab"], "Meta");
-        assert_eq!(catalog[0]["group"], "OpenCode");
-    }
-}
+#[path = "../tests/format/unit.rs"]
+mod tests;

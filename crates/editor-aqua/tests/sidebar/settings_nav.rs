@@ -1,4 +1,4 @@
-use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+use editor_aqua::core::{Screen, SettingsPage};
 use editor_aqua::shell::host::ShellResources;
 use editor_aqua::sidebar::{controller::Sidebar, settings_nav};
 use editor_aqua::ui::theme::ArtisanTheme;
@@ -10,10 +10,7 @@ use std::{
 #[test]
 fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     core.navigate(Screen::Settings(SettingsPage::General));
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::General));
     let mut sidebar = Sidebar::new(false);
@@ -21,15 +18,16 @@ fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
     sidebar.sync(&core, artisan_api::now());
     let terminal = Instant::now() + Duration::from_secs(1);
     let theme = ArtisanTheme::resolved();
+    let emit: Rc<dyn Fn(SettingsPage)> = Rc::new(|_| {});
     let build = |sidebar: &Sidebar, now| {
         settings_nav::build(
             sidebar.host_data(&core),
             SettingsPage::General,
-            theme,
+            &theme,
             &sidebar.settings_motion,
             now,
             false,
-            Rc::new(|_| {}),
+            &emit,
         )
     };
     let mut resources = ShellResources::new(1.25).unwrap();
@@ -62,7 +60,7 @@ fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
         .unwrap();
     resources.ui.build_frame().unwrap();
     let (expanded, expanded_access) = about(&resources.ui);
-    let children = settings_nav::children_height(4);
+    let children = settings_nav::children_height(&ArtisanTheme::resolved(), 4);
     assert!(
         (expanded.y - collapsed.y - children).abs() < 1.0 / 1.25,
         "the completion frame must expose all four General children without pointer input"
@@ -71,7 +69,7 @@ fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
         (expanded_access.y - collapsed_access.y - children * 1.25).abs() < 1.0,
         "accessibility must follow the completed layout in physical pixels at 1.25 DPI"
     );
-    assert_eq!(
+    test_support::assert_near!(
         expanded_access.y,
         expanded.y * 1.25,
         "the final About hit target and accessibility rectangle must agree"

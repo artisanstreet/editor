@@ -1,20 +1,32 @@
-//! The steps of an `input` batch and the key names they use, read from
-//! the agent's JSON. Coordinates are in screenshot pixels; the batch runner
-//! maps them to the display.
-
 use crate::desktop::Button;
 use forge_runs::Refused;
 use serde_json::{Map, Value};
 use std::time::Duration;
 
-/// The longest a `wait` step may wait.
 const MAX_WAIT: Duration = Duration::from_secs(30);
 
-/// A point in screenshot pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct At {
-    pub x: f64,
-    pub y: f64,
+    x: f64,
+    y: f64,
+}
+
+impl At {
+    #[must_use]
+    pub(crate) fn new(x: f64, y: f64) -> Option<Self> {
+        let valid = |coordinate: f64| coordinate.is_finite() && coordinate >= 0.0;
+        (valid(x) && valid(y)).then_some(Self { x, y })
+    }
+
+    #[must_use]
+    pub(crate) const fn x(self) -> f64 {
+        self.x
+    }
+
+    #[must_use]
+    pub(crate) const fn y(self) -> f64 {
+        self.y
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -25,7 +37,6 @@ pub enum Step {
         button: Button,
         count: u8,
     },
-    /// Presses a button, first moving there if `at` is given.
     Down {
         at: Option<At>,
         button: Button,
@@ -34,10 +45,10 @@ pub enum Step {
         at: Option<At>,
         button: Button,
     },
-    /// Presses at the first point, moves through the rest, releases at the
-    /// last.
     Drag {
-        path: Vec<At>,
+        from: At,
+        through: Vec<At>,
+        to: At,
         button: Button,
     },
     Scroll {
@@ -45,7 +56,6 @@ pub enum Step {
         dx: i32,
         dy: i32,
     },
-    /// Presses a chord: every key down in order, then up in reverse.
     Key(Vec<Key>),
     KeyDown(Key),
     KeyUp(Key),
@@ -56,13 +66,10 @@ pub enum Step {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wait {
     For(Duration),
-    /// Until the screen differs from how it was when the wait began.
     Changed(Duration),
-    /// Until the screen stops changing.
     Settled(Duration),
 }
 
-/// A key on any keyboard: a named one, or the key that types a character.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Named(Named),
@@ -96,24 +103,18 @@ pub enum Named {
     PrintScreen,
     Pause,
     Menu,
-    /// F1 to F24.
     F(u8),
 }
 
-fn refused(message: String) -> anyhow::Error {
-    Refused(message).into()
-}
-
-/// Reads an `input` call's `steps`.
-pub fn parse(steps: &Value) -> anyhow::Result<Vec<Step>> {
+pub(crate) fn parse(steps: &Value) -> Result<Vec<Step>, Refused> {
     let steps = steps
         .as_array()
-        .ok_or_else(|| refused("steps is a list of steps.".to_owned()))?;
+        .ok_or_else(|| Refused("steps is a list of steps.".to_owned()))?;
     if steps.is_empty() {
-        return Err(refused("steps is empty; give at least one.".to_owned()));
+        return Err(Refused("steps is empty; give at least one.".to_owned()));
     }
     if steps.len() > 256 {
-        return Err(refused("at most 256 steps per batch".into()));
+        return Err(Refused("at most 256 steps per batch".into()));
     }
     steps
         .iter()
@@ -122,7 +123,7 @@ pub fn parse(steps: &Value) -> anyhow::Result<Vec<Step>> {
             step.as_object()
                 .ok_or_else(|| "a step is an object such as {\"click\": [x, y]}".to_owned())
                 .and_then(parse_step)
-                .map_err(|error| refused(format!("Step {}: {error}", index + 1)))
+                .map_err(|error| Refused(format!("Step {}: {error}", index + 1)))
         })
         .collect()
 }
@@ -177,11 +178,16 @@ fn parse_step(step: &Map<String, Value>) -> Result<Step, String> {
         },
         "drag" => {
             let path = value.as_array().ok_or("drag must be a list of points")?;
-            if !(2..=256).contains(&path.len()) {
+            let (Some((from, rest)), true) = (path.split_first(), path.len() <= 256) else {
                 return Err("drag needs 2 to 256 points".into());
-            }
+            };
+            let Some((to, through)) = rest.split_last() else {
+                return Err("drag needs 2 to 256 points".into());
+            };
             Step::Drag {
-                path: path.iter().map(at).collect::<Result<_, _>>()?,
+                from: at(from)?,
+                through: through.iter().map(at).collect::<Result<_, _>>()?,
+                to: at(to)?,
                 button: button()?,
             }
         }
@@ -208,7 +214,7 @@ fn parse_step(step: &Map<String, Value>) -> Result<Step, String> {
             Step::Type(text.to_owned())
         }
         "wait" => Step::Wait(wait(value)?),
-        _ => unreachable!(),
+        other => unreachable!("invariant: {other} is one of ACTIONS"),
     })
 }
 
@@ -217,15 +223,11 @@ fn at(value: &Value) -> Result<At, String> {
         .as_array()
         .filter(|v| v.len() == 2)
         .ok_or("a point is [x, y]")?;
-    let coord = |v: &Value| {
-        v.as_f64()
-            .filter(|v| v.is_finite() && *v >= 0.0)
-            .ok_or_else(|| "coordinates must be finite and nonnegative".to_owned())
-    };
-    Ok(At {
-        x: coord(&xy[0])?,
-        y: coord(&xy[1])?,
-    })
+    xy[0]
+        .as_f64()
+        .zip(xy[1].as_f64())
+        .and_then(|(x, y)| At::new(x, y))
+        .ok_or_else(|| "coordinates must be finite and nonnegative".to_owned())
 }
 fn optional_at(value: &Value) -> Result<Option<At>, String> {
     if value == &Value::Bool(true) {
@@ -282,7 +284,7 @@ fn wait(value: &Value) -> Result<Wait, String> {
     }
 }
 
-pub fn key(name: &str) -> Result<Key, String> {
+pub(crate) fn key(name: &str) -> Result<Key, String> {
     use Named::{
         Alt, Backspace, CapsLock, Ctrl, Delete, Down, End, Enter, Escape, F, Home, Insert, Left,
         Menu, NumLock, PageDown, PageUp, Pause, PrintScreen, Right, ScrollLock, Shift, Space,

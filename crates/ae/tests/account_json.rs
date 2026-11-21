@@ -1,8 +1,3 @@
-//! `ae account enroll/status/confirm --json` against a fake Core: the real
-//! binary, an isolated HOME/XDG, and canned enrollment endpoints. Asserts
-//! the actual stdout shapes, the pending → claimed → enrolled transitions,
-//! and that stdout never carries key material.
-
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::process::{Command, Output};
@@ -19,11 +14,6 @@ fn ae() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ae"))
 }
 
-/// Isolated per-command environment on every OS: HOME/USERPROFILE plus the
-/// platform data roots, all under temp and set only on the child (never
-/// global). Also drops a Forge binary placeholder where `wsl::forge_target`
-/// looks, so Windows runs stay local instead of querying real WSL, and no
-/// real user account file is ever read.
 fn isolated(command: &mut Command, home: &std::path::Path) -> std::io::Result<()> {
     let localappdata = home.join("localappdata");
     command
@@ -65,11 +55,9 @@ fn account_file(home: &std::path::Path) -> std::path::PathBuf {
     forge_data_dir(home).join("ast_account.json")
 }
 
-/// Fake Core: canned enrollment endpoints over blocking std IO (no extra
-/// test dependencies). Status flips pending → claimed after the first
-/// poll, modelling approval without a session.
 struct FakeCore {
     url: String,
+    address: std::net::SocketAddr,
     shutdown: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -77,30 +65,28 @@ struct FakeCore {
 impl FakeCore {
     fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        let url = format!("http://{}", listener.local_addr()?);
+        let address = listener.local_addr()?;
+        let url = format!("http://{address}");
         let polls = Arc::new(AtomicUsize::new(0));
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = std::thread::spawn({
             let polls = Arc::clone(&polls);
             let shutdown = Arc::clone(&shutdown);
             move || {
-                if listener.set_nonblocking(true).is_err() {
-                    return;
-                }
-                while !shutdown.load(Ordering::SeqCst) {
-                    let accepted = listener
-                        .accept()
-                        .and_then(|(stream, _)| stream.set_nonblocking(false).map(|()| stream));
-                    let Ok(stream) = accepted else {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    };
-                    serve(stream, &polls);
+                for accepted in listener.incoming() {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match accepted {
+                        Ok(stream) => serve(stream, &polls),
+                        Err(_unaccepted) => break,
+                    }
                 }
             }
         });
         Ok(Self {
             url,
+            address,
             shutdown,
             thread: Some(thread),
         })
@@ -110,6 +96,7 @@ impl FakeCore {
 impl Drop for FakeCore {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        drop(std::net::TcpStream::connect(self.address));
         if let Some(thread) = self.thread.take() {
             let _joined = thread.join();
         }
@@ -192,6 +179,8 @@ fn route(method: &str, path: &str, polls: &AtomicUsize) -> (u16, String) {
                 }),
             )
         }
+    } else if method == "GET" && path == "/v1/config/bundles/latest" {
+        (200, serde_json::json!({ "bundle": null }))
     } else if method == "POST" && path == "/v1/machines/enrollments/confirm" {
         (
             200,
@@ -223,24 +212,22 @@ fn stdout_json(output: &Output) -> serde_json::Result<serde_json::Value> {
     serde_json::from_slice(&output.stdout)
 }
 
-/// Full lifecycle through the real binary: no-enrollment null shape,
-/// enroll code, pending → claimed transitions, guarded confirm, enrolled
-/// shape — with stdout secret-free throughout.
 #[test]
-#[expect(clippy::too_many_lines, reason = "one account enrollment lifecycle is exercised against a shared server")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one account enrollment lifecycle is exercised against a shared server"
+)]
 fn enroll_status_confirm_json_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().to_owned();
     let fake = FakeCore::start().unwrap();
     let core = fake.url.clone();
 
-    // Fresh machine: null shape, exit 0 (not an error).
     let null = stdout_json(&run(&home, &["account", "status", "--json"]).unwrap()).unwrap();
     assert_eq!(null["enrolled"], false);
     assert!(null["enrollment_id"].is_null());
     assert_eq!(null["status"], "none");
 
-    // Enroll: stdout carries the exact stub code, never key material.
     let enrolled = stdout_json(
         &run(
             &home,
@@ -270,7 +257,6 @@ fn enroll_status_confirm_json_lifecycle() {
     );
     assert!(!stdout.contains(&public), "stdout must not carry the key");
 
-    // First poll: pending; second: claimed (the stub models approval).
     let pending =
         stdout_json(&run(&home, &["account", "--core", &core, "status", "--json"]).unwrap())
             .unwrap();
@@ -284,8 +270,6 @@ fn enroll_status_confirm_json_lifecycle() {
     assert_eq!(claimed["account_id"], ACCOUNT_ID);
     assert_eq!(claimed["email"], EMAIL);
 
-    // Confirm into the expected account, then the enrolled shape reads
-    // back the stub's machine binding with no further network.
     let confirmed = run(
         &home,
         &[
@@ -309,7 +293,6 @@ fn enroll_status_confirm_json_lifecycle() {
     assert_eq!(bound["machine_id"], MACHINE_ID);
     assert_eq!(bound["account_id"], ACCOUNT_ID);
 
-    // Human output still works alongside the flag.
     let human = run(&home, &["account", "--core", &core, "status"]).unwrap();
     assert!(human.status.success());
     assert!(
@@ -317,9 +300,6 @@ fn enroll_status_confirm_json_lifecycle() {
         "human status names the machine"
     );
 
-    // A removed machine still has a local enrollment. Ordinary enrollment
-    // must preserve it; explicit replacement rotates the revoked key and
-    // returns to a pending enrollment that can be claimed and confirmed.
     let refused = run(&home, &["account", "--core", &core, "enroll", "--json"]).unwrap();
     assert!(!refused.status.success(), "replacement must be explicit");
     let replaced = stdout_json(
@@ -366,5 +346,31 @@ fn enroll_status_confirm_json_lifecycle() {
         confirmed.status.success(),
         "replacement must confirm: {}",
         String::from_utf8_lossy(&confirmed.stderr)
+    );
+}
+
+#[test]
+fn syncing_with_forge_stopped_reaches_core_instead_of_crashing() {
+    use base64::Engine as _;
+    let home = tempfile::tempdir().unwrap();
+    let core = FakeCore::start().unwrap();
+    let key = artisan_account::MachineKeypair::generate().unwrap();
+    let account = serde_json::json!({
+        "secret_b64u": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.secret()),
+        "public_b64u": key.public_b64u(),
+        "machine_id": MACHINE_ID,
+        "account_id": ACCOUNT_ID,
+    });
+    let path = account_file(home.path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, account.to_string()).unwrap();
+
+    let output = run(home.path(), &["account", "--core", &core.url, "sync"]).unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("Core has no config bundle yet"),
+        "stderr: {stderr}"
     );
 }

@@ -6,8 +6,8 @@ use artisan_api::ThreadId;
 use crate::composer::draft_session::Posting;
 use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
 
-pub const DOCK_KEY: &str = "composer-dock";
-pub const STAGE_KEY: &str = "new-thread-stage";
+pub(crate) const DOCK_KEY: &str = "composer-dock";
+pub(crate) const STAGE_KEY: &str = "new-thread-stage";
 const MOVE: Transition = Transition {
     duration: Duration::from_millis(400),
     easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
@@ -49,7 +49,7 @@ impl Default for ComposerGlide {
     }
 }
 
-pub enum Route<'a> {
+pub(crate) enum Route<'a> {
     NewThread(Posting),
     Thread {
         thread: &'a ThreadId,
@@ -60,12 +60,18 @@ pub enum Route<'a> {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Synced {
-    pub moving: bool,
-    pub sky_gone: bool,
+    pub(crate) moving: bool,
+    pub(crate) sky_gone: bool,
 }
 
 impl ComposerGlide {
-    pub fn follow(&mut self, route: Route<'_>, lift: f32, now: Instant, reduced_motion: bool) {
+    pub(crate) fn follow(
+        &mut self,
+        route: Route<'_>,
+        lift: f32,
+        now: Instant,
+        reduced_motion: bool,
+    ) {
         match route {
             Route::NewThread(posting) => self.new_thread(posting, lift, now, reduced_motion),
             Route::Thread { thread, sent } => {
@@ -87,26 +93,25 @@ impl ComposerGlide {
         }
     }
 
-    pub fn new_thread(&mut self, posting: Posting, lift: f32, now: Instant, reduced_motion: bool) {
+    fn new_thread(&mut self, posting: Posting, lift: f32, now: Instant, reduced_motion: bool) {
         match posting {
             Posting::Sending(thread) => self.launch(thread, lift, now, reduced_motion),
-            Posting::Blocked(thread) | Posting::Accepted(thread) if self.launched_into(&thread) => {
-            }
-            Posting::Blocked(_) | Posting::Accepted(_) | Posting::Idle | Posting::Failed => {
+            Posting::Accepted(thread) if self.launched_into(&thread) => {}
+            Posting::Accepted(_) | Posting::Idle | Posting::Failed => {
                 self.center(now, reduced_motion);
             }
         }
     }
 
     #[must_use]
-    pub fn awaits(&self, posting: &Posting) -> bool {
+    pub(crate) fn awaits(&self, posting: &Posting) -> bool {
         self.wants_launch(posting) != self.launched()
     }
 
     fn wants_launch(&self, posting: &Posting) -> bool {
         match posting {
             Posting::Sending(_) => true,
-            Posting::Blocked(thread) | Posting::Accepted(thread) => self.launched_into(thread),
+            Posting::Accepted(thread) => self.launched_into(thread),
             Posting::Idle | Posting::Failed => false,
         }
     }
@@ -138,23 +143,20 @@ impl ComposerGlide {
             Stage::Away | Stage::Docked(_) => None,
             Stage::Centered(centered) => *centered,
         };
-        match centered {
-            Some(centered) => {
-                let from = centered.composer_bottom + lift - centered.stage_bottom;
-                let start = from + self.shift(now);
-                self.stage = Stage::Launched { from, thread };
-                self.shift = Glide::Resting(start).retarget(0.0, now, MOVE, reduced_motion);
-                self.dusk = self.dusk.retarget(1.0, now, DUSK, reduced_motion);
-            }
-            None => {
-                self.stage = Stage::Launched { from: 0.0, thread };
-                self.shift = Glide::Resting(0.0);
-                self.dusk = Glide::Resting(1.0);
-            }
+        if let Some(centered) = centered {
+            let from = centered.composer_bottom + lift - centered.stage_bottom;
+            let start = from + self.shift(now);
+            self.stage = Stage::Launched { from, thread };
+            self.shift = Glide::Resting(start).retarget(0.0, now, MOVE, reduced_motion);
+            self.dusk = self.dusk.retarget(1.0, now, DUSK, reduced_motion);
+        } else {
+            self.stage = Stage::Launched { from: 0.0, thread };
+            self.shift = Glide::Resting(0.0);
+            self.dusk = Glide::Resting(1.0);
         }
     }
 
-    pub fn leave(&mut self, thread: Option<&ThreadId>) {
+    fn leave(&mut self, thread: Option<&ThreadId>) {
         match (&self.stage, thread) {
             (Stage::Launched { thread: sent, .. }, Some(thread)) if sent == thread => {
                 self.stage = Stage::Docked(thread.clone());
@@ -165,47 +167,47 @@ impl ComposerGlide {
     }
 
     #[must_use]
-    pub const fn launched(&self) -> bool {
+    pub(crate) const fn launched(&self) -> bool {
         matches!(self.stage, Stage::Launched { .. })
     }
 
     #[must_use]
-    pub fn shift(&self, now: Instant) -> f32 {
+    pub(crate) fn shift(&self, now: Instant) -> f32 {
         self.shift.value(now, MOVE)
     }
 
     #[must_use]
-    pub fn transform(&self, now: Instant) -> Transform2D {
+    fn transform(&self, now: Instant) -> Transform2D {
         Transform2D::translate(0.0, self.shift(now))
     }
 
     #[must_use]
-    pub fn dusk(&self, now: Instant) -> f32 {
+    fn dusk(&self, now: Instant) -> f32 {
         self.dusk.value(now, DUSK)
     }
 
     #[must_use]
-    pub fn sky_shown(&self, now: Instant) -> bool {
+    pub(crate) fn sky_shown(&self, now: Instant) -> bool {
         self.dusk(now) < 1.0
     }
 
     #[must_use]
-    pub fn sky_setting(&self, now: Instant) -> bool {
+    pub(crate) fn sky_setting(&self, now: Instant) -> bool {
         self.dusk.target() >= 1.0 && self.sky_shown(now)
     }
 
     #[must_use]
-    pub fn sky_opacity(&self, now: Instant) -> f32 {
+    pub(crate) fn sky_opacity(&self, now: Instant) -> f32 {
         1.0 - self.dusk(now)
     }
 
     #[must_use]
-    pub fn sky_transform(&self, now: Instant) -> Transform2D {
+    pub(crate) fn sky_transform(&self, now: Instant) -> Transform2D {
         let dusk = self.dusk(now);
         Transform2D::translate(0.0, SET * dusk * dusk)
     }
 
-    pub fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> Synced {
+    pub(crate) fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> Synced {
         let keyed = |ui: &aqua::UiApp, key: &str| {
             ui.tree()
                 .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key)))

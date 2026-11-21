@@ -8,17 +8,95 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct NotificationEffects {
     pub withdraw: Vec<String>,
     pub show: Vec<Notification>,
     pub badge: Option<Attention>,
 }
 
+#[derive(Debug)]
 pub enum SettingsPlatformEffect {
     OpenUrl(String),
+    OpenNotices,
     CopyText(String),
 }
+
+impl SettingsPlatformEffect {
+    pub(crate) fn of(action: &crate::settings::view::ViewAction) -> Option<Self> {
+        use crate::settings::view::ViewAction;
+        match action {
+            ViewAction::OpenUrl(url) => Some(Self::OpenUrl(url.clone())),
+            ViewAction::OpenNotices => Some(Self::OpenNotices),
+            ViewAction::CopyText(text) => Some(Self::CopyText(text.clone())),
+            ViewAction::Navigate(_)
+            | ViewAction::EngineEdited
+            | ViewAction::EnginePresentationChanged
+            | ViewAction::EngineAction(..)
+            | ViewAction::EngineVersions(_)
+            | ViewAction::EngineUse(..)
+            | ViewAction::EngineCode(_)
+            | ViewAction::ClaudeTransport(..)
+            | ViewAction::ClaudeSignIn
+            | ViewAction::AccountEdited
+            | ViewAction::AccountPresentationChanged
+            | ViewAction::AccountRequestLink
+            | ViewAction::AccountFinish
+            | ViewAction::AccountDismiss
+            | ViewAction::AccountRefresh
+            | ViewAction::AccountSignOut
+            | ViewAction::AccountSignOutEverywhere
+            | ViewAction::ForgeOpen(_)
+            | ViewAction::ForgeConnect(_)
+            | ViewAction::ForgeRemove(_)
+            | ViewAction::ForgeEnroll
+            | ViewAction::ForgeConfirm
+            | ViewAction::ForgeRefresh
+            | ViewAction::ForgeClaim
+            | ViewAction::RetentionMenu(_)
+            | ViewAction::SetRetention(..)
+            | ViewAction::ArchiveLatest
+            | ViewAction::ArchiveOlder
+            | ViewAction::Unarchive(_)
+            | ViewAction::McpOpen(_)
+            | ViewAction::McpRemove(_)
+            | ViewAction::McpSave
+            | ViewAction::McpCancel
+            | ViewAction::McpEdited
+            | ViewAction::McpPresentationChanged
+            | ViewAction::McpSignIn(_)
+            | ViewAction::McpCancelSignIn(_)
+            | ViewAction::McpSignOut(_)
+            | ViewAction::PromptChanged
+            | ViewAction::PromptPresentationChanged
+            | ViewAction::SavePrompt
+            | ViewAction::LoadLatestPrompt
+            | ViewAction::RetryPrompt
+            | ViewAction::ResolvePrompt(_)
+            | ViewAction::FontMenu(_)
+            | ViewAction::SetFont(_)
+            | ViewAction::SetDarkMode(_)
+            | ViewAction::SetOutlineText(_)
+            | ViewAction::SetShowAllModels(_)
+            | ViewAction::SetHideBadModelOptions(_)
+            | ViewAction::SetHighContrast(_)
+            | ViewAction::TextSizeMenu(_)
+            | ViewAction::ContrastMenu(_)
+            | ViewAction::SetTextScale(_)
+            | ViewAction::StreamingMenu(_)
+            | ViewAction::SetStreaming(_)
+            | ViewAction::SetFrameRate(_)
+            | ViewAction::SetVsync(_)
+            | ViewAction::SetNotifications(_)
+            | ViewAction::ReloadSettings
+            | ViewAction::SetHostSetting(..)
+            | ViewAction::RetryHostSetting(_)
+            | ViewAction::DismissHostSetting(_) => None,
+        }
+    }
+}
+
+type OptionDetailAction = ((u64, u64), crate::sources::ContentAction);
 
 #[derive(PartialEq, Eq)]
 struct QuestionSourceIdentity {
@@ -32,13 +110,41 @@ struct QuestionSourceIdentity {
     selection: aqua_text::document::SelectionSourceId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Followed {
+    Navigated,
+    BehindSettings,
+    Stayed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidePanel {
+    Overview,
+    Inspector,
+}
+
+impl SidePanel {
+    #[must_use]
+    pub(crate) const fn toggled(self) -> Self {
+        match self {
+            Self::Overview => Self::Inspector,
+            Self::Inspector => Self::Overview,
+        }
+    }
+}
+
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent dirty and pending flags for separate subsystems, each cleared on its own"
+)]
 pub struct Workspace {
-    pub selections: crate::shell::selection::SelectionScope,
-    pub inspector: crate::inspector::InspectorOwner,
-    pub conversation_selection: crate::conversation::presentation::SelectionOwners,
-    pub markdown: Rc<RefCell<crate::conversation::presentation::MarkdownOwners>>,
-    pub status_shimmers: Rc<RefCell<crate::conversation::view::status::StatusShimmers>>,
-    pub images: Rc<crate::ui::media::image::Images>,
+    clock: crate::core::Clock,
+    pub(crate) selections: crate::shell::selection::SelectionScope,
+    pub(crate) inspector: crate::inspector::InspectorOwner,
+    pub(crate) conversation_selection: crate::conversation::presentation::SelectionOwners,
+    pub(crate) markdown: Rc<RefCell<crate::conversation::presentation::MarkdownOwners>>,
+    pub(crate) status_shimmers: Rc<RefCell<crate::conversation::view::status::StatusShimmers>>,
+    pub(crate) images: Rc<crate::ui::media::image::Images>,
     code_actions: Rc<RefCell<VecDeque<crate::conversation::presentation::ScopedCodeAction>>>,
     code_frame_pending: bool,
     code_deadline: Option<aqua::Instant>,
@@ -46,12 +152,12 @@ pub struct Workspace {
     terminal_dialog: Option<crate::ui::dialog::DialogHost>,
     terminal_content: Option<aqua_ui::element::Element>,
     terminal_dismissed: Rc<Cell<bool>>,
-    pub sidebar: crate::sidebar::controller::Sidebar,
-    pub settings_sidebar: crate::sidebar::controller::Sidebar,
-    pub usage: crate::sidebar::usage_controller::UsagePage,
-    usage_actions: Rc<RefCell<VecDeque<crate::sidebar::usage_page::Action>>>,
-    pub conversation: crate::conversation::controller::Conversation,
-    pub composer: Option<crate::composer::view::ComposerOwner>,
+    pub(crate) sidebar: crate::sidebar::controller::Sidebar,
+    pub(crate) settings_sidebar: crate::sidebar::controller::Sidebar,
+    pub(crate) usage: crate::sidebar::usage::controller::UsagePage,
+    usage_actions: Rc<RefCell<VecDeque<crate::sidebar::usage::view::Action>>>,
+    pub(crate) conversation: crate::conversation::controller::Conversation,
+    pub(crate) composer: Option<crate::composer::view::ComposerOwner>,
     composer_target: Option<(
         crate::composer::controller::ComposerTarget,
         Option<crate::core::HostInstance>,
@@ -75,13 +181,12 @@ pub struct Workspace {
     question_source: Option<(QuestionSourceIdentity, crate::shell::source::SourceView)>,
     question_source_revision: u64,
     question_option_detail: Option<((u64, u64), crate::shell::source::SourceView)>,
-    question_option_detail_actions:
-        Rc<RefCell<VecDeque<((u64, u64), crate::sources::ContentAction)>>>,
-    pub marketplace: crate::marketplace::controller::MarketplaceController,
+    question_option_detail_actions: Rc<RefCell<VecDeque<OptionDetailAction>>>,
+    pub(crate) marketplace: crate::marketplace::controller::MarketplaceController,
     marketplace_focus_pending: bool,
     marketplace_reveal_pending: bool,
-    pub settings: crate::settings::controller::SettingsController,
-    pub home: crate::settings::controller::SettingsController,
+    pub(crate) settings: crate::settings::controller::SettingsController,
+    pub(crate) home: crate::settings::controller::SettingsController,
     home_actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
     sidebar_actions: Rc<RefCell<VecDeque<crate::sidebar::view::ViewAction>>>,
     settings_sidebar_actions: Rc<RefCell<VecDeque<crate::sidebar::view::ViewAction>>>,
@@ -89,34 +194,63 @@ pub struct Workspace {
     settings_actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
     theme_transition: Option<bool>,
     settings_platform_effects: Vec<SettingsPlatformEffect>,
-    pub palette: Option<Palette>,
-    pub resource_preview: Option<crate::shell::resource_preview::ResourcePreview>,
+    pub(crate) palette: Option<Palette>,
+    pub(crate) resource_preview: Option<crate::shell::resource_preview::ResourcePreview>,
     resource_preview_generation: u64,
-    pub show_sidebar: bool,
-    pub show_inspector: bool,
-    pub failure: Option<String>,
+    pub(crate) side_panel: SidePanel,
     notifications: Notifications,
     repository: crate::shell::repository::RepositoryContext,
     start_pending: bool,
     repository_pending: bool,
 }
 
+impl std::fmt::Debug for Workspace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workspace").finish_non_exhaustive()
+    }
+}
+
 impl Workspace {
+    #[must_use]
+    pub const fn selections(&self) -> &crate::shell::selection::SelectionScope {
+        &self.selections
+    }
+
+    #[must_use]
+    pub const fn markdown(
+        &self,
+    ) -> &Rc<RefCell<crate::conversation::presentation::MarkdownOwners>> {
+        &self.markdown
+    }
+
+    pub const fn conversation_mut(&mut self) -> &mut crate::conversation::controller::Conversation {
+        &mut self.conversation
+    }
+
+    #[must_use]
+    pub const fn composer(&self) -> Option<&crate::composer::view::ComposerOwner> {
+        self.composer.as_ref()
+    }
+
     pub fn new(
         core: &Core,
-        failure: Option<String>,
+        failure: Option<crate::core::Problem>,
         selections: crate::shell::selection::SelectionScope,
     ) -> (Self, NotificationEffects) {
         let marketplace_actions = Rc::new(RefCell::new(VecDeque::new()));
         let sink = Rc::clone(&marketplace_actions);
+        let inspector = crate::inspector::InspectorOwner::new(selections.inspector);
+        let conversation_selection =
+            crate::conversation::presentation::SelectionOwners::new(selections.conversation);
+        let markdown = Rc::new(RefCell::new(
+            crate::conversation::presentation::MarkdownOwners::new(selections.conversation),
+        ));
         let mut workspace = Self {
-            inspector: crate::inspector::InspectorOwner::new(core, selections.inspector),
-            conversation_selection: crate::conversation::presentation::SelectionOwners::new(
-                selections.conversation,
-            ),
-            markdown: Rc::new(RefCell::new(
-                crate::conversation::presentation::MarkdownOwners::new(selections.conversation),
-            )),
+            clock: core.clock().clone(),
+            selections,
+            inspector,
+            conversation_selection,
+            markdown,
             status_shimmers: Rc::new(RefCell::new(
                 crate::conversation::view::status::StatusShimmers::default(),
             )),
@@ -124,21 +258,20 @@ impl Workspace {
             code_actions: Rc::new(RefCell::new(VecDeque::new())),
             code_frame_pending: false,
             code_deadline: None,
-            selections,
             inspector_actions: Rc::new(RefCell::new(VecDeque::new())),
             terminal_dialog: None,
             terminal_content: None,
             terminal_dismissed: Rc::new(Cell::new(false)),
             sidebar: crate::sidebar::controller::Sidebar::new(true),
             settings_sidebar: crate::sidebar::controller::Sidebar::new(false),
-            usage: crate::sidebar::usage_controller::UsagePage::default(),
+            usage: crate::sidebar::usage::controller::UsagePage::default(),
             usage_actions: Rc::new(RefCell::new(VecDeque::new())),
-            sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
-            settings_sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
             conversation: crate::conversation::controller::Conversation::new(core),
             composer: None,
             composer_target: None,
-            draft_sessions: crate::composer::persistence::DraftSessions::default(),
+            draft_sessions: crate::composer::persistence::DraftSessions::with_spool(
+                crate::composer::spool::DraftSpool::new(&core.files().dir),
+            ),
             composer_actions: Rc::new(RefCell::new(VecDeque::new())),
             sent_new_thread: None,
             composer_effects: Vec::new(),
@@ -146,8 +279,8 @@ impl Workspace {
             composer_focus_pending: false,
             composer_was_focused: false,
             composer_mentions_dirty: true,
-            composer_tooltip: None,
             retiring_tooltips: Vec::new(),
+            composer_tooltip: None,
             question_option_actions: Rc::new(RefCell::new(VecDeque::new())),
             question_source_actions: Rc::new(RefCell::new(VecDeque::new())),
             question_source: None,
@@ -157,11 +290,13 @@ impl Workspace {
             marketplace: crate::marketplace::controller::MarketplaceController::new(Rc::new(
                 move |action| sink.borrow_mut().push_back(action),
             )),
+            marketplace_focus_pending: false,
+            marketplace_reveal_pending: false,
             settings: crate::settings::controller::SettingsController::default(),
             home: crate::settings::controller::SettingsController::default(),
             home_actions: Rc::new(RefCell::new(VecDeque::new())),
-            marketplace_focus_pending: false,
-            marketplace_reveal_pending: false,
+            sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
+            settings_sidebar_actions: Rc::new(RefCell::new(VecDeque::new())),
             marketplace_actions,
             settings_actions: Rc::new(RefCell::new(VecDeque::new())),
             theme_transition: None,
@@ -169,14 +304,13 @@ impl Workspace {
             palette: None,
             resource_preview: None,
             resource_preview_generation: 0,
-            show_sidebar: true,
-            show_inspector: true,
-            failure,
+            side_panel: SidePanel::Overview,
             notifications: Notifications::default(),
             repository: crate::shell::repository::RepositoryContext::default(),
             start_pending: true,
             repository_pending: true,
         };
+        workspace.sidebar.error = failure;
         let effects = workspace.follow_hosts(core);
         (workspace, effects)
     }
@@ -187,7 +321,44 @@ impl Workspace {
             .fold(Attention::default(), |total, host| total + host)
     }
 
+    pub(crate) fn unkept_drafts(&self) -> Option<crate::composer::persistence::UnkeptDrafts> {
+        self.draft_sessions.unkept()
+    }
+
+    pub(crate) fn keep_unkept_drafts(
+        &mut self,
+    ) -> Option<crate::composer::persistence::UnkeptDrafts> {
+        self.draft_sessions.keep_unkept()
+    }
+
+    pub(crate) fn retire(
+        &mut self,
+    ) -> (
+        NotificationEffects,
+        crate::composer::persistence::HeldDrafts,
+    ) {
+        if let Some(composer) = &self.composer {
+            composer.controller.borrow_mut().release();
+        }
+        self.draft_sessions.retire();
+        (
+            NotificationEffects {
+                withdraw: self.notifications.retain_hosts(&[]),
+                show: Vec::new(),
+                badge: Some(Attention::default()),
+            },
+            self.draft_sessions.hand_off_held(),
+        )
+    }
+
+    pub(crate) fn take_held_drafts(&mut self, held: crate::composer::persistence::HeldDrafts) {
+        self.draft_sessions.take_held(held);
+    }
+
     fn follow_hosts(&mut self, core: &Core) -> NotificationEffects {
+        if let Some(composer) = &self.composer {
+            composer.controller.borrow_mut().release_if_host_gone(core);
+        }
         self.draft_sessions.retain_hosts(core);
         let hosts: Vec<_> = core.hosts().map(|(_, host)| host).collect();
         let ids: Vec<_> = hosts.iter().map(|host| host.id.clone()).collect();
@@ -219,13 +390,14 @@ impl Workspace {
                                 Screen::Thread { host, thread } if window_active && host == id => {
                                     Some(thread)
                                 }
-                                _ => None,
+                                Screen::Home
+                                | Screen::Thread { .. }
+                                | Screen::NewThread { .. }
+                                | Screen::Settings(_)
+                                | Screen::Marketplace
+                                | Screen::Usage => None,
                             };
-                            let enabled = core
-                                .settings
-                                .get("notifications")
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(true);
+                            let enabled = core.settings().preferences().notifications.on();
                             let changes = self
                                 .notifications
                                 .thread_changed(host, thread_id, watching, enabled);
@@ -241,11 +413,22 @@ impl Workspace {
                             self.notifications.sync_connection(host);
                             effects.badge = Some(Self::attention(core));
                         }
-                        _ => {}
+                        HostEvent::ImagesChanged
+                        | HostEvent::EngineInstall { .. }
+                        | HostEvent::ThreadSummaryChanged { .. }
+                        | HostEvent::WslDistro { .. }
+                        | HostEvent::Item(_)
+                        | HostEvent::Live { .. }
+                        | HostEvent::EditorCall { .. } => {}
                     }
                 }
             }
-            _ => {}
+            CoreEvent::ScreenChanged
+            | CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_) => {}
         }
         if matches!(
             event,
@@ -279,12 +462,17 @@ impl Workspace {
             CoreEvent::Host {
                 host,
                 event: HostEvent::ThreadChanged { thread_id },
-            } => {
-                if core.screen().host() == Some(host) && core.screen().thread() == Some(thread_id) {
-                    self.repository_pending = true;
-                }
+            } if core.screen().host() == Some(host)
+                && core.screen().thread() == Some(thread_id) =>
+            {
+                self.repository_pending = true;
             }
-            _ => {}
+            CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_)
+            | CoreEvent::Host { .. } => {}
         }
         effects
     }
@@ -301,14 +489,18 @@ impl Workspace {
                         });
                     }
                 }
-                _ => self.start_pending = false,
+                Screen::Thread { .. }
+                | Screen::NewThread { .. }
+                | Screen::Settings(_)
+                | Screen::Marketplace
+                | Screen::Usage => self.start_pending = false,
             }
         }
         if self.repository_pending {
             self.repository_pending = false;
             self.repository.sync(core);
-            self.sidebar.sync(core, artisan_api::now());
-            self.settings_sidebar.sync(core, artisan_api::now());
+            self.sidebar.sync(core, self.clock.timestamp());
+            self.settings_sidebar.sync(core, self.clock.timestamp());
             self.conversation.sync_screen(core);
             self.sync_composer(core, ui);
             self.marketplace.sync(core);
@@ -317,7 +509,7 @@ impl Workspace {
         }
     }
 
-    pub fn handle_domain_event(
+    pub(crate) fn handle_domain_event(
         &mut self,
         core: &mut Core,
         event: &CoreEvent,
@@ -336,8 +528,8 @@ impl Workspace {
                 .on_core_event(core, &self.conversation, ui, event);
             return;
         }
-        self.sidebar.sync(core, artisan_api::now());
-        self.settings_sidebar.sync(core, artisan_api::now());
+        self.sidebar.sync(core, self.clock.timestamp());
+        self.settings_sidebar.sync(core, self.clock.timestamp());
         if matches!(
             event,
             CoreEvent::SettingsChanged | CoreEvent::HostsChanged | CoreEvent::ScreenChanged
@@ -358,7 +550,7 @@ impl Workspace {
         self.sync_question_pages(core);
     }
 
-    pub fn dispose_composer_popups(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn dispose_composer_popups(&mut self, ui: &mut aqua::UiApp) {
         for tooltip in self.retiring_tooltips.drain(..) {
             tooltip.dispose(ui);
         }
@@ -372,10 +564,10 @@ impl Workspace {
         }
     }
 
-    pub fn sync_composer_tooltip(
+    pub(crate) fn sync_composer_tooltip(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         now: std::time::Instant,
     ) -> bool {
         use crate::composer::view::PopupKind;
@@ -392,15 +584,11 @@ impl Workspace {
         self.retiring_tooltips.retain(|tooltip| tooltip.is_open(ui));
         let shown = owner.shown_tooltip();
         let node = shown.as_ref().and_then(|shown| {
-            [
-                PopupKind::Model,
-                PopupKind::Project,
-                PopupKind::Mentions,
-            ]
-            .into_iter()
-            .filter_map(|kind| owner.popup_root(kind, ui))
-            .find_map(|root| keyed_descendant(ui, root, shown.anchor.clone().into()))
-            .or_else(|| keyed_node(ui, shown.anchor.clone().into()))
+            [PopupKind::Model, PopupKind::Project, PopupKind::Mentions]
+                .into_iter()
+                .filter_map(|kind| owner.popup_root(kind, ui))
+                .find_map(|root| keyed_descendant(ui, root, shown.anchor.clone().into()))
+                .or_else(|| keyed_node(ui, shown.anchor.clone().into()))
         });
         if self
             .composer_tooltip
@@ -409,13 +597,13 @@ impl Workspace {
                 shown.as_ref() != Some(content) || node != Some(*anchor) || !host.is_open(ui)
             })
         {
-            if let Some((_, _, mut tooltip)) = self.composer_tooltip.take() {
-                if tooltip.is_open(ui) {
-                    if let Err(error) = tooltip.begin_close(ui) {
-                        tracing::warn!(%error, "could not close composer tooltip");
-                    }
-                    self.retiring_tooltips.push(tooltip);
+            if let Some((_, _, mut tooltip)) = self.composer_tooltip.take()
+                && tooltip.is_open(ui)
+            {
+                if let Err(error) = tooltip.begin_close(ui) {
+                    tracing::warn!(%error, "could not close composer tooltip");
                 }
+                self.retiring_tooltips.push(tooltip);
             }
             changed = true;
         }
@@ -446,16 +634,17 @@ impl Workspace {
         changed
     }
 
-    pub fn code_action_emit(
+    pub(crate) fn code_action_emit(
         &self,
     ) -> Rc<dyn Fn(crate::conversation::presentation::ScopedCodeAction)> {
         let actions = Rc::clone(&self.code_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn drain_code_actions(
+    pub(crate) fn drain_code_actions(
         &mut self,
         core: &Core,
+        failures: &mut crate::shell::action_failure::ActionFailureDialog,
         ctx: &mut aqua::AppCtx<'_>,
         window: aqua::prelude::AquaWindowId,
     ) -> bool {
@@ -469,21 +658,22 @@ impl Workspace {
                 continue;
             };
             match action {
-                CodeAction::Copy(CopyEffect::Clipboard(text)) => {
-                    if let Err(error) = ctx.clipboard().set_text(text) {
-                        tracing::warn!(%error, "could not copy code");
+                CodeAction::Copy(CopyEffect::Clipboard(request)) => {
+                    match ctx.clipboard().set_text(request.text().to_owned()) {
+                        Ok(()) => {
+                            let deadline = request.copied(self.clock.now());
+                            self.request_code_frame(ctx, window);
+                            self.wake_code_at(ctx, window, deadline);
+                        }
+                        Err(error) => {
+                            failures.copy(crate::shell::action_failure::CopySubject::Code, &error);
+                            changed = true;
+                        }
                     }
                 }
-                CodeAction::Copy(CopyEffect::RequestFrame) => {
-                    self.code_frame_pending = true;
-                    ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
-                }
+                CodeAction::Copy(CopyEffect::RequestFrame) => self.request_code_frame(ctx, window),
                 CodeAction::Copy(CopyEffect::WakeAt(deadline)) => {
-                    let delay = deadline.saturating_duration_since(std::time::Instant::now());
-                    let at = ctx.now() + delay;
-                    self.code_deadline =
-                        Some(self.code_deadline.map_or(at, |previous| previous.min(at)));
-                    ctx.request_animation_deadline(window, at);
+                    self.wake_code_at(ctx, window, deadline);
                 }
                 CodeAction::Reference(reference) => {
                     let scope = reference
@@ -497,7 +687,28 @@ impl Workspace {
         changed
     }
 
-    pub fn take_code_frame(&mut self, now: aqua::Instant) -> bool {
+    fn request_code_frame(
+        &mut self,
+        ctx: &mut aqua::AppCtx<'_>,
+        window: aqua::prelude::AquaWindowId,
+    ) {
+        self.code_frame_pending = true;
+        ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+    }
+
+    fn wake_code_at(
+        &mut self,
+        ctx: &mut aqua::AppCtx<'_>,
+        window: aqua::prelude::AquaWindowId,
+        deadline: std::time::Instant,
+    ) {
+        let delay = deadline.saturating_duration_since(self.clock.now());
+        let at = ctx.now() + delay;
+        self.code_deadline = Some(self.code_deadline.map_or(at, |previous| previous.min(at)));
+        ctx.request_animation_deadline(window, at);
+    }
+
+    pub(crate) fn take_code_frame(&mut self, now: aqua::Instant) -> bool {
         let due = self.code_deadline.is_some_and(|at| now >= at);
         if due {
             self.code_deadline = None;
@@ -505,11 +716,11 @@ impl Workspace {
         std::mem::take(&mut self.code_frame_pending) || due
     }
 
-    pub fn sync_composer_popups(
+    pub(crate) fn sync_composer_popups(
         &mut self,
         core: &Core,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         assets: &aqua::images::ImageAssets,
         now: f64,
     ) -> bool {
@@ -533,26 +744,19 @@ impl Workspace {
         let emit: view::Dispatch = Rc::new(move |action| actions.borrow_mut().push_back(action));
         let (menu, mentions) = {
             let composer = owner.controller.borrow();
-            (
-                composer.picker.menu,
-                !composer.mentions.rows.is_empty(),
-            )
+            (composer.picker.menu, !composer.mentions.rows.is_empty())
         };
-        for kind in [
-            PopupKind::Model,
-            PopupKind::Project,
-            PopupKind::Mentions,
-        ] {
+        for kind in [PopupKind::Model, PopupKind::Project, PopupKind::Mentions] {
             let desired = match kind {
                 PopupKind::Model => menu == Some(Menu::Model),
                 PopupKind::Project => menu == Some(Menu::Project),
                 PopupKind::Mentions => mentions,
             };
             if !desired {
-                if owner.popup_is_open(kind, ui) {
-                    if let Err(error) = owner.close_popup(ui, kind, now) {
-                        tracing::warn!(%error, "could not close composer popup");
-                    }
+                if owner.popup_is_open(kind, ui)
+                    && let Err(error) = owner.close_popup(ui, kind, now)
+                {
+                    tracing::warn!(%error, "could not close composer popup");
                 }
                 continue;
             }
@@ -569,7 +773,7 @@ impl Workspace {
                         viewport,
                         crate::shell::wheel::kept_offset(ui, crate::ui::scroll::MODEL_MENU).y,
                         assets,
-                        std::time::Instant::now(),
+                        self.clock.now(),
                     ) {
                         Ok(content) => Some(content),
                         Err(error) => {
@@ -586,7 +790,7 @@ impl Workspace {
                         &composer.picker,
                         composer.project(host).as_ref(),
                         viewport,
-                        Rc::clone(&emit),
+                        &emit,
                     ))
                 }
                 PopupKind::Mentions => {
@@ -617,12 +821,12 @@ impl Workspace {
             }
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let frame = editor_ui::kit::hover::live::advance(ui, std::time::Instant::now(), reduced);
+        let frame = editor_ui::kit::hover::live::advance(ui, self.clock.now(), reduced);
         frame.changed || frame.animating
     }
 
     #[must_use]
-    pub fn inspector_emit(&self) -> Rc<dyn Fn(crate::inspector::InspectorAction)> {
+    pub(crate) fn inspector_emit(&self) -> Rc<dyn Fn(crate::inspector::InspectorAction)> {
         let actions = Rc::clone(&self.inspector_actions);
         let scope = self.inspector.scope();
         Rc::new(move |action| {
@@ -632,16 +836,18 @@ impl Workspace {
         })
     }
 
-    pub fn inspector_elements(
+    pub(crate) fn inspector_panel(
         &mut self,
         core: &Core,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         viewport_height: f32,
         reduced_motion: bool,
         now: aqua::Instant,
-    ) -> anyhow::Result<aqua_ui::element::Element> {
+    ) -> Result<aqua_ui::element::Element, crate::inspector::BuildInspectorError> {
         let actions = Rc::clone(&self.inspector_actions);
+        let on_action: Rc<dyn Fn(crate::inspector::OwnerAction)> =
+            Rc::new(move |action| actions.borrow_mut().push_back(action));
         let elements = self.inspector.build(
             core,
             ui,
@@ -649,16 +855,16 @@ impl Workspace {
             viewport_height,
             reduced_motion,
             now,
-            Rc::new(move |action| actions.borrow_mut().push_back(action)),
+            &on_action,
         )?;
         self.terminal_content = elements.terminal;
         Ok(elements.panel)
     }
 
-    pub fn sync_terminal_dialog(
+    pub(crate) fn sync_terminal_dialog(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
     ) {
         if self.terminal_dismissed.replace(false) {
             self.inspector.close_terminal(ui);
@@ -672,7 +878,7 @@ impl Workspace {
         };
         if let Some(dialog) = &self.terminal_dialog {
             if dialog.is_open(ui) {
-                dialog.set_theme(theme);
+                dialog.set_theme(*theme);
                 if let Err(error) = dialog.refresh_content(ui, content) {
                     tracing::warn!(%error, "could not refresh terminal dialog");
                 }
@@ -687,7 +893,7 @@ impl Workspace {
         let dismissed = Rc::clone(&self.terminal_dismissed);
         let dialog = crate::ui::dialog::Dialog::new(
             "inspector-terminal-dialog",
-            theme,
+            *theme,
             "Terminal output",
             content,
         )
@@ -700,7 +906,7 @@ impl Workspace {
         }
     }
 
-    pub fn sync_terminal_input(&mut self, ui: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_terminal_input(&mut self, ui: &mut aqua::UiApp) -> bool {
         if let Some(dialog) = &self.terminal_dialog {
             dialog.sync(ui);
         }
@@ -711,7 +917,7 @@ impl Workspace {
         false
     }
 
-    pub fn dispose_terminal_dialog(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn dispose_terminal_dialog(&mut self, ui: &mut aqua::UiApp) {
         if let Some(dialog) = self.terminal_dialog.take() {
             dialog.dispose(ui);
         }
@@ -720,9 +926,10 @@ impl Workspace {
         self.inspector.close_terminal(ui);
     }
 
-    pub fn drain_inspector(
+    pub(crate) fn drain_inspector(
         &mut self,
         core: &mut Core,
+        failures: &mut crate::shell::action_failure::ActionFailureDialog,
         routes: &crate::ui::dialogs::DialogRoutes,
         ui: &mut aqua::UiApp,
         ctx: &mut aqua::AppCtx<'_>,
@@ -739,6 +946,13 @@ impl Workspace {
                 window,
                 action,
             );
+        }
+        if let Some(error) = self.inspector.take_copy_failure() {
+            failures.copy(
+                crate::shell::action_failure::CopySubject::ShellOutput,
+                &*error,
+            );
+            changed = true;
         }
         changed | self.inspector.drain(core, ui, ctx)
     }
@@ -757,10 +971,12 @@ impl Workspace {
                     project: project.clone(),
                 })
             }
-            _ => return,
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => return,
         };
         let identity = target.map(|target| {
-            let instance = core.host(target.host()).map(|host| host.instance());
+            let instance = core
+                .host(target.host())
+                .map(editor_core::HostData::instance);
             (target, instance)
         });
         let prompt_key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("composer-prompt"));
@@ -797,43 +1013,40 @@ impl Workspace {
         }
     }
 
-    pub fn take_composer_actions(&mut self) -> VecDeque<crate::composer::view::ComposerAction> {
+    fn take_composer_actions(&self) -> VecDeque<crate::composer::view::ComposerAction> {
         std::mem::take(&mut *self.composer_actions.borrow_mut())
     }
 
-    pub fn refresh_composer_mentions(
+    pub(crate) fn refresh_composer_mentions(
         &mut self,
         core: &mut Core,
         theme: &crate::ui::theme::ArtisanTheme,
     ) {
-        if let (Some(_), Some((target, Some(instance)))) = (&self.composer, &self.composer_target) {
-            if let Some(host) = core.host_mut_if_instance(target.host(), *instance) {
-                host.load_skill_catalog(false);
-            }
+        if let (Some(_), Some((target, Some(instance)))) = (&self.composer, &self.composer_target)
+            && let Some(host) = core.host_mut_if_instance(target.host(), *instance)
+        {
+            host.load_skill_catalog(false);
         }
         if !self.composer_mentions_dirty {
             return;
         }
         if let (Some(owner), Some((target, Some(instance)))) =
             (&self.composer, &self.composer_target)
+            && let Some(host) = core.host_if_instance(target.host(), *instance)
         {
-            if let Some(host) = core.host_if_instance(target.host(), *instance) {
-                owner.refresh_mentions(host, theme);
-                self.composer_mentions_dirty = false;
-            }
+            owner.refresh_mentions(host, theme);
+            self.composer_mentions_dirty = false;
         }
     }
 
-    pub fn sync_question_pages(&mut self, core: &Core) {
+    fn sync_question_pages(&mut self, core: &Core) {
         if let Some(owner) = &self.composer {
             let mut composer = owner.controller.borrow_mut();
-            let before = composer.editor.borrow().text().to_owned();
-            crate::conversation::adapter::sync_questionnaires(
+            if crate::conversation::adapter::sync_questionnaires(
                 &self.conversation,
                 core,
                 &mut composer,
-            );
-            if composer.editor.borrow().text() != before {
+            ) {
                 self.composer_editor_dirty = true;
             }
             self.conversation
@@ -863,7 +1076,7 @@ impl Workspace {
                 ComposerEffect::FocusEditor => self.composer_focus_pending = true,
                 ComposerEffect::NewProject => self.sidebar.add_project(core),
                 ComposerEffect::RetryQuestionPage => {
-                    self.conversation.question_pages.retry_question(core)
+                    self.conversation.question_pages.retry_question(core);
                 }
                 ComposerEffect::OpenQuestionSource(source) => {
                     if let (Some(owner), Some((target, Some(instance)))) =
@@ -882,12 +1095,16 @@ impl Workspace {
                         }
                     }
                 }
-                effect => self.composer_effects.push(effect),
+                effect @ (ComposerEffect::OpenImage(_)
+                | ComposerEffect::CloseNote
+                | ComposerEffect::RetryThreadSettings) => {
+                    self.composer_effects.push(effect);
+                }
             }
         }
     }
 
-    pub fn composer_image(
+    pub(crate) fn composer_image(
         &self,
         key: u64,
     ) -> Option<(
@@ -914,11 +1131,11 @@ impl Workspace {
         ))
     }
 
-    pub fn take_composer_effects(&mut self) -> Vec<crate::composer::view::ComposerEffect> {
+    pub(crate) fn take_composer_effects(&mut self) -> Vec<crate::composer::view::ComposerEffect> {
         std::mem::take(&mut self.composer_effects)
     }
 
-    pub fn dispatch_composer_actions(&mut self, core: &mut Core) -> bool {
+    fn dispatch_composer_actions(&mut self, core: &mut Core) -> bool {
         let mut changed = false;
         for action in self.take_composer_actions() {
             self.sync_question_pages(core);
@@ -940,7 +1157,7 @@ impl Workspace {
         changed
     }
 
-    pub fn handle_question_option(
+    fn handle_question_option(
         &mut self,
         core: &mut Core,
         action: crate::conversation::questions::OptionAction,
@@ -973,10 +1190,10 @@ impl Workspace {
                     .map(|browser| browser.borrow().view_state())
     }
 
-    pub fn question_source_view(
+    fn question_source_view(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         document: aqua_text::document::SelectionDocumentId,
         selection: aqua_text::document::SelectionSourceId,
     ) -> Result<Option<aqua_ui::element::Element>, aqua_text::document::SelectionSourceError> {
@@ -1026,21 +1243,18 @@ impl Workspace {
         };
         let actions = Rc::clone(&self.question_source_actions);
         service
-            .render(
-                ui,
-                content,
-                theme,
-                Rc::new(move |action| actions.borrow_mut().push_back(action)),
-            )
+            .render(ui, content, theme, move |action| {
+                actions.borrow_mut().push_back(action);
+            })
             .map(Some)
     }
 
-    pub const fn take_sent_new_thread(&mut self) -> Option<artisan_api::ThreadId> {
+    pub(crate) const fn take_sent_new_thread(&mut self) -> Option<artisan_api::ThreadId> {
         self.sent_new_thread.take()
     }
 
     #[must_use]
-    pub fn new_thread_posting(&self) -> crate::composer::draft_session::Posting {
+    pub(crate) fn new_thread_posting(&self) -> crate::composer::draft_session::Posting {
         self.composer
             .as_ref()
             .and_then(|owner| {
@@ -1052,26 +1266,41 @@ impl Workspace {
                 new_thread
                     .then(|| composer.session.as_ref())
                     .flatten()
-                    .map(|session| session.read(|state| state.posting()))
+                    .map(|session| {
+                        session.read(editor_composer::draft_session::DraftSession::posting)
+                    })
             })
             .unwrap_or(crate::composer::draft_session::Posting::Idle)
     }
 
-    pub fn composer_content(
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one composer content pass building questionnaires and attachments together"
+    )]
+    pub(crate) fn composer_content(
         &mut self,
         ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         reduced_motion: bool,
-    ) -> anyhow::Result<(
-        Option<aqua_ui::element::Element>,
-        Option<aqua_ui::element::Element>,
-    )> {
+    ) -> Result<
+        (
+            Option<aqua_ui::element::Element>,
+            Option<aqua_ui::element::Element>,
+        ),
+        crate::shell::application::BuildError,
+    > {
+        use crate::shell::application::BuildError;
         let (document, source) = self.selections.question;
-        let source_view = self.question_source_view(ui, theme, document, source)?;
+        let source_view = self
+            .question_source_view(ui, theme, document, source)
+            .map_err(|source| BuildError::Selection {
+                surface: "question source",
+                source,
+            })?;
         let browser = self.conversation.question_pages.options_browser();
         let identity = browser.as_ref().and_then(|browser| {
             let browser = browser.borrow();
-            Some((browser.identity(), browser.detail.as_ref()?.identity()))
+            Some((browser.identity(), browser.detail()?.identity()))
         });
         if self
             .question_option_detail
@@ -1095,27 +1324,26 @@ impl Workspace {
             (&browser, &self.question_option_detail)
         {
             let browser = browser.borrow();
-            if let Some(content) = browser.detail.as_ref() {
-                let identity = identity.clone();
+            if let Some(content) = browser.detail() {
+                let identity = *identity;
                 let actions = Rc::clone(&self.question_option_detail_actions);
-                Some(service.render(
-                    ui,
-                    content,
-                    theme,
-                    Rc::new(move |action| {
-                        actions.borrow_mut().push_back((identity.clone(), action))
-                    }),
-                )?)
+                Some(
+                    service
+                        .render(ui, content, theme, move |action| {
+                            actions.borrow_mut().push_back((identity, action));
+                        })
+                        .map_err(|source| BuildError::Selection {
+                            surface: "question option detail",
+                            source,
+                        })?,
+                )
             } else {
                 None
             }
         } else {
             None
         };
-        let owner = self
-            .composer
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("conversation composer is not mounted"))?;
+        let owner = self.composer.as_ref().ok_or(BuildError::NoComposer)?;
         let composer = owner.controller.borrow();
         let actions = Rc::clone(&self.composer_actions);
         let emit: crate::composer::view::Dispatch =
@@ -1129,11 +1357,14 @@ impl Workspace {
             options_source,
             stored_detail,
             self.question_option_emit(),
-        )
-        .map_err(anyhow::Error::msg)?;
+        );
         let options = if let Some(options) = options {
             if let Some(selection) = options.selection {
-                ui.register_selection_source_in(options_document, selection)?;
+                ui.register_selection_source_in(options_document, selection)
+                    .map_err(|source| BuildError::Selection {
+                        surface: "question options",
+                        source,
+                    })?;
             } else {
                 ui.unregister_selection_source_in(options_document, options_source);
             }
@@ -1153,19 +1384,19 @@ impl Workspace {
             options,
             self.conversation.question_pages.question_error(),
             source_view,
-            Rc::clone(&emit),
+            &emit,
         );
         let attachments = crate::composer::view::attachments(
             theme,
             &composer,
-            std::time::Instant::now(),
+            self.clock.now(),
             reduced_motion,
-            emit,
+            &emit,
         );
         Ok((questionnaires, attachments))
     }
 
-    pub fn bind_question_source(
+    pub(crate) fn bind_question_source(
         &self,
         ctx: &aqua::AppCtx<'_>,
         window: aqua::prelude::AquaWindowId,
@@ -1181,19 +1412,17 @@ impl Workspace {
             self.conversation.question_pages.options_browser(),
         ) {
             let browser = browser.borrow();
-            if browser.identity() == identity.0 {
-                if let Some(content) = browser
-                    .detail
-                    .as_ref()
+            if browser.identity() == identity.0
+                && let Some(content) = browser
+                    .detail()
                     .filter(|content| content.identity() == identity.1)
-                {
-                    service.bind(content, ctx, window);
-                }
+            {
+                service.bind(content, ctx, window);
             }
         }
     }
 
-    pub fn drain_question_source(
+    pub(crate) fn drain_question_source(
         &mut self,
         core: &Core,
         routes: &crate::ui::dialogs::DialogRoutes,
@@ -1217,32 +1446,30 @@ impl Workspace {
             self.conversation.question_pages.options_browser(),
         ) {
             let mut browser = browser.borrow_mut();
-            if browser.identity() == identity.0 {
-                if let Some(content) = browser
-                    .detail
-                    .as_mut()
+            if browser.identity() == identity.0
+                && let Some(content) = browser
+                    .detail_mut()
                     .filter(|content| content.identity() == identity.1)
-                {
-                    for (origin, action) in actions {
-                        if &origin == identity {
-                            changed |= service.action(core, content, ctx, routes, window, action);
-                        }
+            {
+                for (origin, action) in actions {
+                    if &origin == identity {
+                        changed |= service.action(core, content, ctx, routes, window, action);
                     }
-                    changed |= service.drain(core, content, ctx);
                 }
+                changed |= service.drain(core, content, ctx);
             }
         }
         changed
     }
 
-    pub fn release_question_source(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn release_question_source(&mut self, ui: &mut aqua::UiApp) {
         if let Some((_, service)) = self.question_source.take() {
             service.release(ui);
         }
         self.question_source_actions.borrow_mut().clear();
     }
 
-    pub fn release_question_options(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn release_question_options(&mut self, ui: &mut aqua::UiApp) {
         if let Some((_, service)) = self.question_option_detail.take() {
             service.release(ui);
         }
@@ -1253,7 +1480,7 @@ impl Workspace {
         );
     }
 
-    pub fn question_option_emit(&self) -> Rc<dyn Fn(crate::conversation::questions::OptionAction)> {
+    fn question_option_emit(&self) -> Rc<dyn Fn(crate::conversation::questions::OptionAction)> {
         let actions = Rc::clone(&self.question_option_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
@@ -1267,52 +1494,44 @@ impl Workspace {
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn usage_emit(&self) -> Rc<dyn Fn(crate::sidebar::usage_page::Action)> {
+    fn usage_emit(&self) -> Rc<dyn Fn(crate::sidebar::usage::view::Action)> {
         let actions = Rc::clone(&self.usage_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn sidebar_view(
+    pub(crate) fn settings_sidebar_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         viewport: aqua_core::Size,
-        visible: bool,
         reduced_motion: bool,
         now: std::time::Instant,
-        settings: bool,
     ) -> aqua_ui::element::Element {
-        let sidebar = if settings {
-            &self.settings_sidebar
-        } else {
-            &self.sidebar
-        };
         crate::sidebar::view::build(
-            sidebar,
+            &self.settings_sidebar,
             core,
             theme,
             viewport,
-            visible,
+            true,
             reduced_motion,
             now,
-            sidebar.thread_visual_factory(theme, reduced_motion),
-            self.sidebar_emit(settings),
+            self.settings_sidebar
+                .thread_visual_factory(theme, reduced_motion),
+            &self.sidebar_emit(true),
         )
     }
 
-    pub fn usage_view(
+    pub(crate) fn usage_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
-        viewport: aqua_core::Size,
+        theme: &crate::ui::theme::ArtisanTheme,
     ) -> aqua_ui::element::Element {
-        crate::sidebar::usage_page::build(
+        crate::sidebar::usage::view::build(
             &self.usage,
             core,
             theme,
-            artisan_api::now(),
-            viewport,
-            self.usage_emit(),
+            self.clock.timestamp(),
+            &self.usage_emit(),
         )
     }
 
@@ -1321,28 +1540,28 @@ impl Workspace {
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn home_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
+    fn home_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
         let actions = Rc::clone(&self.home_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn home_view(
+    pub(crate) fn home_view(
         &self,
         core: &Core,
         theme: &crate::ui::theme::ArtisanTheme,
     ) -> aqua_ui::element::Element {
         crate::shell::view::home(
             theme,
-            crate::settings::account_view::forges(&self.home, core, theme, self.home_emit()),
+            crate::settings::account_view::forges(&self.home, core, theme, &self.home_emit()),
         )
     }
 
-    pub fn settings_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
+    pub(crate) fn settings_emit(&self) -> Rc<dyn Fn(crate::settings::view::ViewAction)> {
         let actions = Rc::clone(&self.settings_actions);
         Rc::new(move |action| actions.borrow_mut().push_back(action))
     }
 
-    pub fn dispatch_sidebar_actions(&mut self, core: &mut Core) -> bool {
+    pub(crate) fn dispatch_sidebar_actions(&mut self, core: &mut Core) -> bool {
         let mut changed = false;
         let sidebar = std::mem::take(&mut *self.sidebar_actions.borrow_mut());
         for action in sidebar {
@@ -1371,7 +1590,7 @@ impl Workspace {
         changed |= self.dispatch_sidebar_actions(core);
         let usage = std::mem::take(&mut *self.usage_actions.borrow_mut());
         for action in usage {
-            changed |= crate::sidebar::usage_page::dispatch(&mut self.usage, core, action);
+            changed |= crate::sidebar::usage::view::dispatch(&mut self.usage, core, action);
         }
         let marketplace = std::mem::take(&mut *self.marketplace_actions.borrow_mut());
         for action in marketplace {
@@ -1387,37 +1606,23 @@ impl Workspace {
         }
         let home = std::mem::take(&mut *self.home_actions.borrow_mut());
         for action in home {
-            match &action {
-                crate::settings::view::ViewAction::OpenUrl(url) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::OpenUrl(url.clone())),
-                crate::settings::view::ViewAction::CopyText(text) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::CopyText(text.clone())),
-                _ => {}
-            }
+            self.settings_platform_effects
+                .extend(SettingsPlatformEffect::of(&action));
             changed |= crate::settings::view::dispatch(&mut self.home, core, action);
         }
         let settings = std::mem::take(&mut *self.settings_actions.borrow_mut());
         for action in settings {
-            match &action {
-                crate::settings::view::ViewAction::SetDarkMode(dark) => {
-                    self.theme_transition = Some(*dark)
-                }
-                crate::settings::view::ViewAction::OpenUrl(url) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::OpenUrl(url.clone())),
-                crate::settings::view::ViewAction::CopyText(text) => self
-                    .settings_platform_effects
-                    .push(SettingsPlatformEffect::CopyText(text.clone())),
-                _ => {}
+            if let crate::settings::view::ViewAction::SetDarkMode(dark) = &action {
+                self.theme_transition = Some(*dark);
             }
+            self.settings_platform_effects
+                .extend(SettingsPlatformEffect::of(&action));
             changed |= crate::settings::view::dispatch(&mut self.settings, core, action);
         }
         changed
     }
 
-    pub fn take_settings_platform_effects(&mut self) -> Vec<SettingsPlatformEffect> {
+    pub(crate) fn take_settings_platform_effects(&mut self) -> Vec<SettingsPlatformEffect> {
         std::mem::take(&mut self.settings_platform_effects)
     }
 
@@ -1425,15 +1630,45 @@ impl Workspace {
         self.theme_transition.take()
     }
 
-    pub fn drain_domains(&mut self, core: &mut Core, assets: &aqua::images::ImageAssets) -> bool {
-        let tm_1 = crate::shell::application::Tm::new("dd.conversation");
+    pub fn follow_accepted(
+        core: &mut Core,
+        target: &crate::composer::controller::ComposerTarget,
+        thread: &artisan_api::ThreadId,
+    ) -> Followed {
+        let host = match target {
+            crate::composer::controller::ComposerTarget::Thread { .. } => return Followed::Stayed,
+            crate::composer::controller::ComposerTarget::NewThread { host, .. } => host,
+        };
+        let composing = matches!(
+            core.workspace_screen(),
+            Screen::NewThread { host: shown, .. } if shown == host
+        );
+        let sent = Screen::Thread {
+            host: host.clone(),
+            thread: thread.clone(),
+        };
+        match (composing, core.screen()) {
+            (false, _) => Followed::Stayed,
+            (true, Screen::Settings(_)) => {
+                core.show_behind_settings(sent);
+                Followed::BehindSettings
+            }
+            (true, _) => {
+                core.navigate(sent);
+                Followed::Navigated
+            }
+        }
+    }
+
+    pub(crate) fn drain_domains(
+        &mut self,
+        core: &mut Core,
+        assets: &aqua::images::ImageAssets,
+    ) -> crate::shell::refresh::Invalidation {
+        use crate::shell::refresh::Cause;
         let conversation_changed = self.conversation.drain(core);
-        drop(tm_1);
-        let tm_2 = crate::shell::application::Tm::new("dd.questions");
         let question_changed = self.conversation.question_pages.drain(core);
         self.sync_question_pages(core);
-        drop(tm_2);
-        let tm_3 = crate::shell::application::Tm::new("dd.composer");
         let mut accepted = None;
         let mut composer_changed = false;
         if let Some(owner) = &mut self.composer {
@@ -1446,72 +1681,53 @@ impl Workspace {
                         accepted = Some((target.clone(), thread));
                         self.composer_editor_dirty = true;
                     }
-                    crate::composer::persistence::SessionEvent::Reloaded
-                    | crate::composer::persistence::SessionEvent::Changed => {
+                    crate::composer::persistence::SessionEvent::Changed
+                    | crate::composer::persistence::SessionEvent::ImageAdopted(_) => {
                         self.composer_editor_dirty = true;
                     }
                 }
             }
             self.route_composer_effects(core, result.effects);
         }
-        drop(tm_3);
         if let Some((target, thread)) = accepted {
-            if matches!(
-                target,
-                crate::composer::controller::ComposerTarget::NewThread { .. }
-            ) {
+            if Self::follow_accepted(core, &target, &thread) == Followed::Navigated {
                 self.sent_new_thread = Some(thread.clone());
-                core.navigate(Screen::Thread {
-                    host: target.host().clone(),
-                    thread: thread.clone(),
-                });
             }
             if core.workspace_screen().thread() == Some(&thread) {
                 self.conversation
                     .jump(core, crate::conversation::viewport::Jump::Latest);
             }
         }
-        let tm_4 = crate::shell::application::Tm::new("dd.qpages2");
         self.sync_question_pages(core);
-        drop(tm_4);
-        let now = artisan_api::now();
-        let tm_5 = crate::shell::application::Tm::new("dd.sidebar");
+        let now = self.clock.timestamp();
         let sidebar = self.sidebar.drain(core, now);
-        drop(tm_5);
-        let tm_6 = crate::shell::application::Tm::new("dd.settings_sidebar");
         let settings_sidebar = self.settings_sidebar.drain(core, now);
-        drop(tm_6);
-        let tm_7 = crate::shell::application::Tm::new("dd.others");
         let usage = self.usage.drain(core);
         let marketplace = self.marketplace.drain(core);
         let settings = self.settings.drain(core);
         let home = self.home.drain(core);
-        drop(tm_7);
-        let tm_8 = crate::shell::application::Tm::new("dd.images");
         let images_changed = self.images.drain(assets) | self.images.poll_assets();
-        drop(tm_8);
-        conversation_changed
-            || images_changed
-            || composer_changed
-            || question_changed
-            || sidebar
-            || settings_sidebar
-            || usage
-            || marketplace
-            || settings
-            || home
+        let mut causes = crate::shell::refresh::Invalidation::default();
+        causes.note(Cause::ConversationState, conversation_changed);
+        causes.note(Cause::ConversationImages, images_changed);
+        causes.note(Cause::ComposerState, composer_changed);
+        causes.note(Cause::QuestionPages, question_changed);
+        causes.note(Cause::SidebarState, sidebar);
+        causes.note(
+            Cause::ScreenState,
+            settings_sidebar || usage || marketplace || settings || home,
+        );
+        causes
     }
 
-    pub fn sync_editor_ui(&mut self, ui: &mut aqua::UiApp, settings_visible: bool) {
-        if self.composer_editor_dirty {
-            if let Some(owner) = &self.composer {
-                if let Some(key) = owner.editor.text_key() {
-                    if let Some(node) = keyed_node(ui, key) {
-                        owner.editor.sync(ui.tree_mut(), node);
-                        self.composer_editor_dirty = false;
-                    }
-                }
-            }
+    pub(crate) fn sync_editor_ui(&mut self, ui: &mut aqua::UiApp, settings_visible: bool) {
+        if self.composer_editor_dirty
+            && let Some(owner) = &self.composer
+            && let Some(key) = owner.editor.text_key()
+            && let Some(node) = keyed_node(ui, key)
+        {
+            owner.editor.sync(ui.tree_mut(), node);
+            self.composer_editor_dirty = false;
         }
         if !self.composer_editor_dirty
             && self.composer_focus_pending
@@ -1526,7 +1742,7 @@ impl Workspace {
         }
     }
 
-    pub fn sync_marketplace_ui(&mut self, ui: &mut aqua::UiApp) {
+    pub(crate) fn sync_marketplace_ui(&mut self, ui: &mut aqua::UiApp) {
         self.marketplace_focus_pending |= self.marketplace.take_focus_request();
         if self.marketplace_focus_pending && ui.focus_key("marketplace-search") {
             self.marketplace_focus_pending = false;
@@ -1542,18 +1758,18 @@ impl Workspace {
         }
     }
 
-    pub fn marketplace_view(
+    pub(crate) fn marketplace_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
     ) -> aqua_ui::element::Element {
         crate::marketplace::view::build(&self.marketplace, core, theme, self.marketplace_emit())
     }
 
-    pub fn settings_view(
+    pub(crate) fn settings_view(
         &self,
         core: &Core,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         build: &crate::settings::about::BuildInfo,
         viewport: aqua_core::Size,
         visible: bool,
@@ -1569,7 +1785,7 @@ impl Workspace {
         )
     }
 
-    pub fn open_reference(
+    pub(crate) fn open_reference(
         &mut self,
         core: &Core,
         path: String,
@@ -1586,33 +1802,33 @@ impl Workspace {
         ));
     }
 
-    pub fn dismiss_reference(&mut self) {
+    pub(crate) fn dismiss_reference(&mut self) {
         self.resource_preview = None;
         self.resource_preview_generation = self.resource_preview_generation.wrapping_add(1);
     }
 
-    pub fn resource_preview_generation(&self) -> u64 {
+    pub(crate) fn resource_preview_generation(&self) -> u64 {
         self.resource_preview_generation
     }
 
-    pub fn drain_reference(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_reference(&mut self, core: &Core) -> bool {
         self.resource_preview
             .as_mut()
             .is_some_and(|preview| preview.drain(core))
     }
 
-    pub fn open_palette(&mut self, core: &Core) {
+    pub(crate) fn open_palette(&mut self, core: &Core) {
         if self.palette.is_none() {
             self.palette = Some(Palette::default());
             self.refresh_palette(core);
         }
     }
 
-    pub fn dismiss_palette(&mut self) {
+    pub(crate) fn dismiss_palette(&mut self) {
         self.palette = None;
     }
 
-    pub fn search_palette(&mut self, core: &Core, query: String) {
+    pub(crate) fn search_palette(&mut self, core: &Core, query: String) {
         if let Some(palette) = &mut self.palette {
             let hosts = core
                 .hosts()
@@ -1629,7 +1845,7 @@ impl Workspace {
         self.refresh_palette(core);
     }
 
-    pub fn drain_palette(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_palette(&mut self, core: &Core) -> bool {
         let changed = self
             .palette
             .as_mut()
@@ -1640,7 +1856,7 @@ impl Workspace {
         changed
     }
 
-    pub fn refresh_palette(&mut self, core: &Core) {
+    fn refresh_palette(&mut self, core: &Core) {
         if let Some(palette) = &mut self.palette {
             let active = core.active_host().map(|host| &host.id);
             let hosts: Vec<_> = core
@@ -1657,26 +1873,17 @@ impl Workspace {
         }
     }
 
-    pub fn activate_palette(&mut self, core: &mut Core) {
-        if let Some(palette) = self.palette.take() {
-            if let Some(screen) = palette.selected() {
-                core.navigate(screen.clone());
-            }
-        }
-    }
-
-    pub fn new_thread(core: &mut Core) {
+    pub(crate) fn new_thread(core: &mut Core) {
         let screen = core
             .active_host()
-            .map(|host| Screen::NewThread {
+            .map_or(Screen::Home, |host| Screen::NewThread {
                 host: host.id.clone(),
                 project: None,
-            })
-            .unwrap_or(Screen::Home);
+            });
         core.navigate(screen);
     }
 
-    pub fn open_settings(core: &mut Core) {
+    pub(crate) fn open_settings(core: &mut Core) {
         core.navigate(Screen::Settings(SettingsPage::General));
     }
 }
@@ -1704,43 +1911,7 @@ fn keyed_descendant(
     found
 }
 
-impl Workspace {
-    pub fn acknowledge_painted(
-        &self,
-        core: &mut Core,
-        painted_row: &crate::conversation::adapter::RowModel,
-        bounds: aqua_core::Rect,
-        clip: aqua_core::Rect,
-        window_active: bool,
-        revealed: bool,
-        prepared: impl Fn(&crate::conversation::fold::Row, &artisan_api::Item) -> bool,
-    ) -> bool {
-        if !crate::conversation::read::painted(bounds, clip, window_active, revealed) {
-            return false;
-        }
-        let row = &painted_row.row;
-        let current = |row: &crate::conversation::fold::Row, item: &artisan_api::Item| {
-            let key = painted_row.row.key();
-            row.key() == key
-                && self
-                    .conversation
-                    .rows
-                    .iter()
-                    .any(|(row, version)| row.key() == key && *version == painted_row.version)
-                && painted_row
-                    .items
-                    .get(&item.id)
-                    .is_some_and(|painted| painted.seq == item.seq)
-                && prepared(row, item)
-        };
-        let Some(candidate) =
-            crate::conversation::read::capture(&self.conversation, core, row, &current)
-        else {
-            return false;
-        };
-        crate::conversation::read::acknowledge(candidate, &self.conversation, core, current)
-    }
-}
+impl Workspace {}
 
 fn mention_anchor(ui: &aqua::UiApp) -> &'static str {
     match keyed_node(ui, "composer-tab-card-body".into()) {

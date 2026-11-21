@@ -1,4 +1,4 @@
-use crate::core::{ForgeClient, delivery::Delivery};
+use crate::core::{ForgeClient, client::RangeError, delivery::OwnedDelivery};
 use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef};
 use futures::future::BoxFuture;
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
@@ -17,14 +17,14 @@ pub trait RangePage: Sized + 'static {
         client: &ForgeClient,
         source: &Self::Source,
         offset: u64,
-    ) -> BoxFuture<'static, anyhow::Result<Self>>;
+    ) -> BoxFuture<'static, Result<Self, RangeError>>;
 }
 
 impl RangePage for ContentRange {
     type Source = ContentRef;
     const KEPT: usize = 3;
     const SPAN: u64 = 1;
-    const FAILURE: &'static str = "Couldn't load source text";
+    const FAILURE: &'static str = "Couldn't load the source text.";
     fn length(source: &ContentRef) -> u64 {
         source.bytes
     }
@@ -41,7 +41,7 @@ impl RangePage for ContentRange {
         client: &ForgeClient,
         source: &ContentRef,
         offset: u64,
-    ) -> BoxFuture<'static, anyhow::Result<Self>> {
+    ) -> BoxFuture<'static, Result<Self, RangeError>> {
         let (client, source) = (client.clone(), source.clone());
         Box::pin(async move {
             client
@@ -55,7 +55,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RangePage for CollectionRa
     type Source = CollectionRef;
     const KEPT: usize = 8;
     const SPAN: u64 = artisan_api::COLLECTION_RANGE_ENTRIES as u64;
-    const FAILURE: &'static str = "Couldn't load collection records";
+    const FAILURE: &'static str = "Couldn't load the collection records.";
     fn length(source: &CollectionRef) -> u64 {
         source.count
     }
@@ -72,7 +72,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RangePage for CollectionRa
         client: &ForgeClient,
         source: &CollectionRef,
         offset: u64,
-    ) -> BoxFuture<'static, anyhow::Result<Self>> {
+    ) -> BoxFuture<'static, Result<Self, RangeError>> {
         let (client, source) = (client.clone(), source.clone());
         Box::pin(async move {
             client
@@ -82,12 +82,14 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RangePage for CollectionRa
     }
 }
 
+#[derive(Debug)]
 pub enum RangeState<R> {
     Loading,
     Ready(Arc<R>),
-    Failed(String),
+    Failed(crate::core::Problem),
 }
 
+#[derive(Debug)]
 pub struct RangeWindow<R: RangePage + Send> {
     client: Option<ForgeClient>,
     source: R::Source,
@@ -96,24 +98,11 @@ pub struct RangeWindow<R: RangePage + Send> {
     requested: u64,
     generation: u64,
     read: Option<AbortOnDropHandle<()>>,
-    delivery: Delivery<(u64, anyhow::Result<R>)>,
+    delivery: OwnedDelivery<(u64, Result<R, RangeError>)>,
 }
 
 pub type ContentWindow = RangeWindow<ContentRange>;
 pub type CollectionWindow<T> = RangeWindow<CollectionRange<T>>;
-
-#[cfg(feature = "test-support")]
-pub struct RangeCompletion<R: RangePage + Send> {
-    generation: u64,
-    sender: crate::core::delivery::DeliverySender<(u64, anyhow::Result<R>)>,
-}
-
-#[cfg(feature = "test-support")]
-impl<R: RangePage + Send> RangeCompletion<R> {
-    pub async fn complete(&self, result: anyhow::Result<R>) -> bool {
-        self.sender.send((self.generation, result)).await.is_ok()
-    }
-}
 
 impl<R: RangePage + Send> RangeWindow<R> {
     pub fn new(client: ForgeClient, source: R::Source) -> Self {
@@ -125,27 +114,14 @@ impl<R: RangePage + Send> RangeWindow<R> {
             requested: 0,
             generation: 0,
             read: None,
-            delivery: Delivery::new(NonZeroUsize::MIN),
+            delivery: OwnedDelivery::new(NonZeroUsize::MIN),
         };
         window.request(0);
         window
     }
 
     pub fn wake_mailbox(&self) -> &aqua::mailbox::Mailbox<()> {
-        self.delivery
-            .wake_mailbox()
-            .expect("range window owns its wake mailbox")
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(&mut self) -> RangeCompletion<R> {
-        self.read = None;
-        self.generation = self.generation.wrapping_add(1);
-        self.delivery.drain();
-        RangeCompletion {
-            generation: self.generation,
-            sender: self.delivery.sender(),
-        }
+        self.delivery.mailbox()
     }
 
     pub fn source(&self) -> &R::Source {
@@ -178,7 +154,8 @@ impl<R: RangePage + Send> RangeWindow<R> {
             return;
         }
         if let Some(index) = self.pages.iter().position(|page| {
-            page.start() <= offset && (offset < page.end() || offset == page.total())
+            page.start() <= offset
+                && (offset < page.end() || (offset == page.total() && page.end() == page.total()))
         }) && let Some(page) = self.pages.remove(index)
         {
             self.pages.push_back(Arc::clone(&page));
@@ -195,16 +172,13 @@ impl<R: RangePage + Send> RangeWindow<R> {
         self.load(self.requested);
     }
 
-    pub fn reset(&mut self) {
-        self.pages.clear();
-        self.load(self.requested);
-    }
-
     pub fn disconnect(&mut self) {
         self.client = None;
         self.read = None;
         self.generation = self.generation.wrapping_add(1);
-        self.state = RangeState::Failed("This Forge is no longer connected.".into());
+        self.state = RangeState::Failed(crate::core::Problem::new(
+            "This Forge is no longer connected.",
+        ));
     }
 
     fn load(&mut self, offset: u64) {
@@ -212,7 +186,9 @@ impl<R: RangePage + Send> RangeWindow<R> {
         self.read = None;
         self.generation = self.generation.wrapping_add(1);
         let Some(client) = &self.client else {
-            self.state = RangeState::Failed("This Forge is no longer connected.".into());
+            self.state = RangeState::Failed(crate::core::Problem::new(
+                "This Forge is no longer connected.",
+            ));
             return;
         };
         let future = R::fetch(client, &self.source, offset);
@@ -222,7 +198,7 @@ impl<R: RangePage + Send> RangeWindow<R> {
         self.read = Some(AbortOnDropHandle::new(
             crate::core::runtime::runtime().spawn(async move {
                 let result = future.await;
-                let _ = sender.send((generation, result)).await;
+                sender.offer((generation, result)).await;
             }),
         ));
     }
@@ -244,7 +220,9 @@ impl<R: RangePage + Send> RangeWindow<R> {
                     }
                     RangeState::Ready(page)
                 }
-                Err(error) => RangeState::Failed(format!("{}: {error:#}", R::FAILURE)),
+                Err(error) => {
+                    RangeState::Failed(crate::core::Problem::caused_by(R::FAILURE, &error))
+                }
             };
             changed = true;
         }

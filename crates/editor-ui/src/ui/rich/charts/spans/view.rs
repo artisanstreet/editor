@@ -1,4 +1,5 @@
 use super::Layout;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{
     Domain, f32_of_count, f64_of, index_of, nice_step, nice_ticks,
 };
@@ -6,9 +7,7 @@ use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
 use aqua_core::geometry::CornerRadii;
 use aqua_core::scene::GpuiShadowLayer;
-use aqua_core::{
-    DisplayItem, GpuiBackground, GpuiHsla, InputEvent, Key, Modifiers, NamedKey, Rect, Role,
-};
+use aqua_core::{DisplayItem, GpuiBackground, GpuiHsla, InputEvent, NamedKey, Rect};
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -60,7 +59,7 @@ impl SpansState {
     fn sync(&self, id: &str, model: &Arc<Layout>) -> (Option<usize>, Probe, u64) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.clone(),
+            model: Arc::clone(model),
             hover: None,
             probe: Rc::new(Cell::new(None)),
             reveal: None,
@@ -72,9 +71,9 @@ impl SpansState {
                 entry.reveal = None;
                 entry.reset = entry.reset.wrapping_add(1);
             }
-            entry.model = model.clone();
+            entry.model = Arc::clone(model);
         }
-        (entry.hover, entry.probe.clone(), entry.reset)
+        (entry.hover, Rc::clone(&entry.probe), entry.reset)
     }
     fn hover(&self, id: &str, value: Option<usize>) -> bool {
         let mut entries = self.0.borrow_mut();
@@ -104,7 +103,14 @@ impl SpansState {
                 Some(entry.hover.map_or(0, |n| (n + 1).min(count - 1)))
             }
             NamedKey::Enter => Some(entry.hover.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.hover = next;
         entry.reveal = next.map(|index| entry.model.spans[index].row);
@@ -194,8 +200,8 @@ fn row_shapes(
     }
     shapes
 }
-fn row_paint(
-    bounds: Rect,
+fn row_items(
+    size: (f32, f32),
     theme: &ArtisanTheme,
     layout: &Layout,
     domain: Domain,
@@ -203,13 +209,27 @@ fn row_paint(
     row: usize,
     hover: Option<usize>,
 ) -> Vec<DisplayItem> {
-    let mut items = scene::source_scene(bounds, &row_shapes(theme, layout, domain, ticks, row));
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut items = vec![DisplayItem::PushClip {
+        bounds,
+        radius: 0.0,
+    }];
+    items.extend(scene::shape_items(
+        size,
+        &row_shapes(theme, layout, domain, ticks, row),
+    ));
+    items.push(DisplayItem::PopClip);
     for index in &layout.row_spans[row] {
         let span = &layout.spans[*index];
         let x0 = domain.fraction(span.start);
         let x1 = domain.fraction(span.end);
         let rect = Rect {
-            x: bounds.x + bounds.w * x0,
+            x: bounds.w.mul_add(x0, bounds.x),
             y: bounds.y + 2.0,
             w: (bounds.w * (x1 - x0)).max(2.0),
             h: (bounds.h - 4.0).max(0.0),
@@ -269,10 +289,14 @@ fn hit_bar(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one spans view laying out lanes, marks, readout and navigation"
+)]
 pub(crate) fn view(
-    id: String,
+    id: &str,
     theme: &ArtisanTheme,
-    layout: Arc<Layout>,
+    layout: &Arc<Layout>,
     state: SpansState,
     services: &Services,
     invalidate: Rc<dyn Fn()>,
@@ -281,17 +305,17 @@ pub(crate) fn view(
         return (services.empty)("No spans");
     }
     let theme = *theme;
-    let (hover, probe, reset) = state.sync(&id, &layout);
+    let (hover, probe, reset) = state.sync(id, layout);
     let width = probe.get().map_or(560.0, |bounds| bounds.w);
-    let (domain, ticks) = tick_values(&layout, width);
+    let (domain, ticks) = tick_values(layout, width);
     let pitch = theme.density.control_sm;
-    let model = layout.clone();
-    let row_id = id.clone();
+    let model = Arc::clone(layout);
+    let row_id = id.to_owned();
     let row_ticks = ticks.clone();
     let row_state = state.clone();
-    let row_invalidate = invalidate.clone();
-    let text = services.text.clone();
-    let bar_label = services.bar_label.clone();
+    let row_invalidate = Rc::clone(&invalidate);
+    let text = Rc::clone(&services.text);
+    let bar_label = Rc::clone(&services.bar_label);
     let rows = List::new()
         .items(0..layout.rows)
         .key(|row| *row)
@@ -338,9 +362,13 @@ pub(crate) fn view(
                 ))
                 .build();
             let row_probe: Probe = Rc::new(Cell::new(None));
-            let draw_probe = row_probe.clone();
-            let draw_model = model.clone();
+            let draw_probe = Rc::clone(&row_probe);
+            let draw_model = Arc::clone(&model);
             let draw_ticks = row_ticks.clone();
+            let row_scene = scene::Scene::drawn(
+                move |size| row_items(size, &theme, &draw_model, domain, &draw_ticks, row, hover),
+                scene::Clip::Overflow,
+            );
             let canvas = ui::Canvas::new()
                 .style(
                     Style::new()
@@ -350,7 +378,7 @@ pub(crate) fn view(
                 )
                 .on_paint(move |bounds| {
                     draw_probe.set(Some(bounds));
-                    row_paint(bounds, &theme, &draw_model, domain, &draw_ticks, row, hover)
+                    row_scene.paint(bounds)
                 })
                 .build();
             let mut content = ui::Box::new()
@@ -381,13 +409,13 @@ pub(crate) fn view(
             }
             let moving = row_state.clone();
             let moving_id = row_id.clone();
-            let moving_probe = row_probe.clone();
-            let moving_model = model.clone();
-            let moving_invalidate = row_invalidate.clone();
+            let moving_probe = row_probe;
+            let moving_model = Arc::clone(&model);
+            let moving_invalidate = Rc::clone(&row_invalidate);
             let leaving = row_state.clone();
             let leaving_id = row_id.clone();
-            let leaving_model = model.clone();
-            let leaving_invalidate = row_invalidate.clone();
+            let leaving_model = Arc::clone(&model);
+            let leaving_invalidate = Rc::clone(&row_invalidate);
             let content = content
                 .build()
                 .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
@@ -467,7 +495,7 @@ pub(crate) fn view(
             .child((services.ticks)(ticks))
             .build(),
     );
-    let plot_probe = probe.clone();
+    let plot_probe = probe;
     plot = plot.child(
         ui::Canvas::new()
             .style(
@@ -518,95 +546,18 @@ pub(crate) fn view(
         aria.push(' ');
         aria.push_str(value);
     }
-    let keyboard = state.clone();
-    let keyboard_id = id.clone();
-    let mut navigation = plot
-        .build()
-        .with_key(format!("{id}-navigation"))
-        .role(Role::Group)
-        .focusable(true)
-        .tab_index(0)
-        .aria_label(aria)
-        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-            let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
-                return InputResponse::default();
-            };
-            let Key::Named(code) = key.key else {
-                return InputResponse::default();
-            };
-            if !keyboard.key(&keyboard_id, code, key.modifiers.contains(Modifiers::ALT)) {
-                return InputResponse::default();
-            }
+    let keyboard = state;
+    let keyboard_id = id.to_owned();
+    let navigation = navigation_group(plot.build(), id, aria, selection, move |code, alt| {
+        let handled = keyboard.key(&keyboard_id, code, alt);
+        if handled {
             invalidate();
-            InputResponse {
-                stop_propagation: true,
-                ..InputResponse::default()
-            }
-        });
-    if let Some(value) = selection {
-        navigation = navigation.aria_value(value);
-    }
+        }
+        handled
+    });
     (services.navigation)(navigation, theme.colors.ring.to_reference_paint())
 }
 
-#[cfg(feature = "test-support")]
-pub struct SpansFixture {
-    model: Arc<Layout>,
-    state: SpansState,
-}
-#[cfg(feature = "test-support")]
-impl SpansFixture {
-    pub fn new(json: &str) -> Self {
-        let value = serde_json::from_str(json).expect("JSON");
-        let model = Arc::new(super::prepare(&value).expect("spans"));
-        let state = SpansState::default();
-        state.sync("test", &model);
-        Self { model, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        let value = serde_json::from_str(json).expect("JSON");
-        self.model = Arc::new(super::prepare(&value).expect("spans"));
-        self.state.sync("test", &self.model);
-    }
-    pub fn selected(&self) -> Option<usize> {
-        self.state.sync("test", &self.model).0
-    }
-    pub fn generation(&self) -> u64 {
-        self.state.sync("test", &self.model).2
-    }
-    pub fn key(&self, key: NamedKey, alt: bool) -> bool {
-        self.state.key("test", key, alt)
-    }
-    pub fn pending_reveal(&self) -> Option<(String, usize)> {
-        self.state.pending_reveal("test")
-    }
-    pub fn revealed(&self, key: &str, row: usize) {
-        self.state.revealed("test", key, row);
-    }
-    pub fn row(&self, index: usize) -> usize {
-        self.model.spans[index].row
-    }
-    pub fn hit(&self, row: usize, x: f32, y: f32) -> Option<usize> {
-        let (domain, _) = tick_values(&self.model, 560.0);
-        hit_bar(
-            &self.model,
-            domain,
-            row,
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 560.0,
-                h: 32.0,
-            },
-            x,
-            y,
-        )
-    }
-    pub fn bar_center(&self, index: usize) -> f32 {
-        let (domain, _) = tick_values(&self.model, 560.0);
-        let span = &self.model.spans[index];
-        let left = 560.0 * domain.fraction(span.start);
-        let width = (560.0 * (domain.fraction(span.end) - domain.fraction(span.start))).max(2.0);
-        left + width / 2.0
-    }
-}
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/charts/spans/view.rs"]
+mod tests;

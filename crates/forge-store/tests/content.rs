@@ -30,7 +30,7 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
         .unwrap();
     let text = "α🙂\n".repeat(3_000_000);
     assert!(text.len() > 20 * 1024 * 1024);
-    let mut events = store.subscribe();
+    let events = store.subscribe();
     let input = NewItem {
         id: ItemId::new(),
         thread_id: thread.id.clone(),
@@ -55,15 +55,13 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
     let event = events.try_recv().unwrap();
     assert!(matches!(&event.event, Event::Item { .. }));
     assert!(serde_json::to_vec(&event).unwrap().len() < 2048);
-    assert!(
-        events.try_recv().is_err(),
-        "one Item write must emit one Item event"
-    );
+    events
+        .try_recv()
+        .expect_err("one Item write must emit one Item event");
     assert_eq!(store.upsert_item(input.clone()).await.unwrap(), first);
-    assert!(
-        events.try_recv().is_err(),
-        "normalized replay must not save again"
-    );
+    events
+        .try_recv()
+        .expect_err("normalized replay must not save again");
     let mut settled = input;
     settled.status = Status::Done;
     let last = store.upsert_item(settled).await.unwrap();
@@ -90,23 +88,20 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
     assert!(serde_json::to_vec(&page).unwrap().len() < 4096);
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM content", [], |row| row
+        conn.query_row(include_str!("content/count_content.sql"), [], |row| row
             .get::<_, u64>(0))
             .unwrap(),
         1
     );
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM item_content", [], |row| row
-            .get::<_, u64>(0))
-            .unwrap(),
+        conn.query_row(include_str!("content/count_item_content.sql"), [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .unwrap(),
         1
     );
-    // Source reads depend only on the indexed chunk table, not Item decoding.
-    conn.execute(
-        "UPDATE items SET body='{\"invalid_item_schema\":true}' WHERE id=?1",
-        [last.id.as_str()],
-    )
-    .unwrap();
+    conn.execute(include_str!("content/corrupt_item.sql"), [last.id.as_str()])
+        .unwrap();
     let mut reconstructed = String::new();
     let mut offset = 0;
     while offset < source.bytes {
@@ -131,7 +126,6 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn version_twelve_migration_preserves_revisions_native_identity_and_complete_output() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -179,39 +173,16 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
         .unwrap();
     let expected = "παλιό🙂\n".repeat(3000) + "exact tail";
     let mut legacy = serde_json::to_value(&item).unwrap();
-    legacy["kind"]["output"] = serde_json::json!({ "head": &expected[..expected.len()-10], "tail": "exact tail", "truncated_bytes": 0 });
+    legacy["kind"]["output"] = serde_json::json!({ "head": expected.strip_suffix("exact tail").expect("the expected text ends with its tail"), "tail": "exact tail", "truncated_bytes": 0 });
     drop(store);
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     conn.execute(
-        "UPDATE items SET body=?2 WHERE id=?1",
+        include_str!("content/replace_item_body.sql"),
         rusqlite::params![item.id.as_str(), serde_json::to_string(&legacy).unwrap()],
     )
     .unwrap();
-    conn.execute_batch(
-        "DROP TRIGGER item_content_owner_delete;
-         DROP INDEX items_transcript_rows;
-         ALTER TABLE items DROP COLUMN work;
-         DROP INDEX items_pending_input;
-         DROP INDEX items_pending_inputs;
-         DROP INDEX items_thread_kind_position;
-         DROP INDEX items_thread_parent_position;
-         DROP INDEX items_agent_message_target;
-         ALTER TABLE items DROP COLUMN kind_type;
-         ALTER TABLE items DROP COLUMN parent_id;
-         DROP TABLE source_index_leaves;
-         DROP TABLE source_indexes;
-         DROP TABLE content_records;
-         DROP TABLE content_collections;
-         DROP TABLE content_dependencies;
-         DROP TABLE item_content;
-         DROP TABLE content_chunks;
-         DROP TABLE content;
-         DROP TABLE continues;
-         DROP TABLE coordination_events;
-         DROP TABLE coordination_records;
-         PRAGMA user_version=12;",
-    )
-    .unwrap();
+    conn.execute_batch(include_str!("content/downgrade_to_v12.sql"))
+        .unwrap();
     drop(conn);
     let migrated = Store::open(dir.path()).unwrap();
     let actual = migrated.item(&item.id).await.unwrap().unwrap();
@@ -301,7 +272,7 @@ async fn goal_summary_reads_a_bounded_prefix_and_preserves_full_source_identity(
     };
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     conn.execute(
-        "DELETE FROM content_chunks WHERE content_id=?1 AND start>1024",
+        include_str!("content/drop_tail_chunks.sql"),
         [source.id.as_str()],
     )
     .unwrap();
@@ -313,10 +284,10 @@ async fn goal_summary_reads_a_bounded_prefix_and_preserves_full_source_identity(
         objective.chars().take(160).collect::<String>() + "…"
     );
     assert!(goal.summary.chars().count() <= 161);
-    assert!(
-        store.resolve_text(&goal.objective).await.is_err(),
-        "fixture must prevent accidental full-source reads"
-    );
+    store
+        .resolve_text(&goal.objective)
+        .await
+        .expect_err("fixture must prevent accidental full-source reads");
 }
 
 #[tokio::test]
@@ -433,4 +404,74 @@ async fn a_compaction_summary_between_4_kib_and_the_inline_limit_is_accepted() {
         panic!("checkpoint retained");
     };
     assert_eq!(store.resolve_text(&kept).await.unwrap(), summary);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_a_message_no_longer_uses_is_collected_a_day_later_on_forges_clock() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
+    let dir = tempfile::tempdir().unwrap();
+    let now = Arc::new(AtomicI64::new(artisan_api::now()));
+    let reading = Arc::clone(&now);
+    let lock = forge_store::DataLock::acquire(dir.path()).unwrap();
+    let store = Store::open_restoring_in(
+        &lock,
+        forge_store::Environment {
+            clock: artisan_api::WallClock::new(move || reading.load(Ordering::SeqCst)),
+            ..forge_store::Environment::system()
+        },
+    )
+    .unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/collected".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let reply = |text: String| NewItem {
+        id: ItemId::from("reply"),
+        thread_id: thread.id.clone(),
+        run_id: None,
+        parent_id: None,
+        native_id: None,
+        status: Status::Running,
+        kind: ItemKind::AssistantMessage {
+            text: text.into(),
+            phase: Phase::Final,
+        },
+    };
+    let long = store
+        .upsert_item(reply("a long draft\n".repeat(4096)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        long.kind,
+        ItemKind::AssistantMessage {
+            text: TextContent::Stored(_),
+            ..
+        }
+    ));
+    store.upsert_item(reply("short".into())).await.unwrap();
+
+    assert_eq!(store.gc_content().await.unwrap(), 0, "kept for a day");
+    now.fetch_add(DAY_MILLIS + 60_000, Ordering::SeqCst);
+    assert_eq!(
+        store.gc_content().await.unwrap(),
+        1,
+        "collected once Forge's clock passes the day"
+    );
 }

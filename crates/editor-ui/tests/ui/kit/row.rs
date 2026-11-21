@@ -1,3 +1,4 @@
+use super::close;
 use aqua_core::{Point, Size};
 use aqua_reactive::Runtime;
 use aqua_ui::binding::View;
@@ -5,30 +6,16 @@ use aqua_ui::element::{Box as UiBox, Element, Key};
 use aqua_ui::events::hit_test;
 use aqua_ui::layout::NaiveMeasurer;
 use aqua_ui::tree::{UiTree, hash_key};
-use editor_ui::kit::{Density, Radius, Row, RowItem, Space, Surface, Tooltip};
+use editor_ui::kit::{Density, Row, RowItem, RowKind, Surface};
 use editor_ui::theme::{ArtisanTheme, ThemeMode};
 
 #[test]
-fn a_menu_item_is_the_account_menu_item() {
-    assert_eq!(Row::MenuItem.height(), Some(36.0), "36 high");
-    assert_eq!(Row::MenuItem.pad().x, Space::S12, "12 across");
-    assert_eq!(Row::MenuItem.pad().y, Space::S8, "8 down");
-    assert_eq!(
-        Row::MenuItem.text_inset(Surface::Menu),
-        18.0,
-        "text sits 18 from the edge"
-    );
-    assert!(
-        (Row::MenuItem.radius_in(Surface::Menu) - Radius::Row.px()).abs() < 1e-4,
-        "rows take the menu's concentric radius"
-    );
-}
-
-#[test]
 fn headings_align_with_menu_item_text() {
-    assert_eq!(
-        Row::Heading.text_inset(Surface::Menu),
-        Row::MenuItem.text_inset(Surface::Menu),
+    assert!(
+        close(
+            Row::Heading.text_inset(Surface::Menu),
+            Row::MenuItem.text_inset(Surface::Menu)
+        ),
         "headings line up with the items they label"
     );
 }
@@ -36,15 +23,19 @@ fn headings_align_with_menu_item_text() {
 #[test]
 fn list_headings_align_with_list_item_text() {
     for density in [Density::Regular, Density::Tall] {
-        assert_eq!(
-            Row::ListHeading.text_inset(Surface::Inset),
-            Row::ListItem(density).text_inset(Surface::Inset),
+        assert!(
+            close(
+                Row::ListHeading.text_inset(Surface::Inset),
+                Row::ListItem(density).text_inset(Surface::Inset)
+            ),
             "a heading in a list lines up with the rows below it"
         );
     }
-    assert_eq!(
-        Row::ListHeading.height(),
-        Row::Heading.height(),
+    assert!(
+        close(
+            Row::ListHeading.height(ArtisanTheme::for_mode(ThemeMode::Dark)),
+            Row::Heading.height(ArtisanTheme::for_mode(ThemeMode::Dark))
+        ),
         "list headings are as tall as menu headings"
     );
     assert!(
@@ -53,41 +44,15 @@ fn list_headings_align_with_list_item_text() {
     );
 }
 
-#[test]
-fn heights_are_lines_plus_padding() {
-    assert_eq!(
-        Row::ListItem(Density::Regular).height(),
-        Some(36.0),
-        "regular"
-    );
-    assert_eq!(Row::ListItem(Density::Dense).height(), Some(28.0), "dense");
-    assert_eq!(
-        Row::ListItem(Density::Tall).height(),
-        Some(52.0),
-        "tall carries a caption"
-    );
-    assert_eq!(Row::Heading.height(), Some(28.0), "heading");
-    assert_eq!(
-        Row::FormRow.height(),
-        None,
-        "form rows size to their control"
-    );
-}
-
-#[test]
-fn rows_outside_a_nesting_surface_fall_back_to_the_concentric_rule() {
-    let radius = Row::MenuItem.radius_in(Surface::Tooltip(Tooltip::Card));
-    assert_eq!(
-        radius, 0.0,
-        "16 inside 10.4 leaves square corners, never a guessed radius"
-    );
-}
-
 fn control() -> Element {
-    UiBox::new().width(40.0).height(20.0).build().with_key("control")
+    UiBox::new()
+        .width(40.0)
+        .height(20.0)
+        .build()
+        .with_key("control")
 }
 
-fn hits_control(row: Row) -> bool {
+fn hits_control(row: impl Into<RowKind>) -> bool {
     let runtime = Runtime::new();
     let mut tree = UiTree::new();
     let mut mounted = View::new(runtime.create_scope(), tree.command_sink());
@@ -96,7 +61,10 @@ fn hits_control(row: Row) -> bool {
         .detail("A description long enough to need room")
         .trailing(control())
         .build();
-    assert!(mounted.set_content(&mut tree, vec![item]).is_ok(), "the row mounts");
+    assert!(
+        mounted.set_content(&mut tree, vec![item]).is_ok(),
+        "the row mounts"
+    );
     assert!(
         mounted
             .compute_layout(&mut tree, Size::new(400.0, 200.0), &NaiveMeasurer)
@@ -108,7 +76,10 @@ fn hits_control(row: Row) -> bool {
     let (Some(control), Some(rect)) = (control, rect) else {
         return false;
     };
-    let mut hit = hit_test(&tree, Point::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
+    let mut hit = hit_test(
+        &tree,
+        Point::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+    );
     while let Some(node) = hit {
         if node == control {
             return true;
@@ -121,28 +92,8 @@ fn hits_control(row: Row) -> bool {
 #[test]
 fn a_form_rows_trailing_control_receives_the_pointer() {
     assert!(
-        hits_control(Row::FormRow),
+        hits_control(RowKind::Form),
         "a switch or select at the end of a form row stays clickable"
-    );
-}
-
-#[test]
-fn only_form_rows_wrap_and_skip_the_hover() {
-    let static_rows = [Row::FormRow, Row::Heading, Row::KeyRow];
-    for row in static_rows {
-        assert!(!row.interactive(), "{row:?} carries no hover or activation");
-    }
-    assert!(Row::FormRow.wraps(), "form descriptions wrap instead of truncating");
-    assert!(!Row::MenuItem.wraps(), "menu items stay on one line");
-}
-
-#[test]
-fn key_rows_are_static_facts_as_tall_as_menu_items() {
-    assert!(!Row::KeyRow.interactive(), "a fact is not a target");
-    assert_eq!(
-        Row::KeyRow.height(),
-        Row::MenuItem.height(),
-        "facts and the rows beside them share one rhythm"
     );
 }
 
@@ -180,5 +131,46 @@ fn a_row_with_a_hover_card_still_lights_on_hover() {
     assert!(
         hover_lights(row().hint(|| UiBox::new().build())),
         "a hint card sits beside the hover instead of replacing it"
+    );
+}
+
+pub(crate) fn painted_with_keyboard_focus(element: Element, key: &str) -> (usize, usize) {
+    let mut app = aqua::UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
+    assert!(app.mount(move |_| element).is_ok(), "the control mounts");
+    app.set_viewport(400.0, 200.0, 1.0);
+    assert!(app.build_frame().is_ok(), "the control lays out");
+    let Some(node) = app.tree().sole_node_with_key(hash_key(Key::from(key))) else {
+        return (0, 0);
+    };
+    let painted = |app: &mut aqua::UiApp| {
+        app.tree_mut()
+            .emit_scene()
+            .into_iter()
+            .filter(|(owner, _)| *owner == node)
+            .count()
+    };
+    let resting = painted(&mut app);
+    let tab = aqua_core::KeyEvent {
+        key: aqua_core::Key::Named(aqua_core::NamedKey::Tab),
+        modifiers: aqua_core::Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&aqua_core::InputEvent::KeyDown(tab));
+    app.handle_input(&aqua_core::InputEvent::KeyUp(tab));
+    assert_eq!(app.tree().focused(), Some(node), "Tab reaches the control");
+    assert!(app.build_frame().is_ok(), "the focused control lays out");
+    (resting, painted(&mut app))
+}
+
+#[test]
+fn a_row_reached_with_tab_shows_a_focus_ring() {
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let row = RowItem::new("row", *theme, Row::MenuItem, Surface::Menu, "Agent")
+        .on_activate(|| {})
+        .build();
+    let (resting, focused) = painted_with_keyboard_focus(row, "row");
+    assert!(
+        focused > resting,
+        "keyboard focus paints an indicator ({resting} items at rest, {focused} focused)"
     );
 }

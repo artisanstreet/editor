@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 const BUDGET_BYTES: usize = 32 * 1024 * 1024;
 const LARGEST_PAGE_BYTES: usize = BUDGET_BYTES / 8;
+const THREADS_REMEMBERED: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tail {
@@ -17,11 +18,11 @@ pub enum Tail {
 }
 
 impl Tail {
-    pub fn rows(query: &ItemsQuery) -> Option<Self> {
+    pub(crate) fn rows(query: &ItemsQuery) -> Option<Self> {
         is_tail(query).then_some(Self::Rows { limit: query.limit })
     }
 
-    pub fn items(parent: Option<&ItemId>, query: &ItemsQuery) -> Option<Self> {
+    pub(crate) fn items(parent: Option<&ItemId>, query: &ItemsQuery) -> Option<Self> {
         is_tail(query).then(|| Self::Items {
             parent: parent.cloned(),
             limit: query.limit,
@@ -33,14 +34,19 @@ const fn is_tail(query: &ItemsQuery) -> bool {
     query.before.is_none() && query.after.is_none()
 }
 
+#[derive(Debug)]
 pub enum Lookup {
     Hit(Arc<ItemsPage>),
     Miss(Version),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Version(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Version {
+    epoch: u64,
+    revision: u64,
+}
 
+#[derive(Debug)]
 struct Held {
     tail: Tail,
     page: Arc<ItemsPage>,
@@ -48,20 +54,23 @@ struct Held {
     used: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Thread {
-    version: u64,
+    changed_at: u64,
     held: Vec<Held>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Window {
     threads: HashMap<ThreadId, Thread>,
     bytes: usize,
     clock: u64,
+    epoch: u64,
+    revision: u64,
+    forgotten: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct HotPages {
     window: Mutex<Window>,
 }
@@ -98,40 +107,69 @@ impl HotPages {
             .committed(envelopes);
     }
 
-    pub fn reset(&self) {
+    pub(crate) fn reset(&self) {
         self.window
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .invalidate_everything();
+    }
+
+    pub fn threads_remembered(&self) -> usize {
+        self.window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .threads
+            .len()
+    }
+
+    pub fn held_bytes(&self) -> usize {
+        self.window
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .bytes
     }
 }
 
 impl Window {
     fn lookup(&mut self, thread: &ThreadId, tail: &Tail) -> Lookup {
         self.clock += 1;
+        let read_at = Version {
+            epoch: self.epoch,
+            revision: self.revision,
+        };
         let Some(known) = self.threads.get_mut(thread) else {
-            return Lookup::Miss(Version(0));
+            return Lookup::Miss(read_at);
         };
         match known.held.iter_mut().find(|held| held.tail == *tail) {
             Some(held) => {
                 held.used = self.clock;
                 Lookup::Hit(Arc::clone(&held.page))
             }
-            None => Lookup::Miss(Version(known.version)),
+            None => Lookup::Miss(read_at),
         }
     }
 
     fn hold(&mut self, thread: &ThreadId, read_at: Version, mut held: Held) {
         self.clock += 1;
-        let known = self.threads.entry(thread.clone()).or_default();
-        if Version(known.version) != read_at || known.held.iter().any(|kept| kept.tail == held.tail)
-        {
+        let changed_at = self
+            .threads
+            .get(thread)
+            .map_or(self.forgotten, |known| known.changed_at);
+        if read_at.epoch != self.epoch || changed_at > read_at.revision {
+            return;
+        }
+        let known = self.threads.entry(thread.clone()).or_insert(Thread {
+            changed_at,
+            held: Vec::new(),
+        });
+        if known.held.iter().any(|kept| kept.tail == held.tail) {
             return;
         }
         held.used = self.clock;
         self.bytes += held.bytes;
         known.held.push(held);
         self.shed();
+        self.forget();
     }
 
     fn committed(&mut self, envelopes: &[Envelope]) {
@@ -145,18 +183,47 @@ impl Window {
     }
 
     fn invalidate(&mut self, thread: &ThreadId) {
+        self.revision += 1;
         let known = self.threads.entry(thread.clone()).or_default();
-        known.version += 1;
+        known.changed_at = self.revision;
         let released: usize = known.held.drain(..).map(|held| held.bytes).sum();
         self.bytes -= released;
+        self.forget();
     }
 
     fn invalidate_everything(&mut self) {
-        for known in self.threads.values_mut() {
-            known.version += 1;
-            known.held.clear();
-        }
+        self.epoch += 1;
+        self.threads.clear();
         self.bytes = 0;
+        self.forgotten = self.revision;
+    }
+
+    fn forget(&mut self) {
+        if self.threads.len() <= THREADS_REMEMBERED {
+            return;
+        }
+        let mut oldest: Vec<((bool, u64), ThreadId)> = self
+            .threads
+            .iter()
+            .map(|(thread, known)| {
+                let recency = known
+                    .held
+                    .iter()
+                    .map(|held| held.used)
+                    .max()
+                    .map_or((false, known.changed_at), |used| (true, used));
+                (recency, thread.clone())
+            })
+            .collect();
+        let excess = self.threads.len() - THREADS_REMEMBERED / 2;
+        oldest.select_nth_unstable(excess);
+        oldest.truncate(excess);
+        for (_, thread) in oldest {
+            if let Some(known) = self.threads.remove(&thread) {
+                self.forgotten = self.forgotten.max(known.changed_at);
+                self.bytes -= known.held.iter().map(|held| held.bytes).sum::<usize>();
+            }
+        }
     }
 
     fn shed(&mut self) {
@@ -201,23 +268,6 @@ const fn changed_transcript(event: &Event) -> Option<&ThreadId> {
     }
 }
 
-struct ByteCount(usize);
-
-impl std::io::Write for ByteCount {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0 += bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn page_bytes(page: &ItemsPage) -> usize {
-    let mut count = ByteCount(0);
-    match serde_json::to_writer(&mut count, page) {
-        Ok(()) => count.0,
-        Err(_unserializable) => usize::MAX,
-    }
+    crate::encoded::len(page)
 }

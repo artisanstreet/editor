@@ -1,9 +1,9 @@
 # Simple Icons marks — license attestation
 
-Scope: `modules/assets/svg/simple-icons/*` (bitbucket, codeberg, gitea,
-sourcehut).
+Scope: `crates/editor-assets/svg/simple-icons/*` (bitbucket, codeberg, gitea,
+sourcehut, meituan, xiaomi).
 
-Evidence: each legacy source component
+Evidence for the first four: each legacy source component
 (`modules/frontend/src/lib/vcs/marks/<host>.svelte`) carries the doc comment
 "vendored from Simple Icons (CC0); fills follow `currentColor`". The four files
 are path-only currentColor marks extracted verbatim from those components.
@@ -17,5 +17,5 @@ owners and are used here to identify the corresponding repository hosts, exactly
 as in the legacy frontend.
 
 `meituan.svg` and `xiaomi.svg` (2026-10-20) come from the `simple-icons` npm package (CC0),
-with its `<title>` dropped and `fill="currentColor"` added; it identifies the
-lab of models in the model menu.
+with their `<title>` dropped and `fill="currentColor"` added; they identify the
+labs of models in the model menu.

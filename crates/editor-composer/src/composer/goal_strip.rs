@@ -23,14 +23,89 @@ pub struct ComposerGoal {
     pub detail: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Level {
+    reveal: f32,
+    label: f32,
+}
+
+impl Level {
+    const HIDDEN: Self = Self {
+        reveal: 0.0,
+        label: 0.0,
+    };
+    const SHOWN: Self = Self {
+        reveal: 1.0,
+        label: 1.0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Phase {
+    Shown,
+    Growing { started: Instant, from: Level },
+    Leaving { started: Instant, from: Level },
+}
+
+impl Phase {
+    fn level(self, now: Instant) -> Level {
+        match self {
+            Self::Shown => Level::SHOWN,
+            Self::Growing { started, from } => {
+                let elapsed = now.saturating_duration_since(started);
+                let reveal = eased(
+                    MotionCurve::SmoothOut,
+                    progress(elapsed, Duration::ZERO, Duration::from_millis(400)),
+                );
+                let label = eased(
+                    MotionCurve::SmoothOut,
+                    progress(
+                        elapsed,
+                        Duration::from_millis(250),
+                        Duration::from_millis(250),
+                    ),
+                );
+                Level {
+                    reveal: (1.0 - from.reveal).mul_add(reveal, from.reveal),
+                    label: (1.0 - from.label).mul_add(label, from.label),
+                }
+            }
+            Self::Leaving { started, from } => {
+                let elapsed = now.saturating_duration_since(started);
+                let label = progress(elapsed, Duration::ZERO, Duration::from_millis(150));
+                let reveal = eased(
+                    MotionCurve::SmoothOut,
+                    progress(
+                        elapsed,
+                        Duration::from_millis(150),
+                        Duration::from_millis(350),
+                    ),
+                );
+                Level {
+                    reveal: from.reveal * (1.0 - reveal),
+                    label: from.label * (1.0 - label),
+                }
+            }
+        }
+    }
+
+    fn finished(self, now: Instant) -> bool {
+        match self {
+            Self::Shown => true,
+            Self::Growing { started, .. } | Self::Leaving { started, .. } => {
+                now.saturating_duration_since(started) >= Duration::from_millis(500)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GoalStrip {
-    shown: Option<ComposerGoal>,
-    grown_at: Option<Instant>,
-    leaving_at: Option<Instant>,
+    shown: Option<(ComposerGoal, Phase)>,
     swap: Option<(Instant, ComposerGoal)>,
 }
 
+#[derive(Debug)]
 pub struct GoalStripFrame {
     pub reveal: f32,
     pub goal: ComposerGoal,
@@ -40,96 +115,79 @@ pub struct GoalStripFrame {
 }
 
 impl GoalStrip {
-    pub fn set(&mut self, goal: Option<ComposerGoal>, now: Instant, reduced: bool) -> bool {
-        match (goal, self.shown.clone()) {
+    fn set(&mut self, goal: Option<ComposerGoal>, now: Instant, reduced: bool) -> bool {
+        match (goal, self.shown.take()) {
             (None, None) => false,
-            (None, Some(_)) => {
-                if self.leaving_at.is_some() {
-                    return false;
-                }
+            (None, Some((shown, phase @ Phase::Leaving { .. }))) => {
+                self.shown = Some((shown, phase));
+                false
+            }
+            (None, Some((shown, phase))) => {
                 if reduced {
                     *self = Self::default();
                 } else {
-                    self.leaving_at = Some(now);
+                    self.shown = Some((
+                        shown,
+                        Phase::Leaving {
+                            started: now,
+                            from: phase.level(now),
+                        },
+                    ));
                     self.swap = None;
                 }
                 true
             }
             (Some(goal), None) => {
-                self.shown = Some(goal);
-                self.grown_at = (!reduced).then_some(now);
-                self.leaving_at = None;
+                self.shown = Some((goal, Self::grow(Level::HIDDEN, now, reduced)));
                 self.swap = None;
                 true
             }
-            (Some(goal), Some(shown)) => {
-                if self.leaving_at.take().is_some() {
-                    self.grown_at = (!reduced).then_some(now);
-                    self.shown = Some(goal);
-                    return true;
-                }
+            (Some(goal), Some((_, phase @ Phase::Leaving { .. }))) => {
+                self.shown = Some((goal, Self::grow(phase.level(now), now, reduced)));
+                true
+            }
+            (Some(goal), Some((shown, phase))) => {
                 if goal == shown {
+                    self.shown = Some((shown, phase));
                     return false;
                 }
                 if !reduced {
                     self.swap = Some((now, shown));
                 }
-                self.shown = Some(goal);
+                self.shown = Some((goal, phase));
                 true
             }
         }
     }
 
+    fn grow(from: Level, now: Instant, reduced: bool) -> Phase {
+        if reduced {
+            Phase::Shown
+        } else {
+            Phase::Growing { started: now, from }
+        }
+    }
+
     pub fn frame(&mut self, now: Instant, reduced: bool) -> Option<GoalStripFrame> {
         if reduced {
-            if self.leaving_at.is_some() {
-                *self = Self::default();
-            } else {
-                self.grown_at = None;
-                self.swap = None;
-            }
+            self.swap = None;
+            self.shown = match self.shown.take() {
+                Some((_, Phase::Leaving { .. })) | None => None,
+                Some((goal, _)) => Some((goal, Phase::Shown)),
+            };
         }
-        let goal = self.shown.clone()?;
-        let mut reveal = 1.0;
-        let mut label = 1.0;
-        let mut moving = false;
-        if let Some(leaving) = self.leaving_at {
-            let elapsed = now.saturating_duration_since(leaving);
-            label = 1.0 - progress(elapsed, Duration::ZERO, Duration::from_millis(150));
-            reveal = 1.0
-                - eased(
-                    MotionCurve::SmoothOut,
-                    progress(
-                        elapsed,
-                        Duration::from_millis(150),
-                        Duration::from_millis(350),
-                    ),
-                );
-            if elapsed >= Duration::from_millis(500) {
+        let (goal, phase) = self.shown.clone()?;
+        let level = phase.level(now);
+        let mut moving = !phase.finished(now);
+        match (phase, moving) {
+            (Phase::Leaving { .. }, false) => {
                 *self = Self::default();
                 return None;
             }
-            moving = true;
-        } else if let Some(grown) = self.grown_at {
-            let elapsed = now.saturating_duration_since(grown);
-            reveal = eased(
-                MotionCurve::SmoothOut,
-                progress(elapsed, Duration::ZERO, Duration::from_millis(400)),
-            );
-            label = eased(
-                MotionCurve::SmoothOut,
-                progress(
-                    elapsed,
-                    Duration::from_millis(250),
-                    Duration::from_millis(250),
-                ),
-            );
-            if elapsed >= Duration::from_millis(500) {
-                self.grown_at = None;
-            } else {
-                moving = true;
-            }
+            (Phase::Growing { .. }, false) => self.shown = Some((goal.clone(), Phase::Shown)),
+            _ => {}
         }
+        let label = level.label;
         let (goal, label_opacity, label_offset) = match self.swap.clone() {
             Some((started, from)) => {
                 let swap = progress(
@@ -153,7 +211,7 @@ impl GoalStrip {
             None => (goal, label, 4.0 * (1.0 - label)),
         };
         Some(GoalStripFrame {
-            reveal,
+            reveal: level.reveal,
             goal,
             label_opacity,
             label_offset,
@@ -179,7 +237,7 @@ pub struct ComposerNote {
     pub text: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StripState {
     pub motion: GoalStrip,
     goal: Option<ComposerGoal>,
@@ -212,15 +270,6 @@ impl StripState {
         }
         self.parked = until.map(|at| (at, format(at)));
         self.update(now, reduced)
-    }
-
-    pub fn set_parked_time(
-        &mut self,
-        until: Option<artisan_api::Timestamp>,
-        now: Instant,
-        reduced: bool,
-    ) -> bool {
-        self.set_parked(until, editor_ui::local_time::moment, now, reduced)
     }
 
     pub fn settle(&mut self) {
@@ -258,3 +307,7 @@ impl StripState {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/goal_strip.rs"]
+mod tests;

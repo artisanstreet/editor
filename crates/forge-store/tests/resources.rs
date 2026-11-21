@@ -3,14 +3,15 @@ use artisan_api::{
 };
 use forge_store::{MAX_RESOURCE_SNAPSHOT_BYTES, Store, keep_resource_snapshot};
 
-async fn thread(store: &Store, folder: &std::path::Path) -> anyhow::Result<ThreadId> {
+async fn thread(store: &Store, folder: &std::path::Path) -> ThreadId {
     let project = store
         .create_project(CreateProject {
             id: ProjectId::new(),
             path: folder.display().to_string(),
             name: None,
         })
-        .await?;
+        .await
+        .expect("the project is created");
     let thread = store
         .create_thread(CreateThread {
             id: ThreadId::new(),
@@ -20,15 +21,16 @@ async fn thread(store: &Store, folder: &std::path::Path) -> anyhow::Result<Threa
             parent_thread_id: None,
             spawned_by: None,
         })
-        .await?;
-    Ok(thread.id)
+        .await
+        .expect("the thread is created");
+    thread.id
 }
 
 #[tokio::test]
 async fn snapshots_are_kept_per_item_and_path_and_the_first_capture_wins() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let thread = thread(&store, dir.path()).await.unwrap();
+    let thread = thread(&store, dir.path()).await;
     let (first, second) = (ItemId::new(), ItemId::new());
     let target = |item: &ItemId, path: &str, from_home: bool| {
         store
@@ -60,7 +62,7 @@ async fn collection_removes_only_the_snapshots_of_threads_that_are_gone() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     assert_eq!(store.gc_resource_snapshots().await.unwrap(), 0);
-    let live = thread(&store, dir.path()).await.unwrap();
+    let live = thread(&store, dir.path()).await;
     let gone = ThreadId::new();
     let item = ItemId::new();
     let kept = store

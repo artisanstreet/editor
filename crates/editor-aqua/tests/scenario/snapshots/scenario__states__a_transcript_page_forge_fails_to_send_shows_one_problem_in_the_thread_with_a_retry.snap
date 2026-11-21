@@ -1,0 +1,14 @@
+---
+source: crates/editor-aqua/tests/scenario/states.rs
+expression: "settled.lines().skip_while(|line|\n!line.contains(HEADLINE)).collect::<Vec<_>>().join(\"\\n\")"
+---
+  Label "Couldn't load earlier messages. Forge couldn't be reached."
+  Button "Try again"
+    Label "Try again"
+  Label "Details"
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message"
+  Button "Send message" [disabled]
+  Label "Lost the connection to Forge. Reconnecting…"

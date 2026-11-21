@@ -1,9 +1,8 @@
-//! One maintained-parser scan into compact native semantic leaf descriptors.
 use super::PARSE_OPTIONS;
 use super::{
-    Arc, BlockShape, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, Kind, LeafContext, LeafSpacing,
-    ListLevel, MarkdownIndex, MarkdownIndexError, SOURCE_BYTES, TableAlignment, Tag, TagEnd, Text,
-    Token, event_heap_bytes,
+    Arc, BlockShape, BuildIndexError, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, ItemStart,
+    Kind, LeafContext, LeafSpacing, ListLevel, ListMark, ListShape, MarkdownIndex, Marker, Resume,
+    SOURCE_BYTES, TableAlignment, Tag, TagEnd, Text, Token, event_heap_bytes,
 };
 use pulldown_cmark::Parser;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +12,18 @@ struct OpenList {
     start: Option<u64>,
     source_start: usize,
     ordinal: u64,
+    top: bool,
+    loose: Option<bool>,
+}
+
+impl OpenList {
+    const fn mark(&self) -> ListMark {
+        ListMark {
+            start: self.start,
+            source_start: self.source_start,
+            ordinal: self.ordinal,
+        }
+    }
 }
 struct OpenItem {
     task: Option<bool>,
@@ -25,6 +36,11 @@ struct ActiveLeaf {
     implicit: bool,
 }
 
+pub(crate) fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
+    Ok(build_from(source, 0, Resume::Start)?
+        .expect("invariant: a build from the start resumes no list"))
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one pass over the parser's events, keeping list, table and leaf state together"
@@ -33,15 +49,24 @@ struct ActiveLeaf {
     clippy::wildcard_enum_match_arm,
     reason = "pulldown-cmark's events and tags: only the ones named here shape the index"
 )]
-pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
+pub(crate) fn build_from(
+    source: &str,
+    start: usize,
+    resume: Resume,
+) -> Result<Option<MarkdownIndex>, BuildIndexError> {
     if source.len() > SOURCE_BYTES {
-        return Err(MarkdownIndexError::SourceBudget);
+        return Err(BuildIndexError::SourceTooLarge {
+            bytes: source.len(),
+        });
     }
     let mut result = MarkdownIndex {
         leaves: Vec::new(),
         contexts: Vec::new(),
         decoded: Vec::new(),
         source_bytes: source.len(),
+        definitions: false,
+        items: Vec::new(),
+        lists: Vec::new(),
     };
     let mut contexts = HashMap::<LeafContext, usize>::new();
     let mut decoded = HashSet::<Arc<str>>::new();
@@ -49,22 +74,37 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
     let mut items = Vec::<OpenItem>::new();
     let mut alignments = Vec::<TableAlignment>::new();
     let mut quote_depth = 0;
-    let mut root_previous = None;
+    let (mut root_previous, mut continued) = match resume {
+        Resume::Start => (None, None),
+        Resume::After(shape) => (Some(shape), None),
+        Resume::Item { list, marker } => (Some(BlockShape::List), Some((list, marker))),
+    };
     let mut spacing = Vec::new();
     let mut table_source = None;
     let mut depth = 0usize;
     let mut active: Option<ActiveLeaf> = None;
-    // Includes the transient interning maps and pending event vector. The
-    // completed index reports its own actual retained capacities below.
     let mut admission_bytes = 0usize;
-    for (event, range) in Parser::new_ext(source, PARSE_OPTIONS).into_offset_iter() {
+    let suffix = source
+        .get(start..)
+        .expect("invariant: an index is rebuilt from a line boundary inside its source");
+    let parser = Parser::new_ext(suffix, PARSE_OPTIONS);
+    result.definitions = parser.reference_definitions().iter().next().is_some();
+    for (event, range) in parser
+        .into_offset_iter()
+        .map(|(event, range)| (event, range.start + start..range.end + start))
+    {
+        if let Some((list, marker)) = continued
+            && !continues_at(source, start, &event, &range, list, marker)
+        {
+            return Ok(None);
+        }
         if admission_bytes > INDEX_BYTES {
-            return Err(MarkdownIndexError::IndexBudget);
+            return Err(BuildIndexError::IndexTooLarge);
         }
         if let Event::Start(_) = &event {
             depth += 1;
             if depth > 96 {
-                return Err(MarkdownIndexError::NestingBudget);
+                return Err(BuildIndexError::NestingTooDeep);
             }
         } else if let Event::End(_) = &event {
             depth = depth.saturating_sub(1);
@@ -99,24 +139,15 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                 .filter(|item| item.previous.is_none())
                 .map(|item| item.source_start)
         {
-            let context = LeafContext {
-                lists: lists
-                    .iter()
-                    .zip(items.iter())
-                    .map(|(list, item)| ListLevel {
-                        source_start: list.source_start,
-                        number: list.start.map(|start| start.saturating_add(list.ordinal)),
-                        task: item.task,
-                        first: item.first,
-                    })
-                    .collect(),
-                quote_depth,
-                table_alignments: alignments.clone(),
-                table_source,
-                spacing: std::mem::take(&mut spacing),
-            };
             let context_id = intern_context(
-                context,
+                leaf_context(
+                    &lists,
+                    &items,
+                    quote_depth,
+                    &alignments,
+                    table_source,
+                    std::mem::take(&mut spacing),
+                ),
                 &mut result.contexts,
                 &mut contexts,
                 &mut admission_bytes,
@@ -137,8 +168,7 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                     },
                 ],
             });
-            admission_bytes +=
-                2 * (std::mem::size_of::<IndexedLeaf>() + 2 * std::mem::size_of::<IndexedEvent>());
+            admission_bytes += 2 * (size_of::<IndexedLeaf>() + 2 * size_of::<IndexedEvent>());
             for item in &mut items {
                 item.first = false;
             }
@@ -146,22 +176,49 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
         if active.is_none() {
             match &event {
                 Event::Start(Tag::List(start)) => {
-                    record_spacing(
-                        &mut root_previous,
-                        &mut items,
-                        &mut spacing,
-                        BlockShape::List,
+                    let top = lists.is_empty() && quote_depth == 0;
+                    let list = continued.take().map(|(list, _)| list).map_or_else(
+                        || {
+                            record_spacing(
+                                &mut root_previous,
+                                &mut items,
+                                &mut spacing,
+                                BlockShape::List,
+                            );
+                            OpenList {
+                                start: *start,
+                                source_start: range.start,
+                                ordinal: 0,
+                                top,
+                                loose: None,
+                            }
+                        },
+                        |mark| OpenList {
+                            start: mark.start,
+                            source_start: mark.source_start,
+                            ordinal: mark.ordinal,
+                            top,
+                            loose: None,
+                        },
                     );
-                    lists.push(OpenList {
-                        start: *start,
-                        source_start: range.start,
-                        ordinal: 0,
-                    });
+                    lists.push(list);
                     continue;
                 }
                 Event::Start(Tag::Item) => {
                     if lists.last().is_some_and(|list| list.ordinal > 0) {
                         spacing.push(LeafSpacing::Item);
+                    }
+                    if let [list] = lists.as_slice()
+                        && list.top
+                        && let Some(line_start) = marker_line(source, range.start)
+                        && let Some(marker) = source.get(line_start..).and_then(marker_of)
+                    {
+                        result.items.push(ItemStart {
+                            line_start,
+                            first_leaf: result.leaves.len(),
+                            list: list.mark(),
+                            marker,
+                        });
                     }
                     items.push(OpenItem {
                         task: None,
@@ -179,7 +236,12 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                     continue;
                 }
                 Event::End(TagEnd::List(_)) => {
-                    lists.pop();
+                    if let Some(list) = lists.pop().filter(|list| list.top) {
+                        result.lists.push(ListShape {
+                            source_start: list.source_start,
+                            loose: list.loose,
+                        });
+                    }
                     continue;
                 }
                 Event::Start(Tag::BlockQuote(_)) => {
@@ -220,7 +282,6 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                 Event::Start(Tag::HtmlBlock) | Event::Html(_) => Some(Kind::Html),
                 Event::Start(Tag::TableHead) => Some(Kind::TableRow { header: true }),
                 Event::Start(Tag::TableRow) => Some(Kind::TableRow { header: false }),
-                // Inline content outside a paragraph opens one implicitly.
                 Event::Text(_)
                 | Event::Code(_)
                 | Event::InlineHtml(_)
@@ -249,30 +310,28 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
             if let Some(shape) = shape {
                 record_spacing(&mut root_previous, &mut items, &mut spacing, shape);
             }
-            let context = LeafContext {
-                lists: lists
-                    .iter()
-                    .zip(items.iter())
-                    .map(|(list, item)| ListLevel {
-                        source_start: list.source_start,
-                        number: list.start.map(|start| start.saturating_add(list.ordinal)),
-                        task: item.task,
-                        first: item.first,
-                    })
-                    .collect(),
-                quote_depth,
-                table_alignments: alignments.clone(),
-                table_source,
-                spacing: std::mem::take(&mut spacing),
-            };
             let context_id = intern_context(
-                context,
+                leaf_context(
+                    &lists,
+                    &items,
+                    quote_depth,
+                    &alignments,
+                    table_source,
+                    std::mem::take(&mut spacing),
+                ),
                 &mut result.contexts,
                 &mut contexts,
                 &mut admission_bytes,
             );
             let implicit =
                 kind == Kind::Paragraph && !matches!(&event, Event::Start(Tag::Paragraph));
+            if kind == Kind::Paragraph
+                && quote_depth == 0
+                && items.len() == 1
+                && let [list] = lists.as_mut_slice()
+            {
+                list.loose.get_or_insert(!implicit);
+            }
             let mut leaf = IndexedLeaf {
                 range: range.clone(),
                 context: context_id,
@@ -286,7 +345,7 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                 });
             }
             active = Some(ActiveLeaf { leaf, implicit });
-            admission_bytes += 2 * std::mem::size_of::<IndexedLeaf>();
+            admission_bytes += 2 * size_of::<IndexedLeaf>();
         }
         let Some(current) = active.as_mut() else {
             continue;
@@ -346,15 +405,15 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
             other => {
                 admission_bytes += event_heap_bytes(&other);
                 if admission_bytes > INDEX_BYTES {
-                    return Err(MarkdownIndexError::IndexBudget);
+                    return Err(BuildIndexError::IndexTooLarge);
                 }
                 Token::Structural(other.into_static())
             }
         };
         current.leaf.events.push(IndexedEvent { token, range });
-        admission_bytes += 2 * std::mem::size_of::<IndexedEvent>();
+        admission_bytes += 2 * size_of::<IndexedEvent>();
         if admission_bytes > INDEX_BYTES {
-            return Err(MarkdownIndexError::IndexBudget);
+            return Err(BuildIndexError::IndexTooLarge);
         }
         if finishes && let Some(done) = active.take() {
             result.leaves.push(done.leaf);
@@ -372,11 +431,49 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
         }
         result.leaves.push(current.leaf);
     }
+    if continued.is_some() {
+        return Ok(None);
+    }
     result.decoded = decoded.into_iter().collect();
     if result.resident_bytes() > INDEX_BYTES {
-        return Err(MarkdownIndexError::IndexBudget);
+        return Err(BuildIndexError::IndexTooLarge);
     }
-    Ok(result)
+    Ok(Some(result))
+}
+
+fn continues_at(
+    source: &str,
+    line_start: usize,
+    event: &Event<'_>,
+    range: &std::ops::Range<usize>,
+    list: ListMark,
+    marker: Marker,
+) -> bool {
+    matches!(event, Event::Start(Tag::List(first)) if first.is_some() == list.start.is_some())
+        && marker_line(source, range.start) == Some(line_start)
+        && source.get(line_start..).and_then(marker_of) == Some(marker)
+}
+
+fn marker_of(line: &str) -> Option<Marker> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = line.get(indent..)?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let delimiter = *rest.as_bytes().get(digits)?;
+    let valid = if digits == 0 {
+        matches!(delimiter, b'-' | b'*' | b'+')
+    } else {
+        matches!(delimiter, b'.' | b')')
+    };
+    valid.then_some(Marker { indent, delimiter })
+}
+
+fn marker_line(source: &str, marker: usize) -> Option<usize> {
+    let before = source.get(..marker)?;
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    before
+        .get(line_start..)
+        .is_some_and(|indent| indent.len() <= 3 && indent.bytes().all(|byte| byte == b' '))
+        .then_some(line_start)
 }
 
 fn record_spacing(
@@ -397,6 +494,32 @@ fn record_spacing(
         in_item,
     });
 }
+fn leaf_context(
+    lists: &[OpenList],
+    items: &[OpenItem],
+    quote_depth: usize,
+    alignments: &[TableAlignment],
+    table_source: Option<usize>,
+    spacing: Vec<LeafSpacing>,
+) -> LeafContext {
+    LeafContext {
+        lists: lists
+            .iter()
+            .zip(items.iter())
+            .map(|(list, item)| ListLevel {
+                source_start: list.source_start,
+                number: list.start.map(|start| start.saturating_add(list.ordinal)),
+                task: item.task,
+                first: item.first,
+            })
+            .collect(),
+        quote_depth,
+        table_alignments: alignments.to_vec(),
+        table_source,
+        spacing,
+    }
+}
+
 fn intern_context(
     context: LeafContext,
     owned: &mut Vec<LeafContext>,
@@ -407,10 +530,10 @@ fn intern_context(
         return *id;
     }
     *bytes += 2
-        * (std::mem::size_of::<LeafContext>()
-            + context.lists.capacity() * std::mem::size_of::<ListLevel>()
-            + context.table_alignments.capacity() * std::mem::size_of::<TableAlignment>()
-            + context.spacing.capacity() * std::mem::size_of::<LeafSpacing>()
+        * (size_of::<LeafContext>()
+            + context.lists.capacity() * size_of::<ListLevel>()
+            + context.table_alignments.capacity() * size_of::<TableAlignment>()
+            + context.spacing.capacity() * size_of::<LeafSpacing>()
             + 64);
     let id = owned.len();
     owned.push(context.clone());
@@ -423,7 +546,7 @@ fn intern_text(
     source: &str,
     decoded: &mut HashSet<Arc<str>>,
     bytes: &mut usize,
-) -> Result<Text, MarkdownIndexError> {
+) -> Result<Text, BuildIndexError> {
     let start = (text.as_ptr() as usize).checked_sub(source.as_ptr() as usize);
     if let Some(start) = start.filter(|start| *start <= source.len())
         && source.get(start..start.saturating_add(text.len())) == Some(text)
@@ -433,11 +556,11 @@ fn intern_text(
     if let Some(known) = decoded.get(text) {
         return Ok(Text::Decoded(Arc::clone(known)));
     }
-    if bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64) > INDEX_BYTES {
-        return Err(MarkdownIndexError::IndexBudget);
+    if bytes.saturating_add(text.len() + 2 * size_of::<usize>() + 64) > INDEX_BYTES {
+        return Err(BuildIndexError::IndexTooLarge);
     }
     let text: Arc<str> = Arc::from(text);
-    *bytes = bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64);
+    *bytes = bytes.saturating_add(text.len() + 2 * size_of::<usize>() + 64);
     decoded.insert(Arc::clone(&text));
     Ok(Text::Decoded(text))
 }

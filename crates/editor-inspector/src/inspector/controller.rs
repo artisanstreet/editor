@@ -1,35 +1,36 @@
 use super::{Entry, entries};
+use artisan_api::{InspectorSummary, PlanStep, ThreadId};
 use editor_conversation::controller::Conversation;
 use editor_core::{Core, CoreEvent, HostEvent, HostId, HostInstance, Screen};
 use editor_sources::{CollectionBrowser, ContentText};
-use artisan_api::{InspectorSummary, ItemId, PlanStep, ThreadId};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
+#[derive(Default)]
 pub struct Inspector {
-    pub open: Option<(HostId, ThreadId)>,
+    pub(crate) open: Option<(HostId, ThreadId)>,
     instance: Option<HostInstance>,
-    pub summary: Arc<InspectorSummary>,
-    pub entries: Vec<Entry>,
-    pub error: Option<String>,
-    pub source: Option<ContentText>,
-    pub plan: Option<Rc<RefCell<CollectionBrowser<PlanStep>>>>,
+    pub(crate) summary: Arc<InspectorSummary>,
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) error: Option<editor_core::Problem>,
+    pub(crate) source: Option<ContentText>,
+    pub(crate) plan: Option<Rc<RefCell<CollectionBrowser<PlanStep>>>>,
 }
 
-impl Default for Inspector {
-    fn default() -> Self {
-        Self {
-            open: None,
-            instance: None,
-            summary: Arc::default(),
-            entries: Vec::new(),
-            error: None,
-            source: None,
-            plan: None,
-        }
+impl std::fmt::Debug for Inspector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inspector").finish_non_exhaustive()
     }
 }
 
 impl Inspector {
+    pub const fn open(&self) -> Option<&(HostId, ThreadId)> {
+        self.open.as_ref()
+    }
+
+    pub fn summary(&self) -> &InspectorSummary {
+        &self.summary
+    }
+
     pub fn is_current(&self, core: &Core) -> bool {
         self.open.as_ref().is_some_and(|(host, _)| {
             self.instance
@@ -42,7 +43,7 @@ impl Inspector {
             .open
             .as_ref()
             .and_then(|(host, _)| core.host(host))
-            .map(|host| host.instance());
+            .map(editor_core::HostData::instance);
         if self.open == conversation.open && self.instance == instance {
             return false;
         }
@@ -57,7 +58,7 @@ impl Inspector {
         true
     }
 
-    pub fn on_core_event(
+    pub(crate) fn on_core_event(
         &mut self,
         core: &Core,
         conversation: &Conversation,
@@ -81,13 +82,26 @@ impl Inspector {
                     true
                 }
                 HostEvent::Changed | HostEvent::ThreadChanged { .. } => true,
-                _ => changed,
+                HostEvent::ImagesChanged
+                | HostEvent::EngineInstall { .. }
+                | HostEvent::ThreadSummaryChanged { .. }
+                | HostEvent::WslDistro { .. }
+                | HostEvent::Item(_)
+                | HostEvent::Live { .. }
+                | HostEvent::EditorCall { .. } => changed,
             },
-            _ => changed,
+            CoreEvent::ScreenChanged
+            | CoreEvent::HostsChanged
+            | CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_)
+            | CoreEvent::Host { .. } => changed,
         }
     }
 
-    pub fn sync_summary(&mut self, core: &Core) {
+    fn sync_summary(&mut self, core: &Core) {
         let state = self.open.as_ref().and_then(|(host, thread)| {
             core.host_if_instance(host, self.instance?)?
                 .thread_summary(thread)
@@ -103,12 +117,12 @@ impl Inspector {
         match (&mut self.plan, self.summary.plan.stored()) {
             (Some(plan), Some(source)) => plan.borrow_mut().set_source(source.clone()),
             (_, None) => self.plan = None,
-            _ => {}
+            (None, Some(_)) => {}
         }
         self.entries = entries(&self.summary);
     }
 
-    pub fn retry_summary(&self, core: &mut Core) {
+    pub(crate) fn retry_summary(&self, core: &mut Core) {
         if let Some((host, thread)) = &self.open
             && let Some(instance) = self.instance
             && let Some(host) = core.host_mut_if_instance(host, instance)
@@ -117,35 +131,12 @@ impl Inspector {
         }
     }
 
-    pub fn open_agent(&self, core: &mut Core, conversation: &mut Conversation, index: usize) {
-        let Some(agent) = self.summary.agents.get(index) else {
-            return;
-        };
-        let Some((host, _)) = &self.open else {
-            return;
-        };
-        let Some(instance) = self.instance else {
-            return;
-        };
-        if core.host_if_instance(host, instance).is_none() {
-            return;
-        }
-        if let Some(thread) = &agent.thread {
-            core.navigate(Screen::Thread {
-                host: host.clone(),
-                thread: thread.clone(),
-            });
-        } else {
-            conversation.open_agent(core, Some(agent.id.clone()));
-        }
-    }
-
-    pub fn open_agent_target(
+    pub(crate) fn open_agent_target(
         &self,
         core: &mut Core,
         conversation: &mut Conversation,
         id: artisan_api::ItemId,
-        thread: Option<artisan_api::ThreadId>,
+        thread: Option<ThreadId>,
     ) {
         let Some((host, _)) = &self.open else {
             return;
@@ -166,7 +157,7 @@ impl Inspector {
         }
     }
 
-    pub fn open_source(&mut self, core: &Core, source: artisan_api::ContentRef) {
+    pub(crate) fn open_source(&mut self, core: &Core, source: artisan_api::ContentRef) {
         let Some((host, _)) = &self.open else {
             return;
         };
@@ -179,7 +170,7 @@ impl Inspector {
         self.source = Some(ContentText::new(host, source));
     }
 
-    pub fn open_plan(&mut self, core: &Core) {
+    pub(crate) fn open_plan(&mut self, core: &Core) {
         let Some(source) = self.summary.plan.stored().cloned() else {
             return;
         };
@@ -193,36 +184,5 @@ impl Inspector {
             return;
         };
         self.plan = Some(Rc::new(RefCell::new(CollectionBrowser::new(host, source))));
-    }
-
-    pub fn open_step(&mut self, core: &Core, index: usize) {
-        let Some(step) = self
-            .summary
-            .plan
-            .inline()
-            .and_then(|steps| steps.get(index))
-        else {
-            return;
-        };
-        let artisan_api::TextContent::Stored(source) = &step.text else {
-            return;
-        };
-        let Some((host, _)) = &self.open else {
-            return;
-        };
-        let Some(instance) = self.instance else {
-            return;
-        };
-        let Some(host) = core.host_if_instance(host, instance) else {
-            return;
-        };
-        self.source = Some(ContentText::new(host, source.clone()));
-    }
-
-    pub fn terminal_id(&self, index: usize) -> Option<&ItemId> {
-        self.summary
-            .terminals
-            .get(index)
-            .map(|terminal| &terminal.id)
     }
 }

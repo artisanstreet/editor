@@ -1,5 +1,7 @@
-use crate::{Inner, Store};
-use anyhow::{Context, Result, anyhow};
+use crate::error::AtStep as _;
+use crate::error::{StorageError, operation_error};
+use crate::writer::InputFailure;
+use crate::{Inner, SendRejected, Store};
 use artisan_api::{BlobHash, BlobRef};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -7,17 +9,15 @@ use std::fmt;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
 use std::time::{Duration, SystemTime};
 
-pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_BLOB_BYTES: usize = artisan_api::TUNNEL_BODY_MAX_BYTES;
+pub const MAX_MESSAGE_IMAGES: usize = 128;
+pub const MAX_MESSAGE_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_IMAGE_PIXELS: u64 = 16_777_216;
 
-/// Files younger than this survive collection: a client uploads a blob just
-/// before the message that references it.
 const GC_MIN_AGE: Duration = Duration::from_hours(1);
 
-/// Why [`Store::put_blob`] refused the bytes (the client's fault, not
-/// Forge's). Find it with `error.downcast_ref::<BlobRejected>()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobRejected {
     NotWebp,
@@ -25,91 +25,162 @@ pub enum BlobRejected {
 }
 
 impl fmt::Display for BlobRejected {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotWebp => formatter.write_str("blob is not a WebP image"),
-            Self::TooLarge { bytes } => write!(
-                formatter,
-                "blob is {bytes} bytes; the limit is {MAX_BLOB_BYTES}"
-            ),
+            Self::NotWebp => f.write_str("blob is not a WebP image"),
+            Self::TooLarge { bytes } => {
+                write!(f, "blob is {bytes} bytes; the limit is {MAX_BLOB_BYTES}")
+            }
         }
     }
 }
 
 impl std::error::Error for BlobRejected {}
 
+type Result<T, E = BlobFailure> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlobFileError {
+    #[error("list {}", path.display())]
+    List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("name blob {}", path.display())]
+    Rename {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlobFailure {
+    #[error(transparent)]
+    Rejected(#[from] BlobRejected),
+    #[error("the image is {width}x{height}; the limit is 16 megapixels")]
+    TooManyPixels { width: u32, height: u32 },
+    #[error("read the image")]
+    Image(#[source] image::ImageError),
+    #[error("start the WebP encoder")]
+    WebPEncoder,
+    #[error("encode a {width}x{height} WebP: {error:?}")]
+    WebPEncode {
+        width: u32,
+        height: u32,
+        error: webp::WebPEncodingError,
+    },
+    #[error("{step} {}", path.display())]
+    Io {
+        step: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read which images the kept databases use")]
+    KeptImages(#[source] crate::retained::RetainedError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+fn io(step: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> BlobFailure {
+    let path = path.to_path_buf();
+    move |source| BlobFailure::Io { step, path, source }
+}
+
+operation_error!(PutBlobError(BlobFailure), "store a blob of {bytes} bytes", bytes: usize);
+operation_error!(PutImageError(BlobFailure), "store an image of {bytes} bytes", bytes: usize);
+operation_error!(InputImagesError(InputFailure), "find the files of {count} input images", count: usize);
+operation_error!(CollectBlobsError(BlobFailure), "collect unreferenced blobs");
+
 const WEBP_QUALITY: f32 = 85.0;
 
 const EXTENSION: &str = "webp";
 
-pub fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
+fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
     hash.is_valid().then(|| {
-        dir.join(&hash.as_str()[..2])
+        dir.join(hash.as_str().split_at(2).0)
             .join(hash.as_str())
             .with_extension(EXTENSION)
     })
 }
 
-pub fn name_files(dir: &Path) -> Result<usize> {
+pub(crate) fn name_files(dir: &Path) -> Result<usize, BlobFileError> {
+    let list = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| BlobFileError::List { path, source }
+    };
     let mut renamed = 0;
-    for shard in fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))? {
-        let shard = shard?.path();
+    for shard in fs::read_dir(dir).map_err(list(dir))? {
+        let shard = shard.map_err(list(dir))?.path();
         if !shard.is_dir() {
             continue;
         }
-        for file in fs::read_dir(&shard).with_context(|| format!("list {}", shard.display()))? {
-            let file = file?.path();
+        for file in fs::read_dir(&shard).map_err(list(&shard))? {
+            let file = file.map_err(list(&shard))?.path();
             let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
             if !BlobHash(name.to_owned()).is_valid() {
                 continue;
             }
-            fs::rename(&file, file.with_extension(EXTENSION))
-                .with_context(|| format!("name blob {}", file.display()))?;
+            fs::rename(&file, file.with_extension(EXTENSION)).map_err(|source| {
+                BlobFileError::Rename {
+                    path: file.clone(),
+                    source,
+                }
+            })?;
             renamed += 1;
         }
     }
     Ok(renamed)
 }
 
-/// Canonical encoded image admission, also used to validate historical pending inputs.
-pub fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u64)> {
-    if hashes.len() > 128 {
-        return Err(
-            crate::SendRejected::Payload("message exceeds 128 image references".into()).into(),
-        );
+pub(crate) fn input_images(
+    dir: &Path,
+    hashes: &[BlobHash],
+) -> Result<(Vec<PathBuf>, u64), InputFailure> {
+    if hashes.len() > MAX_MESSAGE_IMAGES {
+        return Err(SendRejected::TooManyImages {
+            count: hashes.len(),
+        }
+        .into());
     }
     let mut paths = Vec::with_capacity(hashes.len());
     let mut bytes = 0u64;
     for hash in hashes {
-        let file = path(dir, hash).ok_or_else(|| crate::SendRejected::MissingBlob(hash.clone()))?;
+        let file = path(dir, hash).ok_or_else(|| SendRejected::MissingBlob(hash.clone()))?;
         let metadata = fs::metadata(&file).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                anyhow::Error::from(crate::SendRejected::MissingBlob(hash.clone()))
+                InputFailure::Rejected(SendRejected::MissingBlob(hash.clone()))
             } else {
-                anyhow::Error::from(error)
-                    .context(format!("read image metadata {}", file.display()))
+                InputFailure::ImageMetadata {
+                    path: file.clone(),
+                    source: error,
+                }
             }
         })?;
         if !metadata.is_file() {
-            return Err(crate::SendRejected::MissingBlob(hash.clone()).into());
+            return Err(SendRejected::MissingBlob(hash.clone()).into());
         }
         if metadata.len() > MAX_BLOB_BYTES as u64 {
-            return Err(crate::SendRejected::Payload("image blob exceeds 32 MiB".into()).into());
+            return Err(SendRejected::ImageTooLarge {
+                blob: hash.clone(),
+                bytes: metadata.len(),
+            }
+            .into());
         }
         bytes = bytes.saturating_add(metadata.len());
-        if bytes > 128 * 1024 * 1024 {
-            return Err(
-                crate::SendRejected::Payload("message images exceed 128 MiB".into()).into(),
-            );
+        if bytes > MAX_MESSAGE_IMAGE_BYTES {
+            return Err(SendRejected::ImagesTooLarge { bytes }.into());
         }
         paths.push(file);
     }
     Ok((paths, bytes))
 }
 
-pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
+fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
@@ -127,7 +198,7 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
         .set_limits(limits)
         .map_err(|_decode_error| BlobRejected::NotWebp)?;
     let (width, height) = decoder.dimensions();
-    if u64::from(width) * u64::from(height) > 16_777_216 {
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
         return Err(BlobRejected::NotWebp.into());
     }
     let hash = BlobHash(hex::encode(Sha256::digest(bytes)));
@@ -135,68 +206,114 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
         hash,
         bytes: bytes.len() as u64,
     };
-    let target = path(dir, &blob_ref.hash).context("hash a blob")?;
+    let target = path(dir, &blob_ref.hash).expect("invariant: a SHA-256 hex digest is a blob hash");
     if target.exists() {
         fs::File::options()
             .write(true)
-            .open(&target)?
-            .set_modified(SystemTime::now())?;
+            .open(&target)
+            .and_then(|file| file.set_modified(SystemTime::now()))
+            .map_err(io("refresh blob", &target))?;
         return Ok(blob_ref);
     }
-    let shard = target.parent().context("blob shard directory")?;
-    fs::create_dir_all(shard).with_context(|| format!("create {}", shard.display()))?;
+    let shard = target
+        .parent()
+        .expect("invariant: a blob path sits in its shard folder");
+    fs::create_dir_all(shard).map_err(io("create blob shard", shard))?;
 
-    let mut temporary = tempfile::NamedTempFile::new_in(shard)?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(shard).map_err(io("create a blob file in", shard))?;
+    temporary
+        .write_all(bytes)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(io("write blob", &target))?;
     match temporary.persist_noclobber(&target) {
         Ok(_) => {}
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("write blob {}", target.display()));
-        }
+        Err(error) => return Err(io("write blob", &target)(error.error)),
     }
     Ok(blob_ref)
 }
 
-impl Store {
-    /// Stores WebP bytes by content. Rejected input fails with a
-    /// [`BlobRejected`] inside the error.
-    pub async fn put_blob(&self, bytes: Vec<u8>) -> Result<BlobRef> {
-        let inner = std::sync::Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let _guard = inner
-                .blob_lock
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let _generation = inner.lock_blobs()?;
-            put(&inner.blob_dir, &bytes)
-        })
-        .await
-        .context("blob write task")?
-    }
+#[derive(Debug)]
+pub struct BlobUpload {
+    store: Store,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
 
-    /// Stores any common image format, converted to WebP first.
-    pub async fn put_image(&self, bytes: Vec<u8>) -> Result<BlobRef> {
-        let inner = std::sync::Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            let bytes = to_webp(bytes)?;
-            let _guard = inner
-                .blob_lock
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let _generation = inner.lock_blobs()?;
-            put(&inner.blob_dir, &bytes)
-        })
-        .await
-        .context("image write task")?
-    }
-
-    pub async fn input_image_paths(&self, images: Vec<BlobHash>) -> Result<Vec<PathBuf>> {
-        let dir = self.inner.blob_dir.clone();
-        tokio::task::spawn_blocking(move || input_images(&dir, &images).map(|(paths, _)| paths))
+impl BlobUpload {
+    pub async fn put(self, bytes: Vec<u8>) -> Result<BlobRef, PutBlobError> {
+        let length = bytes.len();
+        self.store
+            .persist_blob(bytes)
             .await
-            .context("read input image metadata task")?
+            .map_err(|cause| PutBlobError {
+                bytes: length,
+                cause: Box::new(cause),
+            })
+    }
+}
+
+impl Store {
+    pub async fn admit_blob(&self) -> BlobUpload {
+        let slot = std::sync::Arc::clone(&self.inner.blob_uploads)
+            .acquire_owned()
+            .await
+            .expect("invariant: the blob upload slots are never closed");
+        BlobUpload {
+            store: self.clone(),
+            _slot: slot,
+        }
+    }
+
+    pub async fn put_blob(&self, bytes: Vec<u8>) -> Result<BlobRef, PutBlobError> {
+        self.admit_blob().await.put(bytes).await
+    }
+
+    pub async fn put_image(&self, bytes: Vec<u8>) -> Result<BlobRef, PutImageError> {
+        let length = bytes.len();
+        let failed = |cause| PutImageError {
+            bytes: length,
+            cause: Box::new(cause),
+        };
+        let upload = self.admit_blob().await;
+        let webp = tokio::task::spawn_blocking(move || to_webp(bytes))
+            .await
+            .map_err(|task| failed(BlobFailure::Storage(StorageError::Task(task))))?
+            .map_err(failed)?;
+        upload.store.persist_blob(webp).await.map_err(failed)
+    }
+
+    async fn persist_blob(&self, bytes: Vec<u8>) -> Result<BlobRef> {
+        let persisting = std::sync::Arc::clone(&self.inner.blob_lock)
+            .lock_owned()
+            .await;
+        let inner = std::sync::Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let _persisting = persisting;
+            let _generation = inner.lock_blobs()?;
+            put(&inner.blob_dir, &bytes)
+        })
+        .await
+        .map_err(|task| BlobFailure::Storage(StorageError::Task(task)))?
+    }
+
+    pub async fn input_image_paths(
+        &self,
+        images: Vec<BlobHash>,
+    ) -> Result<Vec<PathBuf>, InputImagesError> {
+        let count = images.len();
+        let dir = self.inner.blob_dir.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            input_images(&dir, &images).map(|(paths, _)| paths)
+        })
+        .await;
+        found
+            .map_err(|task| InputFailure::from(StorageError::Task(task)))
+            .and_then(|found| found)
+            .map_err(|cause| InputImagesError {
+                count,
+                cause: Box::new(cause),
+            })
     }
 
     #[must_use]
@@ -204,125 +321,177 @@ impl Store {
         &self.inner.blob_dir
     }
 
-    /// Where a stored blob lives; `None` if the hash is malformed or unknown.
     #[must_use]
     pub fn blob_path(&self, hash: &BlobHash) -> Option<PathBuf> {
         path(&self.inner.blob_dir, hash).filter(|path| path.is_file())
     }
 
-    /// Deletes blob files no item or draft references. Returns how many.
-    pub async fn gc_blobs(&self) -> Result<usize> {
-        let inner = std::sync::Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || inner.gc_blobs())
+    pub async fn gc_blobs(&self) -> Result<usize, CollectBlobsError> {
+        self.collect_blobs()
             .await
-            .context("blob collection task")?
+            .map_err(|cause| CollectBlobsError {
+                cause: Box::new(cause),
+            })
+    }
+
+    async fn collect_blobs(&self) -> Result<usize> {
+        let inner = std::sync::Arc::clone(&self.inner);
+        let (seen, candidates) = tokio::task::spawn_blocking(move || {
+            let (seen, mut referenced) = inner.with_reader(|conn| {
+                let snapshot = conn.unchecked_transaction().at("begin a read snapshot")?;
+                let seen = crate::read::max_seq(&snapshot)?;
+                Ok::<_, BlobFailure>((seen, referenced_since(&snapshot, 0)?))
+            })?;
+            referenced.extend(
+                crate::retained::kept_images(&inner.database).map_err(BlobFailure::KeptImages)?,
+            );
+            Ok::<_, BlobFailure>((seen, unreferenced(&inner.blob_dir, &referenced)?))
+        })
+        .await
+        .map_err(StorageError::Task)??;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let inner = std::sync::Arc::clone(&self.inner);
+        let persisting = std::sync::Arc::clone(&self.inner.blob_lock)
+            .lock_owned()
+            .await;
+        self.write(move |tx| {
+            let _persisting = persisting;
+            let referenced = referenced_since(tx, seen)?;
+            let _generation = inner.lock_blobs()?;
+            Ok(remove_unreferenced(candidates, &referenced))
+        })
+        .await
     }
 }
 
 impl Inner {
-    fn lock_blobs(&self) -> Result<std::fs::File> {
+    fn lock_blobs(&self) -> Result<fs::File> {
         use fs2::FileExt as _;
-        let file = std::fs::OpenOptions::new()
+        let lock = self.blob_dir.with_extension("lock");
+        let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.blob_dir.with_extension("lock"))?;
-        file.lock_exclusive()?;
+            .open(&lock)
+            .map_err(io("open the blob lock", &lock))?;
+        file.lock_exclusive()
+            .map_err(io("lock the blobs with", &lock))?;
         Ok(file)
-    }
-
-    fn gc_blobs(&self) -> Result<usize> {
-        // A plain snapshot suffices: a new reference names a blob uploaded
-        // within GC_MIN_AGE (an upload refreshes an existing file's age) or
-        // one already referenced, so it cannot name a file deleted here.
-        let referenced = self.with_reader(|conn| {
-            let mut hashes = HashSet::new();
-            // Only typed image ownership fields; prose and arbitrary 64-hex strings
-            // are never decoded or mistaken for references.
-            let mut statement = conn.prepare_cached(
-                "SELECT image.value FROM items i, json_each(i.body, '$.kind.images') image
-                    WHERE i.kind_type = 'user_message'
-                 UNION SELECT json_extract(body, '$.kind.blob') FROM items WHERE kind_type = 'image'
-                 UNION SELECT image.value FROM drafts d, json_each(d.body, '$.images') image",
-            )?;
-            for hash in statement.query_map([], |row| row.get::<_, Option<String>>(0))? {
-                if let Some(hash) = hash?
-                    && BlobHash(hash.clone()).is_valid()
-                {
-                    hashes.insert(hash);
-                }
-            }
-            Ok(hashes)
-        })?;
-        // Uploads wait, so a reused file cannot be deleted after its age was read.
-        let _guard = self
-            .blob_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let _generation = self.lock_blobs()?;
-        gc(&self.blob_dir, &referenced)
     }
 }
 
-pub fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
+fn referenced_since(
+    conn: &rusqlite::Connection,
+    seq: artisan_api::Seq,
+) -> Result<HashSet<String>, StorageError> {
+    let mut hashes = HashSet::new();
+    let mut statement = conn
+        .prepare_cached(include_str!("sql/blobs/referenced.sql"))
+        .at("blobs/referenced.sql")?;
+    for hash in statement
+        .query_map([seq], |row| row.get::<_, Option<String>>(0))
+        .at("blobs/referenced.sql")?
+    {
+        if let Some(hash) = hash.at("blobs/referenced.sql")?
+            && BlobHash(hash.clone()).is_valid()
+        {
+            hashes.insert(hash);
+        }
+    }
+    Ok(hashes)
+}
+
+struct Candidate {
+    hash: String,
+    path: PathBuf,
+}
+
+fn unreferenced(dir: &Path, referenced: &HashSet<String>) -> Result<Vec<Candidate>> {
     let cutoff = SystemTime::now() - GC_MIN_AGE;
-    let mut removed = 0;
-    for shard in fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))? {
-        let shard = shard?.path();
+    let mut candidates = Vec::new();
+    for shard in fs::read_dir(dir).map_err(io("list", dir))? {
+        let shard = shard.map_err(io("list", dir))?.path();
         if !shard.is_dir() {
             continue;
         }
-        for file in fs::read_dir(&shard).with_context(|| format!("list {}", shard.display()))? {
-            let file = file?;
+        for file in fs::read_dir(&shard).map_err(io("list", &shard))? {
+            let file = file.map_err(io("list", &shard))?;
             let name = file.file_name();
             let name = name.to_string_lossy();
-            let name = name.strip_suffix(".webp").unwrap_or(&name);
-            let keep = referenced.contains(name) || file.metadata()?.modified()? > cutoff;
-            if keep {
-                continue;
-            }
-            match fs::remove_file(file.path()) {
-                Ok(()) => removed += 1,
-                Err(error) => {
-                    tracing::warn!(path = %file.path().display(), %error, "remove unreferenced blob");
-                }
+            let hash = name.strip_suffix(".webp").unwrap_or(&name);
+            let modified = file
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .map_err(io("read the age of", &file.path()))?;
+            if !referenced.contains(hash) && modified <= cutoff {
+                candidates.push(Candidate {
+                    hash: hash.to_owned(),
+                    path: file.path(),
+                });
             }
         }
     }
-    Ok(removed)
+    Ok(candidates)
 }
 
-pub fn is_webp(bytes: &[u8]) -> bool {
+fn remove_unreferenced(candidates: Vec<Candidate>, referenced: &HashSet<String>) -> usize {
+    let cutoff = SystemTime::now() - GC_MIN_AGE;
+    let mut removed = 0;
+    for candidate in candidates {
+        if referenced.contains(&candidate.hash) {
+            continue;
+        }
+        match fs::metadata(&candidate.path).and_then(|metadata| metadata.modified()) {
+            Ok(modified) if modified <= cutoff => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path = %candidate.path.display(), %error, "read the age of an unreferenced blob");
+                continue;
+            }
+        }
+        match fs::remove_file(&candidate.path) {
+            Ok(()) => removed += 1,
+            Err(error) => {
+                tracing::warn!(path = %candidate.path.display(), %error, "remove unreferenced blob");
+            }
+        }
+    }
+    removed
+}
+
+fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
 
-/// WebP stays as it is (re-encoding only adds loss); anything else is
-/// decoded and encoded lossy at quality 85 with sharp YUV.
-pub fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
+fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
     use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
     }
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|source| BlobFailure::Image(image::ImageError::IoError(source)))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
-    let decoder = reader.into_decoder().context("read image dimensions")?;
+    let decoder = reader.into_decoder().map_err(BlobFailure::Image)?;
     let (width, height) = decoder.dimensions();
-    anyhow::ensure!(
-        u64::from(width) * u64::from(height) <= 16_777_216,
-        "image exceeds 16 megapixels"
-    );
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(BlobFailure::TooManyPixels { width, height });
+    }
     if is_webp(&bytes) {
         drop(decoder);
         return Ok(bytes);
     }
-    let image = image::DynamicImage::from_decoder(decoder).context("decode image")?;
+    let image = image::DynamicImage::from_decoder(decoder).map_err(BlobFailure::Image)?;
     let (width, height) = (image.width(), image.height());
-    let mut config = webp::WebPConfig::new().map_err(|()| anyhow!("init the WebP encoder"))?;
+    let mut config = webp::WebPConfig::new().map_err(|()| BlobFailure::WebPEncoder)?;
     config.quality = WEBP_QUALITY;
     config.use_sharp_yuv = 1;
     let encoded = if image.color().has_alpha() {
@@ -336,90 +505,13 @@ pub fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
             .encode_advanced(&config)
             .map(|memory| memory.to_vec())
     };
-    encoded.map_err(|error| anyhow!("encode {width}x{height} WebP: {error:?}"))
+    encoded.map_err(|error| BlobFailure::WebPEncode {
+        width,
+        height,
+        error,
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{NewItem, Store};
-    use artisan_api::{
-        CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, ProjectId, Status,
-        ThreadId,
-    };
-    use std::path::Path;
-
-    fn image_bytes() -> Vec<u8> {
-        webp::Encoder::from_rgb(&[21, 72, 131], 1, 1)
-            .encode_lossless()
-            .to_vec()
-    }
-    fn age(path: &Path) {
-        std::fs::File::options()
-            .write(true)
-            .open(path)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_hours(2))
-            .unwrap();
-    }
-    async fn thread(store: &Store) -> ThreadId {
-        let project = store
-            .create_project(CreateProject {
-                id: ProjectId::new(),
-                path: "/temporary-blob-race".into(),
-                name: None,
-            })
-            .await
-            .unwrap();
-        store
-            .create_thread(CreateThread {
-                id: ThreadId::new(),
-                project_id: project.id,
-                config: EngineConfig::new(EngineId::Claude),
-                title: None,
-                parent_thread_id: None,
-                spawned_by: None,
-            })
-            .await
-            .unwrap()
-            .id
-    }
-
-    #[tokio::test]
-    async fn reusing_an_old_blob_refreshes_grace_until_the_new_reference_commits() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let thread = thread(&store).await;
-        let bytes = image_bytes();
-        let blob = store.put_blob(bytes.clone()).await.unwrap();
-        let path = store.blob_path(&blob.hash).unwrap();
-        age(&path);
-        assert_eq!(store.put_blob(bytes).await.unwrap(), blob);
-        assert_eq!(
-            store.gc_blobs().await.unwrap(),
-            0,
-            "reuse must protect an old blob before its new Item is persisted"
-        );
-        store
-            .upsert_item(NewItem {
-                id: ItemId::new(),
-                thread_id: thread,
-                run_id: None,
-                parent_id: None,
-                native_id: None,
-                status: Status::Done,
-                kind: ItemKind::Image {
-                    blob: blob.hash.clone(),
-                    caption: None,
-                },
-            })
-            .await
-            .unwrap();
-        age(&path);
-        assert_eq!(
-            store.gc_blobs().await.unwrap(),
-            0,
-            "committed typed reference protects the blob after grace ends"
-        );
-        assert_eq!(std::fs::read(path).unwrap(), image_bytes());
-    }
-}
+#[path = "../tests/blobs/unit.rs"]
+mod tests;

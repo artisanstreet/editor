@@ -47,7 +47,11 @@ pub fn artwork(
                 parameters.extend(color);
             }
             parameters.extend(sunlight);
-            let horizon = (bounds.h * 0.5 - composer_height.get().unwrap_or(88.0) * 0.5 - 42.0)
+            let horizon = (composer_height
+                .get()
+                .unwrap_or(88.0)
+                .mul_add(-0.5, bounds.h * 0.5)
+                - 42.0)
                 .max(bounds.h * 0.22)
                 / bounds.h.max(1.0);
             parameters.extend([horizon, 0.0, 0.0, 0.0]);

@@ -1,14 +1,9 @@
-//! `Engines`: installs, versions and models for every engine, and the
-//! `EngineStatus` stream the Editor shows.
-
 use crate::catalog::{self, Listing, Program};
-use crate::engines::{Artifact, Feed, compare_versions, host_spec, meets_minimum};
+use crate::engines::{Artifact, Feed, host_spec, meets_minimum};
 use crate::install::{self, Event, Layout, Machine, Resolved};
-use anyhow::{Context, Result, bail};
 use artisan_api::{
     EngineId, EngineStatus, InstallState, Integrity, Model, PublishedVersion, SlashCommand,
 };
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -16,12 +11,13 @@ use tokio::sync::broadcast;
 
 mod accounts;
 
-#[derive(Clone)]
+pub use accounts::NotInstalled;
+
+#[derive(Debug, Clone)]
 pub struct Engines {
     inner: Arc<Inner>,
 }
 
-/// Full metadata snapshots and a precise install-progress delta.
 #[derive(Clone, Debug)]
 #[expect(
     clippy::large_enum_variant,
@@ -35,39 +31,37 @@ pub enum EngineChange {
     },
 }
 
+#[derive(Debug)]
 struct Inner {
     layout: Layout,
     http: reqwest::Client,
     statuses: broadcast::Sender<EngineChange>,
     slots: [Slot; EngineId::ALL.len()],
     usage: crate::UsageCache,
+    claude_ai_sign_outs: crate::claudeai::SignOuts,
 }
 
-/// Everything Forge tracks about one engine. Add a field here and fill it
-/// in `Engines::status` to extend `EngineStatus`.
+#[derive(Debug)]
 struct Slot {
     install: Mutex<Machine>,
-    /// Cache of the last listing; `None` until the first one.
     models: Mutex<ModelCache>,
     sign_in: Arc<crate::SignIn>,
     sign_in_follower: Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     model_reading: tokio::sync::Mutex<()>,
-    /// The vendor's versions, newest first, once asked for.
     versions: Mutex<Arc<[PublishedVersion]>>,
-    /// The `/` commands the engine last reported, by a probe or a run.
     commands: Mutex<Arc<[SlashCommand]>>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ModelCache {
     discovery: artisan_api::DiscoveryState,
     generation: u64,
     reads: u64,
     listing: Option<CachedListing>,
-    error: Option<String>,
+    error: Option<Arc<catalog::ListModelsError>>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 struct CachedListing {
     models: Arc<[Model]>,
     default: Option<String>,
@@ -87,7 +81,7 @@ impl Drop for Slot {
     }
 }
 
-/// Keeps an installed binary's files available until its run finishes.
+#[derive(Debug)]
 pub struct BinaryLease {
     path: PathBuf,
     usage: std::fs::File,
@@ -101,9 +95,6 @@ impl BinaryLease {
 
 impl Drop for BinaryLease {
     fn drop(&mut self) {
-        // A concurrent fork can briefly inherit this open file description.
-        // Release the owner's lock explicitly instead of waiting for every
-        // inherited descriptor to close at exec.
         if let Err(error) = fs2::FileExt::unlock(&self.usage) {
             tracing::warn!(path = %self.path.display(), %error, "release engine binary lease");
         }
@@ -111,11 +102,145 @@ impl Drop for BinaryLease {
 }
 
 enum Target {
-    /// Install the newest version unless one is installed already.
     Present,
     Latest,
     Exact(String),
     Previous,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{} publishes no build for this platform", engine.display_name())]
+pub struct NoBuild {
+    pub engine: EngineId,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateVersionError {
+    #[error(transparent)]
+    Unusable(install::UnusableVersion),
+    #[error("{} {version} is older than the oldest supported version {minimum}", engine.display_name())]
+    TooOld {
+        engine: EngineId,
+        version: String,
+        minimum: &'static str,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InstallError {
+    #[error("take the {} install lock", engine.display_name())]
+    Lock {
+        engine: EngineId,
+        #[source]
+        source: install::LockError,
+    },
+    #[error("{} has no previous version to roll back to", engine.display_name())]
+    NoPrevious { engine: EngineId },
+    #[error(transparent)]
+    NoBuild(NoBuild),
+    #[error("find the latest {} version", engine.display_name())]
+    Latest {
+        engine: EngineId,
+        #[source]
+        source: install::LatestVersionError,
+    },
+    #[error(transparent)]
+    Version(ValidateVersionError),
+    #[error("switch {} to {version}", engine.display_name())]
+    Switch {
+        engine: EngineId,
+        version: String,
+        #[source]
+        source: install::SwitchError,
+    },
+    #[error("wait for the {} version switch task", engine.display_name())]
+    SwitchTask {
+        engine: EngineId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("resolve {} {version}", engine.display_name())]
+    Resolve {
+        engine: EngineId,
+        version: String,
+        #[source]
+        source: install::ResolveError,
+    },
+    #[error(transparent)]
+    Fetch(install::FetchError),
+    #[error("find the current {} version", engine.display_name())]
+    Pointer {
+        engine: EngineId,
+        #[source]
+        source: install::ReadPointerError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ListVersionsError {
+    #[error(transparent)]
+    NoBuild(NoBuild),
+    #[error("list {} versions", engine.display_name())]
+    Get {
+        engine: EngineId,
+        #[source]
+        source: install::GetError,
+    },
+    #[error("read the installed {} versions", engine.display_name())]
+    Task {
+        engine: EngineId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("find the current {} version", engine.display_name())]
+    Pointer {
+        engine: EngineId,
+        #[source]
+        source: install::ReadPointerError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("list {} models", engine.display_name())]
+pub(crate) struct RefreshModelsError {
+    engine: EngineId,
+    #[source]
+    source: Arc<catalog::ListModelsError>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClaudeAiSignInError {
+    #[error("that browser is not signed in to claude.ai")]
+    NotSignedIn,
+    #[error("the session has no user agent")]
+    NoUserAgent,
+    #[error("build the claude.ai client")]
+    Client(#[source] crate::claudeai::BuildClientError),
+    #[error("claude.ai did not take the session")]
+    Bootstrap(#[source] crate::claudeai::RequestError),
+    #[error("claude.ai named no organization for the account")]
+    NoOrganization,
+    #[error("keeping the claude.ai session")]
+    Save(#[source] crate::claudeai::SaveSessionError),
+    #[error("claude.ai was signed out while this sign-in was being checked")]
+    SignedOutMeanwhile,
+}
+
+fn loaded(layout: &Layout, engine: EngineId) -> (Event, Option<String>) {
+    match layout.installed(engine) {
+        Ok(version) => (
+            Event::Loaded {
+                version: version.clone(),
+            },
+            version,
+        ),
+        Err(error) => (
+            Event::Fail {
+                message: diagnostics::chain(&error),
+            },
+            None,
+        ),
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -125,8 +250,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Engines {
-    /// Forge's HTTP client, for what the engines' vendors and directories
-    /// serve.
     #[must_use]
     pub fn http(&self) -> &reqwest::Client {
         &self.inner.http
@@ -137,11 +260,7 @@ impl Engines {
         let layout = Layout::new(data_dir.as_ref());
         let slots = EngineId::ALL.map(|engine| {
             let mut machine = install::machine();
-            machine.handle(&Event::Loaded {
-                version: layout
-                    .current(engine)
-                    .filter(|_| layout.binary(engine).is_some()),
-            });
+            machine.handle(&loaded(&layout, engine).0);
             Slot {
                 install: Mutex::new(machine),
                 models: Mutex::new(ModelCache::default()),
@@ -157,7 +276,7 @@ impl Engines {
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
             .build()
-            .unwrap_or_default();
+            .expect("invariant: the engine catalog's HTTP client builds with the bundled TLS");
         Self {
             inner: Arc::new(Inner {
                 layout,
@@ -165,6 +284,7 @@ impl Engines {
                 statuses: broadcast::channel(64).0,
                 slots,
                 usage: crate::UsageCache::new(accounts::USAGE_TTL),
+                claude_ai_sign_outs: crate::claudeai::SignOuts::default(),
             }),
         }
     }
@@ -173,11 +293,10 @@ impl Engines {
         let index = EngineId::ALL
             .iter()
             .position(|candidate| *candidate == engine)
-            .unwrap_or_default();
+            .unwrap_or_else(|| unreachable!("invariant: EngineId::ALL lists {engine}"));
         &self.inner.slots[index]
     }
 
-    /// What Forge knows about `engine` now. Never probes the engine.
     #[must_use]
     pub fn status(&self, engine: EngineId) -> EngineStatus {
         let slot = self.slot(engine);
@@ -199,42 +318,33 @@ impl Engines {
         }
     }
 
-    /// Something about the engine changed outside the manager (a run marked
-    /// its claude.ai session): tell whoever shows its status.
     pub fn changed(&self, engine: EngineId) {
         self.publish(engine);
     }
 
-    /// Checks a claude.ai session a browser captured, and keeps it for
-    /// claude.ai mode.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error when the browser was not signed in or claude.ai
-    /// does not take the session.
     pub async fn claude_ai_sign_in(
         &self,
         captured: artisan_api::ClaudeAiSession,
-    ) -> Result<artisan_api::ClaudeAiState> {
+    ) -> Result<artisan_api::ClaudeAiState, ClaudeAiSignInError> {
         use crate::claudeai::{Session, Transport};
-        anyhow::ensure!(
-            captured.signed_in(),
-            "that browser is not signed in to claude.ai"
-        );
-        anyhow::ensure!(
-            !captured.user_agent.trim().is_empty(),
-            "the session has no user agent"
-        );
+        if !captured.signed_in() {
+            return Err(ClaudeAiSignInError::NotSignedIn);
+        }
+        if captured.user_agent.trim().is_empty() {
+            return Err(ClaudeAiSignInError::NoUserAgent);
+        }
+        let ticket = self.inner.claude_ai_sign_outs.ticket();
         let home = self.home(EngineId::Claude);
         let org = captured
             .cookie("lastActiveOrg")
             .unwrap_or_default()
             .to_owned();
-        let transport = Transport::new(&home, Session::new(captured, org, None))?;
+        let transport = Transport::new(&home, Session::new(captured, org, None))
+            .map_err(ClaudeAiSignInError::Client)?;
         let bootstrap = transport
             .get("/api/bootstrap")
             .await
-            .context("claude.ai did not take the session")?;
+            .map_err(ClaudeAiSignInError::Bootstrap)?;
         let account = &bootstrap["account"];
         let mut session = transport.session();
         session.account = account["email_address"]
@@ -242,7 +352,6 @@ impl Engines {
             .or_else(|| account["full_name"].as_str())
             .map(str::to_owned);
         if session.org_uuid.is_empty() {
-            // The organization that can chat; the first one otherwise.
             let memberships = account["memberships"]
                 .as_array()
                 .cloned()
@@ -257,35 +366,31 @@ impl Engines {
                 .find(chats)
                 .or_else(|| memberships.first())
                 .and_then(|membership| membership["organization"]["uuid"].as_str())
-                .context("claude.ai named no organization for the account")?
+                .ok_or(ClaudeAiSignInError::NoOrganization)?
                 .clone_into(&mut session.org_uuid);
         }
-        session
-            .save(&home)
-            .context("keeping the claude.ai session")?;
+        self.inner
+            .claude_ai_sign_outs
+            .keep(ticket, || session.save(&home))
+            .ok_or(ClaudeAiSignInError::SignedOutMeanwhile)?
+            .map_err(ClaudeAiSignInError::Save)?;
         self.publish(EngineId::Claude);
         Ok(session.status())
     }
 
-    /// Forgets the claude.ai session.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error if the session cannot be removed.
-    pub fn claude_ai_sign_out(&self) -> Result<()> {
-        crate::claudeai::Session::remove(&self.home(EngineId::Claude))?;
+    pub fn claude_ai_sign_out(&self) -> Result<(), crate::claudeai::RemoveSessionError> {
+        let home = self.home(EngineId::Claude);
+        self.inner
+            .claude_ai_sign_outs
+            .sign_out(|| crate::claudeai::Session::remove(&home))?;
         self.publish(EngineId::Claude);
         Ok(())
     }
 
-    /// Current scalar installation state without cloning any catalog metadata.
     pub fn install_state(&self, engine: EngineId) -> InstallState {
         install::view(lock(&self.slot(engine).install).state())
     }
 
-    /// The listed versions with where each stands on disk now.
-    /// What the engine reported, then what Forge reads for it that the
-    /// engine didn't name.
     fn commands(&self, engine: EngineId) -> Arc<[SlashCommand]> {
         let reported = lock(&self.slot(engine).commands).clone();
         let own: Vec<SlashCommand> = crate::commands::own(engine)
@@ -298,8 +403,6 @@ impl Engines {
         reported.iter().cloned().chain(own).collect()
     }
 
-    /// The engine said which `/` commands it reads now: a probe or a run
-    /// reported them.
     pub fn set_commands(&self, engine: EngineId, commands: Vec<SlashCommand>) {
         let commands: Arc<[SlashCommand]> = crate::commands::reported(commands).into();
         {
@@ -316,16 +419,20 @@ impl Engines {
         lock(&self.slot(engine).versions).clone()
     }
 
-    /// Asks the vendor which versions it publishes ("Choose version").
-    pub async fn list_versions(&self, engine: EngineId) -> Result<Arc<[PublishedVersion]>> {
-        let feed = artifact(engine)?.feed;
+    pub async fn list_versions(
+        &self,
+        engine: EngineId,
+    ) -> Result<Arc<[PublishedVersion]>, ListVersionsError> {
+        let feed = artifact(engine).map_err(ListVersionsError::NoBuild)?.feed;
         let versions = install::published_versions(&self.inner.http, feed)
             .await
-            .with_context(|| format!("listing {} versions", engine.display_name()))?;
+            .map_err(|source| ListVersionsError::Get { engine, source })?;
         let layout = self.inner.layout.clone();
         let published = tokio::task::spawn_blocking(move || {
-            let current = layout.current(engine);
-            versions
+            let current = layout
+                .current(engine)
+                .map_err(|source| ListVersionsError::Pointer { engine, source })?;
+            Ok(versions
                 .into_iter()
                 .map(|version| PublishedVersion {
                     installed: layout.executable(engine, &version).is_some(),
@@ -333,28 +440,21 @@ impl Engines {
                     unsupported: !meets_minimum(engine, &version),
                     version,
                 })
-                .collect::<Arc<[PublishedVersion]>>()
+                .collect::<Arc<[PublishedVersion]>>())
         })
         .await
-        .context("read installed engine versions")?;
+        .map_err(|source| ListVersionsError::Task { engine, source })??;
         *lock(&self.slot(engine).versions) = published;
         self.publish(engine);
         Ok(self.published(engine))
     }
 
-    /// Reconcile external CLI changes only at an explicit refresh boundary.
     fn reconcile_install(&self, engine: EngineId) {
-        let current = self
-            .inner
-            .layout
-            .current(engine)
-            .filter(|_| self.binary(engine).is_some());
+        let (loaded, current) = loaded(&self.inner.layout, engine);
         {
             let mut machine = lock(&self.slot(engine).install);
             if install::settled(machine.state()) {
-                machine.handle(&Event::Loaded {
-                    version: current.clone(),
-                });
+                machine.handle(&loaded);
             }
         }
         let mut versions = lock(&self.slot(engine).versions);
@@ -368,141 +468,117 @@ impl Engines {
         }
     }
 
-    /// Every change to any engine's status.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<EngineChange> {
         self.inner.statuses.subscribe()
     }
 
     fn publish(&self, engine: EngineId) {
-        // Nobody listening is fine.
-        self.inner
+        let _no_listeners = self
+            .inner
             .statuses
-            .send(EngineChange::Full(self.status(engine)))
-            .ok();
+            .send(EngineChange::Full(self.status(engine)));
     }
 
     fn apply(&self, engine: EngineId, event: &Event) {
         lock(&self.slot(engine).install).handle(event);
         if matches!(event, Event::Progress { .. }) {
-            // Nobody listening is fine.
-            self.inner
-                .statuses
-                .send(EngineChange::Install {
-                    engine,
-                    install: self.install_state(engine),
-                })
-                .ok();
+            let _no_listeners = self.inner.statuses.send(EngineChange::Install {
+                engine,
+                install: self.install_state(engine),
+            });
         } else {
             self.publish(engine);
         }
     }
 
-    /// The engine's executable, if installed.
     #[must_use]
     pub fn binary(&self, engine: EngineId) -> Option<PathBuf> {
-        self.inner.layout.binary(engine)
+        match self.inner.layout.binary(engine) {
+            Ok(binary) => binary,
+            Err(error) => {
+                tracing::warn!(%engine, error = %diagnostics::chain(&error), "the engine's installed version can't be read");
+                None
+            }
+        }
     }
 
-    /// Pins installed files across Forge and CLI processes while in use.
     pub fn lease(&self, engine: EngineId) -> Option<BinaryLease> {
-        let usage = install::usage_lock(&self.home(engine)).ok()?;
-        fs2::FileExt::lock_shared(&usage).ok()?;
+        let usage = match install::usage_lock(&self.home(engine)) {
+            Ok(usage) => usage,
+            Err(error) => {
+                tracing::warn!(%engine, error = %diagnostics::chain(&error), "the engine's binary could not be leased");
+                return None;
+            }
+        };
+        if let Err(error) = fs2::FileExt::lock_shared(&usage) {
+            tracing::warn!(%engine, %error, "the engine's binary could not be locked for use");
+            return None;
+        }
         let path = self.binary(engine)?;
         Some(BinaryLease { path, usage })
     }
 
-    /// The engine's `HOME`: `<data>/engines/<engine>/home`.
     #[must_use]
     pub fn home(&self, engine: EngineId) -> PathBuf {
         self.inner.layout.home(engine)
     }
 
-    /// Environment for running the engine: its home, its config directory
-    /// and its own tool directories ahead of `PATH`.
-    #[must_use]
-    pub fn launch_env(&self, engine: EngineId) -> Vec<(String, String)> {
-        crate::engines::environment(engine, self.binary(engine).as_deref(), &self.home(engine))
-    }
-
-    /// Uses the selected lease for both the executable and its helper PATH.
     #[must_use]
     pub fn launch_env_for_binary(&self, engine: EngineId, binary: &Path) -> Vec<(String, String)> {
         crate::engines::environment(engine, Some(binary), &self.home(engine))
     }
 
-    /// Arguments that start the engine's own sign-in.
-    #[must_use]
-    pub fn login_args(engine: EngineId) -> &'static [&'static str] {
-        host_spec(engine).login
-    }
-
-    /// Validates a version command before an asynchronous operation is accepted.
-    pub fn validate_version(engine: EngineId, version: &str) -> Result<()> {
-        install::check_version(version)?;
+    pub fn validate_version(engine: EngineId, version: &str) -> Result<(), ValidateVersionError> {
+        install::check_version(version).map_err(ValidateVersionError::Unusable)?;
         if !meets_minimum(engine, version) {
-            bail!(
-                "{} {version} is older than the oldest supported version {}",
-                engine.display_name(),
-                host_spec(engine).minimum.unwrap_or_default()
-            );
+            return Err(ValidateVersionError::TooOld {
+                engine,
+                version: version.to_owned(),
+                minimum: host_spec(engine).minimum.unwrap_or_default(),
+            });
         }
         Ok(())
     }
 
-    /// Installs the newest version unless one is installed. Returns the
-    /// current version.
-    pub async fn install(&self, engine: EngineId) -> Result<String> {
+    pub async fn install(&self, engine: EngineId) -> Result<String, InstallError> {
         self.change(engine, Target::Present).await
     }
 
-    /// Installs the newest version if it differs from the current one; the
-    /// current version keeps serving until the new one is in place.
-    pub async fn update(&self, engine: EngineId) -> Result<String> {
+    pub async fn update(&self, engine: EngineId) -> Result<String, InstallError> {
         self.change(engine, Target::Latest).await
     }
 
-    /// Makes `version` current, downloading it if it isn't the current or
-    /// previous one.
-    pub async fn use_version(&self, engine: EngineId, version: &str) -> Result<()> {
+    pub async fn use_version(&self, engine: EngineId, version: &str) -> Result<(), InstallError> {
         self.change(engine, Target::Exact(version.to_owned()))
             .await
             .map(drop)
     }
 
-    /// Swaps back to the previous version. Returns it.
-    pub async fn rollback(&self, engine: EngineId) -> Result<String> {
+    pub async fn rollback(&self, engine: EngineId) -> Result<String, InstallError> {
         self.change(engine, Target::Previous).await
     }
 
-    /// Asks the feed for the newest version and records it as an available
-    /// update when it is newer than the current one.
-    pub async fn check_update(&self, engine: EngineId) -> Result<Option<String>> {
-        let artifact = artifact(engine)?;
-        let latest = install::latest_version(&self.inner.http, artifact.feed).await?;
-        let current = self.inner.layout.current(engine);
-        let newer = current
-            .is_some_and(|current| compare_versions(&latest, &current) == Ordering::Greater)
-            .then_some(latest);
-        if let Some(version) = &newer {
-            self.apply(
-                engine,
-                &Event::UpdateAvailable {
-                    version: version.clone(),
-                },
-            );
-        }
-        Ok(newer)
-    }
-
-    async fn change(&self, engine: EngineId, target: Target) -> Result<String> {
+    async fn change(&self, engine: EngineId, target: Target) -> Result<String, InstallError> {
         let layout = &self.inner.layout;
         let _lock = match install::lock(layout, engine).await {
             Ok(lock) => lock,
-            Err(error) => return self.finish(engine, Err(error)).await,
+            Err(source) => {
+                return self
+                    .finish(engine, Err(InstallError::Lock { engine, source }))
+                    .await;
+            }
+        };
+        let installed = match layout.installed(engine) {
+            Ok(installed) => installed,
+            Err(source) => {
+                return self
+                    .finish(engine, Err(InstallError::Pointer { engine, source }))
+                    .await;
+            }
         };
         if matches!(target, Target::Present)
-            && let Some(current) = self.binary(engine).and_then(|_| layout.current(engine))
+            && let Some(current) = installed
         {
             self.apply(
                 engine,
@@ -519,25 +595,24 @@ impl Engines {
         }
         let result = async {
             let current = layout
-                .current(engine)
-                .filter(|version| layout.executable(engine, version).is_some());
+                .installed(engine)
+                .map_err(|source| InstallError::Pointer { engine, source })?;
             let version = match (target, &current) {
                 (Target::Present, Some(current)) => return Ok(current.clone()),
                 (Target::Exact(version), _) => version,
                 (Target::Previous, _) => layout
                     .previous(engine)
+                    .map_err(|source| InstallError::Pointer { engine, source })?
                     .filter(|version| layout.executable(engine, version).is_some())
-                    .with_context(|| {
-                        format!(
-                            "{} has no previous version to roll back to",
-                            engine.display_name()
-                        )
-                    })?,
+                    .ok_or(InstallError::NoPrevious { engine })?,
                 (Target::Present | Target::Latest, _) => {
-                    install::latest_version(&self.inner.http, artifact(engine)?.feed).await?
+                    let feed = artifact(engine).map_err(InstallError::NoBuild)?.feed;
+                    install::latest_version(&self.inner.http, feed)
+                        .await
+                        .map_err(|source| InstallError::Latest { engine, source })?
                 }
             };
-            Self::validate_version(engine, &version)?;
+            Self::validate_version(engine, &version).map_err(InstallError::Version)?;
             if layout.executable(engine, &version).is_some() {
                 let switching = self.clone();
                 let switching_version = version.clone();
@@ -545,19 +620,37 @@ impl Engines {
                     install::switch(&switching.inner.layout, engine, &switching_version)
                 })
                 .await
-                .context("engine version switch task")??;
+                .map_err(|source| InstallError::SwitchTask { engine, source })?
+                .map_err(|source| InstallError::Switch {
+                    engine,
+                    version: version.clone(),
+                    source,
+                })?;
                 return Ok(version);
             }
-            let resolved =
-                install::resolve(&self.inner.http, artifact(engine)?.feed, &version).await?;
-            self.fetch(engine, artifact(engine)?, &resolved).await?;
+            let artifact = artifact(engine).map_err(InstallError::NoBuild)?;
+            let resolved = install::resolve(&self.inner.http, artifact.feed, &version)
+                .await
+                .map_err(|source| InstallError::Resolve {
+                    engine,
+                    version: version.clone(),
+                    source,
+                })?;
+            self.fetch(engine, artifact, &resolved)
+                .await
+                .map_err(InstallError::Fetch)?;
             Ok(version)
         }
         .await;
         self.finish(engine, result).await
     }
 
-    async fn fetch(&self, engine: EngineId, artifact: Artifact, resolved: &Resolved) -> Result<()> {
+    async fn fetch(
+        &self,
+        engine: EngineId,
+        artifact: Artifact,
+        resolved: &Resolved,
+    ) -> Result<(), install::FetchError> {
         let report = |event: Event| self.apply(engine, &event);
         install::fetch(
             &self.inner.layout,
@@ -570,12 +663,18 @@ impl Engines {
         .await
     }
 
-    async fn finish(&self, engine: EngineId, result: Result<String>) -> Result<String> {
+    async fn finish(
+        &self,
+        engine: EngineId,
+        result: Result<String, InstallError>,
+    ) -> Result<String, InstallError> {
         match &result {
             Ok(version) => {
                 let engines = self.clone();
                 if let Err(error) = tokio::task::spawn_blocking(move || {
-                    install::prune(&engines.inner.layout, engine);
+                    if let Err(error) = install::prune(&engines.inner.layout, engine) {
+                        tracing::warn!(%engine, error = %diagnostics::chain(&error), "old engine versions were kept");
+                    }
                     engines.reconcile_install(engine);
                 })
                 .await
@@ -591,53 +690,15 @@ impl Engines {
                 self.models_changed(engine);
             }
             Err(error) => {
-                tracing::warn!(%engine, error = format!("{error:#}"), "engine install failed");
-                self.apply(
-                    engine,
-                    &Event::Fail {
-                        message: format!("{error:#}"),
-                    },
-                );
+                let message = diagnostics::chain(error);
+                tracing::warn!(%engine, error = message, "engine install failed");
+                self.apply(engine, &Event::Fail { message });
             }
         }
         result
     }
 
-    /// Installs an already resolved artifact (tests use local fixtures).
-    #[cfg(test)]
-    pub(crate) async fn install_resolved(
-        &self,
-        engine: EngineId,
-        artifact: Artifact,
-        resolved: Resolved,
-    ) -> Result<String> {
-        let _lock = install::lock(&self.inner.layout, engine).await?;
-        let result = self
-            .fetch(engine, artifact, &resolved)
-            .await
-            .map(|()| resolved.version.clone());
-        self.finish(engine, result).await
-    }
-
-    /// Brings engines installed by the old Forge (`<old data>/toolchain`)
-    /// into this layout. Returns the engines it imported.
-    #[cfg(feature = "legacy-import")]
-    pub async fn import_legacy(&self, old_toolchain: &Path) -> Result<Vec<EngineId>> {
-        let imported = install::import_legacy(&self.inner.layout, old_toolchain).await?;
-        for engine in &imported {
-            self.apply(
-                *engine,
-                &Event::Loaded {
-                    version: self.inner.layout.current(*engine),
-                },
-            );
-        }
-        Ok(imported)
-    }
-
-    /// Asks the engine for its models now. On failure the previous listing
-    /// stays.
-    pub async fn refresh_models(&self, engine: EngineId) -> Result<Arc<[Model]>> {
+    async fn refresh_models(&self, engine: EngineId) -> Result<Arc<[Model]>, RefreshModelsError> {
         let slot = self.slot(engine);
         let observed = {
             let cache = lock(&slot.models);
@@ -658,7 +719,12 @@ impl Engines {
                                 .map(|listing| Arc::clone(&listing.models))
                                 .unwrap_or_default())
                         },
-                        |error| Err(anyhow::anyhow!(error.clone())),
+                        |error| {
+                            Err(RefreshModelsError {
+                                engine,
+                                source: Arc::clone(error),
+                            })
+                        },
                     )
                 })
             })
@@ -698,17 +764,20 @@ impl Engines {
                         let listing = CachedListing::from(listing);
                         let models = Arc::clone(&listing.models);
                         cache.error = None;
-                        cache.discovery = artisan_api::DiscoveryState::Fresh { observed_at: artisan_api::now() };
+                        cache.discovery = artisan_api::DiscoveryState::Fresh {
+                            observed_at: artisan_api::now(),
+                        };
                         cache.listing = Some(listing);
                         Some(Ok(models))
                     }
                     Err(error) => {
-                        cache.error = Some(format!("{error:#}"));
-                        cache.discovery = cache.discovery.failed(&format!("{error:#}"));
-                        Some(Err(error.context(format!(
-                            "listing {} models",
-                            engine.display_name()
-                        ))))
+                        let error = Arc::new(error);
+                        cache.discovery = cache.discovery.failed(&diagnostics::chain(&*error));
+                        cache.error = Some(Arc::clone(&error));
+                        Some(Err(RefreshModelsError {
+                            engine,
+                            source: error,
+                        }))
                     }
                 }
             })
@@ -730,7 +799,6 @@ impl Engines {
         cache.discovery = artisan_api::DiscoveryState::Unknown;
     }
 
-    /// A new binary may list different models.
     fn models_changed(&self, engine: EngineId) {
         self.invalidate_models(engine);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -739,14 +807,12 @@ impl Engines {
         let engines = self.clone();
         runtime.spawn(async move {
             if let Err(error) = engines.refresh_models(engine).await {
-                tracing::debug!(%engine, error = format!("{error:#}"), "model refresh after install failed");
+                tracing::debug!(%engine, error = diagnostics::chain(&error), "model refresh after install failed");
             }
         });
     }
 }
 
-/// What the engine's downloads are checked against: whatever digest its
-/// feed publishes.
 fn integrity(engine: EngineId) -> Option<Integrity> {
     Some(match host_spec(engine).artifact?.feed {
         Feed::Claude { .. } => Integrity::VendorSha256,
@@ -755,312 +821,23 @@ fn integrity(engine: EngineId) -> Option<Integrity> {
     })
 }
 
-fn artifact(engine: EngineId) -> Result<Artifact> {
-    host_spec(engine).artifact.with_context(|| {
-        format!(
-            "{} publishes no build for this platform",
-            engine.display_name()
-        )
-    })
+fn artifact(engine: EngineId) -> Result<Artifact, NoBuild> {
+    host_spec(engine).artifact.ok_or(NoBuild { engine })
 }
 
 #[cfg(test)]
 #[cfg(unix)]
-mod context_tests {
-    use super::*;
-    use artisan_api::SignInState;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    /// A Codex stand-in: a shell script answering the CLI calls Forge makes.
-    /// `app_server <model>` plays `codex app-server`: it answers
-    /// `initialize`, takes `initialized`, and lists `<model>` as the default
-    /// once `model/list` arrives.
-    fn codex_manager(script: &str) -> (tempfile::TempDir, Engines, PathBuf) {
-        let directory = tempfile::tempdir().unwrap();
-        let layout = Layout::new(directory.path());
-        let engine = EngineId::Codex;
-        let home = layout.home(engine);
-        std::fs::create_dir_all(&home).unwrap();
-        let version = layout.version_dir(engine, "1.0.0");
-        let binary = version.join(host_spec(engine).artifact.unwrap().entry);
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        let script = script.replacen(
-            '\n',
-            "\napp_server() {\n read -r _; echo '{\"id\":1,\"result\":{}}'\n read -r _\n read -r _; printf '{\"id\":2,\"result\":{\"data\":[{\"id\":\"%s\",\"isDefault\":true}]}}\\n' \"$1\"\n}\n",
-            1,
-        );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        install::switch(&layout, engine, "1.0.0").unwrap();
-        let engines = Engines::new(directory.path());
-        (directory, engines, home)
-    }
-
-    async fn wait_until(mut ready: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !ready() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn login_links_are_still_parsed_after_the_retained_log_budget() {
-        let (_directory, engines, _home) = codex_manager(
-            r#"#!/bin/sh
-case "$*" in
- "login --device-auth") yes 'noise' | head -n 15000; echo 'https://login.example.test/login'; sleep 30 ;;
- "login status") echo 'Logged in' ;;
- "app-server --stdio") app_server model1 ;;
-esac
-"#,
-        );
-        engines.login(EngineId::Codex).unwrap();
-        wait_until(|| matches!(engines.status(EngineId::Codex).sign_in, SignInState::LoggingIn { url: Some(url), .. } if url == "https://login.example.test/login")).await;
-        engines.cancel_login(EngineId::Codex);
-        wait_until(|| {
-            matches!(
-                engines.status(EngineId::Codex).sign_in,
-                SignInState::SignedIn { .. }
-            )
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn overlapping_model_refreshes_share_one_native_probe() {
-        let (_directory, engines, home) = codex_manager(
-            r#"#!/bin/sh
-printf 'probe\n' >> "$PWD/calls"
-touch "$PWD/started"
-while [ ! -e "$PWD/release" ]; do sleep 0.01; done
-app_server model1
-"#,
-        );
-        let owner = engines.clone();
-        let first =
-            tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
-        wait_until(|| home.join("started").exists()).await;
-        let owner = engines.clone();
-        let (started, waiting) = tokio::sync::oneshot::channel();
-        let second = tokio::spawn(async move {
-            started.send(()).ok();
-            owner.refresh_models(EngineId::Codex).await.unwrap()
-        });
-        waiting.await.unwrap();
-        std::fs::write(home.join("release"), "").unwrap();
-        assert_eq!(first.await.unwrap(), second.await.unwrap());
-        assert_eq!(
-            std::fs::read_to_string(home.join("calls"))
-                .unwrap()
-                .lines()
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn old_models_cannot_return_after_an_account_aba() {
-        let (_directory, engines, home) = codex_manager(
-            r#"#!/bin/sh
-case "$*" in
- "login status") if [ -e "$PWD/out" ]; then echo 'Not logged in'; else echo 'Logged in'; fi ;;
- logout) touch "$PWD/out" ;;
- "login --device-auth") rm -f "$PWD/out" ;;
- "app-server --stdio") model=$(cat "$PWD/model"); touch "$PWD/started"; while [ ! -e "$PWD/release" ]; do sleep 0.01; done; app_server "$model" ;;
-esac
-"#,
-        );
-        std::fs::write(home.join("model"), "old-model1").unwrap();
-        assert_eq!(
-            engines.check_sign_in(EngineId::Codex).await,
-            SignInState::SignedIn { account: None }
-        );
-        let owner = engines.clone();
-        let old = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
-        wait_until(|| home.join("started").exists()).await;
-        engines.logout(EngineId::Codex).unwrap();
-        wait_until(|| engines.status(EngineId::Codex).sign_in == SignInState::SignedOut).await;
-        std::fs::write(home.join("model"), "new-model2").unwrap();
-        engines.login(EngineId::Codex).unwrap();
-        wait_until(|| {
-            engines.status(EngineId::Codex).sign_in == SignInState::SignedIn { account: None }
-        })
-        .await;
-        std::fs::write(home.join("release"), "").unwrap();
-        assert!(
-            old.await.unwrap().is_empty(),
-            "old context must not commit even though public account state is identical"
-        );
-        wait_until(|| {
-            engines
-                .status(EngineId::Codex)
-                .models
-                .iter()
-                .any(|model| model.id == "new-model2")
-        })
-        .await;
-        assert!(
-            !engines
-                .status(EngineId::Codex)
-                .models
-                .iter()
-                .any(|model| model.id == "old-model1")
-        );
-    }
-
-    #[tokio::test]
-    async fn login_pins_the_selected_version_until_cancellation_and_probe_finish() {
-        let (directory, engines, home) = codex_manager(
-            r#"#!/bin/sh
-case "$*" in
- "login --device-auth") touch "$PWD/started"; while :; do sleep 1; done ;;
- "login status") echo 'Logged in' ;;
- "app-server --stdio") app_server model1 ;;
-esac
-"#,
-        );
-        let old_binary = engines.binary(EngineId::Codex).unwrap();
-        engines.login(EngineId::Codex).unwrap();
-        wait_until(|| home.join("started").exists()).await;
-        let layout = Layout::new(directory.path());
-        for version in ["2.0.0", "3.0.0"] {
-            let next = layout
-                .version_dir(EngineId::Codex, version)
-                .join(host_spec(EngineId::Codex).artifact.unwrap().entry);
-            std::fs::create_dir_all(next.parent().unwrap()).unwrap();
-            std::fs::copy(&old_binary, next).unwrap();
-            install::switch(&layout, EngineId::Codex, version).unwrap();
-        }
-        install::prune(&layout, EngineId::Codex);
-        assert!(old_binary.is_file());
-        engines.cancel_login(EngineId::Codex);
-        wait_until(|| {
-            install::prune(&layout, EngineId::Codex);
-            !old_binary.exists()
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn present_install_reconciles_a_failed_update_without_another_download() {
-        let (_directory, engines, _home) = codex_manager("#!/bin/sh\necho 'Logged in'\n");
-        engines.apply(
-            EngineId::Codex,
-            &Event::Start {
-                version: "2.0.0".into(),
-            },
-        );
-        engines.apply(
-            EngineId::Codex,
-            &Event::Fail {
-                message: "download failed".into(),
-            },
-        );
-        assert!(matches!(
-            engines.status(EngineId::Codex).install,
-            artisan_api::InstallState::Failed { .. }
-        ));
-        assert_eq!(engines.install(EngineId::Codex).await.unwrap(), "1.0.0");
-        assert!(matches!(
-            engines.status(EngineId::Codex).install,
-            artisan_api::InstallState::Installed { .. }
-        ));
-    }
-}
+#[path = "../tests/manager/context.rs"]
+mod context_tests;
 
 #[cfg(test)]
-mod snapshot_tests {
-    use super::*;
-    #[tokio::test]
-    async fn download_progress_shares_catalog_allocations_and_preserves_prior_snapshots() {
-        let folder = tempfile::tempdir().unwrap();
-        let engines = Engines::new(folder.path());
-        let engine = EngineId::Codex;
-        lock(&engines.slot(engine).models).listing = Some(CachedListing::from(catalog::Listing {
-            models: vec![artisan_api::Model {
-                id: "fixture-model1".into(),
-                ..artisan_api::Model::default()
-            }],
-            default: Some("fixture-model1".into()),
-            ..catalog::Listing::default()
-        }));
-        *lock(&engines.slot(engine).versions) = vec![PublishedVersion {
-            version: "1.0.0".into(),
-            installed: true,
-            current: true,
-            unsupported: false,
-        }]
-        .into();
-        let before = engines.status(engine);
-        let mut events = engines.subscribe();
-        engines.apply(
-            engine,
-            &Event::Start {
-                version: "2.0.0".into(),
-            },
-        );
-        engines.apply(
-            engine,
-            &Event::Progress {
-                received: 100,
-                total: Some(1000),
-            },
-        );
-        let EngineChange::Full(started) = events.recv().await.unwrap() else {
-            panic!("start must publish metadata");
-        };
-        let EngineChange::Install {
-            engine: progress_engine,
-            install: progress_install,
-        } = events.recv().await.unwrap()
-        else {
-            panic!("progress must publish only installation");
-        };
-        assert_eq!(progress_engine, engine);
-        let progress = engines.status(engine);
-        assert!(Arc::ptr_eq(&before.models, &started.models));
-        assert!(Arc::ptr_eq(&before.models, &progress.models));
-        assert!(Arc::ptr_eq(&before.versions, &progress.versions));
-        assert!(matches!(
-            progress_install,
-            artisan_api::InstallState::Downloading { received: 100, .. }
-        ));
-        // Explicit install reconciliation may replace metadata, while already
-        // published snapshots retain their original coherent flags.
-        engines.reconcile_install(engine);
-        assert!(before.versions[0].installed);
-        assert!(!engines.status(engine).versions[0].installed);
-    }
-}
+#[path = "../tests/manager/snapshot.rs"]
+mod snapshot_tests;
 
 #[cfg(test)]
-mod lease_release_tests {
-    use super::*;
+#[path = "../tests/manager/lease_release.rs"]
+mod lease_release_tests;
 
-    #[test]
-    fn dropping_binary_lease_releases_lock_with_an_inherited_descriptor_open() {
-        let directory = tempfile::tempdir().unwrap();
-        let engine = EngineId::Codex;
-        let layout = Layout::new(directory.path());
-        let binary = layout
-            .version_dir(engine, "0.150.0")
-            .join(host_spec(engine).artifact.unwrap().entry);
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, "lease fixture").unwrap();
-        install::switch(&layout, engine, "0.150.0").unwrap();
-        let engines = Engines::new(directory.path());
-        let lease = engines.lease(engine).unwrap();
-        // A duplicated handle models the inherited open file description
-        // before a concurrently spawned child reaches exec.
-        let inherited = lease.usage.try_clone().unwrap();
-        let competing = install::usage_lock(&layout.home(engine)).unwrap();
-        assert!(fs2::FileExt::try_lock_exclusive(&competing).is_err());
-        drop(lease);
-        fs2::FileExt::try_lock_exclusive(&competing)
-            .expect("the ended owner releases its lease even before the inherited handle closes");
-        drop(inherited);
-    }
-}
+#[cfg(test)]
+#[path = "../tests/manager/install.rs"]
+mod install_resolved;

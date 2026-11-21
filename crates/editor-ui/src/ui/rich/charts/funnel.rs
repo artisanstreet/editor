@@ -3,9 +3,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::FunnelFixture;
-pub(crate) use view::{FunnelState, TextRole};
+pub(crate) use view::{FunnelState, TextFactory, TextRole};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct Step {
@@ -47,15 +45,15 @@ impl TryFrom<FunnelSpec> for Funnel {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StepReading {
-    pub(crate) value: f64,
-    pub(crate) of_first: Option<f64>,
-    pub(crate) drop: Option<(f64, Option<f64>)>,
+    value: f64,
+    of_first: Option<f64>,
+    drop: Option<(f64, Option<f64>)>,
 }
 
 impl Funnel {
     pub(crate) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + std::mem::size_of_val(self.steps.as_ref())
+        size_of::<Self>()
+            + size_of_val(self.steps.as_ref())
             + self
                 .steps
                 .iter()
@@ -79,7 +77,7 @@ impl Funnel {
         }
     }
 
-    pub(crate) fn reading(&self, index: usize) -> StepReading {
+    fn reading(&self, index: usize) -> StepReading {
         let value = self.value(index);
         let first = self.value(0);
         let share = |part: f64, whole: f64| (whole > 0.0).then(|| part / whole);

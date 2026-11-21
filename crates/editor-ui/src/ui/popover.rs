@@ -4,10 +4,11 @@ use aqua_ui::{
 };
 
 use super::{kit::Surface, theme::ArtisanTheme};
+use std::rc::Rc;
 
 const VIEWPORT_MARGIN: f32 = 16.0;
 
-pub struct PopoverPanel {
+struct PopoverPanel {
     id: Key,
     theme: ArtisanTheme,
     content: Element,
@@ -16,7 +17,11 @@ pub struct PopoverPanel {
 }
 
 impl PopoverPanel {
-    pub fn new(
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the popover panel stores this theme copy and paints from it when built"
+    )]
+    fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         content: Element,
@@ -32,10 +37,15 @@ impl PopoverPanel {
         }
     }
 
-    pub fn build(self) -> Element {
+    fn build(self) -> Element {
         let width = Length::Px((self.viewport_width - VIEWPORT_MARGIN).max(1.0));
         let height = Length::Px(
-            (self.viewport_height - VIEWPORT_MARGIN - 2.0 * Surface::Menu.padding_px()).max(1.0),
+            2.0f32
+                .mul_add(
+                    -Surface::Menu.padding_px(),
+                    self.viewport_height - VIEWPORT_MARGIN,
+                )
+                .max(1.0),
         );
         let scroll = Scroll::new()
             .style(
@@ -64,10 +74,20 @@ pub struct Popover {
     theme: ArtisanTheme,
     content: Element,
     viewport: aqua_core::Size,
-    dismiss: std::rc::Rc<dyn Fn()>,
+    dismiss: Rc<dyn Fn()>,
+}
+
+impl std::fmt::Debug for Popover {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Popover").finish_non_exhaustive()
+    }
 }
 
 impl Popover {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the popover stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         label: impl Into<String>,
@@ -84,7 +104,7 @@ impl Popover {
             theme,
             content,
             viewport,
-            dismiss: std::rc::Rc::new(dismiss),
+            dismiss: Rc::new(dismiss),
         }
     }
     pub fn into_parts(self) -> (Element, aqua_ui::popup::PopupOptions) {
@@ -97,7 +117,7 @@ impl Popover {
             self.viewport.w,
             self.viewport.h,
         );
-        let tab_dismiss = self.dismiss.clone();
+        let tab_dismiss = Rc::clone(&self.dismiss);
         let panel = panel.build().role(Role::Menu).aria_label(self.label).debug_selector(crate::ui::menu_keys::POPOVER_MENU).on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
             if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(key)) if key.key == InputKey::Named(NamedKey::Tab)) {
                 tab_dismiss();
@@ -107,26 +127,22 @@ impl Popover {
         let mut options = aqua_ui::popup::PopupOptions::menu().at(self.position);
         options.focus = aqua_ui::popup::PopupFocus::Root;
         let dismiss = self.dismiss;
-        options.on_close = Some(std::rc::Rc::new(move |_| dismiss()));
+        options.on_close = Some(Rc::new(move |_| dismiss()));
         (panel, options)
     }
 }
 
-pub struct PopoverHost {
-    overlay: aqua_ui::overlay::OverlayId,
-    pending: std::rc::Rc<std::cell::Cell<bool>>,
-}
-
+#[derive(Debug)]
 pub struct PickerPopupHost {
     overlay: aqua_ui::overlay::OverlayId,
 }
 
 impl PickerPopupHost {
-    pub fn root(&self, app: &aqua::UiApp) -> Option<aqua_core::NodeId> {
+    fn root(&self, app: &aqua::UiApp) -> Option<aqua_core::NodeId> {
         app.host().popup_root(self.overlay)
     }
 
-    pub fn open_above(
+    fn open_above(
         app: &mut aqua::UiApp,
         owner: aqua_core::NodeId,
         content: Element,
@@ -142,28 +158,28 @@ impl PickerPopupHost {
         options.placement.align = aqua_ui::overlay::Align::Start;
         options.placement.gap = gap;
         options.placement.flip = false;
-        options.on_close = Some(std::rc::Rc::new(on_close));
+        options.on_close = Some(Rc::new(on_close));
         let overlay = app
             .open_popup_measured(owner, content, options)
             .map_err(|error| error.to_string())?;
         Ok(Self { overlay })
     }
 
-    pub fn refresh(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
+    fn refresh(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
         app.refresh_popup(self.overlay, content)
             .map_err(|error| error.to_string())
     }
 
-    pub fn close(&self, app: &mut aqua::UiApp) {
+    fn close(&self, app: &mut aqua::UiApp) {
         app.close_popup(self.overlay);
     }
 
-    pub fn is_open(&self, app: &aqua::UiApp) -> bool {
+    fn is_open(&self, app: &aqua::UiApp) -> bool {
         app.host().is_open(self.overlay)
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum PickerEntrance {
     Slide,
     Scale { origin: aqua_core::Point },
@@ -171,7 +187,7 @@ pub enum PickerEntrance {
 
 pub struct AnimatedPickerHost {
     popup: PickerPopupHost,
-    factory: Option<std::rc::Rc<dyn Fn() -> Element>>,
+    factory: Option<Rc<dyn Fn() -> Element>>,
     motion: super::picker_motion::MenuMotion,
     entrance: PickerEntrance,
     scale: f32,
@@ -182,8 +198,14 @@ pub struct AnimatedPickerHost {
     now: f64,
 }
 
+impl std::fmt::Debug for AnimatedPickerHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnimatedPickerHost").finish_non_exhaustive()
+    }
+}
+
 impl AnimatedPickerHost {
-    pub fn set_reduced_motion(&mut self, reduced: bool) {
+    pub(crate) fn set_reduced_motion(&mut self, reduced: bool) {
         self.open_duration = if reduced {
             std::time::Duration::ZERO
         } else {
@@ -196,7 +218,7 @@ impl AnimatedPickerHost {
         };
     }
 
-    pub fn overlay(&self) -> aqua_ui::overlay::OverlayId {
+    pub(crate) fn overlay(&self) -> aqua_ui::overlay::OverlayId {
         self.popup.overlay
     }
 
@@ -204,6 +226,10 @@ impl AnimatedPickerHost {
         self.popup.root(app)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the popover opens with its owner, factory, gap, focus, entrance and both durations"
+    )]
     pub fn open_above(
         app: &mut aqua::UiApp,
         owner: aqua_core::NodeId,
@@ -216,7 +242,7 @@ impl AnimatedPickerHost {
         now: f64,
         on_close: impl Fn(aqua_ui::overlay::CloseReason) + 'static,
     ) -> Result<Self, String> {
-        let factory: std::rc::Rc<dyn Fn() -> Element> = std::rc::Rc::new(factory);
+        let factory: Rc<dyn Fn() -> Element> = Rc::new(factory);
         let content = factory();
         let mut host = Self::open_content(
             app,
@@ -234,6 +260,10 @@ impl AnimatedPickerHost {
         Ok(host)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the popover opens with its owner, content, gap, focus, entrance and both durations"
+    )]
     pub fn open_content(
         app: &mut aqua::UiApp,
         owner: aqua_core::NodeId,
@@ -262,10 +292,10 @@ impl AnimatedPickerHost {
             factory: None,
             motion,
             entrance,
-            open_duration,
-            close_duration,
             scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            open_duration,
+            close_duration,
             flight: None,
             now,
         };
@@ -283,7 +313,9 @@ impl AnimatedPickerHost {
         let origin = match options.placement.preferred {
             aqua_ui::overlay::Side::Above => aqua_core::Point::new(0.0, 1.0),
             aqua_ui::overlay::Side::Before => aqua_core::Point::new(1.0, 0.0),
-            _ => aqua_core::Point::new(0.0, 0.0),
+            aqua_ui::overlay::Side::Below | aqua_ui::overlay::Side::After => {
+                aqua_core::Point::new(0.0, 0.0)
+            }
         };
         options.dismiss = aqua_ui::overlay::DismissPolicy::MANUAL;
         let overlay = app
@@ -296,10 +328,10 @@ impl AnimatedPickerHost {
             factory: None,
             motion,
             entrance: PickerEntrance::Scale { origin },
-            open_duration: super::picker_motion::DROPDOWN_OPEN,
-            close_duration: super::picker_motion::DROPDOWN_CLOSE,
             scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            open_duration: super::picker_motion::DROPDOWN_OPEN,
+            close_duration: super::picker_motion::DROPDOWN_CLOSE,
             flight: None,
             now,
         };
@@ -354,6 +386,10 @@ impl AnimatedPickerHost {
         .as_secs_f64();
         let reduced =
             app.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "progress is clamped to 0..=1"
+        )]
         let progress = if duration > 0.0 && !reduced {
             ((now - started) / duration).clamp(0.0, 1.0) as f32
         } else {
@@ -410,7 +446,11 @@ impl AnimatedPickerHost {
                 .ok_or_else(|| "picker popup is closed".to_owned())?;
             match &node.kind {
                 aqua_ui::tree::NodeKind::Box(content) => content.paint().clone(),
-                _ => node.paint().clone(),
+                aqua_ui::tree::NodeKind::Text(_)
+                | aqua_ui::tree::NodeKind::Media(_)
+                | aqua_ui::tree::NodeKind::Scroll(_)
+                | aqua_ui::tree::NodeKind::Canvas(_)
+                | aqua_ui::tree::NodeKind::Viewport3D(_) => node.paint().clone(),
             }
         };
         let (opacity, transform) = self.frame_values(app);
@@ -420,7 +460,7 @@ impl AnimatedPickerHost {
         Ok(())
     }
 
-    pub fn refresh(&mut self, app: &mut aqua::UiApp) -> Result<(), String> {
+    pub fn refresh(&self, app: &mut aqua::UiApp) -> Result<(), String> {
         let factory = self
             .factory
             .as_ref()
@@ -429,40 +469,12 @@ impl AnimatedPickerHost {
         self.refresh_content(app, content)
     }
 
-    pub fn refresh_content(
-        &mut self,
-        app: &mut aqua::UiApp,
-        content: Element,
-    ) -> Result<(), String> {
+    pub fn refresh_content(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
         let (opacity, transform) = self.frame_values(app);
         self.popup.refresh(
             app,
             content.style(Style::new().opacity(opacity).transform(transform)),
         )
-    }
-
-    pub fn step(
-        &mut self,
-        app: &mut aqua::UiApp,
-        input: aqua::RuntimeInput,
-    ) -> Result<aqua::RuntimeOutput, String> {
-        if let aqua::RuntimeInput::Shell(aqua_protocol::ShellEvent::Input { event, .. }) = &input {
-            self.request_dismissal(app, event)?;
-        }
-        if let aqua::RuntimeInput::Shell(aqua_protocol::ShellEvent::Frame {
-            presentation: now,
-            ..
-        })
-        | aqua::RuntimeInput::Tick(now) = &input
-        {
-            self.advance(app, now.as_secs_f64())?;
-        }
-        app.drive(input);
-        let output = app.take_pending();
-        if self.popup.is_open(app) {
-            self.advance(app, self.now)?;
-        }
-        Ok(output)
     }
 
     pub fn request_dismissal(
@@ -482,7 +494,18 @@ impl AnimatedPickerHost {
             aqua_core::InputEvent::KeyDown(key) => {
                 key.key == aqua_core::Key::Named(aqua_core::NamedKey::Escape)
             }
-            _ => false,
+            aqua_core::InputEvent::PointerMove(_)
+            | aqua_core::InputEvent::PointerDown(..)
+            | aqua_core::InputEvent::PointerUp(..)
+            | aqua_core::InputEvent::PointerCancel { .. }
+            | aqua_core::InputEvent::Scroll { .. }
+            | aqua_core::InputEvent::KeyUp(_)
+            | aqua_core::InputEvent::ModifiersChanged(_)
+            | aqua_core::InputEvent::TextInput { .. }
+            | aqua_core::InputEvent::Ime(_)
+            | aqua_core::InputEvent::ImeReplace { .. }
+            | aqua_core::InputEvent::ImeSelect { .. }
+            | aqua_core::InputEvent::Focused(_) => false,
         };
         if dismiss {
             self.begin_close(app, self.now)?;
@@ -496,40 +519,5 @@ impl AnimatedPickerHost {
 
     pub fn is_animating(&self, _app: &aqua::UiApp) -> bool {
         self.motion.transition().is_some() && self.flight.is_some()
-    }
-}
-
-impl PopoverHost {
-    pub fn open(
-        app: &mut aqua::UiApp,
-        owner: aqua_core::NodeId,
-        mut popover: Popover,
-    ) -> Result<Self, String> {
-        let callback = popover.dismiss.clone();
-        let pending = std::rc::Rc::new(std::cell::Cell::new(false));
-        let queue = pending.clone();
-        popover.dismiss = std::rc::Rc::new(move || queue.set(true));
-        let (panel, mut options) = popover.into_parts();
-        options.on_close = Some(std::rc::Rc::new(move |_| callback()));
-        let overlay = app
-            .open_popup_measured(owner, panel, options)
-            .map_err(|error| error.to_string())?;
-        Ok(Self { overlay, pending })
-    }
-
-    pub fn sync(&self, app: &mut aqua::UiApp) {
-        if self.pending.replace(false) {
-            app.close_popup(self.overlay);
-        }
-    }
-
-    pub fn handle_input(&self, app: &mut aqua::UiApp, event: &aqua_core::InputEvent) -> bool {
-        let handled = app.handle_input(event);
-        self.sync(app);
-        handled
-    }
-
-    pub fn is_open(&self, app: &aqua::UiApp) -> bool {
-        app.host().is_open(self.overlay)
     }
 }

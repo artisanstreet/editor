@@ -1,19 +1,19 @@
-use crate::core::ae::Ae;
-use crate::core::client::ForgeClient;
+use crate::core::ae::{Ae, AeError};
+use crate::core::client::{CallError, ForgeClient, NewClientError};
+use crate::core::config_file::{self, ReadConfigError, UpdateConfigError, WriteConfigError};
 use crate::core::runtime::runtime;
-use anyhow::{Context, Result, bail};
 use artisan_api::PairRequest;
 use artisan_api::tls::Identity;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct HostId(pub String);
 
 impl std::fmt::Display for HostId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -42,6 +42,19 @@ pub enum HostKind {
     },
 }
 
+#[must_use]
+pub fn is_loopback(address: &str) -> bool {
+    match url::Url::parse(&format!("https://{address}")) {
+        Ok(url) => match url.host() {
+            Some(url::Host::Domain(domain)) => domain == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        Err(_) => false,
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HostsFile {
     pub hosts: Vec<HostConfig>,
@@ -55,80 +68,168 @@ pub struct EditorFiles {
     pub dir: PathBuf,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DataDirError {
+    #[error("find the Editor's data directory")]
+    Resolve(#[source] artisan_paths::RootError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    #[error("read this device's identity")]
+    Read(#[source] ReadConfigError),
+    #[error("generate this device's identity")]
+    Generate(#[source] artisan_api::tls::GenerateIdentityError),
+    #[error("save this device's new identity")]
+    Save(#[source] WriteConfigError),
+    #[error("{path} was removed while another Editor created it")]
+    Vanished { path: PathBuf },
+}
+
 impl EditorFiles {
-    #[must_use]
-    pub fn default_location() -> Self {
-        let dir = std::env::var_os("ARTISAN_EDITOR_DATA").map_or_else(
-            || {
-                artisan_paths::App::Editor
-                    .data()
-                    .unwrap_or_else(|_| std::env::temp_dir().join("artisan-editor"))
-            },
-            PathBuf::from,
-        );
-        Self { dir }
+    pub fn default_location() -> Result<Self, DataDirError> {
+        let dir = match std::env::var_os("ARTISAN_EDITOR_DATA") {
+            Some(dir) => PathBuf::from(dir),
+            None => artisan_paths::App::Editor
+                .data()
+                .map_err(DataDirError::Resolve)?,
+        };
+        Ok(Self { dir })
     }
 
-    pub fn identity(&self) -> Result<Identity> {
+    pub fn identity(&self) -> Result<Identity, IdentityError> {
         let path = self.dir.join("identity.json");
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
+        if let Some(identity) =
+            config_file::read::<Option<Identity>>(&path).map_err(IdentityError::Read)?
+        {
+            return Ok(identity);
+        }
+        let identity = Identity::generate("artisan-editor").map_err(IdentityError::Generate)?;
+        match config_file::create(&path, &identity) {
+            Ok(()) => Ok(identity),
+            Err(WriteConfigError::AlreadyExists { .. }) => {
+                config_file::read::<Option<Identity>>(&path)
+                    .map_err(IdentityError::Read)?
+                    .ok_or(IdentityError::Vanished { path })
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let identity = Identity::generate("artisan-editor")?;
-                write_json(&path, &identity)?;
-                Ok(identity)
-            }
-            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+            Err(error) => Err(IdentityError::Save(error)),
         }
     }
 
-    pub fn hosts(&self) -> Result<HostsFile> {
-        read_json(&self.dir.join("hosts.json"))
+    pub fn hosts(&self) -> Result<HostsFile, ReadConfigError> {
+        config_file::read(&self.hosts_path())
     }
 
-    pub fn save_hosts(&self, hosts: &HostsFile) -> Result<()> {
-        write_json(&self.dir.join("hosts.json"), hosts)
+    pub fn save_hosts(&self, hosts: &HostsFile) -> Result<(), WriteConfigError> {
+        config_file::write(&self.hosts_path(), hosts)
     }
 
-    pub fn settings(&self) -> Result<EditorSettings> {
-        read_json(&self.dir.join("settings.json"))
+    pub fn update_hosts(
+        &self,
+        change: impl FnOnce(&mut HostsFile),
+    ) -> Result<HostsFile, UpdateConfigError> {
+        config_file::update(&self.hosts_path(), change).map(|(hosts, ())| hosts)
     }
 
-    pub fn save_settings(&self, settings: &EditorSettings) -> Result<()> {
-        write_json(&self.dir.join("settings.json"), settings)
+    pub(crate) fn settings(&self) -> Result<EditorSettings, ReadConfigError> {
+        config_file::read(&self.settings_path())
+    }
+
+    pub(crate) fn update_settings(
+        &self,
+        change: impl FnOnce(&mut EditorSettings),
+    ) -> Result<EditorSettings, UpdateConfigError> {
+        config_file::update(&self.settings_path(), change).map(|(settings, ())| settings)
+    }
+
+    fn hosts_path(&self) -> PathBuf {
+        self.dir.join("hosts.json")
+    }
+
+    fn settings_path(&self) -> PathBuf {
+        self.dir.join("settings.json")
     }
 }
 
-pub(crate) fn read_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum PairThisMachineError {
+    #[error("ask `ae pair` for an invite to {host}")]
+    Invite {
+        host: HostId,
+        #[source]
+        source: AeError,
+    },
+    #[error("read the invite `ae pair` printed for {host}")]
+    ReadInvite {
+        host: HostId,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("read the certificate in the invite for {host}")]
+    Certificate {
+        host: HostId,
+        #[source]
+        source: artisan_api::tls::DecodeCertificateError,
+    },
+    #[error("pair with this machine's Forge as {host}")]
+    Pair {
+        host: HostId,
+        #[source]
+        source: PairError,
+    },
 }
 
-pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    use std::io::Write as _;
-    let parent = path.parent().context("configuration directory")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    let mut temporary =
-        tempfile::NamedTempFile::new_in(parent).context("create configuration temporary")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o600))
-            .context("restrict configuration temporary")?;
-    }
-    serde_json::to_writer_pretty(temporary.as_file_mut(), value)?;
-    temporary.flush()?;
-    temporary
-        .persist(path)
-        .with_context(|| format!("replace {}", path.display()))?;
-    Ok(())
+#[derive(Debug, thiserror::Error)]
+pub enum PairError {
+    #[error("connect to Forge at {address}")]
+    Client {
+        address: String,
+        #[source]
+        source: Box<NewClientError>,
+    },
+    #[error("pair with Forge at {address}")]
+    Pair {
+        address: String,
+        #[source]
+        source: CallError,
+    },
+    #[error("Forge at {address} has fingerprint {fingerprint:?}, which is too short to name it")]
+    Fingerprint {
+        address: String,
+        fingerprint: String,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WslCommandError {
+    #[error("the wsl.exe task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error("wsl.exe did not finish within {seconds} seconds")]
+    TimedOut { seconds: u64 },
+    #[error("run wsl.exe")]
+    Run(#[source] std::io::Error),
+    #[error("wsl.exe exited with {code:?}: {stderr}")]
+    Failed { code: Option<i32>, stderr: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("read WSL's state")]
+pub struct WslStateError(#[source] WslCommandError);
+
+#[derive(Debug, thiserror::Error)]
+#[error("start Forge with `ae forge start` in {distro}")]
+pub struct StartWslForgeError {
+    distro: String,
+    #[source]
+    source: WslCommandError,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("keep {distro} awake")]
+pub struct KeepWslAwakeError {
+    distro: String,
+    #[source]
+    source: std::io::Error,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,10 +245,26 @@ pub(crate) async fn pair_this_machine(
     device_name: &str,
     id: HostId,
     name: String,
-) -> Result<HostConfig> {
-    let invite: Invite = serde_json::from_str(&ae.run(&["pair", "--json"]).await?)
-        .context("read what `ae pair` printed")?;
-    let fingerprint = artisan_api::tls::fingerprint_of(&invite.forge_certificate)?;
+) -> Result<HostConfig, PairThisMachineError> {
+    let printed =
+        ae.run(&["pair", "--json"])
+            .await
+            .map_err(|source| PairThisMachineError::Invite {
+                host: id.clone(),
+                source,
+            })?;
+    let invite: Invite =
+        serde_json::from_str(&printed).map_err(|source| PairThisMachineError::ReadInvite {
+            host: id.clone(),
+            source,
+        })?;
+    let fingerprint =
+        artisan_api::tls::fingerprint_of(&invite.forge_certificate).map_err(|source| {
+            PairThisMachineError::Certificate {
+                host: id.clone(),
+                source,
+            }
+        })?;
     let config = pair(
         &invite.address,
         &invite.code,
@@ -157,7 +274,11 @@ pub(crate) async fn pair_this_machine(
         name,
         HostKind::Local,
     )
-    .await?;
+    .await
+    .map_err(|source| PairThisMachineError::Pair {
+        host: id.clone(),
+        source,
+    })?;
     Ok(HostConfig { id, ..config })
 }
 
@@ -174,30 +295,61 @@ fn wsl_exe() -> tokio::process::Command {
     command
 }
 
-async fn wsl_listing(args: &'static [&'static str]) -> Result<String> {
-    let mut command = wsl_exe();
-    command.args(args);
+async fn run_wsl(
+    mut command: tokio::process::Command,
+    seconds: u64,
+) -> Result<std::process::Output, WslCommandError> {
     let output = runtime()
         .spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await
+            tokio::time::timeout(std::time::Duration::from_secs(seconds), command.output()).await
         })
         .await
-        .context("WSL query task failed")?
-        .context("WSL query timed out")?
-        .context("Could not run wsl.exe")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "wsl.exe failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let units: Vec<u16> = output
-        .stdout
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
-        .collect();
-    Ok(String::from_utf16_lossy(&units).replace('\0', ""))
+        .map_err(WslCommandError::Task)?
+        .map_err(|_elapsed| WslCommandError::TimedOut { seconds })?
+        .map_err(WslCommandError::Run)?;
+    if !output.status.success() {
+        return Err(WslCommandError::Failed {
+            code: output.status.code(),
+            stderr: wsl_text(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(output)
+}
+
+async fn wsl_listing(args: &'static [&'static str]) -> Result<String, WslCommandError> {
+    let mut command = wsl_exe();
+    command.args(args);
+    let output = run_wsl(command, 10).await?;
+    Ok(wsl_text(&output.stdout))
+}
+
+fn wsl_text(bytes: &[u8]) -> String {
+    let text = if bytes.contains(&0) {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    text.trim_start_matches('\u{feff}').replace('\0', "")
+}
+
+fn running_or_none(listing: Result<String, WslCommandError>) -> Result<String, WslCommandError> {
+    match listing {
+        Err(WslCommandError::Failed { code, stderr }) => {
+            tracing::info!(
+                ?code,
+                %stderr,
+                "wsl.exe --list --running failed, so no distribution is running"
+            );
+            Ok(String::new())
+        }
+        listing => listing,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,8 +359,10 @@ pub struct WslDistro {
     pub running: bool,
 }
 
-pub(crate) fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
-    text.lines()
+pub fn parse_wsl_listing(verbose: &str, running: &str) -> Vec<WslDistro> {
+    let running: std::collections::HashSet<&str> = running.lines().map(str::trim).collect();
+    verbose
+        .lines()
         .skip(1)
         .filter_map(|line| {
             let line = line.trim();
@@ -217,51 +371,42 @@ pub(crate) fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
                 .map_or((false, line), |rest| (true, rest));
 
             let mut fields = line.split_whitespace();
-            let name = fields.next()?.to_owned();
-            let state = fields.next()?;
+            let name = fields.next()?;
+            fields.next()?;
             Some(WslDistro {
-                name,
+                name: name.to_owned(),
                 default,
-                running: state.eq_ignore_ascii_case("running"),
+                running: running.contains(name),
             })
         })
         .collect()
 }
 
-pub async fn wsl_state() -> Result<Vec<WslDistro>> {
+pub async fn wsl_state() -> Result<Vec<WslDistro>, WslStateError> {
     if !cfg!(windows) {
         return Ok(Vec::new());
     }
-    Ok(parse_wsl_verbose(
-        &wsl_listing(&["--list", "--verbose"])
-            .await
-            .context("Could not read WSL's state")?,
-    ))
+    let (verbose, running) = tokio::join!(
+        wsl_listing(&["--list", "--verbose"]),
+        wsl_listing(&["--list", "--running", "--quiet"]),
+    );
+    let verbose = verbose.map_err(WslStateError)?;
+    let running = running_or_none(running).map_err(WslStateError)?;
+    Ok(parse_wsl_listing(&verbose, &running))
 }
 
-pub(crate) async fn start_wsl_forge(distro: String) -> Result<()> {
+pub(crate) async fn start_wsl_forge(distro: String) -> Result<(), StartWslForgeError> {
     let mut command = wsl_exe();
     command.args([
         "-d", &distro, "--exec", "sh", "-c", AE_IN_WSL, "ae", "forge", "start",
     ]);
-    let output = runtime()
-        .spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(60), command.output()).await
-        })
+    run_wsl(command, 60)
         .await
-        .context("WSL start task failed")?
-        .context("starting WSL timed out")?
-        .context("Could not run wsl.exe")?;
-    if !output.status.success() {
-        bail!(
-            "`ae forge start` failed in {distro}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+        .map(drop)
+        .map_err(|source| StartWslForgeError { distro, source })
 }
 
-pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child> {
+pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child, KeepWslAwakeError> {
     let _runtime = runtime().enter();
     wsl_exe()
         .args(["-d", distro, "--exec", "sleep", "infinity"])
@@ -269,22 +414,10 @@ pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .context("keep WSL awake")
-}
-
-pub fn parse_pairing(text: &str) -> Result<(String, String, String)> {
-    let parts: Vec<&str> = text
-        .split(|c: char| c.is_whitespace() || c == '/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    match parts.as_slice() {
-        [address, code, fingerprint] if fingerprint.len() == 64 => Ok((
-            (*address).to_owned(),
-            (*code).to_owned(),
-            fingerprint.to_ascii_lowercase(),
-        )),
-        _ => bail!("expected `<host:port> <code> <fingerprint>` as printed by `ae pair`"),
-    }
+        .map_err(|source| KeepWslAwakeError {
+            distro: distro.to_owned(),
+            source,
+        })
 }
 
 pub async fn pair(
@@ -295,24 +428,35 @@ pub async fn pair(
     device_name: &str,
     name: String,
     kind: HostKind,
-) -> Result<HostConfig> {
-    let client = ForgeClient::new(address, fingerprint, identity)?;
+) -> Result<HostConfig, PairError> {
+    let short = fingerprint.get(..8).ok_or_else(|| PairError::Fingerprint {
+        address: address.to_owned(),
+        fingerprint: fingerprint.to_owned(),
+    })?;
+    let client =
+        ForgeClient::new(address, fingerprint, identity).map_err(|source| PairError::Client {
+            address: address.to_owned(),
+            source: Box::new(source),
+        })?;
     client
         .pair(&PairRequest {
             code: code.to_owned(),
             device_name: device_name.to_owned(),
         })
         .await
-        .with_context(|| format!("pair with Forge at {address}"))?;
+        .map_err(|source| PairError::Pair {
+            address: address.to_owned(),
+            source,
+        })?;
     Ok(HostConfig {
-        id: HostId(format!(
-            "{}-{}",
-            address.replace([':', '.'], "-"),
-            &fingerprint[..8]
-        )),
+        id: HostId(format!("{}-{short}", address.replace([':', '.'], "-"))),
         name,
         address: address.to_owned(),
         fingerprint: fingerprint.to_owned(),
         kind,
     })
 }
+
+#[cfg(test)]
+#[path = "../../tests/core/hosts/wsl_command.rs"]
+mod wsl_command_tests;

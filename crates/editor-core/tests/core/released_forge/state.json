@@ -1,0 +1,1016 @@
+{
+  "head": 29,
+  "forge_version": "0.0.0",
+  "protocol": 7,
+  "projects": [
+    {
+      "id": "scratch",
+      "path": "/home/user/released/forge/scratch",
+      "name": "No project",
+      "seq": 2,
+      "created_at": 1795011021885,
+      "removed": false
+    },
+    {
+      "id": "01a1f000-0000-7000-8000-000000000001",
+      "path": "/home/user/released/work",
+      "name": "Released",
+      "seq": 6,
+      "created_at": 1795011021962,
+      "removed": false
+    }
+  ],
+  "threads": [
+    {
+      "id": "01a1f000-0000-7000-8000-000000000002",
+      "project_id": "01a1f000-0000-7000-8000-000000000001",
+      "title": "Released thread",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null,
+        "permissions": "auto",
+        "options": {}
+      },
+      "activity_seq": 28,
+      "activity_at": 1795011022071,
+      "read_seq": 7,
+      "marked_unread": false,
+      "settled_seq": 0,
+      "seq": 29,
+      "created_at": 1795011021963,
+      "updated_at": 1795011022071,
+      "archived": false,
+      "parent_thread_id": null
+    }
+  ],
+  "threads_next": null,
+  "runs": [
+    {
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null,
+        "permissions": "auto",
+        "options": {}
+      },
+      "id": "01a1eefe-8cf3-7b51-ac3c-6736386f06c9",
+      "thread_id": "01a1f000-0000-7000-8000-000000000002",
+      "engine": "claude",
+      "model": null,
+      "input_cutoff": 21,
+      "status": "done",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": null,
+        "context_used": null,
+        "context_window": null,
+        "cost_usd": null
+      },
+      "session_id": "00000000-0000-4000-8000-0000000f1c26",
+      "error": null,
+      "seq": 28,
+      "started_at": 1795011022068,
+      "ended_at": 1795011022071
+    }
+  ],
+  "settings": {
+    "global_prompt": "",
+    "suggestions": false,
+    "you_should_know": false,
+    "summary_titles": false,
+    "last_project": "01a1f000-0000-7000-8000-000000000001",
+    "default_engine_config": {
+      "engine": "claude",
+      "model": null,
+      "effort": null,
+      "permissions": "auto",
+      "options": {}
+    },
+    "harness_engine_configs": {
+      "claude": {
+        "engine": "claude",
+        "model": null,
+        "effort": null,
+        "permissions": "auto",
+        "options": {}
+      }
+    }
+  },
+  "engines": [
+    {
+      "discovery": {
+        "state": "fresh",
+        "observed_at": 1795011022178
+      },
+      "engine": "claude",
+      "install": {
+        "state": "installed",
+        "version": "1.0.0",
+        "update": null
+      },
+      "sign_in": {
+        "state": "failed",
+        "message": "Couldn't check the Claude Code sign-in: starting engine process: Permission denied (os error 13)"
+      },
+      "models": [
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "fast_mode",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-opus-5-5",
+          "name": "Opus 5.5",
+          "description": "For complex work and everyday tasks",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true,
+          "speeds": [
+            {
+              "id": "standard",
+              "label": "Standard",
+              "default": true
+            },
+            {
+              "id": "fast",
+              "label": "Fast",
+              "default": false
+            }
+          ]
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-sonnet-5-5",
+          "name": "Sonnet 5.5",
+          "description": "Most efficient for simpler tasks",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "fast_mode",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-fable-5-2",
+          "name": "Fable 5.2",
+          "description": "For your toughest challenges",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true,
+          "speeds": [
+            {
+              "id": "standard",
+              "label": "Standard",
+              "default": true
+            },
+            {
+              "id": "fast",
+              "label": "Fast",
+              "default": false
+            }
+          ]
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-haiku-5-5",
+          "name": "Haiku 5.5",
+          "description": "Fastest for quick answers",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "medium",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-fable-5-1",
+          "name": "Fable 5.1",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "high",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Haiku 4.5",
+          "efforts": [],
+          "default_effort": null,
+          "context_window": 200000,
+          "context_windows": [
+            {
+              "tokens": 200000
+            }
+          ],
+          "supports_images": true
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-sonnet-5",
+          "name": "Sonnet 5",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "high",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "fast_mode",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-opus-5",
+          "name": "Opus 5",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "high",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true,
+          "speeds": [
+            {
+              "id": "standard",
+              "label": "Standard",
+              "default": true
+            },
+            {
+              "id": "fast",
+              "label": "Fast",
+              "default": false
+            }
+          ]
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-fable-5",
+          "name": "Fable 5",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "high",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "fast_mode",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-opus-4-8",
+          "name": "Opus 4.8",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "high",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true,
+          "speeds": [
+            {
+              "id": "standard",
+              "label": "Standard",
+              "default": true
+            },
+            {
+              "id": "fast",
+              "label": "Fast",
+              "default": false
+            }
+          ]
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-opus-4-7",
+          "name": "Opus 4.7",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_effort": "xhigh",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "fast_mode",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-opus-4-6",
+          "name": "Opus 4.6",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "default_effort": "high",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true,
+          "speeds": [
+            {
+              "id": "standard",
+              "label": "Standard",
+              "default": true
+            },
+            {
+              "id": "fast",
+              "label": "Fast",
+              "default": false
+            }
+          ]
+        },
+        {
+          "evidence": {
+            "sources": [
+              {
+                "field": "id",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "name",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "thinking",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "runtime",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              },
+              {
+                "field": "images",
+                "source": "claude.published_catalog",
+                "observed_at": 1795011022177
+              }
+            ]
+          },
+          "id": "claude-sonnet-4-6",
+          "name": "Sonnet 4.6",
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "default_effort": "high",
+          "effort_notes": [
+            {
+              "special": false,
+              "effort": "max",
+              "description": "May use excessive tokens resulting in long response times and may hit token limits. Use sparingly for the hardest tasks."
+            }
+          ],
+          "context_window": 1000000,
+          "context_windows": [
+            {
+              "tokens": 1000000
+            },
+            {
+              "tokens": 500000,
+              "override_tokens": 500000
+            }
+          ],
+          "supports_images": true
+        }
+      ],
+      "default_model": null,
+      "commands": [
+        {
+          "name": "ultracode",
+          "description": "Ultracode for this message",
+          "hint": "<prompt>"
+        },
+        {
+          "name": "ultrathink",
+          "description": "Think hardest about this message",
+          "hint": "<prompt>"
+        }
+      ],
+      "usage": null,
+      "integrity": "vendor_sha256",
+      "claude_ai": {
+        "state": "signed_out"
+      }
+    },
+    {
+      "discovery": {
+        "state": "unknown"
+      },
+      "engine": "codex",
+      "install": {
+        "state": "absent"
+      },
+      "sign_in": {
+        "state": "unknown"
+      },
+      "models": [],
+      "default_model": null,
+      "usage": null,
+      "integrity": "npm_sha512"
+    },
+    {
+      "discovery": {
+        "state": "unknown"
+      },
+      "engine": "opencode",
+      "install": {
+        "state": "absent"
+      },
+      "sign_in": {
+        "state": "unknown"
+      },
+      "models": [],
+      "default_model": null,
+      "usage": null,
+      "integrity": "artisan_sha256"
+    }
+  ],
+  "waiting": [],
+  "account": {
+    "user": "sander",
+    "host": "DESKTOP-96USC6J",
+    "wsl_distro": null
+  }
+}

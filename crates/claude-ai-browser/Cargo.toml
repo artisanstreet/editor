@@ -2,22 +2,27 @@
 name = "claude-ai-browser"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
+autotests = false
 description = "Signs in to claude.ai in the user's own browser and reads the session Native Claude Mode runs on."
 
+[lib]
+doctest = false
+
 [dependencies]
-anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
-artisan-paths = { path = "../artisan-paths" }
+artisan-api.workspace = true
+artisan-paths.workspace = true
 futures.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "time", "fs", "macros", "rt", "net"] }
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "sync"] }
 
 [lints]
 workspace = true

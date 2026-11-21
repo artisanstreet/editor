@@ -5,7 +5,8 @@ pub use editor_conversation as conversation;
 pub use editor_core as core;
 pub mod frame;
 pub use editor_inspector as inspector;
-pub mod logging;
+mod logging;
+mod measure;
 pub use editor_marketplace as marketplace;
 #[cfg(feature = "qualification")]
 pub mod qualification;
@@ -17,4 +18,5 @@ pub use editor_sources as sources;
 pub use editor_ui as ui;
 
 mod launch;
-pub use launch::launch;
+pub use launch::{LaunchError, launch};
+pub use logging::RecordError;

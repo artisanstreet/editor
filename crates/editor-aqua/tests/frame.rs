@@ -2,10 +2,12 @@
 mod glide;
 #[path = "frame/menu.rs"]
 mod menu;
-#[path = "frame/projects.rs"]
-mod projects;
 #[path = "frame/scramble.rs"]
 mod scramble;
+#[path = "frame/search.rs"]
+mod search;
+#[path = "frame/sign_in/card.rs"]
+mod sign_in_card;
 #[path = "frame/sign_in/dither.rs"]
 mod sign_in_dither;
 #[path = "frame/sign_in/model.rs"]
@@ -14,15 +16,13 @@ mod sign_in_model;
 mod sign_in_pattern;
 #[path = "frame/strip.rs"]
 mod strip;
-#[path = "frame/tabs.rs"]
-mod tabs;
 #[path = "frame/wordmark.rs"]
 mod wordmark;
 
-#[path = "frame/limits.rs"]
-mod limits;
 #[path = "frame/account.rs"]
 mod account;
+#[path = "frame/limits.rs"]
+mod limits;
 
 #[path = "frame/seam/outline.rs"]
 mod seam_outline;
@@ -33,5 +33,9 @@ mod seam_motion;
 #[path = "frame/sidebar.rs"]
 mod sidebar;
 
+#[path = "frame/avatar.rs"]
+mod avatar;
 #[path = "frame/inbox.rs"]
 mod inbox;
+#[path = "frame/overview.rs"]
+mod overview;

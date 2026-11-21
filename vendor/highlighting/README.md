@@ -1,8 +1,8 @@
 # Bounded highlighting dependencies
 
-These are runtime copies of Syntect 5.3.0 and Onig 6.5.3, patched for Artisan's
-highlighting memory use. All packaged grammar/theme assets and runtime source
-modules remain present. The editor selects `regex-onig`; `regex-fancy` remains
+These are runtime copies of Syntect 5.3.0, Onig 6.5.3 and onig_sys 69.9.3 (which
+bundles the Oniguruma 6.9.10 C library), patched for Artisan's highlighting memory
+use. All packaged grammar/theme assets and runtime source modules remain present. The editor selects `regex-onig`; `regex-fancy` remains
 available for a rollback. No grammar or highlighting theme is changed.
 
 Syntect gives each native search a 1,000,000-retry budget using its owned
@@ -22,9 +22,10 @@ full internal suite; the standalone `validation` package exercises the changed
 module and bundled grammars without pretending that suite is available.
 
 `PROVENANCE.json` records upstream archive SHA-256 values, package VCS revisions,
-licenses, and the upstream/current checksum of every retained package file.
+licenses, the upstream/current checksum of every retained package file, and the
+repository files that wire the packages in; `verify.py` checks both.
 `NOTICE.txt` contains the upstream notices, including the bundled C engine's
-notice. Release archives include it as `HIGHLIGHTING-NOTICES.txt`.
+notice. The Editor embeds it in its third-party notices.
 
 Run from the repository root:
 
@@ -46,12 +47,23 @@ metacharacter expansions of 116 dynamic patterns. It compiles 3,732 unique
 patterns in both engines. These checks do not prove equivalence for every input
 or every possible dynamic capture value.
 
-`onig_sys = 69.9.3` stays a registry dependency and compiles its bundled C sources
-statically through `cc`. Existing Linux/MinGW C toolchains suffice; the `generate`
-feature is disabled, so this path does not require bindgen. Keep
-`RUSTONIG_SYSTEM_LIBONIG` and dynamic-library overrides unset for the qualified
-build. The root Cargo.lock records all transitives. The isolated validation
-package has its own lockfile and patches Onig to this same local package.
+`onig_sys` compiles the vendored Oniguruma C sources statically through `cc`.
+Existing Linux/MinGW C toolchains suffice; the `generate` feature is disabled, so
+this path does not require bindgen. Keep `RUSTONIG_SYSTEM_LIBONIG` and
+dynamic-library overrides unset for the qualified build. The root Cargo.lock
+records all transitives. The isolated validation package has its own lockfile and
+patches Onig and onig_sys to these same local packages.
+
+## Ownership
+
+Oniguruma upstream ended on 24 April 2025, so Artisan Street owns this copy of the
+C library: a native defect is fixed in `onig_sys/oniguruma/src`, recorded under
+`followup_changes` in `PROVENANCE.json`, and validated with the commands above.
+Syntect's pure-Rust `regex-fancy` backend is not a replacement yet. It passes the
+parity digests and compiles every grammar pattern, but on the parity corpus it took
+1.70 s and 256 MB against 0.18 s and 26 MB for the bounded Onig backend, and
+capping fancy-regex's DFA or NFA sizes did not close the gap without breaking
+grammars. `PROVENANCE.json` records the decision and when to revisit it.
 
 An upgrade must refresh the upstream archives/checksums, reapply the two runtime
 changes, regenerate both lockfiles, and run these tests plus Editor Markdown,

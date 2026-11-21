@@ -1,0 +1,161 @@
+name: Nightly checks
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: How many random seeds the Forge simulation sweeps
+        default: '400'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: nightly-checks
+  cancel-in-progress: false
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CI: 'true'
+  NEXTEST_PROFILE: ci
+jobs:
+  simulation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-nextest@0.9.152
+      - name: Sweep random seeds through Forge's fault simulation
+        shell: bash
+        env:
+          SIMULATION_SWEEP: ${{ inputs.seeds || '400' }}
+        run: |
+          nix develop .#cargo-linux --command cargo nextest run --locked -p forge-http \
+            --test simulation --example replay_engine --no-capture 2>&1 | tee simulation.log
+      - name: Name the failing seed
+        if: failure()
+        run: |
+          {
+            echo '## Forge simulation'
+            echo '```'
+            grep -E '^(sweeping|simulation seed|replay it with)' simulation.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: simulation-log
+          path: simulation.log
+  engine-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-nextest@0.9.152
+      - name: Say which engines can run a prompt
+        id: secrets
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: |
+          missing=''
+          for name in ANTHROPIC_API_KEY OPENAI_API_KEY OPENCODE_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::warning title=Engine contracts::the $name secret is not defined; its engine is only installed and probed, no prompt runs"
+              missing="$missing $name"
+            fi
+          done
+          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
+      - name: Install each engine the way Forge does and check what it sends
+        id: contracts
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          CONTRACT_OUT: ${{ runner.temp }}/contract
+        run: |
+          nix develop .#cargo-linux --command cargo nextest run --locked -p forge-http \
+            --test contract --no-capture --no-fail-fast
+      - name: Check the decoder against the newest Codex app-server schema
+        id: codex-schema
+        if: ${{ !cancelled() }}
+        run: |
+          out="$RUNNER_TEMP/codex-schema"
+          nix shell --inputs-from . nixpkgs#nodejs --command \
+            npx --yes @openai/codex@latest app-server generate-json-schema --out "$out"
+          cp "$out/ServerNotification.json" "$out/ServerRequest.json" crates/forge-engines/src/codex/schema/
+          mkdir -p "$RUNNER_TEMP/contract"
+          git diff --stat -- crates/forge-engines/src/codex/schema > "$RUNNER_TEMP/contract/codex-schema.diff"
+          cp "$out/ServerNotification.json" "$out/ServerRequest.json" "$RUNNER_TEMP/contract/"
+          nix develop .#cargo-linux --command cargo nextest run --locked -p forge-engines \
+            --no-fail-fast -E 'test(/schema_tests/)'
+      - name: Summarise drift
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '## Engine contracts'
+            for file in "$RUNNER_TEMP"/contract/*-drift.txt; do
+              [ -s "$file" ] || continue
+              echo "### $(basename "$file" -drift.txt): shapes no recorded transcript has"
+              echo '```'
+              cat "$file"
+              echo '```'
+            done
+            if [ -s "$RUNNER_TEMP/contract/codex-schema.diff" ]; then
+              echo '### Codex app-server schema changed'
+              echo '```'
+              cat "$RUNNER_TEMP/contract/codex-schema.diff"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the live recordings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engine-contracts
+          path: ${{ runner.temp }}/contract
+          if-no-files-found: ignore
+      - name: Open or update the drift issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title='Engine contract drift'
+          body="The nightly engine contract check failed: $RUN_URL. The run's engine-contracts artifact holds the live recordings and the newest Codex schema; record them as fixtures and fix the decoder."
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+      - name: Fail when an engine could not run a prompt
+        if: ${{ !cancelled() && steps.secrets.outputs.missing != '' }}
+        env:
+          MISSING: ${{ steps.secrets.outputs.missing }}
+        run: |
+          echo "::error title=Engine contracts::no prompt ran for $MISSING; define these repository secrets so the nightly checks what each engine sends"
+          echo "### Not checked: no prompt ran for $MISSING" >> "$GITHUB_STEP_SUMMARY"
+          exit 1

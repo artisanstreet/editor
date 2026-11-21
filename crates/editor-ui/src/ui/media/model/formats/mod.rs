@@ -21,7 +21,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Obj => "OBJ",
             Self::Fbx => "FBX",
@@ -38,7 +38,7 @@ impl Format {
         }
     }
 
-    pub fn sniff(bytes: &[u8]) -> Option<Self> {
+    fn sniff(bytes: &[u8]) -> Option<Self> {
         if gltf::is_glb(bytes) || gltf::is_json(bytes) {
             Some(Self::Gltf)
         } else if fbx::is_binary(bytes) || fbx::is_ascii(bytes) {
@@ -56,23 +56,15 @@ impl Format {
 }
 
 #[derive(Debug)]
-pub struct Model {
+pub(crate) struct Model {
     pub mesh: Mesh,
     pub triangles: usize,
     pub format: Format,
 }
 
-impl Model {
-    pub fn resident_bytes(&self) -> usize {
-        self.mesh.positions.capacity() * std::mem::size_of::<super::mesh::Vec3>()
-            + self.mesh.normals.capacity() * std::mem::size_of::<super::mesh::Vec3>()
-            + self.mesh.colors.as_ref().map_or(0, |colors| {
-                colors.capacity() * std::mem::size_of::<super::mesh::Vec3>()
-            })
-    }
-}
+impl Model {}
 
-pub fn parse(bytes: &[u8], format: Option<Format>, up: Option<Up>) -> Result<Model, String> {
+pub(crate) fn parse(bytes: &[u8], format: Option<Format>, up: Option<Up>) -> Result<Model, String> {
     let format = format
         .or_else(|| Format::sniff(bytes))
         .ok_or("the file is not a model format the viewer reads (OBJ, FBX, STL, PLY, glTF)")?;
@@ -110,7 +102,8 @@ fn text_head(bytes: &[u8]) -> &str {
     let head = &bytes[..bytes.len().min(1024)];
     match std::str::from_utf8(head) {
         Ok(text) => text,
-        Err(error) => std::str::from_utf8(&head[..error.valid_up_to()]).unwrap_or_default(),
+        Err(error) => std::str::from_utf8(&head[..error.valid_up_to()])
+            .expect("invariant: the prefix up to valid_up_to is valid UTF-8"),
     }
 }
 

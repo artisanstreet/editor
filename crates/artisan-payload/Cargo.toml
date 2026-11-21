@@ -2,11 +2,16 @@
 name = "artisan-payload"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Carries one program inside another: packed by a build script, written out when installing."
 
+[lib]
+doctest = false
+
 [dependencies]
 flate2.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

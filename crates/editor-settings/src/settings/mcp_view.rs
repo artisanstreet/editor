@@ -1,18 +1,17 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::rc::Rc;
 
 use aqua_ui::{
     element::{Box as UiBox, Element},
     style::{Length, Style},
 };
-use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer};
+use artisan_api::{McpAuthStatus, McpServer};
 
 use super::{
     controller::SettingsController,
-    extensions::MCP_SERVERS_KEY,
     ui::{self, Ink},
     view::ViewAction,
 };
-use editor_core::{Core, HostData, McpSignIn, McpSignInPhase};
+use editor_core::{Core, HostData, McpSignIn, McpSignInPhase, Problem};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole},
     text::{
@@ -31,16 +30,18 @@ fn button(
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
+    ui::button(theme, id, label, tone, disabled, move || {
+        emit(action.clone());
+    })
 }
 
 fn note(status: Option<McpAuthStatus>, sign_in: Option<&McpSignIn>) -> Option<String> {
     if let Some(sign_in) = sign_in {
-        return Some(match &sign_in.phase {
+        return Some(match sign_in.phase() {
             McpSignInPhase::Starting => "Opening the sign-in…".into(),
             McpSignInPhase::Waiting => "Waiting for the browser…".into(),
             McpSignInPhase::Finishing => "Signing in…".into(),
-            McpSignInPhase::Failed(reason) => format!("Couldn't sign in: {reason}"),
+            McpSignInPhase::Failed(_) => "Sign-in failed".into(),
         });
     }
     match status? {
@@ -57,7 +58,7 @@ fn controls(
     name: &str,
     status: Option<McpAuthStatus>,
     sign_in: Option<&McpSignIn>,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Vec<Element> {
     let make = |kind: &str, label: &str, tone, disabled, action| {
         button(
@@ -67,10 +68,10 @@ fn controls(
             tone,
             disabled,
             action,
-            emit.clone(),
+            Rc::clone(emit),
         )
     };
-    match sign_in.map(|sign_in| (&sign_in.phase, sign_in.authorize_url.clone())) {
+    match sign_in.map(|sign_in| (sign_in.phase(), sign_in.authorize_url().map(str::to_owned))) {
         Some((McpSignInPhase::Waiting, Some(url))) => vec![
             make(
                 "open",
@@ -94,20 +95,38 @@ fn controls(
                 ViewAction::McpCancelSignIn(name.into()),
             ),
         ],
-        Some((McpSignInPhase::Starting | McpSignInPhase::Waiting, _)) => vec![make(
-            "busy",
-            "Opening…",
-            ButtonTone::Neutral,
-            true,
-            ViewAction::McpEdited,
-        )],
-        Some((McpSignInPhase::Finishing, _)) => vec![make(
-            "busy",
-            "Signing in…",
-            ButtonTone::Neutral,
-            true,
-            ViewAction::McpEdited,
-        )],
+        Some((McpSignInPhase::Starting | McpSignInPhase::Waiting, _)) => vec![
+            make(
+                "busy",
+                "Opening…",
+                ButtonTone::Neutral,
+                true,
+                ViewAction::McpEdited,
+            ),
+            make(
+                "cancel-sign-in",
+                "Cancel",
+                ButtonTone::Quiet,
+                false,
+                ViewAction::McpCancelSignIn(name.into()),
+            ),
+        ],
+        Some((McpSignInPhase::Finishing, _)) => vec![
+            make(
+                "busy",
+                "Signing in…",
+                ButtonTone::Neutral,
+                true,
+                ViewAction::McpEdited,
+            ),
+            make(
+                "cancel-sign-in",
+                "Cancel",
+                ButtonTone::Quiet,
+                false,
+                ViewAction::McpCancelSignIn(name.into()),
+            ),
+        ],
         Some((McpSignInPhase::Failed(_), _)) => vec![make(
             "sign-in",
             "Try again",
@@ -130,7 +149,7 @@ fn controls(
                 false,
                 ViewAction::McpSignOut(name.into()),
             )],
-            _ => Vec::new(),
+            Some(McpAuthStatus::NeedsToken) | None => Vec::new(),
         },
     }
 }
@@ -156,15 +175,18 @@ fn form(
     ];
     let mut body = ui::stack(Space::S12);
     for (index, (label, placeholder)) in fields.into_iter().enumerate() {
-        let send = emit.clone();
-        let editor =
-            EditorController::from_shared(controller.mcp_editors[index].clone(), move |event| {
-                match event {
-                    EditorEvent::Changed => send(ViewAction::McpEdited),
-                    EditorEvent::PresentationChanged => send(ViewAction::McpPresentationChanged),
-                    _ => {}
-                }
-            });
+        let send = Rc::clone(&emit);
+        let editor = EditorController::from_shared(
+            Rc::clone(&controller.mcp_editors[index]),
+            move |event| match event {
+                EditorEvent::Changed => send(ViewAction::McpEdited),
+                EditorEvent::PresentationChanged => send(ViewAction::McpPresentationChanged),
+                EditorEvent::SelectionChanged { .. }
+                | EditorEvent::Submitted
+                | EditorEvent::List(_)
+                | EditorEvent::PastedFiles { .. } => {}
+            },
+        );
         body = body.child(
             ui::stack(Space::S4)
                 .child(ui::text(theme, TextRole::Label, Ink::Muted, label))
@@ -188,57 +210,81 @@ fn form(
             ButtonTone::Primary,
             saving,
             ViewAction::McpSave,
-            emit.clone(),
+            Rc::clone(&emit),
         ))
         .child(button(
             theme,
             "mcp-cancel".into(),
             "Cancel",
             ButtonTone::Quiet,
-            false,
+            saving,
             ViewAction::McpCancel,
             emit,
         ));
     ui::block(body.child(actions.build()).build())
 }
 
-pub fn section(
+fn sign_in_failure(
+    theme: &ArtisanTheme,
+    server: &str,
+    sign_in: Option<&McpSignIn>,
+) -> Option<Element> {
+    match sign_in?.phase() {
+        McpSignInPhase::Failed(problem) => Some(ui::block(
+            ui::problem(theme, format!("mcp-sign-in-error-{server}"), problem).build(),
+        )),
+        McpSignInPhase::Starting | McpSignInPhase::Waiting | McpSignInPhase::Finishing => None,
+    }
+}
+
+pub(crate) fn section(
     controller: &SettingsController,
     core: &Core,
     host: &HostData,
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let servers: Result<Vec<McpServer>, String> =
-        host.setting(MCP_SERVERS_KEY)
-            .map_or(Ok(Vec::new()), |value| {
-                serde_json::from_value(value.clone())
-                    .map_err(|error| format!("Couldn't read MCP servers: {error}"))
-            });
-    let auth: BTreeMap<String, McpAuthStatus> = host
-        .setting(MCP_AUTH_KEY)
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default();
+    let servers: Result<Vec<McpServer>, Problem> = host
+        .mcp_servers()
+        .map(<[McpServer]>::to_vec)
+        .map_err(|error| Problem::caused_by("Couldn't read the MCP servers.", error));
+    let auth = host.settings.mcp_auth();
     let mut rows = Vec::new();
-    if let Err(error) = &servers {
-        rows.push(ui::block(ui::error_text(theme, error)));
+    if let Err(problem) = &servers {
+        rows.push(ui::block(
+            ui::problem(theme, "mcp-servers-error", problem).build(),
+        ));
+    }
+    if let Err(error) = auth {
+        rows.push(ui::block(
+            ui::problem(
+                theme,
+                "mcp-auth-error",
+                &Problem::caused_by("Couldn't read which MCP servers are signed in.", error),
+            )
+            .build(),
+        ));
     }
     for server in servers.unwrap_or_default() {
         let target = server.url.clone().unwrap_or_else(|| {
             format!(
                 "{} {}",
                 server.command,
-                serde_json::to_string(&server.args).unwrap_or_default()
+                serde_json::to_string(&server.args)
+                    .expect("invariant: a list of strings always serializes")
             )
         });
-        let status = auth.get(&server.name).copied();
+        let status = match auth {
+            Ok(auth) => auth.get(&server.name).copied(),
+            Err(_shown_above) => None,
+        };
         let sign_in = core.mcp_sign_in(&host.id, &server.name);
-        let summary =
-            note(status, sign_in).map_or(target.clone(), |note| format!("{target} · {note}"));
+        let summary = note(status, sign_in)
+            .map_or_else(|| target.clone(), |note| format!("{target} · {note}"));
         let mut actions = UiBox::new()
             .spaced(Space::S8)
             .style(Style::new().wrap(true))
-            .children(controls(theme, &server.name, status, sign_in, emit.clone()));
+            .children(controls(theme, &server.name, status, sign_in, &emit));
         actions = actions.child(button(
             theme,
             format!("mcp-edit-{}", server.name),
@@ -246,7 +292,7 @@ pub fn section(
             ButtonTone::Quiet,
             false,
             ViewAction::McpOpen(Some(server.clone())),
-            emit.clone(),
+            Rc::clone(&emit),
         ));
         actions = actions.child(button(
             theme,
@@ -255,9 +301,11 @@ pub fn section(
             ButtonTone::Quiet,
             controller.extensions.saving,
             ViewAction::McpRemove(server.clone()),
-            emit.clone(),
+            Rc::clone(&emit),
         ));
+        let failure = sign_in_failure(theme, &server.name, sign_in);
         rows.push(ui::row(theme, server.name, summary, Some(actions.build())));
+        rows.extend(failure);
     }
     if rows.is_empty() && controller.extensions.editing.is_none() {
         rows.push(ui::row(
@@ -268,11 +316,11 @@ pub fn section(
         ));
     }
     if controller.extensions.editing.is_some() {
-        rows.push(form(controller, theme, emit.clone()));
+        rows.push(form(controller, theme, Rc::clone(&emit)));
     }
     let mut body = ui::stack(Space::S8).child(ui::card(theme, rows));
-    if let Some(error) = &controller.extensions.error {
-        body = body.child(ui::error_text(theme, error));
+    if let Some(problem) = &controller.extensions.error {
+        body = body.child(ui::problem(theme, "mcp-error", problem).build());
     }
     if controller.extensions.editing.is_none() {
         body = body.child(
@@ -292,7 +340,7 @@ pub fn section(
     ui::section(
         theme,
         "MCP servers",
-        Some("Tools every engine on this host can call."),
+        Some("Tools every engine on this Forge can call."),
         None,
         body.width(Length::Pct(100.0)).build(),
     )

@@ -8,23 +8,23 @@ const FIT_MARGIN: f32 = 1.06;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {
-    pub yaw: f32,
-    pub pitch: f32,
-    pub distance: f32,
-    pub pan: (f32, f32),
+    pub(crate) yaw: f32,
+    pub(crate) pitch: f32,
+    pub(crate) distance: f32,
+    pub(crate) pan: (f32, f32),
 }
 
 impl Camera {
-    pub const DEFAULT_YAW: f32 = 30.0;
-    pub const DEFAULT_PITCH: f32 = 18.0;
-    pub const NEAREST: f32 = 1.3;
-    pub const FARTHEST: f32 = 16.0;
+    pub(crate) const DEFAULT_YAW: f32 = 30.0;
+    pub(crate) const DEFAULT_PITCH: f32 = 18.0;
+    pub(crate) const NEAREST: f32 = 1.3;
+    pub(crate) const FARTHEST: f32 = 16.0;
 
-    pub fn fitted() -> f32 {
+    fn fitted() -> f32 {
         FIT_MARGIN / (FIELD_OF_VIEW.to_radians() * 0.5).sin()
     }
 
-    pub fn new(yaw: f32, pitch: f32) -> Self {
+    pub(crate) fn new(yaw: f32, pitch: f32) -> Self {
         Self {
             yaw,
             pitch: pitch.clamp(-89.0, 89.0),
@@ -33,11 +33,11 @@ impl Camera {
         }
     }
 
-    pub fn focal(width: f32, height: f32) -> f32 {
+    pub(crate) fn focal(width: f32, height: f32) -> f32 {
         0.5 * width.min(height) / (FIELD_OF_VIEW.to_radians() * 0.5).tan()
     }
 
-    pub fn view_matrix(&self) -> [[f32; 4]; 4] {
+    pub(crate) fn view_matrix(&self) -> [[f32; 4]; 4] {
         let r = self.rotation();
         [
             [r[0][0], r[1][0], r[2][0], 0.0],
@@ -47,7 +47,7 @@ impl Camera {
         ]
     }
 
-    pub fn projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
+    pub(crate) fn projection_matrix(width: f32, height: f32) -> [[f32; 4]; 4] {
         let focal = 1.0 / (FIELD_OF_VIEW.to_radians() * 0.5).tan();
         let short = width.min(height);
         let (near, far) = (NEAR, FAR);
@@ -78,14 +78,15 @@ impl Default for Camera {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Look {
-    pub base: Vec3,
-    pub edges: Option<(Vec3, f32)>,
+    pub(crate) base: Vec3,
+    pub(crate) edges: Option<(Vec3, f32)>,
 }
 
+#[derive(Debug)]
 pub struct Frame {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) pixels: Vec<u8>,
 }
 
 fn rotate(m: &[[f32; 3]; 3], v: Vec3) -> Vec3 {
@@ -213,14 +214,18 @@ struct Grid {
     height: usize,
 }
 
-pub fn render(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Cancelled;
+
+pub(crate) fn render(
     mesh: &Mesh,
     camera: &Camera,
     look: &Look,
     width: u32,
     height: u32,
     samples: u32,
-) -> Frame {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Frame, Cancelled> {
     let samples = samples.max(1);
     let grid = Grid {
         width: (width * samples) as usize,
@@ -228,13 +233,26 @@ pub fn render(
     };
     #[expect(clippy::cast_precision_loss, reason = "frame sides are small")]
     let projection = Projection::new(mesh, camera, grid.width as f32, grid.height as f32);
-    let winner = visibility(&projection, grid);
-    let color = shade(mesh, &projection, &winner, look, camera, grid, samples);
-    Frame {
+    let winner = visibility(&projection, grid, cancelled)?;
+    let color = shade(
+        mesh,
+        &projection,
+        &winner,
+        look,
+        camera,
+        grid,
+        samples,
+        cancelled,
+    )?;
+    Ok(Frame {
         width,
         height,
         pixels: resolve(&winner, &color, grid, samples),
-    }
+    })
+}
+
+fn proceed(cancelled: &dyn Fn() -> bool) -> Result<(), Cancelled> {
+    if cancelled() { Err(Cancelled) } else { Ok(()) }
 }
 
 #[expect(
@@ -243,11 +261,16 @@ pub fn render(
     clippy::cast_sign_loss,
     reason = "sample coordinates are small, non-negative, and clamped to the grid"
 )]
-fn visibility(projection: &Projection, grid: Grid) -> Vec<u32> {
+fn visibility(
+    projection: &Projection,
+    grid: Grid,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<u32>, Cancelled> {
     let mut depth = vec![0.0_f32; grid.width * grid.height];
     let mut winner = vec![EMPTY; grid.width * grid.height];
     let (right, bottom) = (grid.width as f32 - 1.0, grid.height as f32 - 1.0);
     for triangle in 0..projection.projected.len() / 3 {
+        proceed(cancelled)?;
         let screen = projection.screen(triangle);
         let corners = screen.corners;
         if corners.iter().any(|corner| corner.inverse_depth <= 0.0)
@@ -302,10 +325,14 @@ fn visibility(projection: &Projection, grid: Grid) -> Vec<u32> {
             }
         }
     }
-    winner
+    Ok(winner)
 }
 
 #[expect(clippy::cast_precision_loss, reason = "sample coordinates are small")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shading pass reads mesh, projection, winners, look, camera, grid and sample count"
+)]
 fn shade(
     mesh: &Mesh,
     projection: &Projection,
@@ -314,11 +341,15 @@ fn shade(
     camera: &Camera,
     grid: Grid,
     samples: u32,
-) -> Vec<Vec3> {
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Vec3>, Cancelled> {
     let lights = Lights::new();
     let edge_half_width = 0.5 * samples as f32;
     let mut color = vec![Vec3::ZERO; winner.len()];
     for (at, (out, triangle)) in color.iter_mut().zip(winner).enumerate() {
+        if at % grid.width == 0 {
+            proceed(cancelled)?;
+        }
         if *triangle == EMPTY {
             continue;
         }
@@ -347,7 +378,7 @@ fn shade(
         }
         *out = shaded;
     }
-    color
+    Ok(color)
 }
 
 #[expect(
@@ -458,3 +489,7 @@ fn encode(linear: f32) -> u8 {
     let index = linear.clamp(0.0, 1.0).mul_add(4095.0, 0.5) as usize;
     TABLE[index.min(4095)]
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/ui/media/model/raster.rs"]
+mod tests;

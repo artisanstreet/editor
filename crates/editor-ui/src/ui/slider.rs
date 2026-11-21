@@ -5,7 +5,7 @@ pub struct SliderRange {
     step: f64,
 }
 impl SliderRange {
-    pub fn new(min: f64, max: f64, step: Option<f64>) -> Self {
+    pub(crate) fn new(min: f64, max: f64, step: Option<f64>) -> Self {
         let (min, max) = if min.is_finite() && max.is_finite() && (max - min).is_finite() {
             (min.min(max), min.max(max))
         } else {
@@ -26,7 +26,7 @@ impl SliderRange {
         clippy::float_cmp,
         reason = "the clamped ends are kept exactly, not snapped"
     )]
-    pub fn snap(self, value: f64) -> f64 {
+    fn snap(self, value: f64) -> f64 {
         let value = if value.is_finite() {
             value.clamp(self.min, self.max)
         } else {
@@ -43,7 +43,7 @@ impl SliderRange {
             value
         }
     }
-    pub fn command(self, value: f64, command: SliderCommand) -> f64 {
+    fn command(self, value: f64, command: SliderCommand) -> f64 {
         match command {
             SliderCommand::Start => self.min,
             SliderCommand::End => self.max,
@@ -52,42 +52,33 @@ impl SliderRange {
         }
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum SliderCommand {
     Start,
     End,
     Previous,
     Next,
 }
-impl SliderCommand {
-    pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "home" => Some(Self::Start),
-            "end" => Some(Self::End),
-            "left" | "down" => Some(Self::Previous),
-            "right" | "up" => Some(Self::Next),
-            _ => None,
-        }
-    }
-}
+impl SliderCommand {}
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use aqua_core::{
     CornerRadii, DisplayItem, GpuiBackground, InputEvent, Insets, Key as InputKey, NamedKey,
-    Oklch as PaintColor, PointerButton, Rect, Role,
+    NumericRangeSemantics, Oklch as PaintColor, PointerButton, Rect, Role,
 };
 use aqua_ui::{
     element::{Box as UiBox, Canvas, Element, Key},
     input::{CaptureRequest, EventPhase, FocusRequest, InputKind, InputResponse, RoutedInput},
     style::{LayoutStyle, Length, Style},
-    tree::UiCommand,
+    tree::{AccessibilityRequest, UiCommand},
 };
 
 use super::kit::{Space, Spaced, TextRole};
 use super::theme::{ArtisanTheme, Opacity};
 
+#[derive(Debug)]
 pub struct SliderState {
     range: SliderRange,
     value: f64,
@@ -95,7 +86,7 @@ pub struct SliderState {
 }
 
 impl SliderState {
-    pub fn new(range: SliderRange, value: f64) -> Self {
+    pub(crate) fn new(range: SliderRange, value: f64) -> Self {
         Self {
             range,
             value: range.snap(value),
@@ -103,11 +94,11 @@ impl SliderState {
         }
     }
 
-    pub fn value(&self) -> f64 {
+    pub(crate) fn value(&self) -> f64 {
         self.value
     }
 
-    pub fn reset(&mut self, range: SliderRange, value: f64) {
+    pub(crate) fn reset(&mut self, range: SliderRange, value: f64) {
         self.range = range;
         self.value = range.snap(value);
         self.dragging = false;
@@ -115,7 +106,7 @@ impl SliderState {
 
     fn set(&mut self, value: f64) -> bool {
         let value = self.range.snap(value);
-        if self.value == value {
+        if self.value.to_bits() == value.to_bits() {
             return false;
         }
         self.value = value;
@@ -130,9 +121,13 @@ impl SliderState {
         self.set(self.range.min + f64::from(t) * (self.range.max - self.range.min))
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the fraction is clamped to 0..=1"
+    )]
     fn fraction(&self) -> f32 {
         let span = self.range.max - self.range.min;
-        if span == 0.0 {
+        if span.abs() < f64::EPSILON {
             0.0
         } else {
             ((self.value - self.range.min) / span).clamp(0.0, 1.0) as f32
@@ -140,7 +135,7 @@ impl SliderState {
     }
 }
 
-pub struct Slider {
+pub(crate) struct Slider {
     id: Key,
     theme: ArtisanTheme,
     label: String,
@@ -151,7 +146,11 @@ pub struct Slider {
 }
 
 impl Slider {
-    pub fn new(
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the slider stores this theme copy and paints from it when built"
+    )]
+    pub(crate) fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,
@@ -169,19 +168,28 @@ impl Slider {
         }
     }
 
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
-    pub fn on_change(mut self, handler: impl Fn(f64) + 'static) -> Self {
+    pub(crate) fn on_change(mut self, handler: impl Fn(f64) + 'static) -> Self {
         self.on_change = Some(Rc::new(handler));
         self
     }
 
-    pub fn build(self) -> Element {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one slider build: track, thumb, drag and keyboard semantics"
+    )]
+    pub(crate) fn build(self) -> Element {
         let theme = self.theme;
         let accent = theme.colors.amber.solid.to_reference_paint();
-        let state = self.state.clone();
+        let range = {
+            let state = self.state.borrow();
+            NumericRangeSemantics {
+                min: state.range.min,
+                max: state.range.max,
+                value: state.value,
+                step: state.range.step,
+            }
+        };
+        let state = Rc::clone(&self.state);
         let layout = LayoutStyle {
             height: Length::Px(20.0),
             min_width: Length::Px(80.0),
@@ -205,7 +213,7 @@ impl Slider {
                     background: GpuiBackground::Solid(fill),
                 };
                 let thumb_bounds = Rect {
-                    x: bounds.x + bounds.w * fraction - 6.0,
+                    x: bounds.w.mul_add(fraction, bounds.x) - 6.0,
                     y: bounds.y + 4.0,
                     w: 12.0,
                     h: 12.0,
@@ -234,6 +242,7 @@ impl Slider {
             .role(Role::Slider)
             .aria_label(self.label.clone())
             .aria_value(self.readout.clone())
+            .aria_range(range)
             .disabled(self.disabled)
             .focusable(!self.disabled);
         if self.disabled {
@@ -256,7 +265,7 @@ impl Slider {
             track = track
                 .cursor(aqua_core::CursorIcon::EwResize)
                 .focus_visible_style(focus);
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             let change = self.on_change.clone();
             let next_layout = layout.clone();
             track = track.on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
@@ -284,7 +293,7 @@ impl Slider {
                     ..InputResponse::handled()
                 }
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             let change = self.on_change.clone();
             let next_layout = layout.clone();
             track = track.on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
@@ -310,7 +319,7 @@ impl Slider {
                     ..InputResponse::handled()
                 }
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             track = track.on_input(InputKind::PointerUp, EventPhase::Bubble, move |_| {
                 state.borrow_mut().dragging = false;
                 InputResponse {
@@ -318,12 +327,32 @@ impl Slider {
                     ..InputResponse::handled()
                 }
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
             track = track.on_input(InputKind::PointerCancel, EventPhase::Bubble, move |_| {
                 state.borrow_mut().dragging = false;
                 InputResponse::default()
             });
-            let state = self.state.clone();
+            let state = Rc::clone(&self.state);
+            let change = self.on_change.clone();
+            track = track.on_accessibility_request(move |request| {
+                let mut state = state.borrow_mut();
+                let value = match request {
+                    AccessibilityRequest::SetValue(value) => value,
+                    AccessibilityRequest::Increment => {
+                        state.range.command(state.value, SliderCommand::Next)
+                    }
+                    AccessibilityRequest::Decrement => {
+                        state.range.command(state.value, SliderCommand::Previous)
+                    }
+                    AccessibilityRequest::ShowContextMenu => return,
+                };
+                let changed = state.set(value).then_some(state.value);
+                drop(state);
+                if let (Some(value), Some(change)) = (changed, &change) {
+                    change(value);
+                }
+            });
+            let state = Rc::clone(&self.state);
             let change = self.on_change;
             track = track.on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
                 let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
@@ -334,7 +363,7 @@ impl Slider {
                     InputKey::Named(NamedKey::End) => SliderCommand::End,
                     InputKey::Named(NamedKey::Left | NamedKey::Down) => SliderCommand::Previous,
                     InputKey::Named(NamedKey::Right | NamedKey::Up) => SliderCommand::Next,
-                    _ => return InputResponse::default(),
+                    InputKey::Char(_) | InputKey::Named(_) => return InputResponse::default(),
                 };
                 let mut state = state.borrow_mut();
                 let value = state.range.command(state.value, command);
@@ -379,3 +408,7 @@ impl Slider {
             .build()
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/ui/slider.rs"]
+mod tests;

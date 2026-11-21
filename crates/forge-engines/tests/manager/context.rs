@@ -1,0 +1,216 @@
+use super::*;
+use artisan_api::SignInState;
+use std::os::unix::fs::PermissionsExt as _;
+use test_support::wait::{LIVENESS, eventually, within};
+
+fn codex_manager(script: &str) -> (tempfile::TempDir, Engines, PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = Layout::new(directory.path());
+    let engine = EngineId::Codex;
+    let home = layout.home(engine);
+    std::fs::create_dir_all(&home).unwrap();
+    let version = layout.version_dir(engine, "1.0.0");
+    let binary = version.join(host_spec(engine).artifact.unwrap().entry);
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    let script = script.replacen(
+        '\n',
+        "\napp_server() {\n read -r _; echo '{\"id\":1,\"result\":{}}'\n read -r _\n read -r _; printf '{\"id\":2,\"result\":{\"data\":[{\"id\":\"%s\",\"isDefault\":true}]}}\\n' \"$1\"\n}\n",
+        1,
+    );
+    std::fs::write(&binary, script).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    install::switch(&layout, engine, "1.0.0").unwrap();
+    let engines = Engines::new(directory.path());
+    (directory, engines, home)
+}
+
+async fn codex_until(engines: &Engines, what: &str, ready: impl Fn(&EngineStatus) -> bool + Sync) {
+    let mut changes = engines.subscribe();
+    within(what, LIVENESS, async {
+        while !ready(&engines.status(EngineId::Codex)) {
+            match changes.recv().await {
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    panic!("the engines stopped publishing while waiting for {what}")
+                }
+            }
+        }
+    })
+    .await;
+}
+
+async fn marked(path: &Path) {
+    eventually(
+        &format!("the fake engine to mark {}", path.display()),
+        LIVENESS,
+        || std::future::ready(path.exists()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn login_links_are_still_parsed_after_the_retained_log_budget() {
+    let (_directory, engines, _home) = codex_manager(
+        r#"#!/bin/sh
+case "$*" in
+ "login --device-auth") yes 'noise' | head -n 15000; echo 'https://login.example.test/login'; sleep 30 ;;
+ "login status") echo 'Logged in' ;;
+ "app-server --stdio") app_server model1 ;;
+esac
+"#,
+    );
+    engines.login(EngineId::Codex).unwrap();
+    codex_until(&engines, "the login link", |status| matches!(&status.sign_in, SignInState::LoggingIn { url: Some(url), .. } if url == "https://login.example.test/login")).await;
+    engines.cancel_login(EngineId::Codex);
+    codex_until(&engines, "the sign-in check after cancelling", |status| {
+        matches!(status.sign_in, SignInState::SignedIn { .. })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn overlapping_model_refreshes_share_one_native_probe() {
+    let (_directory, engines, home) = codex_manager(
+        r#"#!/bin/sh
+printf 'probe\n' >> "$PWD/calls"
+touch "$PWD/started"
+while [ ! -e "$PWD/release" ]; do sleep 0.01; done
+app_server model1
+"#,
+    );
+    let owner = engines.clone();
+    let first = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
+    marked(&home.join("started")).await;
+    let owner = engines.clone();
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn(async move {
+        let _peer_gone = started.send(());
+        owner.refresh_models(EngineId::Codex).await.unwrap()
+    });
+    waiting.await.unwrap();
+    std::fs::write(home.join("release"), "").unwrap();
+    assert_eq!(
+        within("the first refresh", LIVENESS, first).await.unwrap(),
+        within("the second refresh", LIVENESS, second)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn old_models_cannot_return_after_an_account_aba() {
+    let (_directory, engines, home) = codex_manager(
+        r#"#!/bin/sh
+case "$*" in
+ "login status") if [ -e "$PWD/out" ]; then echo 'Not logged in'; else echo 'Logged in'; fi ;;
+ logout) touch "$PWD/out" ;;
+ "login --device-auth") rm -f "$PWD/out" ;;
+ "app-server --stdio") model=$(cat "$PWD/model"); touch "$PWD/started"; while [ ! -e "$PWD/release" ]; do sleep 0.01; done; app_server "$model" ;;
+esac
+"#,
+    );
+    std::fs::write(home.join("model"), "old-model1").unwrap();
+    assert_eq!(
+        engines.check_sign_in(EngineId::Codex).await,
+        SignInState::SignedIn { account: None }
+    );
+    let owner = engines.clone();
+    let old = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
+    marked(&home.join("started")).await;
+    engines.logout(EngineId::Codex).unwrap();
+    codex_until(&engines, "the sign-out", |status| {
+        status.sign_in == SignInState::SignedOut
+    })
+    .await;
+    std::fs::write(home.join("model"), "new-model2").unwrap();
+    engines.login(EngineId::Codex).unwrap();
+    codex_until(&engines, "the new sign-in", |status| {
+        status.sign_in == SignInState::SignedIn { account: None }
+    })
+    .await;
+    std::fs::write(home.join("release"), "").unwrap();
+    assert!(
+        within("the old refresh", LIVENESS, old)
+            .await
+            .unwrap()
+            .is_empty(),
+        "old context must not commit even though public account state is identical"
+    );
+    codex_until(&engines, "the new account's models", |status| {
+        status.models.iter().any(|model| model.id == "new-model2")
+    })
+    .await;
+    assert!(
+        !engines
+            .status(EngineId::Codex)
+            .models
+            .iter()
+            .any(|model| model.id == "old-model1")
+    );
+}
+
+#[tokio::test]
+async fn login_pins_the_selected_version_until_cancellation_and_probe_finish() {
+    let (directory, engines, home) = codex_manager(
+        r#"#!/bin/sh
+case "$*" in
+ "login --device-auth") touch "$PWD/started"; while :; do sleep 1; done ;;
+ "login status") echo 'Logged in' ;;
+ "app-server --stdio") app_server model1 ;;
+esac
+"#,
+    );
+    let old_binary = engines.binary(EngineId::Codex).unwrap();
+    engines.login(EngineId::Codex).unwrap();
+    marked(&home.join("started")).await;
+    let layout = Layout::new(directory.path());
+    for version in ["2.0.0", "3.0.0"] {
+        let next = layout
+            .version_dir(EngineId::Codex, version)
+            .join(host_spec(EngineId::Codex).artifact.unwrap().entry);
+        std::fs::create_dir_all(next.parent().unwrap()).unwrap();
+        test_support::executable::install(&old_binary, &next);
+        install::switch(&layout, EngineId::Codex, version).unwrap();
+    }
+    install::prune(&layout, EngineId::Codex).unwrap();
+    assert!(old_binary.is_file());
+    engines.cancel_login(EngineId::Codex);
+    eventually("the old version to be pruned", LIVENESS, || {
+        install::prune(&layout, EngineId::Codex).unwrap();
+        std::future::ready(!old_binary.exists())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn present_install_reconciles_a_failed_update_without_another_download() {
+    let (_directory, engines, _home) = codex_manager("#!/bin/sh\necho 'Logged in'\n");
+    engines.apply(
+        EngineId::Codex,
+        &Event::Start {
+            version: "2.0.0".into(),
+        },
+    );
+    engines.apply(
+        EngineId::Codex,
+        &Event::Fail {
+            message: "download failed".into(),
+        },
+    );
+    assert!(matches!(
+        engines.status(EngineId::Codex).install,
+        InstallState::Failed { .. }
+    ));
+    assert_eq!(engines.install(EngineId::Codex).await.unwrap(), "1.0.0");
+    assert!(matches!(
+        engines.status(EngineId::Codex).install,
+        InstallState::Installed { .. }
+    ));
+}

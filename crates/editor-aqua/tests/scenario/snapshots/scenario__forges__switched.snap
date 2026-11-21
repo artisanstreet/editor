@@ -1,0 +1,11 @@
+---
+source: crates/editor-aqua/tests/scenario/forges.rs
+expression: "editor.settle_part(\"the other Forge's threads to show\", Role::List, None,\n|view|\n{\n    view.find(Role::Dialog, \"Search threads and commands\").is_none() &&\n    view.find(Role::Button, \"Studio work\").is_some() &&\n    view.find(Role::Button, \"Greeting\").is_none()\n})"
+---
+List
+  ListItem
+    Group "Project"
+      Label "Project"
+  ListItem
+    Button "Studio work"
+      Label "Studio work"

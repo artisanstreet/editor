@@ -23,18 +23,29 @@ enum FrameSize {
     Transcript { aspect: f32, width: f32 },
 }
 
+type Activate = dyn Fn(ActionEvent);
 pub struct MediaFrame {
     theme: ArtisanTheme,
     size: FrameSize,
     content: Element,
     id: Option<Key>,
     selector: Option<String>,
-    activation: Option<(String, Box<dyn Fn(ActionEvent)>)>,
+    activation: Option<(String, Box<Activate>)>,
     error: bool,
     visible: Option<Rc<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for MediaFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaFrame").finish_non_exhaustive()
+    }
+}
+
 impl MediaFrame {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
     pub fn new(theme: ArtisanTheme, aspect: f32, measured_width: f32, content: Element) -> Self {
         let aspect = if aspect.is_finite() && aspect > 0.0 {
             aspect.clamp(0.05, 20.0)
@@ -56,6 +67,10 @@ impl MediaFrame {
         }
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
     pub fn sent_attachment(theme: ArtisanTheme, content: Element) -> Self {
         Self {
             size: FrameSize::SentAttachment,
@@ -63,7 +78,11 @@ impl MediaFrame {
         }
     }
 
-    pub fn attachment(id: impl Into<Key>, theme: ArtisanTheme, content: Element) -> Self {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
+    pub(crate) fn attachment(id: impl Into<Key>, theme: ArtisanTheme, content: Element) -> Self {
         Self {
             size: FrameSize::Attachment,
             id: Some(id.into()),
@@ -71,6 +90,10 @@ impl MediaFrame {
         }
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the media frame stores this theme copy and paints from it when built"
+    )]
     pub fn transcript_image(
         theme: ArtisanTheme,
         aspect: f32,
@@ -115,11 +138,13 @@ impl MediaFrame {
             .build()
     }
 
+    #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.selector = Some(selector.into());
         self
     }
 
+    #[must_use]
     pub fn on_activate(
         mut self,
         id: impl Into<Key>,
@@ -131,21 +156,22 @@ impl MediaFrame {
         self
     }
 
-    pub const fn error(mut self, error: bool) -> Self {
+    pub(crate) const fn error(mut self, error: bool) -> Self {
         self.error = error;
         self
     }
 
+    #[must_use]
     pub fn on_visible(mut self, action: impl Fn() + 'static) -> Self {
         self.visible = Some(Rc::new(action));
         self
     }
 
-    pub fn thumb_radius() -> f32 {
+    pub(crate) fn thumb_radius() -> f32 {
         THUMB.radius_px()
     }
 
-    pub fn thumb_content_style() -> Style {
+    pub(crate) fn thumb_content_style() -> Style {
         Style::new().radius(Length::Px(concentric(THUMB.radius_px(), EDGE)))
     }
 
@@ -153,7 +179,7 @@ impl MediaFrame {
         Self::thumb_content_style()
     }
 
-    pub fn placeholder(theme: ArtisanTheme) -> Element {
+    pub fn placeholder(theme: &ArtisanTheme) -> Element {
         UiBox::new()
             .width(Length::Pct(100.0))
             .height(Length::Pct(100.0))
@@ -164,9 +190,10 @@ impl MediaFrame {
     }
 
     pub fn build(self) -> Element {
-        let edge = match self.error {
-            true => self.theme.colors.destructive,
-            false => self.theme.colors.text.at(Opacity::MediaEdge),
+        let edge = if self.error {
+            self.theme.colors.destructive
+        } else {
+            self.theme.colors.text.at(Opacity::MediaEdge)
         };
         let (width, height, surface, border) = match self.size {
             FrameSize::Aspect { aspect, width } => (width, width / aspect, FRAME, None),

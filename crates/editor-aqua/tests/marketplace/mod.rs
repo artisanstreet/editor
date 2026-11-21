@@ -2,8 +2,20 @@ use std::time::{Duration, Instant};
 
 use artisan_api::Listing;
 use editor_aqua::core::HostId;
+use editor_aqua::core::client::{CallError, CallFailure};
 use editor_aqua::marketplace::presentation::{self, Item, ServerRow};
-use editor_aqua::marketplace::{Marketplace, Remote};
+use editor_aqua::marketplace::{Marketplace, OperationError, Remote};
+
+fn refused() -> OperationError {
+    OperationError::Install {
+        listing: "listing".into(),
+        source: CallError {
+            method: "POST".parse().expect("POST is an HTTP method"),
+            path: "/marketplace/install".into(),
+            failure: Box::new(CallFailure::Inconsistent { check: "test" }),
+        },
+    }
+}
 
 fn listing(id: &str, name: &str, installs: u64) -> Listing {
     Listing {
@@ -89,7 +101,7 @@ fn changing_host_discards_old_operation_completion() {
             .is_none()
     );
     page.sync_host(Some(HostId("second".into())), &[], &[]);
-    assert!(!page.finish_operation(&request, Err(anyhow::anyhow!("failed"))));
+    assert!(!page.finish_operation(&request, Err(refused())));
     assert!(page.pending.is_none());
     assert!(page.notice.is_none());
 }
@@ -117,7 +129,7 @@ fn removed_and_readded_host_rejects_old_requests() {
     page.sync_host(Some(host), &[], &[]);
     page.finish_search(&search, Ok(vec![listing("old", "pdf", 10)]));
     assert_eq!(page.listings, Remote::Idle);
-    assert!(!page.finish_operation(&operation, Err(anyhow::anyhow!("old error"))));
+    assert!(!page.finish_operation(&operation, Err(refused())));
     assert!(page.pending.is_none());
     assert!(page.notice.is_none());
     assert!(
@@ -130,15 +142,12 @@ fn removed_and_readded_host_rejects_old_requests() {
 fn same_id_host_replacement_resets_marketplace_requests() {
     use artisan_api::SkillAction;
     use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostKind, Screen};
+    use editor_aqua::core::{ForgeClient, HostConfig, HostKind, Screen};
     use editor_aqua::marketplace::Operation;
     use editor_aqua::marketplace::controller::MarketplaceController;
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("marketplace-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
@@ -150,7 +159,7 @@ fn same_id_host_replacement_resets_marketplace_requests() {
         fingerprint,
         kind: HostKind::Local,
     };
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     core.navigate(Screen::Marketplace);
     let mut controller = MarketplaceController::default();
     controller.sync(&mut core);
@@ -170,19 +179,15 @@ fn same_id_host_replacement_resets_marketplace_requests() {
         .unwrap();
     core.remove_host(&id).unwrap();
     assert!(core.host_if_instance(&id, first).is_none());
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert_ne!(core.host(&id).unwrap().instance(), first);
     assert!(core.host_if_instance(&id, first).is_none());
     controller.sync(&mut core);
     controller
         .page
         .finish_search(&search, Ok(vec![listing("old", "pdf", 10)]));
-    assert_eq!(controller.page.listings, Remote::Idle);
-    assert!(
-        !controller
-            .page
-            .finish_operation(&operation, Err(anyhow::anyhow!("old error")))
-    );
+    assert_eq!(controller.page.listings, Remote::Searching);
+    assert!(!controller.page.finish_operation(&operation, Err(refused())));
     assert!(controller.page.pending.is_none());
     assert!(controller.page.notice.is_none());
     assert!(
@@ -194,29 +199,29 @@ fn same_id_host_replacement_resets_marketplace_requests() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one keyboard search scenario walked step by step"
+)]
 fn mounted_search_routes_keyboard_selection_and_escape() {
     use aqua_core::{InputEvent, Key as InputKey, KeyEvent, Modifiers, NamedKey};
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::{element::Key, tree::hash_key};
     use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{
-        Core, EditorFiles, ForgeClient, HostConfig, HostKind, Screen, SettingsPage,
-    };
+    use editor_aqua::core::{ForgeClient, HostConfig, HostKind, Screen, SettingsPage};
     use editor_aqua::marketplace::{controller::MarketplaceController, view};
     use editor_aqua::ui::theme::ArtisanTheme;
     use std::cell::RefCell;
     use std::rc::Rc;
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = Identity::generate("marketplace-view-test").unwrap();
     let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
     let id = HostId("view-host".into());
-    core.add_test_host(
+    test_support::editor::core::connect_client(
+        &mut core,
         &HostConfig {
             id,
             name: "Forge".into(),
@@ -228,9 +233,10 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     );
     core.navigate(Screen::Marketplace);
     let events = Rc::new(RefCell::new(Vec::new()));
-    let recorded = events.clone();
-    let emit = Rc::new(move |action| recorded.borrow_mut().push(action));
-    let mut controller = MarketplaceController::new(emit.clone());
+    let recorded = Rc::clone(&events);
+    let emit: Rc<dyn Fn(view::ViewAction)> =
+        Rc::new(move |action| recorded.borrow_mut().push(action));
+    let mut controller = MarketplaceController::new(Rc::clone(&emit));
     controller.sync(&mut core);
     controller.page.items = vec![
         Item::Server(ServerRow {
@@ -293,7 +299,7 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
     let mut app = aqua::UiApp::new(fonts, SharedRuns::new());
-    app.mount(|_| view::build(&controller, &core, ArtisanTheme::resolved(), emit))
+    app.mount(|_| view::build(&controller, &core, &ArtisanTheme::resolved(), emit))
         .unwrap();
     app.set_viewport(1000.0, 900.0, 1.0);
     app.build_frame().unwrap();
@@ -302,7 +308,11 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
         let text = app.tree().get(control).unwrap().children[0];
         let text_color = |app: &aqua::UiApp| match &app.tree().get(text).unwrap().kind {
             aqua_ui::tree::NodeKind::Text(text) => text.text_style.gpui_source_color,
-            _ => panic!("control label is not text"),
+            aqua_ui::tree::NodeKind::Box(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => panic!("control label is not text"),
         };
         let muted = ArtisanTheme::resolved()
             .colors
@@ -391,7 +401,7 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     }
     assert_eq!(controller.page.query, "p");
     assert!(controller.page.search_deadline().is_none());
-    assert_eq!(controller.page.selected, 0);
+    assert_eq!(controller.page.selected_index(), Some(0));
     let key_event = |key| {
         InputEvent::KeyDown(KeyEvent {
             key: InputKey::Named(key),
@@ -403,14 +413,14 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     for action in events.borrow_mut().drain(..) {
         view::dispatch(&mut controller, &mut core, action);
     }
-    assert_eq!(controller.page.selected, 1);
+    assert_eq!(controller.page.selected_index(), Some(1));
     assert!(controller.selected_entry_key().is_some());
     app.handle_input(&key_event(NamedKey::Escape));
     for action in events.borrow_mut().drain(..) {
         view::dispatch(&mut controller, &mut core, action);
     }
     assert!(controller.page.query.is_empty());
-    assert_eq!(controller.page.selected, 0);
+    assert_eq!(controller.page.selected_index(), Some(0));
     app.handle_input(&InputEvent::TextInput { text: "p".into() });
     for action in events.borrow_mut().drain(..) {
         view::dispatch(&mut controller, &mut core, action);
@@ -420,4 +430,394 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
         view::dispatch(&mut controller, &mut core, action);
     }
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::Extensions));
+}
+
+fn discovered(id: &str) -> Item {
+    Item::Skill(presentation::SkillRow {
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        size: String::new(),
+        enabled: false,
+        origin: artisan_api::SkillOrigin::Discovered,
+        marks: Vec::new(),
+        attention: None,
+        found_in: None,
+    })
+}
+
+#[test]
+fn enter_installs_the_skill_that_is_painted_selected_after_the_catalog_shrinks() {
+    use editor_aqua::marketplace::{Action, Entry, ListKey, Operation, entries};
+
+    let mut page = Marketplace::default();
+    page.set_shown(true);
+    page.sync_host(Some(HostId("host".into())), &[], &[]);
+    page.items = vec![
+        discovered("pdf-a"),
+        discovered("pdf-b"),
+        discovered("pdf-c"),
+    ];
+    let now = Instant::now();
+    page.set_query("pdf".into(), now);
+    assert!(page.list_key(ListKey::Down, now).is_none());
+    assert!(page.list_key(ListKey::Down, now).is_none());
+    page.items.remove(1);
+    let painted = entries(&page).into_iter().find_map(|entry| match entry {
+        Entry::Item {
+            item,
+            selected: true,
+            ..
+        } => Some(item.name().to_owned()),
+        Entry::Hero
+        | Entry::Notices
+        | Entry::Found(_)
+        | Entry::Group(_)
+        | Entry::SearchFailed(_)
+        | Entry::Empty(_)
+        | Entry::Item { .. } => None,
+    });
+    assert_eq!(painted.as_deref(), Some("pdf-c"));
+    assert!(matches!(
+        page.list_key(ListKey::Accept, now),
+        Some(Action::Operation(Operation::Skill { id, .. })) if id == "pdf-c"
+    ));
+}
+
+#[test]
+fn an_mcp_server_does_not_hide_a_skills_sh_skill_with_the_same_name() {
+    let mut page = Marketplace::default();
+    page.set_shown(true);
+    page.sync_host(Some(HostId("host".into())), &[], &[]);
+    page.items = vec![Item::Server(ServerRow {
+        name: "github".into(),
+        target: "npx github-mcp".into(),
+    })];
+    page.set_query("github".into(), Instant::now());
+    page.listings = Remote::Found(vec![listing("listing", "github", 5)]);
+    page.set_kind(presentation::Kind::Skills);
+    assert!(
+        page.results()
+            .iter()
+            .any(|item| matches!(item, Item::Listing(row) if row.name == "github"))
+    );
+}
+
+#[test]
+fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
+    use editor_aqua::core::{Core, Screen};
+    use editor_aqua::marketplace::controller::MarketplaceController;
+    use test_support::editor::core::{Delivered, stub_host};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let first_forge = stub_forge();
+    let second_forge = stub_forge();
+    let first = stub_host("first", "first", &first_forge);
+    let second = stub_host("second", "second", &second_forge);
+    connect_live(&mut core, &first);
+    connect_live(&mut core, &second);
+    let show_on = |core: &mut Core, host: &HostId| {
+        core.navigate(Screen::NewThread {
+            host: host.clone(),
+            project: None,
+        });
+        core.navigate(Screen::Marketplace);
+    };
+    show_on(&mut core, &first.id);
+    let mut controller = MarketplaceController::default();
+    controller.sync(&mut core);
+    let delivered = Delivered::watch(controller.wake_mailbox());
+    controller.search.state().borrow_mut().set_text("pdf");
+    controller.edited(&core);
+    first_forge
+        .take("GET", "/marketplace/search")
+        .respond(vec![listing("first", "pdf", 1)]);
+    delivered.wait("the first host's search results");
+
+    show_on(&mut core, &second.id);
+    controller.sync(&mut core);
+    assert_eq!(controller.page.host.as_ref(), Some(&second.id));
+    let on_second = second_forge.take("GET", "/marketplace/search");
+    assert!(
+        on_second.query().is_some_and(|query| query.contains("pdf")),
+        "the search restarts on the second host: {on_second:?}"
+    );
+
+    controller.drain(&mut core);
+    assert_eq!(
+        controller.page.listings,
+        Remote::Searching,
+        "the first host's results must not appear on the second host"
+    );
+}
+
+fn stub_forge() -> test_support::editor::forge::StubForge {
+    editor_aqua::core::runtime::runtime().block_on(test_support::editor::forge::StubForge::serve(
+        test_support::editor::forge::empty_state(),
+        axum::Router::new(),
+    ))
+}
+
+fn connect_live(core: &mut editor_aqua::core::Core, config: &editor_aqua::core::HostConfig) {
+    test_support::editor::core::connect(core, config);
+    test_support::wait::wait_until("the stub Forge to go live", Duration::from_secs(10), || {
+        core.drain_with(|_, _| {});
+        core.host(&config.id)
+            .is_some_and(editor_aqua::core::HostData::is_live)
+    });
+}
+
+fn marketplace_host(
+    core: &mut editor_aqua::core::Core,
+) -> (
+    editor_aqua::marketplace::controller::MarketplaceController,
+    test_support::editor::forge::StubForge,
+) {
+    use editor_aqua::core::Screen;
+    use editor_aqua::marketplace::controller::MarketplaceController;
+    let forge = stub_forge();
+    connect_live(
+        core,
+        &test_support::editor::core::stub_host("state-host", "Forge", &forge),
+    );
+    core.navigate(Screen::Marketplace);
+    let mut controller = MarketplaceController::default();
+    controller.sync(core);
+    (controller, forge)
+}
+
+fn marketplace_app(
+    controller: &editor_aqua::marketplace::controller::MarketplaceController,
+    core: &editor_aqua::core::Core,
+    emit: std::rc::Rc<dyn Fn(editor_aqua::marketplace::view::ViewAction)>,
+) -> aqua::UiApp {
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::marketplace::view;
+    use editor_aqua::ui::theme::ArtisanTheme;
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = aqua::UiApp::new(fonts, SharedRuns::new());
+    let element = view::build(controller, core, &ArtisanTheme::resolved(), emit);
+    app.mount(|_| element).expect("mount the marketplace");
+    app.set_viewport(1000.0, 1600.0, 1.0);
+    app.build_frame().expect("lay out the marketplace");
+    app
+}
+
+#[test]
+fn a_failed_skills_sh_search_says_why_and_tries_the_same_query_again() {
+    use axum::http::StatusCode;
+    use editor_aqua::marketplace::view::{self, ViewAction};
+    use std::{cell::RefCell, rc::Rc};
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = marketplace_host(&mut core);
+    controller.search.state().borrow_mut().set_text("pdf");
+    controller.edited(&core);
+    forge.take("GET", "/marketplace/search").fail(
+        StatusCode::BAD_GATEWAY,
+        "internal",
+        "skills.sh did not answer",
+    );
+    test_support::wait::wait_until(
+        "the failed search to reach the page",
+        Duration::from_secs(10),
+        || {
+            controller.drain(&mut core);
+            matches!(controller.page.listings, Remote::Failed(_))
+        },
+    );
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&actions);
+    let mut app = marketplace_app(
+        &controller,
+        &core,
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    );
+    let texts = test_support::editor::ui::painted_texts(&app);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with("Couldn't search skills.sh.")),
+        "{texts:?}"
+    );
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains("did not answer") || text.contains("/marketplace/search")),
+        "the cause stays in the details, off the page: {texts:?}"
+    );
+    test_support::editor::ui::click(&mut app, "marketplace-search-retry");
+    let retry = actions.borrow_mut().pop().unwrap();
+    assert!(matches!(retry, ViewAction::RetrySearch));
+    assert!(view::dispatch(&mut controller, &mut core, retry));
+    assert_eq!(controller.page.listings, Remote::Searching);
+    assert_eq!(controller.page.query, "pdf");
+    let retried = forge.take("GET", "/marketplace/search");
+    assert!(
+        retried.query().is_some_and(|query| query.contains("pdf")),
+        "Try again searches the same query: {retried:?}"
+    );
+}
+
+#[test]
+fn a_quarantined_skill_being_installed_says_so_on_its_row() {
+    use artisan_api::SkillAction;
+    use editor_aqua::marketplace::Operation;
+    use std::rc::Rc;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, _forge) = marketplace_host(&mut core);
+    controller.page.items = vec![discovered("pdf-tools"), discovered("csv-tools")];
+    controller.page.found_open = true;
+    controller
+        .page
+        .begin_operation(Operation::Skill {
+            id: "pdf-tools".into(),
+            action: SkillAction::Adopt,
+        })
+        .unwrap();
+    let texts = test_support::editor::ui::painted_texts(&marketplace_app(
+        &controller,
+        &core,
+        Rc::new(|_| {}),
+    ));
+    assert_eq!(
+        texts.iter().filter(|text| *text == "Installing…").count(),
+        1,
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn a_long_name_is_truncated_so_its_row_keeps_its_controls_and_shows_in_full_on_hover() {
+    use std::rc::Rc;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, _forge) = marketplace_host(&mut core);
+    let long = "a-very-long-skill-name-that-keeps-going-".repeat(6);
+    controller.page.items = vec![Item::Server(ServerRow {
+        name: long.clone(),
+        target: "npx server".into(),
+    })];
+    let mut app = marketplace_app(&controller, &core, Rc::new(|_| {}));
+    let edit =
+        test_support::editor::ui::node_with_key(&app, &format!("marketplace-server-{long}-edit"));
+    let bounds = app.tree().rect(edit).unwrap();
+    assert!(
+        bounds.x + bounds.w <= 1000.0,
+        "the row's Edit button stays inside the window at {bounds:?}"
+    );
+    let name = app
+        .tree()
+        .traverse()
+        .into_iter()
+        .find(|node| {
+            app.tree().get(*node).is_some_and(|record| {
+                matches!(&record.kind, aqua_ui::tree::NodeKind::Text(text) if text.text() == long)
+            })
+        })
+        .expect("the name is painted");
+    let painted = app.tree().rect(name).unwrap();
+    assert!(
+        painted.x + painted.w <= bounds.x,
+        "the name ends before the Edit button: {painted:?} vs {bounds:?}"
+    );
+    let full_names = |app: &aqua::UiApp| {
+        app.tree()
+            .traverse()
+            .into_iter()
+            .filter(|node| {
+                app.tree().get(*node).is_some_and(|record| {
+                    matches!(&record.kind, aqua_ui::tree::NodeKind::Text(text) if text.text() == long)
+                })
+            })
+            .count()
+    };
+    assert_eq!(full_names(&app), 1, "no tooltip before the pointer rests");
+    app.handle_input(&aqua_core::InputEvent::PointerMove(
+        aqua_core::PointerEvent {
+            contact: 0,
+            kind: aqua_core::PointerKind::Mouse,
+            position: aqua_core::Point::new(
+                painted.w.mul_add(0.5, painted.x),
+                painted.h.mul_add(0.5, painted.y),
+            ),
+            buttons: 0,
+        },
+    ));
+    for frame in 1..=60_u32 {
+        app.advance_clock(f64::from(frame) * 0.016);
+        app.build_frame().unwrap();
+    }
+    assert_eq!(
+        full_names(&app),
+        2,
+        "resting on the cut-off name shows the whole name in a tooltip"
+    );
+}
+
+#[test]
+fn arrow_keys_move_focus_and_the_kind_through_the_kind_tabs() {
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey, Role};
+    use editor_aqua::marketplace::presentation::Kind;
+    use editor_aqua::marketplace::view::ViewAction;
+    use std::{cell::RefCell, rc::Rc};
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let (controller, _forge) = marketplace_host(&mut core);
+    let chosen = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&chosen);
+    let mut app = marketplace_app(
+        &controller,
+        &core,
+        Rc::new(move |action| {
+            if let ViewAction::SetKind(kind) = action {
+                sink.borrow_mut().push(kind);
+            }
+        }),
+    );
+    let semantics = app.tree().emit_semantics();
+    let tabs: Vec<_> = semantics
+        .iter()
+        .filter(|node| node.role == Role::Tab)
+        .collect();
+    assert_eq!(tabs.len(), 3, "All, Skills and MCP servers are tabs");
+    assert!(
+        semantics.iter().any(|node| node.role == Role::TabList),
+        "the kinds are a tab list"
+    );
+    let all = tabs[0].node;
+    assert!(app.tree_mut().set_focused(Some(all)));
+    let mut focused = Vec::new();
+    for key in [
+        NamedKey::Right,
+        NamedKey::End,
+        NamedKey::Home,
+        NamedKey::Left,
+    ] {
+        let event = KeyEvent {
+            key: Key::Named(key),
+            modifiers: Modifiers::NONE,
+            repeat: false,
+        };
+        app.handle_input(&InputEvent::KeyDown(event));
+        app.handle_input(&InputEvent::KeyUp(event));
+        focused.extend(
+            app.tree()
+                .emit_semantics()
+                .into_iter()
+                .find(|node| node.focused)
+                .map(|node| node.label),
+        );
+    }
+    assert_eq!(
+        *chosen.borrow(),
+        [Kind::Skills, Kind::Servers, Kind::All, Kind::Servers]
+    );
+    assert_eq!(
+        focused,
+        ["Skills 0", "MCP servers 0", "All", "MCP servers 0"]
+    );
 }

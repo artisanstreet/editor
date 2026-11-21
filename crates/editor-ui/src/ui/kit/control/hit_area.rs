@@ -2,18 +2,34 @@ use aqua_core::{CursorIcon, Role};
 use aqua_ui::element::{Button, Element, Key};
 use aqua_ui::style::{Length, Style};
 
+use super::focus_ring;
+use crate::ui::theme::ArtisanTheme;
+
 pub struct HitArea {
     key: Key,
+    ring: Style,
     role: Role,
     label: String,
     children: Vec<Element>,
     on_activate: Option<Box<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for HitArea {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HitArea").finish_non_exhaustive()
+    }
+}
+
 impl HitArea {
-    pub fn new(key: impl Into<Key>, role: Role, label: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<Key>,
+        theme: &ArtisanTheme,
+        role: Role,
+        label: impl Into<String>,
+    ) -> Self {
         Self {
             key: key.into(),
+            ring: focus_ring(theme),
             role,
             label: label.into(),
             children: Vec::new(),
@@ -53,5 +69,6 @@ impl HitArea {
             .aria_label(self.label)
             .focusable(true)
             .cursor(CursorIcon::Pointer)
+            .focus_visible_style(self.ring)
     }
 }

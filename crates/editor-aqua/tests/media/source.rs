@@ -28,7 +28,7 @@ fn authored_sources_keep_host_relative_paths_and_decode_data_urls() {
         panic!("expected data URL");
     };
     assert_eq!(base64, percent);
-    assert_eq!(base64.bytes.as_ref(), &[0x89, 0x50, 0x4e, 0x47, 0xff]);
+    assert_eq!(base64.bytes(), &[0x89, 0x50, 0x4e, 0x47, 0xff]);
     assert_eq!(parse("data:text/plain;base64,???"), Parsed::Invalid);
 }
 
@@ -39,7 +39,7 @@ async fn media_paths_fetch_through_captured_thread_scope() {
     };
     use std::sync::{Arc, Mutex};
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = requests.clone();
+    let captured = Arc::clone(&requests);
     let fetcher = MediaFetcher::new("thread-a", move |request| {
         captured.lock().unwrap().push(request);
         Box::pin(async { Ok(Arc::<[u8]>::from([1, 2, 3])) })
@@ -86,14 +86,22 @@ fn fetcher_clones_share_thread_cache_and_preserve_semantic_identity() {
     use std::sync::Arc;
 
     let fetcher = MediaFetcher::new("forge/thread", |_| {
-        Box::pin(async { Err(MediaFailure::Missing) })
+        Box::pin(async {
+            Err(editor_aqua::ui::media::source::MediaLoadError::Fetch(
+                MediaFailure::Missing,
+            ))
+        })
     });
     let first = fetcher.clone().owned_by(&[42], 1);
     let repeated = fetcher.clone().owned_by(&[42], 1);
     let revised = fetcher.clone().owned_by(&[42], 2);
-    let other = fetcher.clone().owned_by(&[43], 1);
+    let other = fetcher.owned_by(&[43], 1);
     let new_thread = MediaFetcher::new("forge/thread", |_| {
-        Box::pin(async { Err(MediaFailure::Missing) })
+        Box::pin(async {
+            Err(editor_aqua::ui::media::source::MediaLoadError::Fetch(
+                MediaFailure::Missing,
+            ))
+        })
     })
     .owned_by(&[42], 1);
     assert!(Arc::ptr_eq(first.resources(), other.resources()));
@@ -118,14 +126,19 @@ fn fetcher_clones_share_thread_cache_and_preserve_semantic_identity() {
         first.asset_owner("left", true),
         new_thread.asset_owner("left", true)
     );
-    assert!(first.provider() == other.provider());
-    assert!(first.provider() != new_thread.provider());
+    assert_eq!(first.provider(), other.provider());
+    assert_ne!(first.provider(), new_thread.provider());
 
-    let Parsed::Data(left) = MediaSource::from("data:text/plain;base64,YQ==".to_owned()).parsed
+    let Parsed::Data(left) = MediaSource::from("data:text/plain;base64,YQ==".to_owned())
+        .parsed()
+        .clone()
     else {
         panic!()
     };
-    let Parsed::Data(right) = MediaSource::from("data:text/plain,a".to_owned()).parsed else {
+    let Parsed::Data(right) = MediaSource::from("data:text/plain,a".to_owned())
+        .parsed()
+        .clone()
+    else {
         panic!()
     };
     assert_eq!(

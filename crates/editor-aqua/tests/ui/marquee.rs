@@ -47,14 +47,14 @@ fn overflow_waits_then_scrolls_and_reduced_motion_stops() {
         })
         .unwrap();
     assert!(marquee.advance(&mut app, owner, 1.6, false));
-    assert_eq!(
+    test_support::assert_near!(
         app.tree().get(first).unwrap().paint().transform.unwrap().tx,
         0.0
     );
     assert!(marquee.advance(&mut app, owner, 2.6, false));
     assert!((app.tree().get(first).unwrap().paint().transform.unwrap().tx + 36.0).abs() < 0.001);
     assert!(!marquee.advance(&mut app, owner, 2.7, true));
-    assert_eq!(
+    test_support::assert_near!(
         app.tree().get(first).unwrap().paint().transform.unwrap().tx,
         0.0
     );

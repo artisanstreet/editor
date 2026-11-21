@@ -1,74 +1,149 @@
-//! Immutable derived Markdown topology attached to the existing source owner.
-//! No Item, harness, rendering style or pixel layout participates in this scan.
-use anyhow::{Result, ensure};
+use crate::content::ContentError;
+use crate::error::AtStep as _;
+use crate::error::StorageError;
 use artisan_api::{
     ContentId, ContentRef, SourceIndexFormat, SourceIndexHeader, SourceIndexQuery,
     SourceIndexRange, SourceLeafDescriptor, TextContent,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
 
-pub fn header(
+type Result<T, E = SourceIndexError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SourceIndexError {
+    #[error("{source_id} is not a source identity")]
+    InvalidIdentity { source_id: ContentId },
+    #[error("a page of {limit} leaves is outside 1..64")]
+    PageLimit { limit: u32 },
+    #[error("leaf offset {offset} is past the {leaves} leaves of source {source_id}")]
+    OffsetPastEnd {
+        source_id: ContentId,
+        offset: u64,
+        leaves: u64,
+    },
+    #[error("the bytes of source {source_id} do not match its identity")]
+    IdentityMismatch { source_id: ContentId },
+    #[error("index the Markdown of source {source_id}")]
+    Markdown {
+        source_id: ContentId,
+        #[source]
+        source: artisan_markdown_index::BuildIndexError,
+    },
+    #[error("the Markdown index of source {source_id} has no record for leaf {ordinal}")]
+    MissingRecord {
+        source_id: ContentId,
+        ordinal: usize,
+    },
+    #[error("the serialized index of source {source_id} exceeds 32 MiB")]
+    MetadataTooLarge { source_id: ContentId },
+    #[error("the derived index of source {source_id} would own itself")]
+    SelfOwned { source_id: ContentId },
+    #[error("the stored topology of source {source_id} has a gap")]
+    TopologyGap { source_id: ContentId },
+    #[error("the stored topology ordinals of source {source_id} are inconsistent")]
+    TopologyOrdinals { source_id: ContentId },
+    #[error(transparent)]
+    Content(#[from] ContentError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+fn header(
     conn: &Connection,
     id: &ContentId,
     format: SourceIndexFormat,
 ) -> Result<Option<SourceIndexHeader>> {
-    ensure!(id.is_valid(), "invalid source identity");
-    conn.query_row("SELECT s.bytes,s.lines,m.id,m.bytes,m.lines,i.leaf_count FROM source_indexes i JOIN content s ON s.id=i.source_id JOIN content m ON m.id=i.metadata_id WHERE i.source_id=?1 AND i.version=?2 AND i.format=?3", params![id.as_str(),artisan_api::SOURCE_INDEX_VERSION,format.as_str()], |row| Ok(SourceIndexHeader {
-        format, source: ContentRef { id:id.clone(),bytes:row.get(0)?,lines:row.get(1)? },
-        metadata: ContentRef { id:ContentId(row.get(2)?),bytes:row.get(3)?,lines:row.get(4)? },
-        version: artisan_api::SOURCE_INDEX_VERSION, leaves:row.get(5)?,
-    })).optional().map_err(Into::into)
+    if !id.is_valid() {
+        return Err(SourceIndexError::InvalidIdentity {
+            source_id: id.clone(),
+        });
+    }
+    conn.query_row(
+        include_str!("sql/sources/index_header.sql"),
+        params![
+            id.as_str(),
+            artisan_api::SOURCE_INDEX_VERSION,
+            format.as_str()
+        ],
+        |row| {
+            Ok(SourceIndexHeader {
+                format,
+                source: ContentRef {
+                    id: id.clone(),
+                    bytes: row.get(0)?,
+                    lines: row.get(1)?,
+                },
+                metadata: ContentRef {
+                    id: ContentId(row.get(2)?),
+                    bytes: row.get(3)?,
+                    lines: row.get(4)?,
+                },
+                version: artisan_api::SOURCE_INDEX_VERSION,
+                leaves: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .at("sources/index_header.sql")
+    .map_err(Into::into)
 }
-pub struct PreparedIndex {
+pub(crate) struct PreparedIndex {
     source: ContentRef,
     format: SourceIndexFormat,
     metadata: String,
     leaves: Vec<SourceLeafDescriptor>,
 }
 
-pub enum Prepared {
-    /// The source does not exist.
+pub(crate) enum Prepared {
     Missing,
-    /// Another request built the index meanwhile.
     Indexed,
     Built(PreparedIndex),
 }
 
-pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> Result<Prepared> {
+pub(crate) fn prepare(
+    conn: &Connection,
+    id: &ContentId,
+    format: SourceIndexFormat,
+) -> Result<Prepared> {
     if header(conn, id, format)?.is_some() {
         return Ok(Prepared::Indexed);
     }
     let Some(source) = conn
-        .query_row(
-            "SELECT bytes,lines FROM content WHERE id=?1",
-            [id.as_str()],
-            |row| {
-                Ok(ContentRef {
-                    id: id.clone(),
-                    bytes: row.get(0)?,
-                    lines: row.get(1)?,
-                })
-            },
-        )
-        .optional()?
+        .query_row(include_str!("sql/content/size.sql"), [id.as_str()], |row| {
+            Ok(ContentRef {
+                id: id.clone(),
+                bytes: row.get(0)?,
+                lines: row.get(1)?,
+            })
+        })
+        .optional()
+        .at("content/size.sql")?
     else {
         return Ok(Prepared::Missing);
     };
     let text = crate::content::resolve(conn, &TextContent::Stored(source.clone()))?;
-    ensure!(
-        ContentRef::from_text(&text) == source,
-        "source identity does not match immutable bytes"
-    );
+    if ContentRef::from_text(&text) != source {
+        return Err(SourceIndexError::IdentityMismatch {
+            source_id: id.clone(),
+        });
+    }
     let index = match format {
-        SourceIndexFormat::Markdown => Some(artisan_markdown_index::MarkdownIndex::build(&text)?),
+        SourceIndexFormat::Markdown => Some(
+            artisan_markdown_index::MarkdownIndex::build(&text).map_err(|source| {
+                SourceIndexError::Markdown {
+                    source_id: id.clone(),
+                    source,
+                }
+            })?,
+        ),
         SourceIndexFormat::Literal => None,
     };
-    // Literal scanning stores offsets only, never parser events derived from syntax.
     let mut literal_start = Some(0);
     let literal_ranges = std::iter::from_fn(|| {
         let start = literal_start?;
-        if let Some(relative_end) = text[start..].find('\n') {
+        let (_, rest) = text.split_at(start);
+        if let Some(relative_end) = rest.find('\n') {
             let end = start + relative_end + 1;
             literal_start = Some(end);
             Some(start..end)
@@ -82,7 +157,10 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
             Box::new((0..index.leaves().len()).map(|ordinal| {
                 index
                     .record(ordinal)
-                    .ok_or_else(|| anyhow::anyhow!("indexed ordinal {ordinal} has no record"))
+                    .ok_or_else(|| SourceIndexError::MissingRecord {
+                        source_id: id.clone(),
+                        ordinal,
+                    })
             }))
         } else {
             Box::new(
@@ -93,11 +171,12 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
     let mut leaves = Vec::new();
     for (ordinal, record) in records.enumerate() {
         let record = record?;
-        let json = serde_json::to_string(&record)?;
-        ensure!(
-            metadata.len().saturating_add(json.len() + 1) <= MAX_METADATA_BYTES,
-            "serialized source index exceeds 32 MiB"
-        );
+        let json = crate::read::to_body(&record)?;
+        if metadata.len().saturating_add(json.len() + 1) > MAX_INDEX_BYTES {
+            return Err(SourceIndexError::MetadataTooLarge {
+                source_id: id.clone(),
+            });
+        }
         let range = record.leaf.source_range();
         let start = metadata.len() as u64;
         metadata.push_str(&json);
@@ -118,60 +197,98 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
         leaves,
     }))
 }
-pub fn persist(conn: &Connection, prepared: PreparedIndex) -> Result<Option<SourceIndexHeader>> {
+const LEAVES_PER_WRITE: usize = 2048;
+
+pub(crate) enum Staging {
+    Published,
+    Gone,
+    Staged,
+}
+
+fn source_present(conn: &Connection, source: &ContentRef) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            include_str!("sql/sources/present.sql"),
+            params![source.id.as_str(), source.bytes, source.lines],
+            |row| row.get(0),
+        )
+        .at("sources/present.sql")?)
+}
+
+pub(crate) fn stage(conn: &Connection, prepared: &PreparedIndex, batch: usize) -> Result<Staging> {
+    if header(conn, &prepared.source.id, prepared.format)?.is_some() {
+        return Ok(Staging::Published);
+    }
+    if !source_present(conn, &prepared.source)? {
+        return Ok(Staging::Gone);
+    }
+    let mut insert = conn
+        .prepare_cached(include_str!("sql/sources/stage_leaf.sql"))
+        .at("sources/stage_leaf.sql")?;
+    for leaf in prepared
+        .leaves
+        .iter()
+        .skip(batch * LEAVES_PER_WRITE)
+        .take(LEAVES_PER_WRITE)
+    {
+        insert
+            .execute(params![
+                prepared.source.id.as_str(),
+                artisan_api::SOURCE_INDEX_VERSION,
+                leaf.ordinal,
+                leaf.source_start,
+                leaf.source_end,
+                leaf.metadata_start,
+                leaf.metadata_end,
+                prepared.format.as_str()
+            ])
+            .at("sources/stage_leaf.sql")?;
+    }
+    Ok(Staging::Staged)
+}
+
+impl PreparedIndex {
+    #[must_use]
+    pub(crate) fn batches(&self) -> usize {
+        self.leaves.len().div_ceil(LEAVES_PER_WRITE)
+    }
+}
+
+pub(crate) fn publish(
+    conn: &crate::content::Stamped<'_>,
+    prepared: &PreparedIndex,
+) -> Result<Option<SourceIndexHeader>> {
     if let Some(existing) = header(conn, &prepared.source.id, prepared.format)? {
         return Ok(Some(existing));
     }
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM content WHERE id=?1 AND bytes=?2 AND lines=?3)",
-        params![
-            prepared.source.id.as_str(),
-            prepared.source.bytes,
-            prepared.source.lines
-        ],
-        |row| row.get(0),
-    )?;
-    // GC may have removed an unowned original while its index worker ran.
-    if !exists {
+    if !source_present(conn, &prepared.source)? {
         return Ok(None);
     }
-    // Even tiny derived indexes must belong to the same immutable content owner.
     let metadata_ref = crate::content::store_source(conn, &prepared.metadata)?;
-    ensure!(
-        metadata_ref.id != prepared.source.id,
-        "derived index cannot own itself"
-    );
-    // Preserve ownership and cleanup through the existing dependency trigger.
+    if metadata_ref.id == prepared.source.id {
+        return Err(SourceIndexError::SelfOwned {
+            source_id: prepared.source.id.clone(),
+        });
+    }
     conn.execute(
-        "INSERT INTO content_dependencies(parent_id,child_id) VALUES(?1,?2) ON CONFLICT DO NOTHING",
+        include_str!("sql/content/insert_dependency.sql"),
         params![prepared.source.id.as_str(), metadata_ref.id.as_str()],
-    )?;
+    )
+    .at("content/insert_dependency.sql")?;
     conn.execute(
-        "INSERT INTO source_indexes(source_id,version,metadata_id,leaf_count,format) VALUES(?1,?2,?3,?4,?5)",
+        include_str!("sql/sources/insert_index.sql"),
         params![
             prepared.source.id.as_str(),
             artisan_api::SOURCE_INDEX_VERSION,
             metadata_ref.id.as_str(),
-            prepared.leaves.len() as u64, prepared.format.as_str()
-        ],
-    )?;
-    let mut insert=conn.prepare_cached("INSERT INTO source_index_leaves(source_id,version,ordinal,source_start,source_end,metadata_start,metadata_end,format) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
-    for leaf in prepared.leaves {
-        insert.execute(params![
-            prepared.source.id.as_str(),
-            artisan_api::SOURCE_INDEX_VERSION,
-            leaf.ordinal,
-            leaf.source_start,
-            leaf.source_end,
-            leaf.metadata_start,
-            leaf.metadata_end,
+            prepared.leaves.len() as u64,
             prepared.format.as_str()
-        ])?;
-    }
-    drop(insert);
+        ],
+    )
+    .at("sources/insert_index.sql")?;
     header(conn, &prepared.source.id, prepared.format)
 }
-pub fn range(
+pub(crate) fn range(
     conn: &Connection,
     id: &ContentId,
     query: &SourceIndexQuery,
@@ -180,18 +297,22 @@ pub fn range(
         return Ok(None);
     };
     let limit = query.limit.unwrap_or(artisan_api::SOURCE_INDEX_PAGE_LEAVES);
-    ensure!(
-        (1..=artisan_api::SOURCE_INDEX_PAGE_LEAVES).contains(&limit),
-        "source index page limit must be 1..64 leaves"
-    );
+    if !(1..=artisan_api::SOURCE_INDEX_PAGE_LEAVES).contains(&limit) {
+        return Err(SourceIndexError::PageLimit { limit });
+    }
     let start = query
         .offset
         .unwrap_or_else(|| index.leaves.saturating_sub(u64::from(limit)));
-    ensure!(
-        start <= index.leaves,
-        "source leaf offset exceeds index length"
-    );
-    let mut select=conn.prepare_cached("SELECT ordinal,source_start,source_end,metadata_start,metadata_end FROM source_index_leaves WHERE source_id=?1 AND version=?2 AND ordinal>=?3 AND format=?5 ORDER BY ordinal LIMIT ?4")?;
+    if start > index.leaves {
+        return Err(SourceIndexError::OffsetPastEnd {
+            source_id: id.clone(),
+            offset: start,
+            leaves: index.leaves,
+        });
+    }
+    let mut select = conn
+        .prepare_cached(include_str!("sql/sources/leaves.sql"))
+        .at("sources/leaves.sql")?;
     let leaves = select
         .query_map(
             params![
@@ -210,20 +331,25 @@ pub fn range(
                     metadata_end: row.get(4)?,
                 })
             },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        )
+        .at("sources/leaves.sql")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .at("sources/leaves.sql")?;
     let end = start + leaves.len() as u64;
-    ensure!(
-        end == start.saturating_add(u64::from(limit)).min(index.leaves),
-        "source topology contains a gap"
-    );
-    ensure!(
-        leaves
-            .iter()
-            .enumerate()
-            .all(|(n, leaf)| leaf.ordinal == start + n as u64),
-        "source topology ordinals are inconsistent"
-    );
+    if end != start.saturating_add(u64::from(limit)).min(index.leaves) {
+        return Err(SourceIndexError::TopologyGap {
+            source_id: id.clone(),
+        });
+    }
+    if !leaves
+        .iter()
+        .enumerate()
+        .all(|(n, leaf)| leaf.ordinal == start + n as u64)
+    {
+        return Err(SourceIndexError::TopologyOrdinals {
+            source_id: id.clone(),
+        });
+    }
     Ok(Some(SourceIndexRange {
         index,
         start,

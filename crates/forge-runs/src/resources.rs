@@ -1,18 +1,21 @@
 use crate::Hub;
-use anyhow::Context as _;
-use artisan_api::{ItemId, Thread, ThreadId};
+use crate::beneath::{self, Directory, OpenBeneathError, OpenRootError, Placed, Relative};
+use crate::scratch::ThreadFolderError;
+use artisan_api::{EngineId, ItemId, Thread, ThreadId};
+use forge_engines::claudeai::{ReadRefusal, Rules};
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
-pub const MAX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RESOURCE_BYTES: u64 = artisan_api::TUNNEL_BODY_MAX_BYTES as u64;
 
 const SNAPSHOTS_PER_ITEM: usize = 32;
 const KERNEL_RELEASE: &str = "/proc/sys/kernel/osrelease";
 const WSL_CONFIG: &str = "/etc/wsl.conf";
 const WSL_DRIVES: &str = "/mnt";
 const BLOCK_PREFIX: &str = "artisan-";
+const WSL_DISTRIBUTION: &str = "WSL_DISTRO_NAME";
 
 static HOST: LazyLock<Host> = LazyLock::new(Host::detect);
 
@@ -20,10 +23,77 @@ static HOST: LazyLock<Host> = LazyLock::new(Host::detect);
 pub enum ResourceError {
     #[error("resource not found")]
     Missing,
-    #[error("{0}")]
-    Refused(String),
-    #[error(transparent)]
-    Failed(#[from] anyhow::Error),
+    #[error("{path} is not a file URL Forge can read")]
+    InvalidUrl {
+        path: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("the file is in the WSL distribution {distribution}, which Forge does not run in")]
+    OtherDistribution { distribution: String },
+    #[error("Forge has no home directory")]
+    NoHome,
+    #[error("{} is not a regular file", path.display())]
+    NotRegular { path: PathBuf },
+    #[error("{} is {bytes} bytes, more than the {MAX_RESOURCE_BYTES} an Editor can carry", path.display())]
+    TooLarge { path: PathBuf, bytes: u64 },
+    #[error("{} is outside the thread's folder", path.display())]
+    Outside { path: PathBuf },
+    #[error("{} is reached through a symbolic link", path.display())]
+    Linked {
+        path: PathBuf,
+        #[source]
+        source: OpenBeneathError,
+    },
+    #[error("open the thread's folder to read resources beneath it")]
+    Root {
+        #[source]
+        source: Arc<RootError>,
+    },
+    #[error("open resource {}", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: OpenBeneathError,
+    },
+    #[error("{} is not readable on the agent's behalf", path.display())]
+    Refused {
+        path: PathBuf,
+        #[source]
+        source: ReadRefusal,
+    },
+    #[error("read resource {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("find the folder resources are read from")]
+    Folder(#[source] ThreadFolderError),
+    #[error("find out whether the reply keeps its files when first viewed")]
+    KeptAtView(#[source] forge_store::KeptAtViewError),
+    #[error("run the resource read task of thread {thread}")]
+    Task {
+        thread: ThreadId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RootError {
+    #[error("resolve the thread's folder {}", folder.display())]
+    Resolve {
+        folder: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("open the thread's folder {} without following links", resolved.display())]
+    Open {
+        resolved: PathBuf,
+        #[source]
+        source: OpenRootError,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -40,7 +110,7 @@ fn has_scheme(source: &str, scheme: &str) -> bool {
 
 impl Written {
     #[must_use]
-    pub fn parse(source: &str) -> Option<Self> {
+    fn parse(source: &str) -> Option<Self> {
         let source = source.trim();
         let remote = ["http://", "https://", "data:"]
             .iter()
@@ -103,7 +173,7 @@ fn block_sources(value: &serde_json::Value, found: &mut Vec<String>) {
     clippy::wildcard_enum_match_arm,
     reason = "only images and fenced blocks carry sources; every other event is prose"
 )]
-pub fn written_sources(markdown: &str) -> Vec<Written> {
+pub(crate) fn written_sources(markdown: &str) -> Vec<Written> {
     let mut found = Vec::new();
     let mut block: Option<String> = None;
     for event in Parser::new(markdown) {
@@ -120,11 +190,13 @@ pub fn written_sources(markdown: &str) -> Vec<Written> {
                 }
             }
             Event::End(TagEnd::CodeBlock) => {
-                if let Some(value) = block
-                    .take()
-                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-                {
-                    block_sources(&value, &mut found);
+                if let Some(body) = block.take() {
+                    match serde_json::from_str::<serde_json::Value>(&body) {
+                        Ok(value) => block_sources(&value, &mut found),
+                        Err(error) => {
+                            tracing::debug!(%error, "an artisan block that isn't JSON names no files");
+                        }
+                    }
                 }
             }
             _ => {}
@@ -141,12 +213,13 @@ pub fn written_sources(markdown: &str) -> Vec<Written> {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Host {
-    pub home: Option<PathBuf>,
-    pub windows_drives: Option<PathBuf>,
+    pub(crate) home: Option<PathBuf>,
+    pub(crate) windows_drives: Option<PathBuf>,
+    pub(crate) wsl_distribution: Option<String>,
 }
 
 #[must_use]
-pub fn automount_root(config: &str) -> PathBuf {
+pub(crate) fn automount_root(config: &str) -> PathBuf {
     let mut automount = false;
     let mut root = None;
     for line in config.lines().map(str::trim) {
@@ -166,6 +239,17 @@ pub fn automount_root(config: &str) -> PathBuf {
         .map_or_else(|| PathBuf::from(WSL_DRIVES), PathBuf::from)
 }
 
+fn wsl_config() -> String {
+    match std::fs::read_to_string(WSL_CONFIG) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            tracing::warn!(path = WSL_CONFIG, %error, "Windows drives are looked for under the default mount root");
+            String::new()
+        }
+    }
+}
+
 impl Host {
     fn detect() -> Self {
         let inside_wsl = cfg!(target_os = "linux")
@@ -173,8 +257,10 @@ impl Host {
                 .is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"));
         Self {
             home: dirs::home_dir(),
-            windows_drives: inside_wsl
-                .then(|| automount_root(&std::fs::read_to_string(WSL_CONFIG).unwrap_or_default())),
+            windows_drives: inside_wsl.then(|| automount_root(&wsl_config())),
+            wsl_distribution: std::env::var(WSL_DISTRIBUTION)
+                .into_iter()
+                .find(|name| inside_wsl && !name.is_empty()),
         }
     }
 }
@@ -211,7 +297,10 @@ fn without_scheme(path: &str) -> Result<String, ResourceError> {
     if !has_scheme(path, "file://") {
         return Ok(path.to_owned());
     }
-    let url = url::Url::parse(path).map_err(|error| ResourceError::Refused(error.to_string()))?;
+    let url = url::Url::parse(path).map_err(|source| ResourceError::InvalidUrl {
+        path: path.to_owned(),
+        source,
+    })?;
     let local = percent_decoded(url.path());
     let share = url
         .host_str()
@@ -227,40 +316,59 @@ fn without_scheme(path: &str) -> Result<String, ResourceError> {
     ))
 }
 
-fn wsl_share(path: &str) -> Option<&str> {
+fn wsl_share(path: &str) -> Option<(&str, &str)> {
     let mut parts = path
         .strip_prefix("\\\\")
         .or_else(|| path.strip_prefix("//"))?
         .splitn(3, ['\\', '/']);
     let host = parts.next()?;
-    let _distribution = parts.next()?;
+    let distribution = parts.next()?;
     let rest = parts.next()?;
     (host.eq_ignore_ascii_case("wsl.localhost") || host.eq_ignore_ascii_case("wsl$"))
-        .then_some(rest)
+        .then_some((distribution, rest))
 }
 
-fn inside_wsl(path: &str, drives: &Path) -> Option<PathBuf> {
+fn inside_wsl(
+    path: &str,
+    drives: &Path,
+    own: Option<&str>,
+) -> Result<Option<PathBuf>, ResourceError> {
     let forward = |rest: &str| rest.replace('\\', "/");
     if is_drive(path) {
-        let letter = path[..1].to_ascii_lowercase();
-        return Some(drives.join(letter).join(forward(&path[3..])));
+        let (letter, rest) = path.split_at(1);
+        let (_, rest) = rest.split_at(2);
+        return Ok(Some(
+            drives.join(letter.to_ascii_lowercase()).join(forward(rest)),
+        ));
     }
-    wsl_share(path).map(|rest| Path::new("/").join(forward(rest)))
+    match wsl_share(path) {
+        None => Ok(None),
+        Some((named, rest)) if own.is_some_and(|own| own.eq_ignore_ascii_case(named)) => {
+            Ok(Some(Path::new("/").join(forward(rest))))
+        }
+        Some((named, _)) => Err(ResourceError::OtherDistribution {
+            distribution: named.to_owned(),
+        }),
+    }
 }
 
-pub fn host_path(written: &Written, folder: &Path, host: &Host) -> Result<PathBuf, ResourceError> {
+pub(crate) fn host_path(
+    written: &Written,
+    folder: &Path,
+    host: &Host,
+) -> Result<PathBuf, ResourceError> {
     let local = without_scheme(&written.path)?;
-    let path = host
-        .windows_drives
-        .as_deref()
-        .and_then(|drives| inside_wsl(&local, drives))
-        .unwrap_or_else(|| PathBuf::from(&local));
+    let translated = match host.windows_drives.as_deref() {
+        Some(drives) => inside_wsl(&local, drives, host.wsl_distribution.as_deref())?,
+        None => None,
+    };
+    let path = translated.unwrap_or_else(|| PathBuf::from(&local));
     if written.from_home {
         return host
             .home
             .as_ref()
             .map(|home| home.join(&path))
-            .ok_or_else(|| ResourceError::Refused("Forge has no home directory".to_owned()));
+            .ok_or(ResourceError::NoHome);
     }
     Ok(if path.is_absolute() {
         path
@@ -269,37 +377,226 @@ pub fn host_path(written: &Written, folder: &Path, host: &Host) -> Result<PathBu
     })
 }
 
-fn read_regular(path: &Path) -> Result<Vec<u8>, ResourceError> {
-    let missing = |error: std::io::Error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            ResourceError::Missing
-        } else {
-            ResourceError::Failed(
-                anyhow::Error::from(error).context(format!("read resource {}", path.display())),
-            )
+#[derive(Debug)]
+struct Root {
+    directory: Directory,
+    given: PathBuf,
+    resolved: PathBuf,
+}
+
+impl Root {
+    fn acquire(folder: &Path) -> Result<Self, RootError> {
+        let resolved = std::fs::canonicalize(folder)
+            .map(|resolved| without_verbatim_prefix(&resolved))
+            .map_err(|source| RootError::Resolve {
+                folder: folder.to_path_buf(),
+                source,
+            })?;
+        let directory = Directory::open(&resolved).map_err(|source| RootError::Open {
+            resolved: resolved.clone(),
+            source,
+        })?;
+        Ok(Self {
+            directory,
+            given: folder.to_path_buf(),
+            resolved,
+        })
+    }
+}
+
+pub(crate) struct Located<'a> {
+    root: &'a Root,
+    relative: Relative,
+    object: PathBuf,
+}
+
+pub(crate) struct Access {
+    root: Result<Root, Arc<RootError>>,
+    rules: Rules,
+}
+
+impl Access {
+    #[must_use]
+    pub(crate) fn load(engine_home: &Path, folder: &Path) -> Self {
+        Self {
+            root: Root::acquire(folder).map_err(Arc::new),
+            rules: Rules::load(engine_home, folder),
         }
+    }
+
+    pub(crate) fn locate(&self, live: &Path) -> Result<Located<'_>, ResourceError> {
+        let root = self.root.as_ref().map_err(|source| ResourceError::Root {
+            source: Arc::clone(source),
+        })?;
+        let relative = match beneath::place(live, &[&root.given, &root.resolved]) {
+            Placed::Beneath(relative) => relative,
+            Placed::Root => {
+                return Err(ResourceError::NotRegular {
+                    path: live.to_path_buf(),
+                });
+            }
+            Placed::Outside => {
+                return Err(ResourceError::Outside {
+                    path: live.to_path_buf(),
+                });
+            }
+        };
+        let object = root.resolved.join(relative.path());
+        self.may_read(&object)?;
+        Ok(Located {
+            root,
+            relative,
+            object,
+        })
+    }
+
+    #[cfg_attr(
+        not(windows),
+        expect(
+            clippy::unused_self,
+            reason = "only Windows checks the rules again against the opened handle's final path"
+        )
+    )]
+    fn open(&self, located: &Located<'_>) -> Result<std::fs::File, ResourceError> {
+        let object = &located.object;
+        let file =
+            beneath::open_file(&located.root.directory, &located.relative).map_err(|failure| {
+                match failure {
+                    OpenBeneathError::Linked { .. } => ResourceError::Linked {
+                        path: object.clone(),
+                        source: failure,
+                    },
+                    OpenBeneathError::Open { source, .. }
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        ResourceError::Missing
+                    }
+                    OpenBeneathError::Open { .. } => ResourceError::Open {
+                        path: object.clone(),
+                        source: failure,
+                    },
+                }
+            })?;
+        #[cfg(windows)]
+        {
+            let opened = beneath::final_path(&file).map_err(|source| ResourceError::Read {
+                path: object.clone(),
+                source,
+            })?;
+            self.may_read(&without_verbatim_prefix(&opened))?;
+        }
+        Ok(file)
+    }
+
+    fn may_read(&self, object: &Path) -> Result<(), ResourceError> {
+        self.rules
+            .may_read(object)
+            .map_err(|source| ResourceError::Refused {
+                path: object.to_path_buf(),
+                source,
+            })
+    }
+
+    pub(crate) fn read_located(&self, located: &Located<'_>) -> Result<Vec<u8>, ResourceError> {
+        read_regular(self.open(located)?, &located.object)
+    }
+
+    pub(crate) fn read(&self, live: &Path) -> Result<Vec<u8>, ResourceError> {
+        self.read_located(&self.locate(live)?)
+    }
+}
+
+fn io_failure(path: &Path, error: std::io::Error) -> ResourceError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ResourceError::Missing
+    } else {
+        ResourceError::Read {
+            path: path.to_path_buf(),
+            source: error,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_kept(path: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(std::fs::File::from)
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(windows)]
+fn open_kept(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    std::fs::File::options()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+}
+
+fn read_kept(path: &Path) -> Result<Vec<u8>, ResourceError> {
+    let file = open_kept(path).map_err(|error| io_failure(path, error))?;
+    read_regular(file, path)
+}
+
+pub(crate) fn read_regular(file: std::fs::File, path: &Path) -> Result<Vec<u8>, ResourceError> {
+    let too_large = |bytes| ResourceError::TooLarge {
+        path: path.to_path_buf(),
+        bytes,
     };
-    let too_large = || {
-        ResourceError::Refused("resource must be a regular file no larger than 128 MiB".to_owned())
-    };
-    let metadata = std::fs::metadata(path).map_err(missing)?;
-    if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES {
-        return Err(too_large());
+    let metadata = file.metadata().map_err(|error| io_failure(path, error))?;
+    if !metadata.is_file() {
+        return Err(ResourceError::NotRegular {
+            path: path.to_path_buf(),
+        });
+    }
+    if metadata.len() > MAX_RESOURCE_BYTES {
+        return Err(too_large(metadata.len()));
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .map_err(missing)?
-        .take(MAX_RESOURCE_BYTES + 1)
+    file.take(MAX_RESOURCE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(missing)?;
+        .map_err(|error| io_failure(path, error))?;
     if bytes.len() as u64 > MAX_RESOURCE_BYTES {
-        Err(too_large())
+        Err(too_large(bytes.len() as u64))
     } else {
         Ok(bytes)
     }
 }
 
+pub(crate) fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    match path.to_str() {
+        Some(text) => match (text.strip_prefix(r"\\?\UNC\"), text.strip_prefix(r"\\?\")) {
+            (Some(share), _) => PathBuf::from(format!(r"\\{share}")),
+            (None, Some(rest)) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+            _ => path.to_path_buf(),
+        },
+        None => path.to_path_buf(),
+    }
+}
+
+fn keep(target: &Path, bytes: &[u8]) {
+    if let Err(error) = forge_store::keep_resource_snapshot(target, bytes) {
+        tracing::warn!(path = %target.display(), "keep resource snapshot: {}", diagnostics::chain(&error));
+    }
+}
+
+fn snapshot(live: &Path, access: &Access, target: &Path) -> Result<(), ResourceError> {
+    let bytes = access.read(live)?;
+    keep(target, &bytes);
+    Ok(())
+}
+
 impl Hub {
+    fn resource_access(&self, folder: &Path) -> Access {
+        Access::load(&self.engines().home(EngineId::Claude), folder)
+    }
+
     pub async fn read_resource(
         &self,
         thread: &Thread,
@@ -314,25 +611,38 @@ impl Hub {
                 written.from_home,
             )
         });
-        let folder = self.thread_folder(thread).await?;
+        let keep_at_view = match item {
+            Some(item) => self
+                .store()
+                .resource_kept_at_view(&thread.id, item)
+                .await
+                .map_err(ResourceError::KeptAtView)?,
+            None => false,
+        };
+        let folder = self
+            .thread_folder(thread)
+            .await
+            .map_err(ResourceError::Folder)?;
         let live = host_path(written, &folder, &HOST);
+        let hub = self.clone();
         tokio::task::spawn_blocking(move || {
             if let Some(kept) = snapshot.as_deref().filter(|kept| kept.is_file()) {
-                return read_regular(kept);
+                return read_kept(kept);
             }
-            let bytes = read_regular(&live?)?;
-            if let Some(target) = &snapshot
-                && let Err(error) = forge_store::keep_resource_snapshot(target, &bytes)
-            {
-                tracing::warn!(path = %target.display(), "keep resource snapshot: {error:#}");
+            let bytes = hub.resource_access(&folder).read(&live?)?;
+            if let Some(target) = snapshot.as_deref().filter(|_| keep_at_view) {
+                keep(target, &bytes);
             }
             Ok(bytes)
         })
         .await
-        .context("resource read task")?
+        .map_err(|source| ResourceError::Task {
+            thread: thread.id.clone(),
+            source,
+        })?
     }
 
-    pub(crate) fn snapshot_resources(
+    pub(crate) async fn snapshot_resources(
         &self,
         thread_id: &ThreadId,
         item_id: &ItemId,
@@ -341,21 +651,45 @@ impl Hub {
         if shown.is_empty() {
             return;
         }
-        let (hub, thread_id, item_id) = (self.clone(), thread_id.clone(), item_id.clone());
-        self.inner.tasks.spawn(async move {
-            let Ok(Some(thread)) = hub.store().thread(&thread_id).await else {
+        let thread = match self.store().thread(thread_id).await {
+            Ok(Some(thread)) => thread,
+            Ok(None) => {
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: the thread is gone");
                 return;
-            };
-            for written in shown.iter().take(SNAPSHOTS_PER_ITEM) {
-                if let Err(error) = hub.read_resource(&thread, Some(&item_id), written).await {
-                    tracing::debug!(
-                        thread = %thread_id,
-                        item = %item_id,
-                        path = %written.path,
-                        "resource not kept: {error:#}"
-                    );
+            }
+            Err(error) => {
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {}", diagnostics::chain(&error));
+                return;
+            }
+        };
+        let folder = match self.thread_folder(&thread).await {
+            Ok(folder) => folder,
+            Err(error) => {
+                tracing::warn!(thread = %thread_id, item = %item_id, "resources not kept: {}", diagnostics::chain(&error));
+                return;
+            }
+        };
+        let targets: Vec<_> = shown
+            .into_iter()
+            .take(SNAPSHOTS_PER_ITEM)
+            .filter_map(|written| {
+                self.store()
+                    .resource_snapshot_target(thread_id, item_id, &written.path, written.from_home)
+                    .map(|target| (host_path(&written, &folder, &HOST), target))
+            })
+            .collect();
+        let (hub, thread, item) = (self.clone(), thread_id.clone(), item_id.clone());
+        let kept = tokio::task::spawn_blocking(move || {
+            let access = hub.resource_access(&folder);
+            for (live, target) in targets {
+                if let Err(error) = live.and_then(|live| snapshot(&live, &access, &target)) {
+                    tracing::debug!(%thread, %item, "resource not kept: {}", diagnostics::chain(&error));
                 }
             }
-        });
+        })
+        .await;
+        if let Err(error) = kept {
+            tracing::warn!(thread = %thread_id, item = %item_id, "resource snapshot task: {error}");
+        }
     }
 }

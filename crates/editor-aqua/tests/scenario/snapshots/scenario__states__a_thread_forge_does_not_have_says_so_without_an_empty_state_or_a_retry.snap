@@ -1,0 +1,26 @@
+---
+source: crates/editor-aqua/tests/scenario/states.rs
+expression: settled
+---
+Group "Artisan Editor" [focused]
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Greeting"
+        Label "Greeting"
+  Button "Test" [collapsed]
+    Label "Test"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  Label "This thread isn't on this Forge."
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message"
+  Button "Send message" [disabled]

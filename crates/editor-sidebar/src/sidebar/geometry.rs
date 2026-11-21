@@ -1,10 +1,11 @@
 use super::list::{HitRow, Lists, RowData};
 use editor_ui::kit::{Density, Divider, Row, Space, Surface};
+use editor_ui::theme::ArtisanTheme;
 
-pub const RAIL_WIDTH: f32 = 48.0;
-pub const READ_AHEAD: f32 = 600.0;
-pub const LIST: Surface = Surface::Inset;
-pub const HEADING: Row = Row::ListHeading;
+pub(crate) const RAIL_WIDTH: f32 = 48.0;
+pub(crate) const READ_AHEAD: f32 = 600.0;
+pub(crate) const LIST: Surface = Surface::Inset;
+pub(crate) const HEADING: Row = Row::ListHeading;
 pub const TOGGLE: Row = Row::ListItem(Density::Regular);
 const GROUP_GAP: Space = Space::S12;
 const ROW_GAP: Space = Space::S2;
@@ -16,20 +17,20 @@ pub enum ThreadLayout {
 }
 
 impl ThreadLayout {
-    pub const fn row(self) -> Row {
+    pub(crate) const fn row(self) -> Row {
         match self {
             Self::Grouped => Row::ListItem(Density::Regular),
             Self::Standalone => Row::ListItem(Density::Tall),
         }
     }
 
-    pub fn height(self) -> f32 {
-        self.row().height().unwrap_or_default()
+    pub(crate) fn height(self, theme: &ArtisanTheme) -> f32 {
+        self.row().height(theme)
     }
 }
 
-pub fn history_height() -> f32 {
-    Divider::Rule.height() + TOGGLE.height().unwrap_or_default()
+pub fn history_height(theme: &ArtisanTheme) -> f32 {
+    Divider::Rule.height(theme) + TOGGLE.height(theme)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,12 +48,12 @@ pub enum Entry {
 }
 
 impl Entry {
-    pub fn height(&self) -> f32 {
+    pub fn height(&self, theme: &ArtisanTheme) -> f32 {
         match self {
-            Self::Thread(_, layout) => layout.height(),
-            Self::Hit(_) => ThreadLayout::Standalone.height(),
-            Self::Project { .. } | Self::Heading(_) => HEADING.height().unwrap_or_default(),
-            Self::History => history_height(),
+            Self::Thread(_, layout) => layout.height(theme),
+            Self::Hit(_) => ThreadLayout::Standalone.height(theme),
+            Self::Project { .. } | Self::Heading(_) => HEADING.height(theme),
+            Self::History => history_height(theme),
             Self::Gap(height) => *height,
             Self::Spacer => 0.0,
         }
@@ -122,15 +123,63 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
     entries
 }
 
-pub fn history_spacer(entries: &[Entry], viewport_height: f32, fraction: f32) -> f32 {
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Listed {
+    pub entry: usize,
+    pub gap: f32,
+    pub spaced: bool,
+}
+
+impl Listed {
+    pub fn lead(self, spacer: f32) -> f32 {
+        if self.spaced {
+            self.gap + spacer
+        } else {
+            self.gap
+        }
+    }
+}
+
+pub fn listed(entries: &[Entry]) -> Vec<Listed> {
+    let mut lead = Listed::default();
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            Entry::Gap(height) => {
+                lead.gap += height;
+                None
+            }
+            Entry::Spacer => {
+                lead.spaced = true;
+                None
+            }
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::Project { .. }
+            | Entry::History
+            | Entry::Heading(_) => Some(Listed {
+                entry: index,
+                ..std::mem::take(&mut lead)
+            }),
+        })
+        .collect()
+}
+
+pub fn history_spacer(
+    theme: &ArtisanTheme,
+    entries: &[Entry],
+    viewport_height: f32,
+    fraction: f32,
+) -> f32 {
     let mut after_history = false;
     let mut before = 0.0;
     let mut after = 0.0;
     for entry in entries {
         if after_history {
-            after += entry.height();
+            after += entry.height(theme);
         } else {
-            before += entry.height();
+            before += entry.height(theme);
         }
         after_history |= matches!(entry, Entry::History);
     }
@@ -145,32 +194,94 @@ pub enum PageDirection {
     Older,
 }
 
-pub struct PagePosition {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageLoad {
+    Pending,
+    Ready,
+    Failed { scrolled: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryPane {
+    Empty,
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageState {
+    pub load: PageLoad,
+    pub at_latest: bool,
+    pub has_older: bool,
+    pub history: HistoryPane,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadPane {
+    Inbox,
+    History,
+}
+
+impl ThreadPane {
+    pub(crate) const fn scroller(self) -> &'static str {
+        match self {
+            Self::Inbox => "sidebar-threads",
+            Self::History => "sidebar-history-threads",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneDistances {
     pub viewport_height: f32,
     pub above: f32,
     pub below: f32,
-    pub loading: bool,
-    pub loaded: bool,
-    pub failed: bool,
-    pub scrolled: bool,
-    pub at_latest: bool,
-    pub has_older: bool,
-    pub history_open: bool,
-    pub history_empty: bool,
 }
 
-pub fn page_direction(page: &PagePosition) -> Option<PageDirection> {
-    if page.viewport_height <= 0.0
-        || page.loading
-        || !page.loaded
-        || (page.failed && !page.scrolled)
-    {
-        return None;
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PaneViewports {
+    inbox: Option<PaneDistances>,
+    history: Option<PaneDistances>,
+}
+
+impl PaneViewports {
+    const fn slot(&mut self, pane: ThreadPane) -> &mut Option<PaneDistances> {
+        match pane {
+            ThreadPane::Inbox => &mut self.inbox,
+            ThreadPane::History => &mut self.history,
+        }
     }
-    if !page.at_latest && page.above < READ_AHEAD {
+
+    pub const fn report(&mut self, pane: ThreadPane, distances: PaneDistances) {
+        *self.slot(pane) = Some(distances);
+    }
+
+    pub const fn forget(&mut self, pane: ThreadPane) {
+        *self.slot(pane) = None;
+    }
+
+    pub fn direction(&self, state: PageState) -> Option<PageDirection> {
+        self.inbox
+            .into_iter()
+            .chain(self.history)
+            .find_map(|distances| page_direction(distances, state))
+    }
+}
+
+pub fn page_direction(distances: PaneDistances, state: PageState) -> Option<PageDirection> {
+    let settled = match state.load {
+        PageLoad::Ready | PageLoad::Failed { scrolled: true } => true,
+        PageLoad::Pending | PageLoad::Failed { scrolled: false } => false,
+    };
+    let older_shown = match state.history {
+        HistoryPane::Empty | HistoryPane::Open => true,
+        HistoryPane::Closed => false,
+    };
+    if distances.viewport_height <= 0.0 || !settled {
+        None
+    } else if !state.at_latest && distances.above < READ_AHEAD {
         Some(PageDirection::Newer)
-    } else if page.has_older && page.below < READ_AHEAD && (page.history_open || page.history_empty)
-    {
+    } else if state.has_older && distances.below < READ_AHEAD && older_shown {
         Some(PageDirection::Older)
     } else {
         None
@@ -179,9 +290,9 @@ pub fn page_direction(page: &PagePosition) -> Option<PageDirection> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Splice {
-    pub start: usize,
-    pub removed: usize,
-    pub inserted: usize,
+    start: usize,
+    removed: usize,
+    inserted: usize,
 }
 
 pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
@@ -202,55 +313,7 @@ pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
     keys
 }
 
-pub fn splices(old: &[Entry], new: &[Entry]) -> Vec<Splice> {
-    let (old, new) = (entry_keys(old), entry_keys(new));
-    let old_set: std::collections::HashSet<_> = old.iter().collect();
-    let new_set: std::collections::HashSet<_> = new.iter().collect();
-    let (mut i, mut j) = (0, 0);
-    let mut changes = Vec::new();
-    while i < old.len() || j < new.len() {
-        if i < old.len() && j < new.len() && old[i] == new[j] {
-            i += 1;
-            j += 1;
-            continue;
-        }
-        let removed = old[i..]
-            .iter()
-            .take_while(|key| !new_set.contains(key))
-            .count();
-        if removed > 0 {
-            changes.push(Splice {
-                start: j,
-                removed,
-                inserted: 0,
-            });
-            i += removed;
-            continue;
-        }
-        let inserted = new[j..]
-            .iter()
-            .take_while(|key| !old_set.contains(key))
-            .count();
-        if inserted > 0 {
-            changes.push(Splice {
-                start: j,
-                removed: 0,
-                inserted,
-            });
-            j += inserted;
-            continue;
-        }
-        changes.push(Splice {
-            start: j,
-            removed: old.len() - i,
-            inserted: new.len() - j,
-        });
-        break;
-    }
-    changes
-}
-
-pub fn history_fraction(
+pub(crate) fn history_fraction(
     open: bool,
     from: f32,
     elapsed_seconds: f64,

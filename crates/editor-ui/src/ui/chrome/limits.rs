@@ -127,6 +127,11 @@ pub fn outlook(limit: &Limit, now: Timestamp) -> Outlook {
     if elapsed <= 0 || limit.used_percent <= 0.0 {
         return Outlook::Lasts(reset);
     }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "limit windows span days, far inside f64's exact integer range"
+    )]
     let runs_out = start + (elapsed as f64 * 100.0 / limit.used_percent).round() as i64;
     if runs_out < reset {
         Outlook::RunsOut(runs_out.max(now))
@@ -136,7 +141,7 @@ pub fn outlook(limit: &Limit, now: Timestamp) -> Outlook {
 }
 
 #[must_use]
-pub fn title(engine: EngineId, limit: &Limit) -> String {
+pub(crate) fn title(engine: EngineId, limit: &Limit) -> String {
     format!("{} usage for {}", limit.label, engine.display_name())
 }
 

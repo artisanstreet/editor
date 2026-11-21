@@ -73,7 +73,7 @@ fn visibility_waits_for_paint_and_actual_clip_intersection() {
     use std::{cell::Cell, rc::Rc};
     let count = Rc::new(Cell::new(0));
     let frame = |top: f32| {
-        let count = count.clone();
+        let count = Rc::clone(&count);
         UiBox::new()
             .width(100.0)
             .height(100.0)
@@ -113,8 +113,8 @@ fn visible_probe_does_not_intercept_nested_retry_activation() {
 
     let retries = Rc::new(Cell::new(0));
     let visible = Rc::new(Cell::new(0));
-    let retry_count = retries.clone();
-    let visible_count = visible.clone();
+    let retry_count = Rc::clone(&retries);
+    let visible_count = Rc::clone(&visible);
     let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         let retry = Button::new()

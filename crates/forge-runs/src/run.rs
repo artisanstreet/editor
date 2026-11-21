@@ -1,20 +1,263 @@
-//! One run: prepare the turn, run the adapter, store what it reports.
-
 use crate::Hub;
-use anyhow::{Context, Result};
+use crate::launch::LaunchSession;
+use crate::turns::{AfterStop, Phase};
 use artisan_api::{
     Answer, Decision, EngineConfig, EngineId, ItemId, ItemKind, LiveTarget, ModelSwitch,
-    NamedModel, Permissions, Run, RunId, RunStatus, Status, ThreadId, ToolKind, UpdateThread,
-    Usage,
+    NamedModel, Permissions, Run, RunId, RunOutcome, RunState, RunStatus, Status, ThreadId,
+    ToolKind, UpdateThread, Usage,
 };
 use forge_engines::{EngineEvent, Input, LiveKind, Outcome, RunIo, Turn, UserInput};
 use forge_store::NewItem;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareError {
+    #[error("{} is not installed", engine.display_name())]
+    NotInstalled { engine: EngineId },
+    #[error(transparent)]
+    Gateway(Box<crate::gateway::GatewayError>),
+    #[error("prepare the folder of thread {thread}")]
+    Folder {
+        thread: ThreadId,
+        #[source]
+        source: Box<crate::scratch::ThreadFolderError>,
+    },
+    #[error("create the image folder {} of thread {thread}", path.display())]
+    ImageFolder {
+        thread: ThreadId,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("prepare the image folder of thread {thread}")]
+    ImageFolderTask {
+        thread: ThreadId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("read what {engine} gets at launch")]
+    Customisation {
+        engine: EngineId,
+        #[source]
+        source: Box<crate::extensions::CustomisationError>,
+    },
+    #[error("prepare {engine}'s home")]
+    HomeTask {
+        engine: EngineId,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error(transparent)]
+    HomesLock(#[from] crate::extensions::HomesLockError),
+    #[error("write {engine}'s home")]
+    Materialize {
+        engine: EngineId,
+        #[source]
+        source: Box<forge_engines::MaterializeError>,
+    },
+    #[error(transparent)]
+    ReadSetting(#[from] forge_store::ReadSettingError),
+    #[error("read the model customizations for {engine}")]
+    Customizations {
+        engine: EngineId,
+        #[source]
+        source: artisan_api::ModelCustomizationsError,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum Inbound {
+    Steer(crate::images::Message),
+    Answer { key: String, answer: Answer },
+    ClearGoal,
+    SetPermissions(Permissions),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DriveError {
+    #[error(transparent)]
+    Continuation(#[from] forge_store::ReadContinueError),
+    #[error(transparent)]
+    PendingInputs(#[from] forge_store::PendingInputsError),
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+    #[error("thread {thread} was removed before its run started")]
+    ThreadGone { thread: ThreadId },
+    #[error(transparent)]
+    LatestRun(#[from] forge_store::LatestRunError),
+    #[error(transparent)]
+    CancelledItems(#[from] forge_store::CancelledItemsError),
+    #[error(transparent)]
+    Begin(#[from] forge_store::BeginRunError),
+    #[error(transparent)]
+    Restore(#[from] forge_store::RestoreInputsError),
+    #[error("read the Claude transport for thread {thread}")]
+    Transport {
+        thread: ThreadId,
+        #[source]
+        source: forge_store::ReadSettingError,
+    },
+}
+
+impl DriveError {
+    pub(crate) const fn retry_later(&self) -> bool {
+        match self {
+            Self::Continuation(_)
+            | Self::PendingInputs(_)
+            | Self::ReadThread(_)
+            | Self::Restore(_)
+            | Self::Begin(_) => true,
+            Self::ThreadGone { .. }
+            | Self::LatestRun(_)
+            | Self::CancelledItems(_)
+            | Self::Transport { .. } => false,
+        }
+    }
+}
+
+enum Ending {
+    Finished(Outcome),
+    Stopped(Cleanup),
+}
+
+enum Cleanup {
+    Confirmed,
+    Failed(String),
+    Unconfirmed,
+}
+
+impl Ending {
+    fn after_stop(outcome: &Outcome) -> Self {
+        Self::Stopped(outcome.failure().map_or(Cleanup::Confirmed, |failure| {
+            Cleanup::Failed(failure.message.clone())
+        }))
+    }
+
+    fn stopped_by_user(self) -> Self {
+        match self {
+            Self::Finished(Outcome::Failed(failure)) => {
+                Self::Stopped(Cleanup::Failed(failure.message))
+            }
+            kept @ (Self::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused)
+            | Self::Stopped(_)) => kept,
+        }
+    }
+
+    fn unconfirmed(self) -> Self {
+        match self {
+            Self::Stopped(Cleanup::Confirmed | Cleanup::Unconfirmed) => {
+                Self::Stopped(Cleanup::Unconfirmed)
+            }
+            Self::Stopped(Cleanup::Failed(error)) => {
+                Self::Stopped(Cleanup::Failed(format!("{error}\n\n{STOP_UNCONFIRMED}")))
+            }
+            Self::Finished(Outcome::Failed(mut failure)) => {
+                failure.message = format!("{}\n\n{STOP_UNCONFIRMED}", failure.message);
+                Self::Finished(Outcome::Failed(failure))
+            }
+            Self::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused) => {
+                Self::Finished(Outcome::failed(STOP_UNCONFIRMED))
+            }
+        }
+    }
+
+    fn failed_cleanup(self, error: String) -> Self {
+        match self {
+            Self::Stopped(_) => Self::Stopped(Cleanup::Failed(error)),
+            Self::Finished(_) => Self::Finished(Outcome::failed(error)),
+        }
+    }
+
+    fn error(&self) -> Option<&str> {
+        match self {
+            Self::Finished(outcome) => outcome.error(),
+            Self::Stopped(Cleanup::Confirmed) => None,
+            Self::Stopped(Cleanup::Failed(error)) => Some(error),
+            Self::Stopped(Cleanup::Unconfirmed) => Some(STOP_UNCONFIRMED),
+        }
+    }
+
+    fn run_outcome(&self, stopped_by: Option<StoppedBy>, run: &RunId) -> RunOutcome {
+        match (self, stopped_by) {
+            (Self::Stopped(_), Some(StoppedBy::User)) => RunOutcome::Cancelled,
+            (Self::Stopped(_), Some(StoppedBy::Shutdown)) => RunOutcome::Interrupted,
+            (Self::Stopped(_), None) => {
+                unreachable!("invariant: run {run} stopped without a Stop or a shutdown")
+            }
+            (Self::Finished(outcome), _) => match outcome.run_outcome() {
+                RunOutcome::Cancelled if stopped_by == Some(StoppedBy::Shutdown) => {
+                    RunOutcome::Interrupted
+                }
+                ended @ (RunOutcome::Done
+                | RunOutcome::Cancelled
+                | RunOutcome::Failed
+                | RunOutcome::Interrupted
+                | RunOutcome::Refused) => ended,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StoppedBy {
+    User,
+    Shutdown,
+}
+
+const STOP_UNCONFIRMED: &str = "The engine did not confirm it stopped within 45 seconds; underlying work may still be running.";
+
+#[derive(Debug, thiserror::Error)]
+enum ExecuteError {
+    #[error("hand the history of thread {thread} to the new session")]
+    Handoff {
+        thread: ThreadId,
+        #[source]
+        source: Box<crate::handoff::ContextError>,
+    },
+    #[error(transparent)]
+    Input(#[from] crate::InputError),
+    #[error(transparent)]
+    Prepare(#[from] PrepareError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ApplyError {
+    #[error(transparent)]
+    SaveRun(#[from] forge_store::UpsertRunError),
+    #[error(transparent)]
+    Title(#[from] forge_store::UpdateThreadError),
+    #[error(transparent)]
+    SaveItem(#[from] forge_store::UpsertItemError),
+    #[error(transparent)]
+    Status(#[from] forge_store::SetItemStatusError),
+    #[error(transparent)]
+    Accept(#[from] forge_store::AcceptInputsError),
+    #[error(transparent)]
+    Address(#[from] forge_store::AgentByAddressError),
+    #[error(transparent)]
+    ReadThread(#[from] forge_store::ReadThreadError),
+    #[error(transparent)]
+    ReadItem(#[from] forge_store::ReadItemError),
+    #[error(transparent)]
+    ByNative(#[from] forge_store::ItemByNativeError),
+    #[error(transparent)]
+    Reopen(#[from] forge_store::ReopenAgentError),
+    #[error("read generated image {path}")]
+    ReadImage {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("generated image {path} is over the {limit} byte limit")]
+    ImageTooLarge { path: PathBuf, limit: usize },
+    #[error(transparent)]
+    StoreImage(#[from] forge_store::PutImageError),
+}
 
 fn carried_usage(carried: Option<&Run>, config: &EngineConfig) -> Usage {
     Usage {
@@ -26,82 +269,70 @@ fn carried_usage(carried: Option<&Run>, config: &EngineConfig) -> Usage {
     }
 }
 
-fn cancel_cutoff(hub: &Hub, thread_id: &ThreadId) -> u64 {
-    hub.lock().get(thread_id).map_or(0, |live| {
-        live.cancel_through
-            .load(std::sync::atomic::Ordering::Acquire)
-    })
+pub(crate) enum Drove {
+    Nothing,
+    Concluded(RunStatus),
 }
 
-/// Runs one engine run for the thread's undelivered messages.
-pub async fn drive(
+pub(crate) async fn drive(
     hub: &Hub,
     thread_id: &ThreadId,
     run_id: RunId,
-    inbox: mpsc::Receiver<Input>,
+    inbox: mpsc::Receiver<Inbound>,
     cancel: CancellationToken,
-) -> Result<RunStatus> {
+    stop: crate::turns::StopSignal,
+) -> Result<Drove, DriveError> {
     let store = hub.store();
-    let continuation = store.take_continue(thread_id.clone()).await?;
+    let continuation = store.continue_request(thread_id).await?;
+    if continuation == Some(artisan_api::Continuation::Requested) {
+        store.restore_undelivered_inputs(thread_id.clone()).await?;
+    }
     let observed = store.pending_inputs(thread_id).await?;
     let pending = observed.items;
-    // Undelivered messages carry a stopped turn on by themselves.
     let continuation = continuation.filter(|_| pending.is_empty());
     if pending.is_empty() && continuation.is_none() {
-        return Ok(RunStatus::Done);
+        return Ok(Drove::Nothing);
     }
     let thread = store
         .thread(thread_id)
         .await?
-        .with_context(|| format!("no thread {thread_id}"))?;
+        .ok_or_else(|| DriveError::ThreadGone {
+            thread: thread_id.clone(),
+        })?;
     let engine = thread.config.engine;
     if let Some(live) = hub.lock().get_mut(thread_id) {
         live.engine = Some(engine);
     }
-    let previous = store.latest_run(thread_id).await?;
-    // The thread's first run: the engine may name the thread during it.
-    let first_run = previous.is_none();
-    let carry_on = match continuation {
-        Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
-        None => None,
-    };
-    // A session made on the other Claude transport cannot carry on: the
-    // run starts fresh, from the thread's history. An empty one is a
-    // session the engine said is gone.
-    let transport = claude_transport(hub, engine).await;
-    let session_id = carried_session(previous.as_ref(), engine, transport);
-    let carried = session_id.as_ref().and(previous.as_ref());
-    let usage = carried_usage(carried, &thread.config);
-    let mut run = Run {
-        config: Some(thread.config.clone()),
-        id: run_id.clone(),
-        thread_id: thread_id.clone(),
-        engine,
-        model: thread.config.model.clone(),
-        status: RunStatus::Running,
-        usage,
-        session_id,
-        error: None,
-        seq: 0,
-        input_cutoff: observed.cutoff,
-        started_at: artisan_api::now(),
-        ended_at: None,
+    let unstarted = unstarted(
+        &thread,
+        run_id.clone(),
+        observed.cutoff,
         continuation,
+        hub.store().now(),
+    );
+    let Started {
+        mut run,
+        previous,
+        carry_on,
+        launch,
+        first_run,
+    } = match Box::pin(start(hub, &thread, unstarted.clone())).await {
+        Ok(started) => started,
+        Err(error) => return Box::pin(fail_unstarted(hub, unstarted, &pending, &error)).await,
     };
-    run = store.upsert_run(run).await?;
+    hub.agent_attention(thread_id).await;
 
-    // A claude.ai run can find its session needs renewing or is signed
-    // out; the Editor hears of it when the run ends.
-    let claude_ai_home =
-        (transport == Some(ClaudeTransport::Chat)).then(|| hub.engines().home(engine));
+    let claude_ai_home = launch.on_claude_ai().then(|| hub.engines().home(engine));
     let claude_ai_before = claude_ai_home
         .as_deref()
         .map(forge_engines::claudeai::Session::state);
     let mut items = Work::new(hub, &thread, first_run, &pending);
-    hub.open_suggestion(thread_id, &run_id);
+    hub.inner
+        .side
+        .open_suggestion(thread_id, &run_id, hub.inner.shutdown.child_token());
     let adapter_cancel = cancel.child_token();
     items.binary = hub.engines().lease(engine);
-    let mut outcome = match execute(
+    let ending = match Box::pin(execute(
         hub,
         &thread,
         &mut run,
@@ -109,65 +340,184 @@ pub async fn drive(
             pending: &pending,
             carry_on,
             previous,
+            launch,
         },
-        inbox,
-        adapter_cancel.clone(),
+        Control {
+            inbox,
+            cancel: adapter_cancel.clone(),
+            stop,
+        },
         &mut items,
-    )
+    ))
     .await
     {
-        Ok(outcome) => outcome,
-        Err(error) => Outcome::failed(format!("{error:#}")),
+        Ok(ending) => ending,
+        Err(error) => Ending::Finished(Outcome::failed(diagnostics::chain(&error))),
     };
     adapter_cancel.cancel();
-    let cancel_cutoff = cancel_cutoff(hub, thread_id);
-    if cancel.is_cancelled()
-        && cancel_cutoff > 0
-        && let Err(error) = store
-            .cancel_pending_inputs(thread_id.clone(), cancel_cutoff)
-            .await
-    {
-        // Settle once as Failed, and do not retry the inputs whose durable
-        // cancellation could not be saved. Newer inputs remain eligible.
-        run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
-        outcome = Outcome::failed(format!("persist cancellation: {error:#}"));
-    }
-    // Forge stopping ends a run unfinished, not cancelled by the user, so
-    // it can carry on after the restart.
-    if hub.inner.shutdown.is_cancelled() && outcome.status == RunStatus::Cancelled {
-        outcome.status = RunStatus::Interrupted;
-    }
-    let status = outcome.status;
-    hub.attention_lock()
-        .entry(thread_id.clone())
-        .or_default()
-        .add(&items.weighed);
-    finish(hub, &mut run, &items, outcome).await?;
+    hub.inner.side.weigh(thread_id, &items.weighed);
+    let attempted = pending.iter().map(|item| item.id.clone()).collect();
+    let status = conclude(hub, &mut run, &items, ending, attempted).await;
     if let Some(home) = &claude_ai_home
         && claude_ai_before.as_ref() != Some(&forge_engines::claudeai::Session::state(home))
     {
         hub.engines().changed(engine);
     }
-    Ok(status)
+    Ok(Drove::Concluded(status))
 }
 
-/// What a run delivers: the thread's undelivered messages, or the prompt
-/// that carries a stopped turn on, and the run before it, whose session a
-/// fresh one may need the history from.
+fn unstarted(
+    thread: &artisan_api::Thread,
+    id: RunId,
+    input_cutoff: u64,
+    continuation: Option<artisan_api::Continuation>,
+    started_at: artisan_api::Timestamp,
+) -> Run {
+    Run {
+        config: Some(thread.config.clone()),
+        id,
+        thread_id: thread.id.clone(),
+        engine: thread.config.engine,
+        model: thread.config.model.clone(),
+        state: RunState::Running,
+        usage: Usage::default(),
+        session_id: None,
+        seq: 0,
+        input_cutoff,
+        started_at,
+        continuation,
+    }
+}
+
+struct Started {
+    run: Run,
+    previous: Option<Run>,
+    carry_on: Option<String>,
+    launch: LaunchSession,
+    first_run: bool,
+}
+
+async fn start(
+    hub: &Hub,
+    thread: &artisan_api::Thread,
+    mut run: Run,
+) -> Result<Started, DriveError> {
+    let store = hub.store();
+    let previous = store.latest_run(&thread.id).await?;
+    let first_run = previous.is_none();
+    let carry_on = match run.continuation {
+        Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
+        None => None,
+    };
+    let launch = LaunchSession::current(hub, run.engine, previous.as_ref())
+        .await
+        .map_err(|source| DriveError::Transport {
+            thread: thread.id.clone(),
+            source,
+        })?;
+    let carried = launch.resume().and(previous.as_ref());
+    run.usage = carried_usage(carried, &thread.config);
+    run.session_id = launch.resume().map(|session| session.as_str().to_owned());
+    let run = store.begin_run(run).await?;
+    Ok(Started {
+        run,
+        previous,
+        carry_on,
+        launch,
+        first_run,
+    })
+}
+
+async fn fail_unstarted(
+    hub: &Hub,
+    run: Run,
+    pending: &[artisan_api::Item],
+    error: &DriveError,
+) -> Result<Drove, DriveError> {
+    tracing::error!(thread = %run.thread_id, run = %run.id, "the run could not start: {}", diagnostics::chain(error));
+    let mut run = hub.store().begin_run(run).await?;
+    let attempted = pending.iter().map(|item| item.id.clone()).collect();
+    Ok(Drove::Concluded(
+        conclude(
+            hub,
+            &mut run,
+            &Work::default(),
+            Ending::Finished(Outcome::failed(diagnostics::chain(error))),
+            attempted,
+        )
+        .await,
+    ))
+}
+
+async fn conclude(
+    hub: &Hub,
+    run: &mut Run,
+    items: &Work,
+    mut ending: Ending,
+    attempted: Vec<ItemId>,
+) -> RunStatus {
+    let park = match &ending {
+        Ending::Finished(outcome @ Outcome::Failed(_)) => {
+            crate::park::plan(hub, run, outcome).await
+        }
+        Ending::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused)
+        | Ending::Stopped(_) => None,
+    };
+    let _admission = hub.inner.admission.lock().await;
+    let phase = hub.lock().phase(&run.thread_id, &run.id);
+    if let Phase::Stopping {
+        through: cancel_cutoff,
+        then: AfterStop::Settle,
+    } = phase
+        && let Err(error) = hub
+            .store()
+            .cancel_pending_inputs(run.thread_id.clone(), cancel_cutoff)
+            .await
+    {
+        run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
+        ending = ending.failed_cleanup(format!(
+            "persist cancellation: {}",
+            diagnostics::chain(&error)
+        ));
+    }
+    let stopped_by = match (phase, hub.inner.shutdown.is_cancelled()) {
+        (Phase::Stopping { .. }, _) => Some(StoppedBy::User),
+        (Phase::Working, true) => Some(StoppedBy::Shutdown),
+        (Phase::Working, false) => None,
+    };
+    if stopped_by == Some(StoppedBy::User) {
+        ending = ending.stopped_by_user();
+    }
+    let ended = ending.run_outcome(stopped_by, &run.id);
+    let park = park.filter(|_| matches!(ending, Ending::Finished(Outcome::Failed(_))));
+    let settled = finish(hub, run, items, ending, ended, attempted, park).await;
+    hub.lock().end(
+        &run.thread_id,
+        &run.id,
+        settled,
+        tokio::time::Instant::now(),
+    );
+    ended.status()
+}
+
+struct Control {
+    inbox: mpsc::Receiver<Inbound>,
+    cancel: CancellationToken,
+    stop: crate::turns::StopSignal,
+}
+
 struct Delivery<'a> {
     pending: &'a [artisan_api::Item],
     carry_on: Option<String>,
     previous: Option<Run>,
+    launch: LaunchSession,
 }
 
-/// What the engine reads to carry a stopped turn on. The user sees none of
-/// it: the turn just goes on. Background work the stop ended is named, so
-/// the agent runs it again instead of waiting on results that won't come.
 async fn continue_prompt(
     hub: &Hub,
     continuation: artisan_api::Continuation,
     previous: Option<&Run>,
-) -> Result<String> {
+) -> Result<String, forge_store::CancelledItemsError> {
     let mut text = match continuation {
         artisan_api::Continuation::Requested => "Continue from where you left off.".to_owned(),
         artisan_api::Continuation::Restart => "Artisan restarted and interrupted this turn. \
@@ -248,7 +598,24 @@ async fn continue_prompt(
     Ok(text)
 }
 
-/// Every fallible operation after Run creation returns through drive's finalizer.
+async fn settle_handoff<T, E: std::error::Error>(
+    thread: &ThreadId,
+    deadline: Duration,
+    handing_off: &mut std::pin::Pin<&mut impl Future<Output = Result<T, E>>>,
+) -> Cleanup {
+    match tokio::time::timeout(deadline, handing_off).await {
+        Ok(Ok(_)) => Cleanup::Confirmed,
+        Ok(Err(error)) => {
+            tracing::debug!(%thread, "the stopped handoff ended with: {}", diagnostics::chain(&error));
+            Cleanup::Confirmed
+        }
+        Err(_elapsed) => {
+            tracing::warn!(%thread, seconds = deadline.as_secs(), "the stopped handoff did not settle in time");
+            Cleanup::Unconfirmed
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one linear turn: prepare, start, pump events, settle"
@@ -261,16 +628,18 @@ async fn execute(
         pending,
         carry_on,
         previous,
+        launch,
     }: Delivery<'_>,
-    mut inbox: mpsc::Receiver<Input>,
-    cancel: CancellationToken,
+    Control {
+        mut inbox,
+        cancel,
+        stop,
+    }: Control,
     items: &mut Work,
-) -> Result<Outcome> {
+) -> Result<Ending, ExecuteError> {
     let engine = run.engine;
-    // A fresh session starts from the thread's history so far.
-    let handoff = if run.session_id.is_none() {
+    let handoff = if launch.resume().is_none() {
         let pending_ids = pending.iter().map(|item| item.id.clone()).collect();
-        // The thread moved here from another engine: the divider says so.
         let switch = previous
             .as_ref()
             .filter(|previous| previous.engine != engine)
@@ -292,26 +661,24 @@ async fn execute(
         tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                // Give the adapter a bounded chance to interrupt and discard
-                // its temporary fork before dropping the handoff future.
-                tokio::time::timeout(Duration::from_secs(20), &mut handing_off).await.ok();
-                return Ok(Outcome::cancelled());
+                let cleanup = settle_handoff(&run.thread_id, hub.inner.stop_deadline, &mut handing_off).await;
+                return Ok(Ending::Stopped(cleanup));
             }
             () = hub.inner.shutdown.cancelled() => {
                 cancel.cancel();
-                tokio::time::timeout(Duration::from_secs(20), &mut handing_off).await.ok();
-                return Ok(Outcome::cancelled());
+                let cleanup = settle_handoff(&run.thread_id, hub.inner.stop_deadline, &mut handing_off).await;
+                return Ok(Ending::Stopped(cleanup));
             }
-            handoff = &mut handing_off => handoff.context("hand the thread's history to the new session")?,
+            handoff = &mut handing_off => handoff.map_err(|source| ExecuteError::Handoff { thread: thread.id.clone(), source: Box::new(source) })?,
         }
     } else {
         None
     };
+    let images = crate::images::ThreadImages::of(hub.data_dir(), &run.thread_id);
     let preparing = async {
-        // Every pending message goes to the engine as one input.
         let mut input = UserInput::default();
         for item in pending {
-            let next = hub.user_input(item, engine).await?;
+            let next = images.deliver(&hub.user_input(item, engine).await?).await;
             if !input.text.is_empty() && !next.text.is_empty() {
                 input.text.push_str("\n\n");
             }
@@ -328,10 +695,10 @@ async fn execute(
         }
         let initial_ids: Vec<_> = pending.iter().map(|item| item.id.clone()).collect();
         let initial_ack = input.id.clone();
-        let turn = prepare(
+        let prepared = prepare(
             hub,
             thread,
-            run.session_id.clone(),
+            &launch,
             input,
             items
                 .binary
@@ -339,19 +706,27 @@ async fn execute(
                 .map(|lease| lease.path().to_path_buf()),
         )
         .await?;
-        Ok::<_, anyhow::Error>((turn, initial_ids, initial_ack))
+        Ok::<_, ExecuteError>((prepared, initial_ids, initial_ack))
     };
-    let (turn, initial_ids, initial_ack) = tokio::select! {
+    let (
+        Prepared {
+            turn,
+            gateway: _gateway,
+        },
+        initial_ids,
+        initial_ack,
+    ) = tokio::select! {
         biased;
-        () = cancel.cancelled() => return Ok(Outcome::cancelled()),
-        () = hub.inner.shutdown.cancelled() => return Ok(Outcome::cancelled()),
+        () = cancel.cancelled() => return Ok(Ending::Stopped(Cleanup::Confirmed)),
+        () = hub.inner.shutdown.cancelled() => return Ok(Ending::Stopped(Cleanup::Confirmed)),
         prepared = preparing => prepared?,
     };
-    // Preserve the effective launch choices, including the account's Claude
-    // transport and any normalized model settings, for later handoff forks.
     run.config = Some(turn.config.clone());
-    // A send can land after the live slot is claimed but before pending inputs
-    // are read. Filter that same ID from the steer channel exactly once.
+    if let Some(live) = hub.lock().get_mut(&run.thread_id)
+        && live.id == run.id
+    {
+        live.launched = Some(turn.config.permissions);
+    }
     let mut delivered: HashSet<_> = initial_ids.iter().cloned().collect();
     let (forward, adapter_inbox) = mpsc::channel(64);
     let approvals = Arc::new(Mutex::new(Approvals {
@@ -365,7 +740,6 @@ async fn execute(
         hub.inner.disk.clone(),
         vec![turn.cwd.clone(), hub.data_dir().to_path_buf()],
     );
-    // Everything the adapter logs names the thread and run it belongs to.
     let adapter_outcome = tracing::Instrument::instrument(
         harness.run(
             turn,
@@ -384,12 +758,19 @@ async fn execute(
     let mut adapter_finished = false;
     let outcome = {
         let forwarding = async {
-            while let Some(input) = inbox.recv().await {
-                if let Input::Steer(message) = &input
-                    && !delivered.insert(message.id.clone())
-                {
-                    continue;
-                }
+            while let Some(inbound) = inbox.recv().await {
+                let input = match inbound {
+                    Inbound::Steer(message) => {
+                        if delivered.contains(message.id()) {
+                            continue;
+                        }
+                        delivered.insert(message.id().clone());
+                        Input::Steer(images.deliver(&message).await)
+                    }
+                    Inbound::Answer { key, answer } => Input::Answer { key, answer },
+                    Inbound::ClearGoal => Input::ClearGoal,
+                    Inbound::SetPermissions(permissions) => Input::SetPermissions(permissions),
+                };
                 let waiting = match &input {
                     Input::SetPermissions(permissions) => {
                         approvals_lock(&approvals).set(*permissions)
@@ -410,8 +791,8 @@ async fn execute(
         loop {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => break Outcome::cancelled(),
-                () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Outcome::cancelled(); },
+                () = cancel.cancelled() => break Ending::Stopped(Cleanup::Confirmed),
+                () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Ending::Stopped(Cleanup::Confirmed); },
                 Some(event) = reports.recv() => {
                     if let Some(key) = approvals_lock(&approvals).observe(&event)
                         && auto_answers.try_send(allow_once(key.clone())).is_err()
@@ -421,17 +802,21 @@ async fn execute(
                     }
                     if let Err(error) = apply(hub, run, items, event).await {
                         cancel.cancel();
-                        break Outcome::failed(format!("persist engine event: {error:#}"));
+                        break Ending::Finished(Outcome::failed(format!("persist engine event: {}", diagnostics::chain(&error))));
                     }
                 },
                 () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
                 outcome = &mut adapter_outcome => {
                     adapter_finished = true;
-                    break outcome;
+                    break if cancel.is_cancelled() {
+                        Ending::after_stop(&outcome)
+                    } else {
+                        Ending::Finished(outcome)
+                    };
                 }
                 () = disk.due() => {
                     if let Some(stopped) = guard_disk(hub, run, &mut disk).await {
-                        break stopped;
+                        break Ending::Finished(stopped);
                     }
                 }
             }
@@ -439,47 +824,52 @@ async fn execute(
     };
     inbox.close();
     cancel.cancel();
-    let mut outcome = outcome;
-    if !adapter_finished
-        && outcome.status == RunStatus::Cancelled
-        && !hub.inner.shutdown.is_cancelled()
-    {
-        match announce_stop(hub, run, items).await {
-            Ok(stopped) => *run = stopped,
-            Err(error) => {
-                tracing::warn!(thread = %run.thread_id, run = %run.id, "announce the stop before the engine confirms it: {error:#}");
-            }
-        }
+    let mut ending = outcome;
+    let mut announced = !adapter_finished && stop.is_requested();
+    if announced {
+        announce_stop(hub, run, items, pending, &stop).await;
     }
     if !adapter_finished {
-        let deadline = tokio::time::sleep(Duration::from_secs(45));
+        let deadline = tokio::time::sleep(hub.inner.stop_deadline);
         tokio::pin!(deadline);
         loop {
             tokio::select! {
+                () = stop.requested(), if !announced => {
+                    announce_stop(hub, run, items, pending, &stop).await;
+                    announced = true;
+                }
                 stopped = &mut adapter_outcome => {
-                    if stopped.status == RunStatus::Failed && outcome.status != RunStatus::Failed {
-                        outcome = stopped;
+                    if let Some(failure) = stopped.failure() {
+                        ending = match ending {
+                            Ending::Stopped(Cleanup::Confirmed) => Ending::Stopped(Cleanup::Failed(failure.message.clone())),
+                            Ending::Finished(outcome) if outcome.failure().is_none() => Ending::Finished(stopped),
+                            kept @ (Ending::Stopped(_) | Ending::Finished(_)) => kept,
+                        };
                     }
                     break;
                 }
                 Some(event) = reports.recv() => {
                     if let Err(error) = apply(hub, run, items, event).await {
-                        outcome = Outcome::failed(format!("persist engine event during cancellation: {error:#}"));
+                        ending = ending.failed_cleanup(format!(
+                            "persist engine event during cancellation: {}",
+                            diagnostics::chain(&error)
+                        ));
                     }
                 }
                 () = &mut deadline => {
-                    outcome = Outcome::failed("The engine did not confirm it stopped within 45 seconds; underlying work may still be running.".to_owned());
+                    ending = ending.unconfirmed();
                     break;
                 }
             }
         }
     }
-    // Preserve acknowledgments already published before shutdown/cancellation.
-    // The bounded drain also prevents a faulty detached producer delaying teardown.
     for _ in 0..256 {
         let Ok(event) = reports.try_recv() else { break };
         if let Err(error) = apply(hub, run, items, event).await {
-            outcome = Outcome::failed(format!("persist engine event: {error:#}"));
+            ending = ending.failed_cleanup(format!(
+                "persist engine event: {}",
+                diagnostics::chain(&error)
+            ));
             break;
         }
     }
@@ -490,19 +880,15 @@ async fn execute(
             Permissions::Auto
         };
     }
-    Ok(outcome)
+    Ok(ending)
 }
 
-/// Tool approvals of a live run: under Full access Forge gives them
-/// itself, so a switch to Full mid-run stops the run asking.
 struct Approvals {
     full: bool,
-    /// Approvals the user hasn't given yet, by adapter key.
     waiting: HashSet<String>,
 }
 
 impl Approvals {
-    /// Notes an access change: the keys to approve now.
     fn set(&mut self, permissions: Permissions) -> Vec<String> {
         self.full = permissions == Permissions::Full;
         if self.full {
@@ -512,8 +898,6 @@ impl Approvals {
         }
     }
 
-    /// Follows the approvals an event asks or settles: the key to approve
-    /// at once under Full.
     fn observe(&mut self, event: &EngineEvent) -> Option<String> {
         let (key, asks) = match event {
             EngineEvent::Item {
@@ -525,10 +909,10 @@ impl Approvals {
                         if approval.decision.is_none()
                             && approval.options.contains(&Decision::AllowOnce)),
             ),
-            // A bare status names no approval; only one that settles counts.
             EngineEvent::Status { key, status } if *status != Status::AwaitingUser => (key, false),
             EngineEvent::Status { .. }
             | EngineEvent::Session { .. }
+            | EngineEvent::SessionGone
             | EngineEvent::Model { .. }
             | EngineEvent::Title { .. }
             | EngineEvent::Image { .. }
@@ -565,7 +949,6 @@ const fn allow_once(key: String) -> Input {
     }
 }
 
-/// Checks the run's disks: the outcome that stops it on a full one.
 async fn guard_disk(hub: &Hub, run: &Run, disk: &mut crate::disk::Watch) -> Option<Outcome> {
     match disk.check().await? {
         crate::disk::Alarm::Full { path, free } => {
@@ -580,8 +963,6 @@ async fn guard_disk(hub: &Hub, run: &Run, disk: &mut crate::disk::Watch) -> Opti
     }
 }
 
-/// Tells the agent to free space, and the user that it was told. False
-/// if the steer could not go now; the next check tries again.
 async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) -> bool {
     let Some(inbox) = hub
         .lock()
@@ -590,12 +971,10 @@ async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) 
     else {
         return false;
     };
-    // Never awaited: the loop that drains the inbox is the one running this.
-    let steer = Input::Steer(UserInput {
-        id: ItemId::new(),
-        text: crate::disk::steer(path, free),
-        images: Vec::new(),
-    });
+    let steer = Inbound::Steer(crate::images::Message::text_only(
+        ItemId::new(),
+        crate::disk::steer(path, free),
+    ));
     if inbox.try_send(steer).is_err() {
         return false;
     }
@@ -615,48 +994,105 @@ async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) 
         tracing::warn!(
             thread = %run.thread_id,
             run = %run.id,
-            "store the disk-low notice: {error:#}"
+            "store the disk-low notice: {}",
+            diagnostics::chain(&error)
         );
     }
     true
 }
 
-pub async fn prepare(
+pub(crate) struct Prepared {
+    pub(crate) turn: Turn,
+    pub(crate) gateway: crate::gateway::GatewayPass,
+}
+
+async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<Option<PathBuf>, PrepareError> {
+    use crate::images::{FolderError, RootError};
+    let checked = crate::images::grantable_folder(hub.data_dir(), thread)
+        .await
+        .map_err(|source| PrepareError::ImageFolderTask {
+            thread: thread.clone(),
+            source,
+        })?;
+    match checked {
+        Ok(images) => Ok(Some(images)),
+        Err(
+            error @ (FolderError::NotAFolder { .. }
+            | FolderError::Root(RootError::NotAFolder { .. })),
+        ) => {
+            tracing::warn!(
+                %thread,
+                error = diagnostics::chain(&error),
+                "the engine runs without its image folder"
+            );
+            Ok(None)
+        }
+        Err(
+            FolderError::Create { path, source, .. }
+            | FolderError::Root(RootError::Check { path, source }),
+        ) => Err(PrepareError::ImageFolder {
+            thread: thread.clone(),
+            path,
+            source,
+        }),
+    }
+}
+
+pub(crate) async fn prepare(
     hub: &Hub,
     thread: &artisan_api::Thread,
-    session_id: Option<String>,
+    session: &LaunchSession,
     input: UserInput,
     binary: Option<PathBuf>,
-) -> Result<Turn> {
+) -> Result<Prepared, PrepareError> {
     let engine = thread.config.engine;
     let engines = hub.engines();
-    let binary = binary.with_context(|| format!("{} is not installed", engine.display_name()))?;
-    let cwd = hub.thread_folder(thread).await?;
-    let mut customisation = hub.customisation().await?;
-    customisation
-        .mcp_servers
-        .retain(|server| hub.mcp_server_reachable(server));
+    let binary = binary.ok_or(PrepareError::NotInstalled { engine })?;
+    let cwd = hub
+        .thread_folder(thread)
+        .await
+        .map_err(|source| PrepareError::Folder {
+            thread: thread.id.clone(),
+            source: Box::new(source),
+        })?;
+    let mut customisation =
+        hub.customisation()
+            .await
+            .map_err(|source| PrepareError::Customisation {
+                engine,
+                source: Box::new(source),
+            })?;
+    customisation.mcp_servers = hub
+        .mcp()
+        .reachability()
+        .answering(std::mem::take(&mut customisation.mcp_servers), &thread.id)
+        .await;
     let owner = hub.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
-        let _homes = owner.homes_lock()?;
-        owner.engines().materialize(engine, &customisation)
+        let _homes = owner.extensions().homes_lock()?;
+        owner
+            .engines()
+            .materialize(engine, &customisation)
+            .map_err(|source| PrepareError::Materialize {
+                engine,
+                source: Box::new(source),
+            })
     })
     .await
-    .context("prepare engine home task")??;
+    .map_err(|source| PrepareError::HomeTask { engine, source })??;
     launch
         .env
         .splice(0..0, engines.launch_env_for_binary(engine, &binary));
-    for (name, url) in hub.gateway_servers(&thread.id).await {
-        forge_engines::with_gateway_mcp(engine, &mut launch, &name, &url);
-    }
-    launch.readable.push(hub.store().blob_dir().to_path_buf());
-    let mut config = thread.config.clone();
-    // The transport is the account's choice, not the thread's: every
-    // Claude thread on this Forge follows the same one.
-    match claude_transport(hub, config.engine)
+    let gateway = hub
+        .gateway_pass(&thread.id)
         .await
-        .and_then(ClaudeTransport::option)
-    {
+        .map_err(|source| PrepareError::Gateway(Box::new(source)))?;
+    for (name, url) in gateway.servers() {
+        forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
+    }
+    launch.readable.extend(image_folder(hub, &thread.id).await?);
+    let mut config = thread.config.clone();
+    match session.transport_option() {
         Some(option) => {
             config.options.insert(
                 "transport".to_owned(),
@@ -677,7 +1113,7 @@ pub async fn prepare(
                 .as_ref()
                 .map(artisan_api::model_customizations)
                 .transpose()
-                .map_err(anyhow::Error::msg)?
+                .map_err(|source| PrepareError::Customizations { engine, source })?
                 .unwrap_or_default();
             let resolution = model.resolve_config(&config, &customizations);
             for change in &resolution.changes {
@@ -686,105 +1122,74 @@ pub async fn prepare(
             config = resolution.effective;
         }
     }
-    Ok(Turn {
-        thread_id: thread.id.clone(),
-        engine,
-        binary,
-        home: engines.home(engine),
-        cwd,
-        config,
-        session_id,
-        input,
-        launch,
-        trace_dir: None,
+    Ok(Prepared {
+        turn: Turn {
+            thread_id: thread.id.clone(),
+            engine,
+            binary,
+            home: engines.home(engine),
+            cwd,
+            config,
+            session_id: session.resume().map(|session| session.as_str().to_owned()),
+            input,
+            launch,
+            trace_dir: Some(forge_engines::trace::folder(hub.data_dir())),
+        },
+        gateway,
     })
 }
 
-/// The session a run carries on: the previous run's, when it was on the
-/// same engine and the same Claude transport. An empty one is a session
-/// the engine said is gone.
-fn carried_session(
-    previous: Option<&Run>,
-    engine: artisan_api::EngineId,
-    transport: Option<ClaudeTransport>,
-) -> Option<String> {
-    previous
-        .filter(|run| run.engine == engine)
-        .and_then(|run| run.session_id.clone())
-        .filter(|session| !session.is_empty())
-        .filter(|session| {
-            transport.is_none_or(|transport| {
-                artisan_api::transport_of_session(Some(session)) == Some(transport.speaks())
-            })
-        })
+const RECENT_KEYS: usize = 1024;
+
+struct Recent<V> {
+    entries: HashMap<String, V>,
+    order: VecDeque<String>,
+    forgot: bool,
 }
 
-/// How a Claude turn runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClaudeTransport {
-    /// Claude Code, the official way.
-    Code,
-    /// claude.ai's chat backend: claude.ai mode.
-    Chat,
-    /// claude.ai mode is on with no session: Claude Code, and the
-    /// turn says why.
-    ChatSignedOut,
-}
-
-impl ClaudeTransport {
-    /// The transport a session from this one was made on.
-    const fn speaks(self) -> &'static str {
-        match self {
-            Self::Chat => artisan_api::CLAUDE_AI,
-            Self::Code | Self::ChatSignedOut => artisan_api::CLAUDE_CODE,
-        }
-    }
-
-    /// The `transport` option the Claude engine reads; Claude Code, the
-    /// official way, needs none.
-    const fn option(self) -> Option<&'static str> {
-        match self {
-            Self::Code => None,
-            Self::Chat => Some(forge_engines::CLAUDE_AI_TRANSPORT),
-            Self::ChatSignedOut => Some(forge_engines::CLAUDE_AI_UNAVAILABLE),
+impl<V> Default for Recent<V> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            forgot: false,
         }
     }
 }
 
-/// How the engine's turns run: `None` for engines with one way.
-async fn claude_transport(hub: &Hub, engine: artisan_api::EngineId) -> Option<ClaudeTransport> {
-    if engine != artisan_api::EngineId::Claude {
-        return None;
+impl<V> Recent<V> {
+    fn insert(&mut self, key: String, value: V) {
+        if self.entries.insert(key.clone(), value).is_none() {
+            self.order.push_back(key);
+        }
+        while self.order.len() > RECENT_KEYS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
+            self.forgot = true;
+        }
     }
-    let setting = hub
-        .store()
-        .setting(artisan_api::TRANSPORT_KEY)
-        .await
-        .unwrap_or(None);
-    if artisan_api::transport_of(setting.as_ref()) != artisan_api::CLAUDE_AI {
-        return Some(ClaudeTransport::Code);
+
+    fn take(&mut self, key: &str) -> Option<V> {
+        let value = self.entries.remove(key)?;
+        self.order.retain(|kept| kept != key);
+        Some(value)
     }
-    let home = hub.engines().home(engine);
-    Some(if forge_engines::claudeai::Session::path(&home).is_file() {
-        ClaudeTransport::Chat
-    } else {
-        ClaudeTransport::ChatSignedOut
-    })
+
+    fn contains(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
 }
 
-/// Work of this run by adapter key.
 #[derive(Default)]
 struct Work {
     binary: Option<forge_engines::BinaryLease>,
     by_key: HashMap<String, Tracked>,
+    settled: Recent<Tracked>,
     initial: Option<(ItemId, Vec<ItemId>)>,
-    /// What the run's finished items weigh toward a "You should know" check.
     weighed: crate::side::Work,
-    /// Keys of calls Forge shows another way (see [`spawns_agent`]).
-    hidden: HashSet<String>,
-    /// The engine reported an error of its own.
+    hidden: Recent<()>,
     errored: bool,
-    /// The original request, to name adapters without native background titles.
     early_title: Option<Box<(artisan_api::Thread, Vec<artisan_api::Item>)>>,
 }
 
@@ -796,7 +1201,7 @@ impl Work {
         messages: &[artisan_api::Item],
     ) -> Self {
         let early_title = first.then(|| {
-            hub.untitled_lock().insert(thread.id.clone());
+            hub.inner.side.untitled(&thread.id);
             Box::new((thread.clone(), messages.to_vec()))
         });
         Self {
@@ -806,16 +1211,15 @@ impl Work {
     }
 }
 
-/// An Artisan MCP `agent_spawn` call: the `Agent` item Forge stores stands
-/// for it.
 fn spawns_agent(kind: &ItemKind) -> bool {
     matches!(kind, ItemKind::Tool { tool: ToolKind::Mcp { server, tool, .. }, .. }
         if server == "artisan" && tool == "agent_spawn")
 }
 
-/// What an Artisan call's row names: the thread it reads or writes, or the
-/// agents it waits on or messages, by title; `None` when it names neither.
-async fn artisan_title(store: &forge_store::Store, input: &str) -> Result<Option<String>> {
+async fn artisan_title(
+    store: &forge_store::Store,
+    input: &str,
+) -> Result<Option<String>, ApplyError> {
     let Ok(serde_json::Value::Object(input)) = serde_json::from_str(input) else {
         return Ok(None);
     };
@@ -847,17 +1251,52 @@ async fn artisan_title(store: &forge_store::Store, input: &str) -> Result<Option
     Ok((!names.is_empty()).then(|| names.join(", ")))
 }
 
-struct Tracked {
-    id: ItemId,
-    parent: Option<ItemId>,
-    status: Status,
-    persisted: bool,
+enum Tracked {
+    Named {
+        id: ItemId,
+    },
+    Stored {
+        id: ItemId,
+        parent: Option<ItemId>,
+        status: Status,
+    },
 }
 
-/// The `Compaction` item a handoff shows while the previous session
-/// summarizes the thread. Tracked with the run's work, so a run stopped
-/// mid-summary settles it.
-pub struct Compaction<'a> {
+impl Tracked {
+    const fn id(&self) -> &ItemId {
+        match self {
+            Self::Named { id } | Self::Stored { id, .. } => id,
+        }
+    }
+
+    const fn status(&self) -> Option<Status> {
+        match self {
+            Self::Named { .. } => None,
+            Self::Stored { status, .. } => Some(*status),
+        }
+    }
+
+    fn stored_parent(&self) -> Option<&ItemId> {
+        match self {
+            Self::Named { .. } => None,
+            Self::Stored { parent, .. } => parent.as_ref(),
+        }
+    }
+
+    fn store(&mut self, parent: Option<ItemId>, status: Status) {
+        let id = self.id().clone();
+        *self = Self::Stored { id, parent, status };
+    }
+
+    fn open(&self) -> Option<&ItemId> {
+        match self {
+            Self::Stored { id, status, .. } if !status.is_terminal() => Some(id),
+            Self::Named { .. } | Self::Stored { .. } => None,
+        }
+    }
+}
+
+pub(crate) struct Compaction<'a> {
     pub(crate) hub: &'a Hub,
     pub(crate) run: &'a Run,
     pub(crate) id: ItemId,
@@ -866,8 +1305,6 @@ pub struct Compaction<'a> {
     pub(crate) switch: Option<ModelSwitch>,
 }
 
-/// A model as its engine names it: the catalogue's name, else its id, else
-/// the engine's own name when the run took the engine's default.
 fn named_model(hub: &Hub, engine: EngineId, model: Option<&str>) -> NamedModel {
     let status = hub.engines().status(engine);
     let name = model.or(status.default_model.as_deref()).map_or_else(
@@ -888,50 +1325,75 @@ impl Compaction<'_> {
         self.cancel.clone()
     }
 
-    pub(crate) fn persisted(&mut self) {
+    pub(crate) fn stored(&mut self, status: Status) {
         if let Some(tracked) = self.work.by_key.get_mut(crate::handoff::COMPACTION_KEY) {
-            tracked.persisted = true;
-        }
-    }
-
-    pub(crate) fn settled(&mut self) {
-        if let Some(tracked) = self.work.by_key.get_mut(crate::handoff::COMPACTION_KEY) {
-            tracked.status = Status::Done;
+            tracked.store(None, status);
         }
     }
 }
 
 impl Work {
+    fn settle(&mut self, key: &str) {
+        if key == crate::handoff::COMPACTION_KEY {
+            return;
+        }
+        if let Some(tracked) = self.by_key.remove(key) {
+            self.settled.insert(key.to_owned(), tracked);
+        }
+    }
+
     fn id(&mut self, key: &str) -> ItemId {
         self.by_key
             .entry(key.to_owned())
-            .or_insert_with(|| Tracked {
-                id: ItemId::new(),
-                parent: None,
-                status: Status::Running,
-                persisted: false,
-            })
-            .id
+            .or_insert_with(|| Tracked::Named { id: ItemId::new() })
+            .id()
             .clone()
     }
 }
 
-/// The item an engine names by its key, as a parent or as an agent it
-/// reports on. Usually one this run made; a subagent resumed in a later
-/// process (Claude's `SendMessage`) still names its first run's agent, which
-/// is found by its native id and reopened here.
-/// Minting an id for it instead orphaned the resumed agent's whole work.
-async fn parent_of(
+async fn identify(
     store: &forge_store::Store,
     run: &Run,
     items: &mut Work,
     key: &str,
-) -> Result<ItemId> {
+) -> Result<ItemId, ApplyError> {
     if let Some(tracked) = items.by_key.get(key) {
-        return Ok(tracked.id.clone());
+        return Ok(tracked.id().clone());
+    }
+    if let Some(tracked) = items.settled.take(key) {
+        let id = tracked.id().clone();
+        items.by_key.insert(key.to_owned(), tracked);
+        return Ok(id);
+    }
+    if items.settled.forgot
+        && let Some(found) = store
+            .item_by_native(&run.thread_id, Some(&run.id), key)
+            .await?
+    {
+        items.by_key.insert(
+            key.to_owned(),
+            Tracked::Stored {
+                id: found.id.clone(),
+                parent: found.parent_id,
+                status: found.status,
+            },
+        );
+        return Ok(found.id);
+    }
+    Ok(items.id(key))
+}
+
+async fn known_item(
+    store: &forge_store::Store,
+    run: &Run,
+    items: &mut Work,
+    key: &str,
+) -> Result<Option<ItemId>, ApplyError> {
+    if let Some(tracked) = items.by_key.get(key) {
+        return Ok(Some(tracked.id().clone()));
     }
     let Some(found) = store.item_by_native(&run.thread_id, None, key).await? else {
-        return Ok(items.id(key));
+        return Ok(None);
     };
     let item = store
         .reopen_agent(&found.id, &run.id)
@@ -939,58 +1401,40 @@ async fn parent_of(
         .unwrap_or(found);
     items.by_key.insert(
         key.to_owned(),
-        Tracked {
+        Tracked::Stored {
             id: item.id.clone(),
             parent: item.parent_id.clone(),
             status: item.status,
-            persisted: true,
         },
     );
-    Ok(item.id)
+    Ok(Some(item.id))
+}
+
+async fn stored_parent(
+    store: &forge_store::Store,
+    run: &Run,
+    items: &mut Work,
+    key: &str,
+) -> Result<Option<ItemId>, ApplyError> {
+    match items.by_key.get(key) {
+        Some(Tracked::Stored { id, .. }) => Ok(Some(id.clone())),
+        Some(Tracked::Named { .. }) => Ok(None),
+        None => known_item(store, run, items, key).await,
+    }
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per engine event; splitting would scatter the dispatch"
 )]
-async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -> Result<()> {
+async fn apply(
+    hub: &Hub,
+    run: &mut Run,
+    items: &mut Work,
+    event: EngineEvent,
+) -> Result<(), ApplyError> {
     let store = hub.store();
     let thread_id = run.thread_id.clone();
-    let event = if let EngineEvent::Image {
-        key,
-        parent,
-        path,
-        caption,
-    } = event
-    {
-        use tokio::io::AsyncReadExt as _;
-        let file = tokio::fs::File::open(&path)
-            .await
-            .with_context(|| format!("read generated image {}", path.display()))?;
-        let mut bytes = Vec::new();
-        file.take((forge_store::MAX_BLOB_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await?;
-        anyhow::ensure!(
-            bytes.len() <= forge_store::MAX_BLOB_BYTES,
-            "generated image exceeds encoded size limit"
-        );
-        let blob = store
-            .put_image(bytes)
-            .await
-            .context("store generated image")?;
-        EngineEvent::Item {
-            key,
-            parent,
-            status: Status::Done,
-            kind: ItemKind::Image {
-                blob: blob.hash,
-                caption: caption.map(Into::into),
-            },
-        }
-    } else {
-        event
-    };
     match event {
         EngineEvent::Session { id } => {
             if run.session_id.as_deref() != Some(&id) {
@@ -1008,6 +1452,12 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
                 hub.start_title(thread, messages);
             }
         }
+        EngineEvent::SessionGone => {
+            if run.session_id.is_some() {
+                run.session_id = None;
+                *run = store.upsert_run(run.clone()).await?;
+            }
+        }
         EngineEvent::Model { id } => {
             if run.model.as_deref() != Some(&id) {
                 run.model = Some(id);
@@ -1017,7 +1467,7 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
         EngineEvent::Title { title } => {
             let title = title.trim().to_owned();
             if !title.is_empty() {
-                hub.untitled_lock().remove(&thread_id);
+                hub.inner.side.titled(&thread_id);
             }
             if !title.is_empty() && hub.enabled(crate::SUMMARY_TITLES_KEY).await {
                 store
@@ -1035,163 +1485,54 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             key,
             parent,
             status,
-            mut kind,
+            kind,
+        } => apply_item(hub, run, items, key, parent, status, kind).await?,
+        EngineEvent::Image {
+            key,
+            parent,
+            path,
+            caption,
         } => {
-            if matches!(kind, ItemKind::Error { .. }) {
-                items.errored = true;
-            }
-            // Forge stores the agent an `agent_spawn` call starts; the call
-            // itself would only repeat it.
-            if items.hidden.contains(&key) || spawns_agent(&kind) {
-                items.hidden.insert(key);
-                return Ok(());
-            }
-            // A message to an agent names the agent's item: the engine
-            // knows it only by its own address (Claude's `agentId`).
-            if let ItemKind::Tool {
-                tool:
-                    ToolKind::AgentMessage {
-                        recipient,
-                        target: target @ None,
-                        ..
-                    },
-                ..
-            } = &mut kind
-            {
-                *target = store.agent_by_address(&thread_id, recipient).await?;
-            }
-            if let ItemKind::Tool {
-                tool:
-                    ToolKind::Agents {
-                        addresses, targets, ..
-                    },
-                ..
-            } = &mut kind
-                && targets.is_empty()
-            {
-                for address in addresses.iter() {
-                    if let Some(agent) = store.agent_by_address(&thread_id, address).await? {
-                        targets.push(agent);
-                    }
-                }
-            }
-            // An Artisan call that names a thread or agents by id shows
-            // their titles instead.
-            if let ItemKind::Tool {
-                tool: ToolKind::Mcp { server, input, .. },
-                title: title @ None,
-                ..
-            } = &mut kind
-                && server == forge_engines::ARTISAN_MCP
-                && let Some(input) = input.as_ref().and_then(|input| input.inline())
-            {
-                *title = artisan_title(store, input).await?;
-            }
-            let parent_id = match parent {
-                Some(parent) => Some(parent_of(store, run, items, &parent).await?),
-                None => None,
-            };
-            // An agent this run didn't start (resumed from an earlier
-            // process) is the one stored under its tool id.
-            let id = if matches!(kind, ItemKind::Agent { .. }) {
-                parent_of(store, run, items, &key).await?
-            } else {
-                items.id(&key)
-            };
-            if matches!(kind, ItemKind::Agent { .. })
-                && status == Status::Running
-                && items
-                    .by_key
-                    .get(&key)
-                    .is_some_and(|tracked| tracked.status.is_terminal())
-                && let Some(item) = store.reopen_agent(&id, &run.id).await?
-                && let Some(tracked) = items.by_key.get_mut(&key)
-            {
-                tracked.status = item.status;
-            }
-            let tracked = items
-                .by_key
-                .get_mut(&key)
-                .with_context(|| format!("item {id} is not tracked"))?;
-            let first = !tracked.persisted;
-            tracked.parent = parent_id.clone().or_else(|| tracked.parent.clone());
-            tracked.persisted = true;
-            // Reasoning precedes what it decided: a new top-level item
-            // (text, a tool) means the thinking it showed is over.
-            if first && tracked.parent.is_none() {
-                hub.clear_live(
-                    &thread_id,
-                    LiveTarget::Reasoning {
-                        run_id: run.id.clone(),
-                    },
-                );
-            }
-            let finished_text =
-                status.is_terminal() && matches!(kind, ItemKind::AssistantMessage { .. });
-            let shown = if finished_text && let ItemKind::AssistantMessage { text, .. } = &kind {
-                text.inline()
-                    .map(crate::resources::written_sources)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let shell_done = status.is_terminal() && matches!(kind, ItemKind::Tool { .. });
-            if status.is_terminal() && !tracked.status.is_terminal() {
-                items.weighed.finished(&kind, status);
-            }
-            let saved = store
-                .upsert_item(new_item(
-                    id.clone(),
-                    &thread_id,
-                    Some(&run.id),
-                    tracked.parent.clone(),
-                    Some(key),
-                    status,
-                    kind,
-                ))
-                .await?;
-            let asked =
-                (tracked.status == Status::AwaitingUser) != (saved.status == Status::AwaitingUser);
-            tracked.status = saved.status;
-            if asked {
-                hub.agent_attention(&thread_id).await;
-            }
-            if finished_text {
-                hub.snapshot_resources(&thread_id, &id, shown);
-                hub.forget_live(
-                    &thread_id,
-                    &LiveTarget::Text {
-                        item_id: id.clone(),
-                    },
-                );
-            }
-            if shell_done {
-                hub.forget_live(
-                    &thread_id,
-                    &LiveTarget::Shell {
-                        item_id: id.clone(),
-                    },
-                );
-                hub.forget_live(&thread_id, &LiveTarget::Progress { item_id: id });
-            }
+            let blob = store_image(hub, &path).await?;
+            apply_item(
+                hub,
+                run,
+                items,
+                key,
+                parent,
+                Status::Done,
+                ItemKind::Image {
+                    blob,
+                    caption: caption.map(Into::into),
+                },
+            )
+            .await?;
         }
         EngineEvent::Status { key, status } => {
             if items.hidden.contains(&key) {
                 return Ok(());
             }
-            let id = items.id(&key);
-            let tracked = items
-                .by_key
-                .get_mut(&key)
-                .with_context(|| format!("item {id} is not tracked"))?;
-            if tracked.persisted
+            let id = identify(store, run, items, &key).await?;
+            let tracked = items.by_key.get_mut(&key).unwrap_or_else(|| {
+                unreachable!(
+                    "invariant: item {id} of run {} is tracked once named",
+                    run.id
+                )
+            });
+            if let Tracked::Stored {
+                status: tracked_status,
+                ..
+            } = tracked
                 && let Some(item) = store.set_item_status(id, status).await?
             {
-                let asked = (tracked.status == Status::AwaitingUser)
+                let asked = (*tracked_status == Status::AwaitingUser)
                     != (item.status == Status::AwaitingUser);
-                tracked.status = item.status;
+                *tracked_status = item.status;
                 if asked {
                     hub.agent_attention(&thread_id).await;
+                }
+                if item.status.is_terminal() && !matches!(item.kind, ItemKind::Agent { .. }) {
+                    items.settle(&key);
                 }
             }
         }
@@ -1200,21 +1541,25 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             text,
             append,
         } => {
+            if let LiveKind::Text { key } | LiveKind::Shell { key } | LiveKind::Progress { key } =
+                &target
+                && !items.by_key.contains_key(key)
+                && !hub.live_has_room(&thread_id)
+            {
+                return Ok(());
+            }
             let target = match target {
                 LiveKind::Text { key } => LiveTarget::Text {
-                    item_id: items.id(&key),
+                    item_id: identify(store, run, items, &key).await?,
                 },
-                // The provider's recap is the run's reasoning line, and it
-                // is already a line: it is not trimmed the way the model's
-                // own prose is.
                 LiveKind::Reasoning | LiveKind::Narration => LiveTarget::Reasoning {
                     run_id: run.id.clone(),
                 },
                 LiveKind::Shell { key } => LiveTarget::Shell {
-                    item_id: items.id(&key),
+                    item_id: identify(store, run, items, &key).await?,
                 },
                 LiveKind::Progress { key } => LiveTarget::Progress {
-                    item_id: items.id(&key),
+                    item_id: identify(store, run, items, &key).await?,
                 },
                 LiveKind::Status => LiveTarget::Status {
                     run_id: run.id.clone(),
@@ -1232,90 +1577,306 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             *run = store.upsert_run(run.clone()).await?;
         }
         EngineEvent::InputAccepted { id } => {
-            let ids = items
-                .initial
-                .take_if(|(ack, _)| *ack == id)
-                .map_or_else(|| vec![id], |(_, ids)| ids);
-            store.accept_inputs(thread_id, run.id.clone(), ids).await?;
+            let (ids, delivered) = items.initial.take_if(|(ack, _)| *ack == id).map_or_else(
+                || (vec![id], forge_store::Delivered::Steer),
+                |(_, ids)| (ids, forge_store::Delivered::Initial),
+            );
+            store
+                .accept_inputs(thread_id, run.id.clone(), ids, delivered)
+                .await?;
         }
-        EngineEvent::Image { .. } => unreachable!("normalized before dispatch"),
     }
     Ok(())
 }
 
-/// Settles the run and anything it left open.
+async fn store_image(
+    hub: &Hub,
+    path: &std::path::Path,
+) -> Result<artisan_api::BlobHash, ApplyError> {
+    use tokio::io::AsyncReadExt as _;
+    let read = |source| ApplyError::ReadImage {
+        path: path.to_owned(),
+        source,
+    };
+    let file = tokio::fs::File::open(path).await.map_err(read)?;
+    let mut bytes = Vec::new();
+    file.take((forge_store::MAX_BLOB_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(read)?;
+    if bytes.len() > forge_store::MAX_BLOB_BYTES {
+        return Err(ApplyError::ImageTooLarge {
+            path: path.to_owned(),
+            limit: forge_store::MAX_BLOB_BYTES,
+        });
+    }
+    Ok(hub.store().put_image(bytes).await?.hash)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one item's normalization, agent naming and storage stay together"
+)]
+async fn apply_item(
+    hub: &Hub,
+    run: &Run,
+    items: &mut Work,
+    key: String,
+    parent: Option<String>,
+    status: Status,
+    mut kind: ItemKind,
+) -> Result<(), ApplyError> {
+    let store = hub.store();
+    let thread_id = run.thread_id.clone();
+    if matches!(kind, ItemKind::Error { .. }) {
+        items.errored = true;
+    }
+    if items.hidden.contains(&key) || spawns_agent(&kind) {
+        items.hidden.insert(key, ());
+        return Ok(());
+    }
+    if let ItemKind::Tool {
+        tool:
+            ToolKind::AgentMessage {
+                recipient,
+                target: target @ None,
+                ..
+            },
+        ..
+    } = &mut kind
+    {
+        *target = store.agent_by_address(&thread_id, recipient).await?;
+    }
+    if let ItemKind::Tool {
+        tool: ToolKind::Agents {
+            addresses, targets, ..
+        },
+        ..
+    } = &mut kind
+        && targets.is_empty()
+    {
+        for address in addresses.iter() {
+            if let Some(agent) = store.agent_by_address(&thread_id, address).await? {
+                targets.push(agent);
+            }
+        }
+    }
+    if let ItemKind::Tool {
+        tool: ToolKind::Mcp { server, input, .. },
+        title: title @ None,
+        ..
+    } = &mut kind
+        && server == forge_engines::ARTISAN_MCP
+        && let Some(input) = input.as_ref().and_then(|input| input.inline())
+    {
+        *title = artisan_title(store, input).await?;
+    }
+    let parent_id = match parent {
+        Some(parent) => stored_parent(store, run, items, &parent).await?,
+        None => None,
+    };
+    let id = if matches!(kind, ItemKind::Agent { .. }) {
+        match known_item(store, run, items, &key).await? {
+            Some(id) => id,
+            None => items.id(&key),
+        }
+    } else {
+        identify(store, run, items, &key).await?
+    };
+    if matches!(kind, ItemKind::Agent { .. })
+        && status == Status::Running
+        && items
+            .by_key
+            .get(&key)
+            .and_then(Tracked::status)
+            .is_some_and(Status::is_terminal)
+        && let Some(item) = store.reopen_agent(&id, &run.id).await?
+        && let Some(Tracked::Stored {
+            status: tracked_status,
+            ..
+        }) = items.by_key.get_mut(&key)
+    {
+        *tracked_status = item.status;
+    }
+    let tracked = items.by_key.get_mut(&key).unwrap_or_else(|| {
+        unreachable!(
+            "invariant: item {id} of run {} is tracked once named",
+            run.id
+        )
+    });
+    let before = tracked.status();
+    let parent_id = parent_id.or_else(|| tracked.stored_parent().cloned());
+    if before.is_none() && parent_id.is_none() {
+        hub.clear_live(
+            &thread_id,
+            LiveTarget::Reasoning {
+                run_id: run.id.clone(),
+            },
+        );
+    }
+    let finished_text = status.is_terminal() && matches!(kind, ItemKind::AssistantMessage { .. });
+    let shown = if finished_text && let ItemKind::AssistantMessage { text, .. } = &kind {
+        match text {
+            artisan_api::TextContent::Inline(markdown) => {
+                crate::resources::written_sources(markdown)
+            }
+            artisan_api::TextContent::Stored(content) => unreachable!(
+                "invariant: the engine sends item {id} of run {} inline, not as {content:?}",
+                run.id
+            ),
+        }
+    } else {
+        Vec::new()
+    };
+    let shell_done = status.is_terminal() && matches!(kind, ItemKind::Tool { .. });
+    if status.is_terminal() && !before.is_some_and(Status::is_terminal) {
+        items.weighed.finished(&kind, status);
+    }
+    hub.snapshot_resources(&thread_id, &id, shown).await;
+    let saved = store
+        .upsert_item(new_item(
+            id.clone(),
+            &thread_id,
+            Some(&run.id),
+            parent_id.clone(),
+            Some(key.clone()),
+            status,
+            kind,
+        ))
+        .await?;
+    let asked = (before == Some(Status::AwaitingUser)) != (saved.status == Status::AwaitingUser);
+    tracked.store(parent_id, saved.status);
+    if saved.status.is_terminal() && !matches!(saved.kind, ItemKind::Agent { .. }) {
+        items.settle(&key);
+    }
+    if asked {
+        hub.agent_attention(&thread_id).await;
+    }
+    if finished_text {
+        hub.forget_live(
+            &thread_id,
+            &LiveTarget::Text {
+                item_id: id.clone(),
+            },
+        );
+    }
+    if shell_done {
+        hub.forget_live(
+            &thread_id,
+            &LiveTarget::Shell {
+                item_id: id.clone(),
+            },
+        );
+        hub.forget_live(&thread_id, &LiveTarget::Progress { item_id: id });
+    }
+    Ok(())
+}
+
 fn open_items(items: &Work) -> Vec<ItemId> {
     items
         .by_key
         .values()
-        .filter(|item| item.persisted && !item.status.is_terminal())
-        .map(|item| item.id.clone())
+        .filter_map(Tracked::open)
+        .cloned()
         .collect()
 }
 
-/// Settles a stopped run as soon as the stop lands, so clients don't wait
-/// on the engine confirming it. The engine's teardown carries on after.
-async fn announce_stop(hub: &Hub, run: &Run, items: &Work) -> Result<Run> {
-    let stopped = Run {
-        status: RunStatus::Cancelled,
-        ended_at: Some(artisan_api::now()),
-        ..run.clone()
-    };
-    let (stopped, _) = hub
-        .store()
-        .settle_run(stopped, open_items(items), None)
-        .await
-        .with_context(|| format!("settle stopped run {}", run.id))?;
-    Ok(stopped)
+async fn announce_stop(
+    hub: &Hub,
+    run: &mut Run,
+    items: &Work,
+    pending: &[artisan_api::Item],
+    stop: &crate::turns::StopSignal,
+) {
+    let mut stopped = run.clone();
+    stopped
+        .finish(RunOutcome::Cancelled, None, hub.store().now())
+        .expect("invariant: a run announces its stop while it is still running");
+    let saved = Box::pin(hub.store().settle_run(forge_store::Settlement {
+        run: stopped,
+        open: open_items(items),
+        attempted: pending.iter().map(|item| item.id.clone()).collect(),
+        park: None,
+        note: None,
+    }))
+    .await;
+    match saved {
+        Ok((stopped, _)) => {
+            *run = stopped;
+            stop.resolve(Ok(()));
+        }
+        Err(error) => {
+            tracing::warn!(thread = %run.thread_id, run = %run.id, "save the stop before the engine confirms it; it is saved when the run ends: {}", diagnostics::chain(&error));
+            stop.resolve(Err(Arc::new(error)));
+        }
+    }
 }
 
-async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Result<()> {
-    let store = hub.store();
+async fn finish(
+    hub: &Hub,
+    run: &mut Run,
+    items: &Work,
+    ending: Ending,
+    ended: RunOutcome,
+    attempted: Vec<ItemId>,
+    park: Option<forge_store::Park>,
+) -> crate::turns::Ended {
     let open = open_items(items);
-    if let Some(error) = &outcome.error {
-        tracing::warn!(thread = %run.thread_id, run = %run.id, "run ended {:?}: {error}", outcome.status);
+    if let Some(error) = ending.error() {
+        tracing::warn!(thread = %run.thread_id, run = %run.id, outcome = ?ended, failure_bytes = error.len(), "the run ended with a failure, shown in the thread");
     }
-    // A run that failed without the engine saying why (it never started,
-    // or Forge stopped it) shows the reason in the transcript; otherwise
-    // the user's message just hangs there unanswered.
-    if outcome.status == RunStatus::Failed
-        && !items.errored
-        && let Some(error) = &outcome.error
-    {
-        store
-            .upsert_item(new_item(
-                ItemId::new(),
-                &run.thread_id,
-                Some(&run.id),
-                None,
-                None,
-                Status::Done,
-                ItemKind::Error {
-                    kind: artisan_api::ErrorKind::Execution,
-                    message: error.clone().into(),
-                    retryable: false,
-                },
-            ))
-            .await
-            .with_context(|| format!("store why run {} failed", run.id))?;
-    }
-    let park = if outcome.status == RunStatus::Failed {
-        crate::park::plan(hub, run, &outcome).await
-    } else {
-        None
+    let note = match ending.error() {
+        Some(error) if !items.errored => Some(new_item(
+            ItemId::new(),
+            &run.thread_id,
+            Some(&run.id),
+            None,
+            None,
+            Status::Done,
+            ItemKind::Error {
+                kind: artisan_api::ErrorKind::Execution,
+                message: error.to_owned().into(),
+                retryable: false,
+            },
+        )),
+        Some(_) | None => None,
     };
-    run.status = outcome.status;
-    run.error = outcome.error;
-    run.ended_at = run.ended_at.or_else(|| Some(artisan_api::now()));
-    let (_, parked) = store
-        .settle_run(run.clone(), open, park)
-        .await
-        .with_context(|| format!("settle run {}", run.id))?;
-    if let Some(park) = park.filter(|_| parked) {
-        tracing::info!(thread = %run.thread_id, run = %run.id, continuation = ?park.continuation,
-            due_at = park.due_at, "parked a failed turn");
+    let error = ending.error().map(str::to_owned);
+    match run.finish(ended, error.clone(), hub.store().now()) {
+        Ok(()) => {}
+        Err(announced) if announced.ended == ended => {
+            if let RunState::Finished {
+                error: recorded, ..
+            } = &mut run.state
+            {
+                *recorded = error;
+            }
+        }
+        Err(announced) => unreachable!("invariant: {announced}"),
     }
-    Ok(())
+    let settlement = forge_store::Settlement {
+        run: run.clone(),
+        open,
+        attempted,
+        park,
+        note,
+    };
+    match hub.store().settle_run(settlement.clone()).await {
+        Ok((_, parked)) => {
+            if let Some(park) = park.filter(|_| parked) {
+                tracing::info!(thread = %run.thread_id, run = %run.id, continuation = ?park.continuation,
+                    due_at = park.due_at, "parked a failed turn");
+            }
+            crate::turns::Ended::Settled
+        }
+        Err(error) => {
+            tracing::error!(thread = %run.thread_id, run = %run.id, "the run's end could not be saved; retrying until it is: {}", diagnostics::chain(&error));
+            crate::turns::Ended::Unsaved {
+                settlement: Box::new(settlement),
+                error: Arc::new(error),
+            }
+        }
+    }
 }
 
 fn new_item(
@@ -1337,3 +1898,7 @@ fn new_item(
         kind,
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/run/ending.rs"]
+mod tests;

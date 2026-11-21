@@ -1,4 +1,5 @@
-use std::time::{Duration, Instant};
+use aqua::Instant;
+use std::time::Duration;
 
 const LINE_UNIT: f32 = 16.0;
 const NOTCH_LINES: f32 = 3.0;
@@ -32,9 +33,9 @@ pub struct WheelGlide {
 }
 
 impl WheelGlide {
-    pub fn push(&mut self, current: f32, delta: f32, max: f32) {
+    fn push(&mut self, current: f32, delta: f32, max: f32, now: Instant) {
         if !self.active() {
-            self.last_frame = Some(Instant::now());
+            self.last_frame = Some(now);
         }
         if self.remaining.signum() != delta.signum() {
             self.remaining = 0.0;
@@ -49,8 +50,7 @@ impl WheelGlide {
     }
 
     #[must_use]
-    pub fn step(&mut self, current: f32, max: f32) -> Option<f32> {
-        let now = Instant::now();
+    fn step(&mut self, current: f32, max: f32, now: Instant) -> Option<f32> {
         let elapsed = self
             .last_frame
             .replace(now)
@@ -58,13 +58,13 @@ impl WheelGlide {
         self.step_elapsed(current, max, elapsed)
     }
 
-    pub fn push_down(&mut self, offset: f32, delta: f32, max: f32) {
-        self.push(-offset, -delta, max);
+    pub fn push_down(&mut self, offset: f32, delta: f32, max: f32, now: Instant) {
+        self.push(-offset, -delta, max, now);
     }
 
     #[must_use]
-    pub fn step_down(&mut self, offset: f32, max: f32) -> Option<f32> {
-        self.step(-offset, max).map(|next| -next)
+    pub fn step_down(&mut self, offset: f32, max: f32, now: Instant) -> Option<f32> {
+        self.step(-offset, max, now).map(|next| -next)
     }
 
     #[must_use]
@@ -72,7 +72,7 @@ impl WheelGlide {
         self.step_elapsed(-offset, max, elapsed).map(|next| -next)
     }
 
-    pub fn step_elapsed(&mut self, current: f32, max: f32, elapsed: Duration) -> Option<f32> {
+    fn step_elapsed(&mut self, current: f32, max: f32, elapsed: Duration) -> Option<f32> {
         let current = current.clamp(-max.max(0.0), 0.0);
         let target = (current + self.remaining).clamp(-max.max(0.0), 0.0);
         let distance = target - current;

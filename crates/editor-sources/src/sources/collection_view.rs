@@ -2,9 +2,6 @@ use super::{
     CollectionBrowser, CollectionPreview, page_record,
     view::{button, code_card, source_lines, stack, viewport},
 };
-use editor_core::RangeState;
-use editor_ui::kit::{ButtonSize, ButtonTone, Density, Row, RowItem, Surface, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::{
     collection::{
         CollectionDescriptor, CollectionError, CollectionLayout, CollectionRole, CollectionSource,
@@ -14,18 +11,23 @@ use aqua_ui::{
     style::{Length, Style},
 };
 use artisan_api::CollectionRange;
+use editor_core::RangeState;
+use editor_ui::kit::{ButtonSize, ButtonTone, Density, Row, RowItem, Surface, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 type Presenter<T> = Rc<dyn Fn(&T, u64) -> CollectionPreview>;
 type Handler<T> = Rc<dyn Fn(CollectionAction<T>)>;
+type Activate<'a, T> = Option<&'a dyn Fn(&T, u64)>;
 
 const ENTRY: Row = Row::ListItem(Density::Regular);
 const READ: ButtonSize = ButtonSize::Sm;
 
-fn entry_height() -> f32 {
-    ENTRY.height().unwrap_or_default()
+fn entry_height(theme: &ArtisanTheme) -> f32 {
+    ENTRY.height(theme)
 }
 
+#[derive(Debug)]
 pub enum CollectionAction<T> {
     Request(u64),
     Retry,
@@ -115,34 +117,34 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<
             callback(CollectionAction::Choose {
                 page: Arc::clone(&chosen),
                 index,
-            })
+            });
         });
         if self.has_activation && preview.detail.is_some() {
             let callback = Rc::clone(&self.action);
             row = row.trailing(
                 button(
                     &format!("collection-read-{index}"),
-                    self.theme,
+                    &self.theme,
                     ButtonTone::Quiet,
                     "Read",
                     move || {
                         callback(CollectionAction::Read {
                             page: Arc::clone(&page),
                             index,
-                        })
+                        });
                     },
                 )
                 .size(READ)
                 .nested(
-                    ENTRY.radius_in(Surface::Inset),
-                    (entry_height() - READ.height()) / 2.0,
+                    Row::radius_in(Surface::Inset),
+                    (entry_height(&self.theme) - READ.height()) / 2.0,
                 )
                 .disabled(preview.disabled)
                 .build(),
             );
         }
         UiBox::new()
-            .height(entry_height())
+            .height(entry_height(&self.theme))
             .clip(true)
             .child(row.build())
             .build()
@@ -150,33 +152,42 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<
 }
 
 pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
-    browser: Rc<RefCell<CollectionBrowser<T>>>,
+    browser: &Rc<RefCell<CollectionBrowser<T>>>,
     title: &str,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     max_height: Option<f32>,
     present: Presenter<T>,
     has_activation: bool,
-    action: Handler<T>,
+    action: &Handler<T>,
 ) -> Element {
     let count = browser.borrow().window().source().count;
     let Ok(count_native) = usize::try_from(count) else {
         return TextRole::Label
-            .text(&theme, "This collection exceeds this device's native list capacity.")
+            .text(
+                theme,
+                "This collection exceeds this device's native list capacity.",
+            )
             .build();
     };
-    let height = viewport(entry_height(), max_height);
+    let height = viewport(entry_height(theme), max_height);
     let mut body = stack().child(
         TextRole::Title
-            .text(&theme, format!("{title} · {count} entries"))
+            .text(
+                theme,
+                format!(
+                    "{title} · {}",
+                    editor_ui::locale::count(count, "entry", "entries")
+                ),
+            )
             .build(),
     );
     if count_native != 0 {
         let source = Rc::new(Rows {
-            browser: Rc::clone(&browser),
+            browser: Rc::clone(browser),
             count: count_native,
-            theme,
+            theme: *theme,
             present,
-            action: Rc::clone(&action),
+            action: Rc::clone(action),
             has_activation,
         });
         let mut descriptor = CollectionDescriptor::new(
@@ -187,11 +198,11 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
                     .width(Length::Pct(100.0)),
             ],
             true,
-            entry_height(),
+            entry_height(theme),
             0,
         );
-        let watched_browser = Rc::clone(&browser);
-        let request = Rc::clone(&action);
+        let watched_browser = Rc::clone(browser);
+        let request = Rc::clone(action);
         descriptor.fixed_row_height = true;
         descriptor.on_viewport = Some(Rc::new(move |viewport: CollectionViewport| {
             let missing = {
@@ -205,42 +216,49 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
         }));
         body = body.child(Element::collection(descriptor));
     }
-    if let Some(error) = browser_state(&browser) {
-        let action = Rc::clone(&action);
-        body = body
-            .child(TextRole::Label.text(&theme, error).build())
-            .child(
-                button("collection-retry", theme, ButtonTone::Neutral, "Retry", move || {
-                    action(CollectionAction::Retry)
-                })
+    if let Some(error) = browser_state(browser) {
+        let action = Rc::clone(action);
+        body = body.child(
+            editor_ui::kit::ProblemNotice::new("collection-problem", *theme, &error)
+                .action(
+                    editor_ui::kit::Button::text(
+                        "collection-retry",
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .on_activate(move |_| action(CollectionAction::Retry))
+                    .build(),
+                )
                 .build(),
-            );
+        );
     }
     code_card(theme, body.build())
 }
 
 fn browser_state<T: serde::de::DeserializeOwned + Send + 'static>(
     browser: &Rc<RefCell<CollectionBrowser<T>>>,
-) -> Option<String> {
+) -> Option<editor_core::Problem> {
     match browser.borrow().window().state() {
         RangeState::Failed(error) => Some(error.clone()),
-        _ => None,
+        RangeState::Loading | RangeState::Ready(_) => None,
     }
 }
 
 pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
     browser: &CollectionBrowser<T>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     max_height: Option<f32>,
     document: aqua_text::document::SelectionDocumentId,
     source_id: aqua_text::document::SelectionSourceId,
     stored_detail: Option<Element>,
-    action: Handler<T>,
-) -> Result<super::ContentView, &'static str> {
-    if browser.detail.is_some() && stored_detail.is_none() {
-        return Err("stored collection detail requires its source view");
-    }
-    let callback = Rc::clone(&action);
+    action: &Handler<T>,
+) -> super::ContentView {
+    assert!(
+        browser.detail().is_none() || stored_detail.is_some(),
+        "invariant: stored collection detail is rendered with its source view"
+    );
+    let callback = Rc::clone(action);
     let mut body = stack().child(
         button(
             "collection-back",
@@ -254,8 +272,8 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
     let mut selection = None;
     if let Some(detail) = stored_detail {
         body = body.child(detail);
-    } else if let Some(text) = &browser.inline_text {
-        let text: Arc<str> = Arc::from(text.as_str());
+    } else if let Some(text) = browser.inline_text() {
+        let text: Arc<str> = Arc::from(text);
         let ranges = super::raw_rows(&text);
         selection = Some(super::selection_source(source_id, 0, Arc::clone(&text)));
         body = body.child(source_lines(
@@ -263,15 +281,15 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
             theme,
             text,
             ranges,
-            viewport(TextRole::Code.spec().line, max_height),
+            viewport(TextRole::Code.line_px(theme), max_height),
             document,
             source_id,
         ));
     }
-    Ok(super::ContentView {
+    super::ContentView {
         element: code_card(theme, body.build()),
         selection,
-    })
+    }
 }
 
 pub fn dispatch_collection<T: serde::de::DeserializeOwned + Send + 'static>(
@@ -279,7 +297,7 @@ pub fn dispatch_collection<T: serde::de::DeserializeOwned + Send + 'static>(
     core: &editor_core::Core,
     action: CollectionAction<T>,
     present: impl Fn(&T, u64) -> CollectionPreview,
-    activate: Option<&dyn Fn(&T, u64)>,
+    activate: Activate<'_, T>,
 ) -> bool {
     match action {
         CollectionAction::Request(index) => {
@@ -310,7 +328,7 @@ pub fn dispatch_collection_changed<T: serde::de::DeserializeOwned + Send + 'stat
     core: &editor_core::Core,
     action: CollectionAction<T>,
     present: impl Fn(&T, u64) -> CollectionPreview,
-    activate: Option<&dyn Fn(&T, u64)>,
+    activate: Activate<'_, T>,
 ) -> bool {
     let before = browser.view_state();
     dispatch_collection(browser, core, action, present, activate);

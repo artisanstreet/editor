@@ -1,10 +1,7 @@
 use std::{
     num::NonZeroUsize,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use aqua::images::{ImageHandle, ImageStatus};
@@ -12,9 +9,11 @@ use aqua_core::{InputEvent, Key, NamedKey, PointerButton};
 use aqua_ui::input::{CaptureRequest, FocusRequest, InputKind, InputResponse, RoutedInput};
 
 use super::{ImageCompare, Mode};
-use crate::ui::kit::{IconSize, Media, Space, Spaced, Surface, TextRole};
+use crate::ui::kit::{
+    Button, ButtonSize, ButtonTone, IconSize, Media, Space, Spaced, Surface, TextRole,
+};
 use crate::ui::media::{
-    image::{ImageError, Images},
+    image::{ImageError, ImageLoader, Images, cache_key},
     source::{MediaFailure, MediaFetcher, MediaLoadError, MediaSource},
 };
 
@@ -26,21 +25,30 @@ pub(crate) enum Side {
     After,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Failure {
+    NeedsConsent,
     Invalid,
     Fetch(MediaFailure),
     Undecodable,
+    TooLarge,
 }
 
 impl Failure {
-    fn title(self) -> &'static str {
+    const fn retryable(&self) -> bool {
+        matches!(self, Self::Fetch(_) | Self::Undecodable)
+    }
+
+    fn title(&self) -> &'static str {
         match self {
+            Self::NeedsConsent => "Remote image",
             Self::Invalid => "Not a valid image path",
             Self::Fetch(MediaFailure::Missing) => "File not found",
-            Self::Fetch(MediaFailure::Unreachable) => "The host didn't answer",
-            Self::Fetch(MediaFailure::Unreadable) => "Couldn't read the file",
+            Self::Fetch(MediaFailure::ForgeUnreachable(_)) => "Forge didn't answer",
+            Self::Fetch(MediaFailure::ServerUnreachable(_)) => "The image's server didn't answer",
+            Self::Fetch(MediaFailure::Unreadable(_)) => "Couldn't read the file",
             Self::Undecodable => "Not a supported image",
+            Self::TooLarge => "Too large to preview",
         }
     }
 }
@@ -58,6 +66,19 @@ pub(crate) enum Action {
     Move { x: f32, width: f32 },
     Release,
     Key { key: Key, shift: bool },
+    Split(f32),
+    Retry(Side),
+}
+
+#[derive(Clone)]
+struct Interaction {
+    mode: Mode,
+    split: f32,
+    showing_after: bool,
+    consent: bool,
+    before: String,
+    after: String,
+    emit: Rc<dyn Fn(Action)>,
 }
 
 pub(crate) struct CompareState {
@@ -109,6 +130,44 @@ impl CompareState {
         }
     }
 
+    const fn part(side: Side) -> &'static str {
+        match side {
+            Side::Before => "before",
+            Side::After => "after",
+        }
+    }
+
+    fn source(&self, side: Side) -> &MediaSource {
+        match side {
+            Side::Before => &self.before,
+            Side::After => &self.after,
+        }
+    }
+
+    fn failure(&self, side: Side) -> Option<Failure> {
+        match &self.images[Self::index(side)] {
+            ImageState::Loading => None,
+            ImageState::Failed(failure) => Some(failure.clone()),
+            ImageState::Decoding(image) => match image.status() {
+                ImageStatus::Ready { .. } | ImageStatus::Pending => None,
+                ImageStatus::Failed(_) | ImageStatus::Cancelled => Some(Failure::Undecodable),
+            },
+        }
+    }
+
+    fn retry(&mut self, side: Side) -> bool {
+        if !self.failure(side).as_ref().is_some_and(Failure::retryable) {
+            return false;
+        }
+        let key = cache_key(&self.fetcher, self.source(side), Self::part(side));
+        self.fetcher.resources().forget::<ImageLoader>(&key);
+        let index = Self::index(side);
+        self.images[index] = ImageState::Loading;
+        self.observed[index] = None;
+        self.refresh();
+        true
+    }
+
     pub(crate) fn refresh(&mut self) -> bool {
         self.wake.drain();
         let mut changed = false;
@@ -118,20 +177,15 @@ impl CompareState {
                 Side::Before => &self.before,
                 Side::After => &self.after,
             };
-            let sender = self.wake.sender();
-            let wake: aqua::mailbox::Wake = Arc::new(move || {
-                let _ = sender.send(());
-            });
-            let part = match side {
-                Side::Before => "before",
-                Side::After => "after",
-            };
+            let wake = crate::ui::media::wake_on(&self.wake);
+            let part = Self::part(side);
             let result =
                 self.loader
                     .request(&self.fetcher, source, part, self.waiters[index], wake);
             let next = match result {
                 None => ImageState::Loading,
                 Some(Ok(image)) => ImageState::Decoding(image),
+                Some(Err(ImageError::NeedsConsent)) => ImageState::Failed(Failure::NeedsConsent),
                 Some(Err(ImageError::Load(MediaLoadError::Invalid))) => {
                     ImageState::Failed(Failure::Invalid)
                 }
@@ -139,6 +193,9 @@ impl CompareState {
                     ImageState::Failed(Failure::Fetch(error))
                 }
                 Some(Err(ImageError::Decode)) => ImageState::Failed(Failure::Undecodable),
+                Some(Err(ImageError::Load(MediaLoadError::TooLarge))) => {
+                    ImageState::Failed(Failure::TooLarge)
+                }
             };
             let same = match (&self.images[index], &next) {
                 (ImageState::Loading, ImageState::Loading) => true,
@@ -148,7 +205,7 @@ impl CompareState {
             };
             let status = match &next {
                 ImageState::Decoding(image) => Some(image.status()),
-                _ => None,
+                ImageState::Loading | ImageState::Failed(_) => None,
             };
             if !same || self.observed[index] != status {
                 changed = true;
@@ -166,8 +223,8 @@ impl CompareState {
         scope_changed: bool,
     ) -> bool {
         if !scope_changed
-            && self.before.raw == model.before.src.raw
-            && self.after.raw == model.after.src.raw
+            && self.before.raw() == model.before.src.raw()
+            && self.after.raw() == model.after.src.raw()
         {
             return false;
         }
@@ -191,8 +248,29 @@ impl CompareState {
         width.is_finite() && width > 0.0 && x.is_finite() && self.set_split(x / width)
     }
 
+    fn waits_for_consent(&self) -> bool {
+        self.images
+            .iter()
+            .any(|image| matches!(image, ImageState::Failed(Failure::NeedsConsent)))
+    }
+
     pub(crate) fn dispatch(&mut self, action: Action) -> bool {
+        if self.waits_for_consent()
+            && matches!(
+                action,
+                Action::Press { .. }
+                    | Action::Key {
+                        key: Key::Char(' ') | Key::Named(NamedKey::Enter),
+                        ..
+                    }
+            )
+        {
+            self.fetcher.allow_remote();
+            self.refresh();
+            return true;
+        }
         match action {
+            Action::Retry(side) => self.retry(side),
             Action::Mode(index) => {
                 let Some(mode) = Mode::ALL.get(index).copied() else {
                     return false;
@@ -219,6 +297,11 @@ impl CompareState {
             },
             Action::Move { x, width } => self.dragging && self.follow(x, width),
             Action::Release => std::mem::take(&mut self.dragging),
+            Action::Split(split) => {
+                split.is_finite()
+                    && matches!(self.mode, Mode::Slider | Mode::Blend)
+                    && self.set_split(split)
+            }
             Action::Key { key, shift } => {
                 let step = if shift { 0.01 } else { 0.05 };
                 match (self.mode, key) {
@@ -246,10 +329,14 @@ impl CompareState {
 }
 
 impl CompareState {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one comparison view: both sides, the divider, mode switch and failures"
+    )]
     pub(crate) fn view(
         &self,
         model: &ImageCompare,
-        theme: crate::ui::theme::ArtisanTheme,
+        theme: &crate::ui::theme::ArtisanTheme,
         id: &str,
         available_width: f32,
         emit: Rc<dyn Fn(Action)>,
@@ -267,102 +354,84 @@ impl CompareState {
         let before_label = model.before.label_or("Before");
         let after_label = model.after.label_or("After");
         let view = if self.mode == Mode::SideBySide {
-            let width = available_width.min(max_width * 2.0 + 8.0);
+            let consent = self.waits_for_consent().then(|| Interaction {
+                mode: self.mode,
+                split: self.split,
+                showing_after: self.showing_after,
+                consent: true,
+                before: before_label.clone(),
+                after: after_label.clone(),
+                emit: Rc::clone(&emit),
+            });
+            let width = available_width.min(max_width.mul_add(2.0, 8.0));
             let half = ((width - 8.0) / 2.0).max(0.0);
             UiBox::new()
                 .width(width)
                 .spaced(Space::S8)
                 .child(frame(
-                    &theme,
+                    theme,
                     half,
                     aspect,
-                    image_layer(
-                        &self.images[0],
-                        &theme,
-                        &self.before.raw,
-                        half,
-                        half / aspect,
-                    ),
-                    vec![corner(&theme, before_label.clone(), true, false, half)],
-                    None,
+                    self.layer(Side::Before, theme, id, half, half / aspect, &emit),
+                    vec![corner(theme, before_label, true, false, half)],
+                    consent.clone(),
                 ))
                 .child(frame(
-                    &theme,
+                    theme,
                     half,
                     aspect,
-                    image_layer(
-                        &self.images[1],
-                        &theme,
-                        &self.after.raw,
-                        half,
-                        half / aspect,
-                    ),
-                    vec![corner(&theme, after_label.clone(), true, false, half)],
-                    None,
+                    self.layer(Side::After, theme, id, half, half / aspect, &emit),
+                    vec![corner(theme, after_label, true, false, half)],
+                    consent,
                 ))
                 .build()
         } else {
             let width = available_width.min(max_width);
             let height = width / aspect;
+            let interaction = Interaction {
+                mode: self.mode,
+                split: self.split,
+                showing_after: self.showing_after,
+                consent: self.waits_for_consent(),
+                before: before_label.clone(),
+                after: after_label.clone(),
+                emit: Rc::clone(&emit),
+            };
             let mut layers = Vec::new();
             match self.mode {
                 Mode::Slider => {
-                    layers.push(image_layer(
-                        &self.images[1],
-                        &theme,
-                        &self.after.raw,
-                        width,
-                        height,
-                    ));
+                    layers.push(self.layer(Side::After, theme, id, width, height, &emit));
                     layers.push(
                         UiBox::new()
                             .width(width * self.split)
                             .height(height)
                             .clip(true)
                             .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                            .child(image_layer(
-                                &self.images[0],
-                                &theme,
-                                &self.before.raw,
-                                width,
-                                height,
-                            ))
+                            .child(self.layer(Side::Before, theme, id, width, height, &emit))
                             .build(),
                     );
-                    layers.push(corner(&theme, before_label, true, self.dragging, width));
-                    layers.push(corner(&theme, after_label, false, self.dragging, width));
-                    layers.extend(divider(&theme, self.split, width, height));
+                    layers.push(corner(theme, before_label, true, self.dragging, width));
+                    layers.push(corner(theme, after_label, false, self.dragging, width));
+                    layers.extend(divider(theme, self.split, width, height));
                 }
                 Mode::Toggle => {
-                    let (image, source, label, left) = if self.showing_after {
-                        (&self.images[1], &self.after.raw, after_label, false)
+                    let (side, label, left) = if self.showing_after {
+                        (Side::After, after_label, false)
                     } else {
-                        (&self.images[0], &self.before.raw, before_label, true)
+                        (Side::Before, before_label, true)
                     };
-                    layers.push(image_layer(image, &theme, source, width, height));
-                    layers.push(corner(&theme, label, left, false, width));
+                    layers.push(self.layer(side, theme, id, width, height, &emit));
+                    layers.push(corner(theme, label, left, false, width));
                 }
                 Mode::Blend => {
-                    layers.push(image_layer(
-                        &self.images[0],
-                        &theme,
-                        &self.before.raw,
-                        width,
-                        height,
-                    ));
+                    layers.push(self.layer(Side::Before, theme, id, width, height, &emit));
                     layers.push(
                         UiBox::new()
                             .width(width)
                             .height(height)
                             .opacity(self.split)
                             .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
-                            .child(image_layer(
-                                &self.images[1],
-                                &theme,
-                                &self.after.raw,
-                                width,
-                                height,
-                            ))
+                            .child(self.layer(Side::After, theme, id, width, height, &emit))
                             .build(),
                     );
                     let text = format!(
@@ -380,19 +449,21 @@ impl CompareState {
                                     .justify(aqua_ui::JustifyContent::CENTER)
                                     .absolute_at(Some(0.0), None, None, Some(8.0)),
                             )
-                            .child(pill(&theme, text))
+                            .child(pill(theme, text))
                             .build(),
                     );
                 }
-                Mode::SideBySide => unreachable!(),
+                Mode::SideBySide => {
+                    unreachable!("invariant: side-by-side mode is drawn by its own branch")
+                }
             }
             let frame = frame(
-                &theme,
+                theme,
                 width,
                 aspect,
                 UiBox::new().build(),
                 layers,
-                Some((self.mode, self.split, emit.clone())),
+                Some(interaction),
             );
             frame.with_key(format!("{id}-frame"))
         };
@@ -403,7 +474,7 @@ impl CompareState {
         let switch_emit = emit;
         let control = SegmentedControl::new(
             format!("{id}-modes"),
-            theme,
+            *theme,
             "Comparison mode",
             mode_index,
             Segment::new(0, Mode::ALL[0].label()),
@@ -440,9 +511,12 @@ fn frame_size(images: &[ImageState; 2], hint: super::super::SizeHint) -> (f32, f
                     (width as f32 / height as f32).clamp(0.05, 20.0),
                     width as f32,
                 )),
-                _ => None,
+                ImageStatus::Pending
+                | ImageStatus::Ready { .. }
+                | ImageStatus::Failed(_)
+                | ImageStatus::Cancelled => None,
             },
-            _ => None,
+            ImageState::Loading | ImageState::Failed(_) => None,
         })
         .max_by(|a, b| a.0.total_cmp(&b.0));
     let (aspect, natural) = widest.map_or_else(
@@ -456,12 +530,67 @@ fn frame_size(images: &[ImageState; 2], hint: super::super::SizeHint) -> (f32, f
     )
 }
 
+impl CompareState {
+    fn layer(
+        &self,
+        side: Side,
+        theme: &crate::ui::theme::ArtisanTheme,
+        id: &str,
+        width: f32,
+        height: f32,
+        emit: &Rc<dyn Fn(Action)>,
+    ) -> aqua_ui::element::Element {
+        let retry = self.failure(side).filter(Failure::retryable).map(|_| {
+            let retry = Rc::clone(emit);
+            let part = Self::part(side);
+            aqua_ui::element::Box::new()
+                .child(
+                    Button::text(
+                        format!("{id}-retry-{part}"),
+                        *theme,
+                        ButtonTone::Neutral,
+                        "Try again",
+                    )
+                    .size(ButtonSize::Sm)
+                    .on_activate(move |_| retry(Action::Retry(side)))
+                    .build(),
+                )
+                .build()
+                .on_input(
+                    InputKind::PointerDown,
+                    aqua_ui::input::EventPhase::Bubble,
+                    |_| InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::default()
+                    },
+                )
+                .on_input(
+                    InputKind::KeyDown,
+                    aqua_ui::input::EventPhase::Bubble,
+                    |_| InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::default()
+                    },
+                )
+        });
+        image_layer(
+            &self.images[Self::index(side)],
+            theme,
+            self.source(side).raw(),
+            width,
+            height,
+            retry,
+        )
+    }
+}
+
 fn image_layer(
     image: &ImageState,
     theme: &crate::ui::theme::ArtisanTheme,
     source: &str,
     width: f32,
     height: f32,
+    retry: Option<aqua_ui::element::Element>,
 ) -> aqua_ui::element::Element {
     use aqua_ui::{
         AlignItems, JustifyContent,
@@ -470,7 +599,7 @@ fn image_layer(
     };
     let status = match image {
         ImageState::Loading => None,
-        ImageState::Failed(error) => Some(*error),
+        ImageState::Failed(error) => Some(error.clone()),
         ImageState::Decoding(image) => match image.status() {
             ImageStatus::Ready { .. } => {
                 return Media::new(image.clone())
@@ -512,16 +641,23 @@ fn image_layer(
             .build()
     };
     if let Some(error) = status {
+        let (icon, hint) = match error {
+            Failure::NeedsConsent => (
+                editor_assets::AssetId::TABLER_WORLD,
+                Some("Load remote images"),
+            ),
+            Failure::Invalid | Failure::TooLarge | Failure::Fetch(_) | Failure::Undecodable => {
+                (editor_assets::AssetId::TABLER_FILE_OFF, None)
+            }
+        };
         panel = panel
-            .child(IconSize::Lg.glyph(
-                editor_assets::AssetId::TABLER_FILE_OFF,
-                theme.colors.text_muted.to_reference_paint(),
-            ))
+            .child(IconSize::Lg.glyph(icon, theme.colors.text_muted.to_reference_paint()))
             .child(text(error.title().to_owned(), theme.colors.text))
             .child(text(source.trim().to_owned(), theme.colors.text_muted));
-        if error != Failure::Invalid {
-            panel = panel.child(text("Click to retry".to_owned(), theme.colors.text_muted));
+        if let Some(hint) = hint {
+            panel = panel.child(text(hint.to_owned(), theme.colors.text_muted));
         }
+        panel = panel.children(retry);
     } else {
         panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));
     }
@@ -529,7 +665,10 @@ fn image_layer(
 }
 
 fn pill(theme: &crate::ui::theme::ArtisanTheme, text: String) -> aqua_ui::element::Element {
-    let height = TextRole::Caption.spec().line + 2.0 * Surface::Pill(0.0).padding_px();
+    let height = 2.0f32.mul_add(
+        Surface::Pill(0.0).padding_px(),
+        TextRole::Caption.line_px(theme),
+    );
     Surface::Pill(height).build(
         theme,
         vec![TextRole::Caption.text(theme, text).wrap(false).build()],
@@ -547,7 +686,7 @@ fn corner(
     UiBox::new()
         .opacity(if hidden { 0.0 } else { 1.0 })
         .style(Style::new().absolute_at(
-            if left { Some(Space::S8.px()) } else { None },
+            left.then(|| Space::S8.px()),
             Some(Space::S8.px()),
             if left { None } else { Some(Space::S8.px()) },
             None,
@@ -616,13 +755,17 @@ fn divider(
     vec![line, handle]
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one comparison frame with its slider semantics, drag and keyboard input"
+)]
 fn frame(
     theme: &crate::ui::theme::ArtisanTheme,
     width: f32,
     aspect: f32,
     base: aqua_ui::element::Element,
     layers: Vec<aqua_ui::element::Element>,
-    interactive: Option<(Mode, f32, Rc<dyn Fn(Action)>)>,
+    interactive: Option<Interaction>,
 ) -> aqua_ui::element::Element {
     use aqua_ui::{input::EventPhase, style::Style};
     let mut children = vec![base];
@@ -632,14 +775,54 @@ fn frame(
             .width(aqua_ui::style::Length::Px(width))
             .height(aqua_ui::style::Length::Px(width / aspect)),
     );
-    let Some((mode, split, emit)) = interactive else {
+    let Some(interaction) = interactive else {
         return root;
     };
+    let Interaction {
+        mode,
+        split,
+        consent,
+        ref emit,
+        ..
+    } = interaction;
+    let emit = Rc::clone(emit);
     let press = Rc::clone(&emit);
     let drag = Rc::clone(&emit);
     let release = Rc::clone(&emit);
-    root.focusable(true)
-        .cursor(if mode == Mode::Toggle {
+    let request = Rc::clone(&emit);
+    let activate = Rc::clone(&emit);
+    described(root, &interaction)
+        .on_accessibility_request(move |access| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the split is a fraction in 0..=1"
+            )]
+            let action = match access {
+                aqua_ui::tree::AccessibilityRequest::SetValue(percent) => {
+                    Action::Split((percent / 100.0) as f32)
+                }
+                aqua_ui::tree::AccessibilityRequest::Increment => Action::Key {
+                    key: Key::Named(NamedKey::Right),
+                    shift: false,
+                },
+                aqua_ui::tree::AccessibilityRequest::Decrement => Action::Key {
+                    key: Key::Named(NamedKey::Left),
+                    shift: false,
+                },
+                aqua_ui::tree::AccessibilityRequest::ShowContextMenu => return,
+            };
+            request(action);
+        })
+        .on_accessibility_activate(move || {
+            if consent || mode == Mode::Toggle {
+                activate(Action::Key {
+                    key: Key::Named(NamedKey::Enter),
+                    shift: false,
+                });
+            }
+        })
+        .focusable(true)
+        .cursor(if consent || mode == Mode::Toggle {
             aqua_core::CursorIcon::Pointer
         } else {
             aqua_core::CursorIcon::ColResize
@@ -686,19 +869,22 @@ fn frame(
             let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
                 return InputResponse::default();
             };
-            let changed = match (mode, key.key) {
-                (
-                    Mode::Toggle,
-                    Key::Char(' ') | Key::Named(NamedKey::Enter | NamedKey::Left | NamedKey::Right),
-                ) => true,
-                (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Left | NamedKey::Home)) => {
-                    split > 0.0
-                }
-                (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Right | NamedKey::End)) => {
-                    split < 1.0
-                }
-                _ => false,
-            };
+            let allows = consent && matches!(key.key, Key::Char(' ') | Key::Named(NamedKey::Enter));
+            let changed = allows
+                || match (mode, key.key) {
+                    (
+                        Mode::Toggle,
+                        Key::Char(' ')
+                        | Key::Named(NamedKey::Enter | NamedKey::Left | NamedKey::Right),
+                    ) => true,
+                    (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Left | NamedKey::Home)) => {
+                        split > 0.0
+                    }
+                    (Mode::Slider | Mode::Blend, Key::Named(NamedKey::Right | NamedKey::End)) => {
+                        split < 1.0
+                    }
+                    _ => false,
+                };
             if !changed {
                 return InputResponse::default();
             }
@@ -711,6 +897,48 @@ fn frame(
                 ..InputResponse::handled()
             }
         })
+}
+
+fn described(
+    root: aqua_ui::element::Element,
+    interaction: &Interaction,
+) -> aqua_ui::element::Element {
+    let Interaction {
+        mode,
+        split,
+        showing_after,
+        consent,
+        before,
+        after,
+        ..
+    } = interaction;
+    let percent = f64::from(*split) * 100.0;
+    let range = aqua_core::NumericRangeSemantics {
+        min: 0.0,
+        max: 100.0,
+        value: percent,
+        step: 5.0,
+    };
+    match (consent, mode) {
+        (true, _) => root
+            .role(aqua_core::Role::Button)
+            .aria_label(format!("Compare {before} and {after}. Load remote images")),
+        (false, Mode::Slider) => root
+            .role(aqua_core::Role::Slider)
+            .aria_label(format!("Split between {before} and {after}"))
+            .aria_range(range)
+            .aria_value(format!("{percent:.0}% {before}")),
+        (false, Mode::Blend) => root
+            .role(aqua_core::Role::Slider)
+            .aria_label(format!("Blend from {before} to {after}"))
+            .aria_range(range)
+            .aria_value(format!("{percent:.0}% {after}")),
+        (false, Mode::Toggle) => root
+            .role(aqua_core::Role::Switch)
+            .aria_label(format!("Show {after} instead of {before}"))
+            .aria_checked(*showing_after),
+        (false, Mode::SideBySide) => root,
+    }
 }
 
 #[cfg(test)]

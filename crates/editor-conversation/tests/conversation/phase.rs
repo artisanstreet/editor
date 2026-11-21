@@ -1,10 +1,9 @@
-use super::{Phase, turn_phase};
+use super::{Phase, section_title, status_copy, turn_phase};
 use artisan_api::{
-    EngineId, Item, ItemId, ItemKind, LiveTarget, Run, RunId, RunStatus, Status, ThreadId,
-    ToolKind, Usage,
+    EngineId, Item, ItemId, ItemKind, LiveTarget, Run, RunId, RunOutcome, RunState, Status,
+    ThreadId, ToolKind, Usage,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
 
 fn run() -> Run {
     Run {
@@ -14,13 +13,11 @@ fn run() -> Run {
         engine: EngineId::Claude,
         model: None,
         input_cutoff: 0,
-        status: RunStatus::Running,
+        state: RunState::Running,
         usage: Usage::default(),
         session_id: None,
-        error: None,
         seq: 1,
         started_at: 0,
-        ended_at: None,
         continuation: None,
     }
 }
@@ -72,7 +69,7 @@ fn reply(position: u64) -> Item {
 
 #[test]
 fn a_job_running_behind_the_turn_is_not_read_as_a_wait() {
-    let live: HashMap<LiveTarget, Arc<ropey::Rope>> = HashMap::new();
+    let live: HashMap<LiveTarget, crate::conversation::thread::LiveText> = HashMap::new();
     let job = shell(1, Status::Running, true);
     let answer = reply(2);
     assert_eq!(
@@ -86,4 +83,20 @@ fn a_job_running_behind_the_turn_is_not_read_as_a_wait() {
         Phase::Working,
         "a foreground command is work whatever runs behind it"
     );
+}
+
+#[test]
+fn a_stopped_run_reads_as_stopped_even_while_its_command_still_runs() {
+    let live: HashMap<LiveTarget, crate::conversation::thread::LiveText> = HashMap::new();
+    let mut stopped = run();
+    stopped.state = RunState::Finished {
+        outcome: RunOutcome::Cancelled,
+        error: None,
+        ended_at: 3_000,
+    };
+    let command = shell(1, Status::Running, false);
+    let phase = turn_phase(&stopped, &[&command], &live);
+    assert_eq!(phase, Phase::Settled(RunOutcome::Cancelled));
+    assert_eq!(section_title(phase, true, 3_000), "Stopped after 3s");
+    assert_eq!(status_copy(phase), None);
 }

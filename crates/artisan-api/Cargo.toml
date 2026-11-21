@@ -2,20 +2,28 @@
 name = "artisan-api"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Types shared by Forge and the Editor: threads, items, runs, events and requests."
+
+[lib]
+doctest = false
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 uuid.workspace = true
-anyhow.workspace = true
 base64 = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 sha2.workspace = true
+zeroize.workspace = true
 hex.workspace = true
+
+[dev-dependencies]
+test-support = { workspace = true, features = ["logs"] }
 
 [features]
 tls = ["dep:rcgen", "dep:rustls"]

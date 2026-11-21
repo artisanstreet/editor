@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use super::resource_cache::ResourceCache;
 use serde::Deserialize;
@@ -14,24 +15,70 @@ pub struct MediaRequest {
     pub item: Option<Arc<str>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub type MediaCause = Arc<dyn std::error::Error + Send + Sync>;
+
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum MediaFailure {
+    #[error("the file does not exist")]
     Missing,
-    Unreachable,
-    Unreadable,
+    #[error("Forge did not answer")]
+    ForgeUnreachable(#[source] MediaCause),
+    #[error("the web server did not answer")]
+    ServerUnreachable(#[source] MediaCause),
+    #[error("the file could not be read")]
+    Unreadable(#[source] MediaCause),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl PartialEq for MediaFailure {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+impl Eq for MediaFailure {}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the web server answered {status}")]
+pub struct ServerStatus {
+    status: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MediaLoadError {
+    #[error("the path is not valid")]
     Invalid,
+    #[error(transparent)]
     Fetch(MediaFailure),
+    #[error("the media is too large to keep in memory")]
+    TooLarge,
 }
 
-pub type MediaFetch = Pin<Box<dyn Future<Output = Result<Arc<[u8]>, MediaFailure>> + Send>>;
+impl From<editor_core::client::CallError> for MediaLoadError {
+    fn from(error: editor_core::client::CallError) -> Self {
+        use artisan_api::{ErrorCode, Failure, ResourceFailure, ThreadFailure};
+        if error.too_large() {
+            return Self::TooLarge;
+        }
+        Self::Fetch(match error.refused() {
+            Some(
+                Failure::Resource(ResourceFailure::FileNotFound { .. })
+                | Failure::Thread(ThreadFailure::NotFound { .. })
+                | Failure::Legacy {
+                    code: ErrorCode::NotFound,
+                },
+            ) => MediaFailure::Missing,
+            Some(_) => MediaFailure::Unreadable(Arc::new(error)),
+            None => MediaFailure::ForgeUnreachable(Arc::new(error)),
+        })
+    }
+}
+
+pub type MediaFetch = Pin<Box<dyn Future<Output = Result<Arc<[u8]>, MediaLoadError>> + Send>>;
 
 static MEDIA_WORK: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
 
+#[derive(Debug)]
 pub struct MediaBytes {
     pub bytes: Arc<[u8]>,
     pub permit: tokio::sync::OwnedSemaphorePermit,
@@ -46,6 +93,25 @@ impl MediaBytes {
     }
 }
 
+#[derive(Default)]
+struct RemoteConsent(Mutex<HashSet<Arc<str>>>);
+
+impl RemoteConsent {
+    fn allows(&self, item: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(item)
+    }
+
+    fn allow(&self, item: Arc<str>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(item);
+    }
+}
+
 #[derive(Clone)]
 pub struct MediaFetcher {
     scope: String,
@@ -54,6 +120,13 @@ pub struct MediaFetcher {
     revision: u64,
     fetch: Arc<dyn Fn(MediaRequest) -> MediaFetch + Send + Sync>,
     resources: Arc<ResourceCache>,
+    remote: Arc<RemoteConsent>,
+}
+
+impl std::fmt::Debug for MediaFetcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaFetcher").finish_non_exhaustive()
+    }
 }
 
 impl MediaFetcher {
@@ -68,19 +141,36 @@ impl MediaFetcher {
             revision: 0,
             fetch: Arc::new(fetch),
             resources: ResourceCache::new(),
+            remote: Arc::default(),
         }
     }
 
-    pub fn fetch(&self, request: MediaRequest) -> MediaFetch {
+    pub(crate) fn waits_for_consent(&self, source: &MediaSource) -> bool {
+        matches!(source.parsed(), Parsed::Url(_))
+            && !self
+                .item
+                .as_deref()
+                .is_some_and(|item| self.remote.allows(item))
+    }
+
+    pub(crate) fn allow_remote(&self) {
+        if let Some(item) = &self.item {
+            self.remote.allow(Arc::clone(item));
+        }
+    }
+
+    fn fetch(&self, request: MediaRequest) -> MediaFetch {
         (self.fetch)(request)
     }
 
+    #[must_use]
     pub fn owned_by(mut self, owner: &[u64], revision: u64) -> Self {
         self.owner = Arc::from(owner);
         self.revision = revision;
         self
     }
 
+    #[must_use]
     pub fn showing(mut self, item: &str) -> Self {
         self.item = Some(Arc::from(item));
         self
@@ -90,7 +180,7 @@ impl MediaFetcher {
         &self.owner
     }
 
-    pub fn scope(&self) -> &str {
+    pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
 
@@ -117,8 +207,8 @@ impl MediaFetcher {
         self.resources.retain_owners(owners);
     }
 
-    pub fn clear_resources(&self) {
-        self.resources.clear();
+    pub fn close_resources(&self) {
+        self.resources.close();
     }
 
     pub fn provider(&self) -> MediaProvider {
@@ -158,8 +248,14 @@ pub struct MediaProvider {
     fetch: Arc<dyn Fn(MediaRequest) -> MediaFetch + Send + Sync>,
 }
 
+impl std::fmt::Debug for MediaProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaProvider").finish_non_exhaustive()
+    }
+}
+
 impl MediaProvider {
-    pub fn scope(&self) -> &str {
+    pub(crate) fn scope(&self) -> &str {
         &self.scope
     }
     pub fn fetch(&self, request: MediaRequest) -> MediaFetch {
@@ -182,8 +278,8 @@ impl Hash for MediaProvider {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Owned<T> {
-    pub owner: String,
-    pub source: T,
+    pub(crate) owner: String,
+    pub(crate) source: T,
 }
 
 impl<T> Owned<T> {
@@ -198,7 +294,13 @@ impl<T> Owned<T> {
 #[derive(Clone, Debug)]
 pub struct Payload {
     id: u64,
-    pub bytes: Arc<[u8]>,
+    pub(crate) bytes: Arc<[u8]>,
+}
+
+impl Payload {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl PartialEq for Payload {
@@ -216,16 +318,14 @@ impl Hash for Payload {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(from = "String")]
 pub struct MediaSource {
-    pub raw: String,
-    pub parsed: Parsed,
+    raw: String,
+    parsed: Parsed,
 }
 
 impl From<String> for MediaSource {
     fn from(raw: String) -> Self {
-        Self {
-            parsed: parse(&raw),
-            raw,
-        }
+        let parsed = parse(&raw);
+        Self { raw, parsed }
     }
 }
 
@@ -238,6 +338,16 @@ impl std::ops::Deref for MediaSource {
 }
 
 impl MediaSource {
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    #[must_use]
+    pub const fn parsed(&self) -> &Parsed {
+        &self.parsed
+    }
+
     pub(crate) fn resident_bytes(&self) -> usize {
         self.raw.capacity()
             + match &self.parsed {
@@ -247,7 +357,7 @@ impl MediaSource {
                 Parsed::Invalid => 0,
             }
     }
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.raw.trim().is_empty()
     }
 }
@@ -333,20 +443,22 @@ pub async fn load_image_bytes(
         .clone()
         .acquire_owned()
         .await
-        .map_err(|_| MediaLoadError::Invalid)?;
-    let bytes = match &source.parsed {
+        .expect("invariant: the media work semaphore is never closed");
+    let bytes = match &source.parsed() {
         Parsed::Url(url) => {
-            let response = http
-                .get(url, true)
-                .await
-                .map_err(|_| MediaLoadError::Fetch(MediaFailure::Unreachable))?;
+            let response = http.get(url, true).await.map_err(|error| {
+                tracing::warn!(error = %::diagnostics::chain(&error), "fetch image");
+                MediaLoadError::Fetch(MediaFailure::ServerUnreachable(Arc::new(error)))
+            })?;
             match response.status.as_u16() {
                 200..=299 => Ok(response.body.into()),
                 404 | 410 => Err(MediaLoadError::Fetch(MediaFailure::Missing)),
-                _ => Err(MediaLoadError::Fetch(MediaFailure::Unreadable)),
+                status => Err(MediaLoadError::Fetch(MediaFailure::Unreadable(Arc::new(
+                    ServerStatus { status },
+                )))),
             }
         }
-        Parsed::Data(payload) => Ok(payload.bytes.clone()),
+        Parsed::Data(payload) => Ok(Arc::clone(&payload.bytes)),
         Parsed::File { path, from_home } => {
             let fetcher = fetcher.ok_or(MediaLoadError::Invalid)?;
             fetcher
@@ -357,9 +469,19 @@ pub async fn load_image_bytes(
                     item: fetcher.item.clone(),
                 })
                 .await
-                .map_err(MediaLoadError::Fetch)
+                .inspect_err(|failure| {
+                    tracing::warn!(
+                        path,
+                        error = %::diagnostics::chain(failure),
+                        "fetch media from Forge"
+                    );
+                })
         }
         Parsed::Invalid => Err(MediaLoadError::Invalid),
     }?;
     Ok(MediaBytes { bytes, permit })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/ui/media/source.rs"]
+mod tests;

@@ -1,69 +1,4 @@
-use artisan_api::ItemId;
-use editor_aqua::conversation::fold::RowKey;
-use editor_aqua::conversation::stored::{edge_offset, retired_leaves, reverses_in_place};
-
-#[test]
-fn stored_edges_overlap_only_when_the_reader_reaches_the_loaded_window() {
-    assert_eq!(edge_offset(64..128, 200, 64, true, false, false), Some(32));
-    assert_eq!(edge_offset(64..128, 200, 64, false, false, false), None);
-    assert_eq!(edge_offset(64..128, 200, 64, true, true, false), None);
-    assert_eq!(edge_offset(64..128, 200, 64, true, false, true), None);
-    assert_eq!(edge_offset(64..128, 200, 68, true, false, false), None);
-    assert_eq!(edge_offset(64..128, 200, 124, false, true, true), Some(96));
-    assert_eq!(edge_offset(64..128, 128, 127, false, false, false), None);
-    assert_eq!(edge_offset(64..128, 200, 128, true, false, false), None);
-}
-
-#[test]
-fn opposite_prefetch_waits_for_real_movement_and_matching_direction() {
-    let first = RowKey::Item(ItemId("first".into()));
-    let second = RowKey::Item(ItemId("second".into()));
-    assert!(reverses_in_place(
-        4,
-        Some(&first),
-        true,
-        4,
-        Some(&second),
-        Some(false),
-        false
-    ));
-    assert!(reverses_in_place(
-        4,
-        Some(&first),
-        true,
-        5,
-        Some(&first),
-        Some(false),
-        false
-    ));
-    assert!(reverses_in_place(
-        4,
-        Some(&first),
-        true,
-        5,
-        Some(&second),
-        Some(true),
-        false
-    ));
-    assert!(!reverses_in_place(
-        4,
-        Some(&first),
-        true,
-        5,
-        Some(&second),
-        Some(false),
-        false
-    ));
-    assert!(!reverses_in_place(
-        4,
-        Some(&first),
-        true,
-        4,
-        Some(&first),
-        None,
-        true
-    ));
-}
+use editor_aqua::conversation::stored::{ROW_WINDOW, retired_leaves, row_window};
 
 #[cfg(feature = "qualification")]
 #[test]
@@ -115,4 +50,395 @@ fn leaves_outside_the_moved_window_retire_unless_mounted() {
     );
     assert!(retired_leaves(&(0..64), [0, 31, 63], |_| false).is_empty());
     assert!(retired_leaves(&(10..20), std::iter::empty(), |_| false).is_empty());
+}
+
+#[test]
+fn the_row_window_opens_at_the_tail_and_shifts_once_per_edge_reached() {
+    let count = 5_000;
+    let tail = row_window(None, count, None);
+    assert_eq!(tail, count - ROW_WINDOW..count);
+    assert_eq!(row_window(Some(&tail), count, Some(count - 1)), tail);
+    assert_eq!(row_window(Some(&tail), count, Some(tail.start + 600)), tail);
+    let earlier = row_window(Some(&tail), count, Some(tail.start + 10));
+    assert!(earlier.start < tail.start && earlier.contains(&(tail.start + 10)));
+    assert_eq!(earlier.len(), ROW_WINDOW);
+    for reached in tail.start..tail.start + 200 {
+        assert_eq!(row_window(Some(&earlier), count, Some(reached)), earlier);
+    }
+    let later = row_window(Some(&earlier), count, Some(earlier.end - 1));
+    assert!(later.start > earlier.start && later.contains(&(earlier.end - 1)));
+    let mut window = tail;
+    while window.start > 0 {
+        window = row_window(Some(&window), count, Some(window.start));
+        assert!(window.contains(&window.start));
+    }
+    assert_eq!(window, 0..ROW_WINDOW);
+    assert_eq!(row_window(None, 130, None), 0..130);
+    assert_eq!(row_window(Some(&(0..130)), 130, Some(0)), 0..130);
+}
+
+#[cfg(feature = "qualification")]
+mod reply {
+    use aqua_text::document::SelectionDocumentId;
+    use artisan_api::{
+        ContentRef, CreateProject, CreateThread, EngineConfig, EngineId, Item, ItemId, ItemKind,
+        Phase, ProjectId, Status, TextContent, ThreadId,
+    };
+    use editor_aqua::conversation::adapter::{ScopedAction, row_model};
+    use editor_aqua::conversation::controller::Conversation;
+    use editor_aqua::conversation::fold::{Row, Slot};
+    use editor_aqua::conversation::presentation::{BodyKey, MarkdownOwners, PresentationScope};
+    use editor_aqua::conversation::stored::StoredConversation;
+    use editor_aqua::conversation::view::factory::{RealizedRow, RowServiceParts, RowServices};
+    use editor_aqua::core::host::ScopedSourceProvider;
+    use editor_aqua::core::{Core, ForgeClient, HostKind, Screen, hosts, runtime::runtime};
+    use editor_aqua::qualification::fixture::ForgeServer;
+    use editor_aqua::ui::markdown::stored::{LeafPreparation, StoredPreparation};
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+    use test_support::editor::rows::{row_factory_with, service_parts};
+    use test_support::editor::ui::{click, mounted, painted_texts};
+
+    struct StoredReply {
+        directory: tempfile::TempDir,
+        core: Core,
+        conversation: Conversation,
+        item: Item,
+        reference: ContentRef,
+        scope: PresentationScope,
+        provider: ScopedSourceProvider,
+        stored: Rc<RefCell<StoredConversation>>,
+        woken: mpsc::Receiver<()>,
+        deadline: Instant,
+        key: BodyKey,
+        version: u64,
+        first: usize,
+    }
+
+    impl StoredReply {
+        fn wait(&self, step: &str) {
+            let remaining = self
+                .deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| panic!("{step} within the deadline"));
+            self.woken
+                .recv_timeout(remaining)
+                .unwrap_or_else(|_| panic!("{step} wakes the conversation"));
+        }
+
+        fn realize(
+            &self,
+            actions: &Rc<RefCell<VecDeque<ScopedAction>>>,
+        ) -> aqua_ui::element::Element {
+            let model = row_model(&self.conversation, self.first, None).unwrap();
+            let row_key = model.row.key();
+            let queue = Rc::clone(actions);
+            let scoped = editor_aqua::conversation::view::scoped_dispatch(
+                &self.conversation,
+                Rc::new(move |action| queue.borrow_mut().push_back(action)),
+            )
+            .unwrap();
+            let (_, allocate) = test_support::editor::rows::source_ids(1000);
+            let factory = row_factory_with(
+                RowServices::new(
+                    &self.scope,
+                    RowServiceParts {
+                        provider: self.provider.clone(),
+                        document: SelectionDocumentId(77),
+                        stored: Rc::clone(&self.stored),
+                        ..service_parts(&self.core, &self.scope)
+                    },
+                )
+                .unwrap(),
+                vec![RealizedRow {
+                    model,
+                    disclosure: editor_aqua::conversation::disclosure::RowDisclosure::default(),
+                    held: false,
+                }],
+                self.scope.clone(),
+                Rc::new(RefCell::new(MarkdownOwners::new(SelectionDocumentId(77)))),
+                true,
+                allocate,
+                Instant::now(),
+                scoped,
+                Rc::default(),
+            );
+            factory.realize(self.first, &row_key).unwrap().element
+        }
+
+        fn publish(&mut self) {
+            self.stored
+                .borrow_mut()
+                .drain_publish(&mut self.conversation, &self.core);
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture pairing a real Forge, storing a long reply and loading its index"
+    )]
+    fn stored_reply(status: Status) -> (StoredReply, ForgeServer) {
+        let directory = tempfile::tempdir().unwrap();
+        let server = runtime()
+            .block_on(ForgeServer::start(
+                directory.path().join("forge"),
+                "127.0.0.1:0".parse().unwrap(),
+            ))
+            .unwrap();
+        let filler = "words ".repeat(16);
+        let text = (0..200)
+            .map(|index| format!("Paragraph {index:03} of a long reply, {filler}.\n\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let item = runtime().block_on(async {
+            let project = server
+                .store()
+                .create_project(CreateProject {
+                    id: ProjectId::new(),
+                    path: "/stored-paging".into(),
+                    name: None,
+                })
+                .await
+                .unwrap();
+            let thread = server
+                .store()
+                .create_thread(CreateThread {
+                    id: ThreadId::new(),
+                    project_id: project.id,
+                    config: EngineConfig::new(EngineId::Codex),
+                    title: None,
+                    parent_thread_id: None,
+                    spawned_by: None,
+                })
+                .await
+                .unwrap();
+            server
+                .store()
+                .upsert_item(forge_store::NewItem {
+                    id: ItemId::new(),
+                    thread_id: thread.id,
+                    run_id: None,
+                    parent_id: None,
+                    native_id: None,
+                    status,
+                    kind: ItemKind::AssistantMessage {
+                        text: text.clone().into(),
+                        phase: Phase::Final,
+                    },
+                })
+                .await
+                .unwrap()
+        });
+        let ItemKind::AssistantMessage {
+            text: TextContent::Stored(reference),
+            ..
+        } = &item.kind
+        else {
+            panic!("a reply over the inline limit is stored")
+        };
+        let reference = reference.clone();
+        let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+        let pairing = runtime().block_on(server.pairing_input()).unwrap();
+        let config = runtime()
+            .block_on(hosts::pair(
+                &pairing.address,
+                &pairing.code,
+                &pairing.fingerprint,
+                core.identity().unwrap(),
+                "stored-paging",
+                "Forge".to_owned(),
+                HostKind::Local,
+            ))
+            .unwrap();
+        let client = ForgeClient::new(
+            &config.address,
+            &config.fingerprint,
+            core.identity().unwrap(),
+        )
+        .unwrap();
+        test_support::editor::core::connect_client(&mut core, &config, client);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while core.pending_work() > 0 {
+            assert!(Instant::now() < deadline, "Core startup did not settle");
+            core.drain_with(|_, _| {});
+            std::thread::yield_now();
+        }
+        core.navigate(Screen::Thread {
+            host: config.id.clone(),
+            thread: item.thread_id.clone(),
+        });
+        let mut conversation = Conversation::new(&core);
+        conversation.open_thread(&mut core, config.id.clone(), item.thread_id.clone());
+        while conversation
+            .view
+            .as_ref()
+            .and_then(|view| view.item(&item.id))
+            .is_none()
+        {
+            core.drain_with(|core, event| {
+                conversation.core_event(core, &event, false);
+            });
+            conversation.drain(&mut core);
+            assert!(
+                Instant::now() < deadline,
+                "the stored reply reaches the conversation"
+            );
+            std::thread::yield_now();
+        }
+        let scope = PresentationScope::capture(&conversation, &core).unwrap();
+        let provider = core.source_provider(&scope.host, scope.instance).unwrap();
+        let stored = Rc::new(RefCell::new(StoredConversation::default()));
+        stored.borrow_mut().rebind(Some(scope.clone()));
+        let (wake, woken) = mpsc::channel();
+        stored
+            .borrow()
+            .wake_mailbox()
+            .unwrap()
+            .set_waker(Arc::new(move || {
+                wake.send(()).expect("the test keeps the wake receiver");
+            }));
+        let key = BodyKey {
+            item: item.id.clone(),
+            slot: Slot::Prose,
+        };
+        let version = conversation.body_version(&key).unwrap();
+        let mut reply = StoredReply {
+            directory,
+            core,
+            conversation,
+            item,
+            reference,
+            scope,
+            provider,
+            stored,
+            woken,
+            deadline,
+            key,
+            version,
+            first: 0,
+        };
+        reply
+            .stored
+            .borrow_mut()
+            .ensure(
+                &reply.scope,
+                &reply.provider,
+                reply.key.clone(),
+                reply.reference.clone(),
+                reply.version,
+            )
+            .unwrap();
+        while reply.stored.borrow().block_count(&reply.key).is_none() {
+            reply.publish();
+            if reply.stored.borrow().block_count(&reply.key).is_none() {
+                reply.wait("the stored index loads");
+            }
+        }
+        reply.publish();
+        let blocks = reply.stored.borrow().block_count(&reply.key).unwrap();
+        assert!(blocks > 2 * artisan_api::SOURCE_INDEX_PAGE_LEAVES as usize);
+        reply.first = reply
+            .conversation
+            .rows
+            .iter()
+            .position(|(row, _)| {
+                matches!(row, Row::Text { id, slot: Slot::Prose, block: 0, .. } if *id == reply.item.id)
+            })
+            .expect("every block of the stored reply has a row, not only the last page");
+        (reply, server)
+    }
+
+    #[test]
+    fn a_stored_page_that_fails_to_load_says_why_and_loads_on_try_again() {
+        let (mut reply, server) = stored_reply(Status::Done);
+        let address = server.address();
+        let forge = reply.directory.path().join("forge");
+        runtime().block_on(server.shutdown()).unwrap();
+        let stopped = test_support::net::ClosingListener::bind_at(address);
+        let actions: Rc<RefCell<VecDeque<ScopedAction>>> = Rc::default();
+        let retry_key = format!("retry-stored-page-{}-{}-0", reply.item.id, Slot::Prose);
+        let mut app = loop {
+            reply.publish();
+            let app = mounted(600.0, 400.0, reply.realize(&actions));
+            if painted_texts(&app)
+                .iter()
+                .any(|text| text == "Couldn't load this part of the message.")
+            {
+                break app;
+            }
+            reply.wait("the unreachable page fails");
+        };
+        drop(stopped);
+        let restarted = runtime()
+            .block_on(ForgeServer::start(forge, address))
+            .unwrap();
+        click(&mut app, &retry_key);
+        let retry = actions
+            .borrow_mut()
+            .pop_front()
+            .expect("Try again dispatches a row action");
+        assert!(retry.dispatch(
+            &mut reply.conversation,
+            &mut reply.stored.borrow_mut(),
+            &reply.core,
+            true,
+            Instant::now()
+        ));
+        let StoredPreparation::Ready(source) = reply
+            .stored
+            .borrow_mut()
+            .ensure(
+                &reply.scope,
+                &reply.provider,
+                reply.key.clone(),
+                reply.reference.clone(),
+                reply.version,
+            )
+            .unwrap()
+        else {
+            panic!("the stored index stays ready while a page fails")
+        };
+        loop {
+            reply.publish();
+            let app = mounted(600.0, 400.0, reply.realize(&actions));
+            let texts = painted_texts(&app);
+            assert!(
+                !texts.iter().any(|text| text.starts_with("Couldn't load")),
+                "Try again starts the page over instead of repeating the failure"
+            );
+            if !texts.iter().any(|text| text.starts_with("Loading")) {
+                break;
+            }
+            reply.wait("the retried page loads");
+        }
+        let LeafPreparation::Ready(leaf) = reply.stored.borrow_mut().leaf(&reply.key, &source, 0)
+        else {
+            panic!("the first block of the reply is prepared once its page loads")
+        };
+        assert!(leaf.source().starts_with("Paragraph 000"));
+        runtime().block_on(restarted.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn a_running_stored_reply_without_a_live_stream_shows_its_saved_text() {
+        let (mut reply, server) = stored_reply(Status::Running);
+        let actions: Rc<RefCell<VecDeque<ScopedAction>>> = Rc::default();
+        loop {
+            reply.publish();
+            let app = mounted(600.0, 400.0, reply.realize(&actions));
+            let texts = painted_texts(&app);
+            if texts.iter().any(|text| text.starts_with("Paragraph 000")) {
+                break;
+            }
+            assert!(
+                !texts.iter().any(|text| text.starts_with("Couldn't load")),
+                "the saved text of the running reply loads: {texts:?}"
+            );
+            reply.wait("the running reply's first page loads");
+        }
+        runtime().block_on(server.shutdown()).unwrap();
+    }
 }

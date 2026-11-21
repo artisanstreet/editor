@@ -1,0 +1,18 @@
+{
+  "name": "thread-stream",
+  "implementation": "Aqua",
+  "route": "thread:thread-stream",
+  "logical_width": 1100,
+  "logical_height": 760,
+  "width": 1100,
+  "height": 760,
+  "scale_bits": 1065353216,
+  "backend": "D3D11",
+  "adapter": "WARP",
+  "pixel_format": "rgba8-unorm",
+  "alpha": "opaque",
+  "color_profile": "gpui-windows-encoded",
+  "surface": "offscreen-client-area-no-native-chrome",
+  "repeat_identical": true,
+  "sha256": "3efb0d1fc17217881a650ea73f36c4755ee6f9710d8b5a8f384150c0ea7416a1"
+}

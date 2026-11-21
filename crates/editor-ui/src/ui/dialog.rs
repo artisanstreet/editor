@@ -40,7 +40,17 @@ pub struct Dialog {
     soft_backdrop: bool,
 }
 
+impl std::fmt::Debug for Dialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dialog").finish_non_exhaustive()
+    }
+}
+
 impl Dialog {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the dialog stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
@@ -61,31 +71,33 @@ impl Dialog {
             soft_backdrop: false,
         }
     }
+    #[must_use]
     pub const fn dismissible(mut self, value: bool) -> Self {
         self.dismissible = value;
         self
     }
+    #[must_use]
     pub const fn bare(mut self) -> Self {
         self.bare = true;
         self
     }
+    #[must_use]
     pub const fn soft_backdrop(mut self) -> Self {
         self.soft_backdrop = true;
         self
     }
+    #[must_use]
     pub const fn max_width(mut self, width: f32) -> Self {
         self.max_width = width;
         self.viewport_width = None;
         self
     }
+    #[must_use]
     pub const fn viewport_max_width(mut self, inset: f32, maximum: f32) -> Self {
         self.viewport_width = Some((inset, maximum));
         self
     }
-    pub fn description(mut self, text: impl Into<String>) -> Self {
-        self.description = Some(text.into());
-        self
-    }
+    #[must_use]
     pub fn on_dismiss(mut self, handler: impl Fn(DialogDismissReason) + 'static) -> Self {
         self.dismiss = Some(Rc::new(handler));
         self
@@ -96,7 +108,8 @@ impl Dialog {
         let title = TextRole::Heading
             .text(&theme, self.title.clone())
             .style(Style::new().min_width(Length::Px(0.0)).flex_grow(1.0))
-            .build();
+            .build()
+            .role(Role::Heading(1));
         let mut close = IconButton::new(
             "dialog-close",
             theme,
@@ -140,9 +153,10 @@ impl Dialog {
             frame = frame.child(page::note(&theme, description).build());
         }
         let frame = frame.child(self.content).build();
-        let panel = match self.bare {
-            true => frame,
-            false => SURFACE.build(&theme, vec![frame]),
+        let panel = if self.bare {
+            frame
+        } else {
+            SURFACE.build(&theme, vec![frame])
         };
         Scroll::new()
             .width(width)
@@ -158,18 +172,15 @@ impl Dialog {
             .role(Role::Dialog)
             .aria_label(self.title)
     }
+}
 
-    pub fn dismiss_callback(&self) -> Option<Rc<dyn Fn(DialogDismissReason)>> {
-        if self.dismissible {
-            self.dismiss.clone()
-        } else {
-            None
-        }
-    }
-
-    pub const fn is_soft_backdrop(&self) -> bool {
-        self.soft_backdrop
-    }
+#[must_use]
+pub fn popup_options() -> aqua_ui::popup::PopupOptions {
+    let mut options = aqua_ui::popup::PopupOptions::dialog();
+    options.kind = aqua_ui::overlay::OverlayKind::Popover;
+    options.placement.margin = 0.0;
+    options.focus = aqua_ui::popup::PopupFocus::Root;
+    options
 }
 
 pub struct DialogHost {
@@ -180,6 +191,12 @@ pub struct DialogHost {
     rebuild: DialogRebuild,
 }
 
+impl std::fmt::Debug for DialogHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialogHost").finish_non_exhaustive()
+    }
+}
+
 type DialogRebuild = Rc<dyn Fn(Element, Size) -> Element>;
 
 impl DialogHost {
@@ -188,10 +205,7 @@ impl DialogHost {
         owner: aqua_core::NodeId,
         mut dialog: Dialog,
     ) -> Result<Self, String> {
-        use aqua_ui::{
-            overlay::{CloseReason, DismissPolicy},
-            popup::{PopupFocus, PopupOptions},
-        };
+        use aqua_ui::overlay::{CloseReason, DismissPolicy};
         let viewport = app.viewport();
         let theme = Rc::new(std::cell::Cell::new(dialog.theme));
         let bare = dialog.bare;
@@ -205,10 +219,10 @@ impl DialogHost {
         let description = dialog.description.clone();
         let max_width = dialog.max_width;
         let viewport_width = dialog.viewport_width;
-        let render_pending = pending.clone();
+        let render_pending = Rc::clone(&pending);
         let render_theme = Rc::clone(&theme);
         let rebuild: DialogRebuild = Rc::new(move |content, viewport| {
-            let queue = render_pending.clone();
+            let queue = Rc::clone(&render_pending);
             let dialog = Dialog {
                 id: id.clone(),
                 theme: render_theme.get(),
@@ -222,13 +236,11 @@ impl DialogHost {
                 bare,
                 soft_backdrop: soft,
             };
-            dialog_root(dialog, viewport, render_pending.clone())
+            dialog_root(dialog, viewport, Rc::clone(&render_pending))
         });
         let root = rebuild(dialog.content, viewport);
-        let reason = closing.clone();
-        let mut options = PopupOptions::dialog();
-        options.placement.margin = 0.0;
-        options.focus = PopupFocus::Root;
+        let reason = Rc::clone(&closing);
+        let mut options = popup_options();
         options.dismiss = if dismissible {
             DismissPolicy::ESCAPE_ONLY
         } else {
@@ -238,7 +250,9 @@ impl DialogHost {
             let resolved = match closed {
                 CloseReason::Escape => Some(DialogDismissReason::Escape),
                 CloseReason::Requested => reason.take(),
-                _ => None,
+                CloseReason::OutsidePress
+                | CloseReason::AncestorClosed
+                | CloseReason::OwnerRemoved => None,
             };
             if let (Some(reason), Some(callback)) = (resolved, &callback) {
                 callback(reason);
@@ -256,6 +270,10 @@ impl DialogHost {
         })
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the dialog host's theme cell stores this copy for its next rebuild"
+    )]
     pub fn set_theme(&self, theme: ArtisanTheme) {
         self.theme.set(theme);
     }
@@ -279,12 +297,6 @@ impl DialogHost {
                 self.closing.set(None);
             }
         }
-    }
-
-    pub fn handle_input(&self, app: &mut aqua::UiApp, event: &aqua_core::InputEvent) -> bool {
-        let handled = app.handle_input(event);
-        self.sync(app);
-        handled
     }
 
     pub fn is_open(&self, app: &aqua::UiApp) -> bool {
@@ -345,7 +357,7 @@ fn dialog_root(
             })
             .build();
         let backdrop = if dismissible {
-            backdrop_events(backdrop, pending.clone())
+            backdrop_events(backdrop, Rc::clone(&pending))
         } else {
             backdrop
         };
@@ -353,7 +365,7 @@ fn dialog_root(
     }
     let mut root = root.child(panel).build();
     if dismissible {
-        root = backdrop_events(root, pending.clone());
+        root = backdrop_events(root, pending);
     }
     root
 }
@@ -365,7 +377,7 @@ fn backdrop_events(
     use aqua_core::{InputEvent, PointerButton};
     use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
     let pressed = Rc::new(std::cell::Cell::new(false));
-    let down = pressed.clone();
+    let down = Rc::clone(&pressed);
     element
         .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
             if event.target == event.current_target

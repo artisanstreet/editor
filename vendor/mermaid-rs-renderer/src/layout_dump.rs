@@ -1,3 +1,4 @@
+use crate::error::WriteLayoutDumpError;
 use crate::ir::Graph;
 use crate::layout::Layout;
 use serde::Serialize;
@@ -150,10 +151,19 @@ impl LayoutDump {
     }
 }
 
-pub fn write_layout_dump(path: &Path, layout: &Layout, graph: &Graph) -> anyhow::Result<()> {
-    let file = File::create(path)?;
+pub fn write_layout_dump(
+    path: &Path,
+    layout: &Layout,
+    graph: &Graph,
+) -> Result<(), WriteLayoutDumpError> {
+    let file = File::create(path).map_err(|source| WriteLayoutDumpError::Create {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let writer = BufWriter::new(file);
     let dump = LayoutDump::from_layout(layout, graph);
-    serde_json::to_writer_pretty(writer, &dump)?;
-    Ok(())
+    serde_json::to_writer_pretty(writer, &dump).map_err(|source| WriteLayoutDumpError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
 }

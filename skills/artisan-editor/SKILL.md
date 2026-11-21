@@ -154,15 +154,11 @@ page take `navigate_user`; set it only when the user asks to be taken there.
   the tool says so; don't retry it.
 - Host, Editor-setting and `open_*` tools need the user's Editor open; if
   none answers, say so rather than retrying.
-- An HTTP MCP server that fails with HTTP 401 needs a sign-in:
-  `sign_in_mcp_server` returns the link to give the user, and Artisan keeps
-  the token for every harness. Don't send the user to settings for it.
-- Tools that change something take `navigate_user`; set it only when the
-  user asked to be taken to the page. Otherwise their screen stays put.
-- An HTTP MCP server that needs signing in shows `needs sign-in` in
-  `list_mcp_servers`. `sign_in_mcp_server` starts the sign-in and returns the
-  link to give the user; with `navigate_user` it also opens the browser and
-  the server's card. Never send the user looking for it in settings.
+- An HTTP MCP server that needs signing in fails with HTTP 401 and shows
+  `needs sign-in` in `list_mcp_servers`. `sign_in_mcp_server` starts the
+  sign-in and returns the link to give the user; with `navigate_user` it also
+  opens the browser and the server's card. Artisan keeps the token for every
+  harness. Never send the user looking for it in settings.
 - Pairing a remote host needs the address, code and fingerprint that
   `ae pair` shows on that machine; ask the user for them.
 - Only the user answers approvals and questions; `list_requests` only shows

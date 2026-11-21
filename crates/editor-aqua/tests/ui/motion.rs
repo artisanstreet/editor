@@ -27,9 +27,12 @@ fn working_pulse_keeps_mount_clock_and_reduced_motion_removes_scope() {
     let first = scene(&mut app);
     let start = first
         .iter()
-        .find_map(|item| match item {
-            DisplayItem::PushGpuiQuadPulse(pulse) => Some(pulse.start_ms),
-            _ => None,
+        .find_map(|item| {
+            if let DisplayItem::PushGpuiQuadPulse(pulse) = item {
+                Some(pulse.start_ms)
+            } else {
+                None
+            }
         })
         .unwrap();
     let end = first

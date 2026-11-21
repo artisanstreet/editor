@@ -57,6 +57,10 @@ pub(crate) fn navigation(content: Element, ring: GpuiHsla) -> Element {
     content.focus_visible_style(Style::new().gpui_border(Insets::uniform(1.0), ring, false))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one concentration frame laying out the plot, both axes and their labels"
+)]
 pub(crate) fn concentration_frame(
     theme: &ArtisanTheme,
     plot: Element,
@@ -85,7 +89,7 @@ pub(crate) fn concentration_frame(
                     Style::new()
                         .absolute_at(
                             Some(0.0),
-                            Some(super::scale::f32_of_count(step) * 60.0 - 8.0),
+                            Some(super::scale::f32_of_count(step).mul_add(60.0, -8.0)),
                             Some(8.0),
                             None,
                         )
@@ -250,12 +254,17 @@ pub(crate) fn plot_label_positioned(
     let mut row = ui::Box::new()
         .layout("row")
         .width(Length::Pct(100.0))
-        .style(Style::new().absolute_at(
-            Some(0.0),
-            Some(y.clamp(0.0, 1.0) * 240.0 + if below { 3.0 } else { -18.0 }),
-            None,
-            None,
-        ));
+        .style(
+            Style::new().absolute_at(
+                Some(0.0),
+                Some(
+                    y.clamp(0.0, 1.0)
+                        .mul_add(240.0, if below { 3.0 } else { -18.0 }),
+                ),
+                None,
+                None,
+            ),
+        );
     if x > 0.7 {
         row = row.child(
             ui::Box::new()
@@ -326,6 +335,10 @@ pub(crate) fn readout_rows(
     readout_rows_at(theme, x, heading, rows, false)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one readout layout placing every row's swatch, label and value"
+)]
 pub(crate) fn readout_rows_at(
     theme: &ArtisanTheme,
     x: f32,
@@ -408,7 +421,7 @@ pub(crate) fn readout_rows_at(
                 Some(0.0),
                 if low { None } else { Some(6.0) },
                 Some(0.0),
-                if low { Some(6.0) } else { None },
+                low.then_some(6.0),
             )
             .width(Length::Pct(100.0)),
     );
@@ -446,7 +459,7 @@ pub(crate) fn readout_rows_at(
                     .build(),
             );
     }
-    wrapper.build()
+    wrapper.build().exclude_from_hit_testing()
 }
 
 pub(crate) fn tick_strip(theme: &ArtisanTheme, ticks: Vec<super::distribution::Tick>) -> Element {
@@ -495,6 +508,10 @@ pub(crate) fn numeric_frame(
     numeric_frame_with_labels(theme, plot, frame, Vec::new())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one numeric frame laying out both axes, ticks, labels and the plot area"
+)]
 pub(crate) fn numeric_frame_with_labels(
     theme: &ArtisanTheme,
     plot: Element,
@@ -513,7 +530,12 @@ pub(crate) fn numeric_frame_with_labels(
                 .height(16.0)
                 .style(
                     Style::new()
-                        .absolute_at(Some(8.0), Some(y * frame.height - 8.0), Some(0.0), None)
+                        .absolute_at(
+                            Some(8.0),
+                            Some(y.mul_add(frame.height, -8.0)),
+                            Some(0.0),
+                            None,
+                        )
                         .clip(true),
                 )
                 .child(
@@ -538,7 +560,7 @@ pub(crate) fn numeric_frame_with_labels(
                     Style::new()
                         .absolute_at(
                             Some(0.0),
-                            Some(tick.at * frame.height - 8.0),
+                            Some(tick.at.mul_add(frame.height, -8.0)),
                             Some(8.0),
                             None,
                         )

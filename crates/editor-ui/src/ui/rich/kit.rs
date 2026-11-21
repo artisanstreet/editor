@@ -60,33 +60,47 @@ pub(crate) fn diverging_color(
 }
 
 pub(crate) fn format_number(value: f64) -> String {
+    crate::ui::locale::with_system(|formats| compact_number(formats, value))
+}
+
+const SUFFIXES: [&str; 4] = ["", "k", "M", "B"];
+
+pub(super) fn compact_number(formats: &crate::ui::locale::Formats, value: f64) -> String {
     if !value.is_finite() {
         return "–".to_owned();
     }
     let magnitude = value.abs();
-    let (scaled, suffix) = if magnitude >= 1e9 {
-        (value / 1e9, "B")
-    } else if magnitude >= 1e6 {
-        (value / 1e6, "M")
-    } else if magnitude >= 1e4 {
-        (value / 1e3, "k")
-    } else {
-        (value, "")
+    let mut index = match magnitude {
+        magnitude if magnitude >= 1e9 => 3,
+        magnitude if magnitude >= 1e6 => 2,
+        magnitude if magnitude >= 1e4 => 1,
+        _ => 0,
     };
-    let decimals = if scaled.abs() >= 100.0 || scaled.fract() == 0.0 {
-        0
-    } else if scaled.abs() >= 10.0 {
-        1
-    } else {
-        2
-    };
-    let text = format!("{scaled:.decimals$}");
-    let text = if text.contains('.') {
-        text.trim_end_matches('0').trim_end_matches('.').to_owned()
-    } else {
-        text
-    };
-    format!("{text}{suffix}")
+    let mut scaled = value / 1e3_f64.powi(i32::try_from(index).expect("invariant: four suffixes"));
+    loop {
+        let decimals = significant_decimals(scaled);
+        let carry = if index == 0 { 1e4 } else { 1e3 };
+        if index + 1 < SUFFIXES.len() && rounded(scaled, decimals).abs() >= carry {
+            index += 1;
+            scaled /= 1e3;
+            continue;
+        }
+        return format!("{}{}", formats.trimmed(scaled, decimals), SUFFIXES[index]);
+    }
+}
+
+fn significant_decimals(scaled: f64) -> usize {
+    match scaled.abs() {
+        magnitude if magnitude >= 100.0 => 0,
+        magnitude if magnitude >= 10.0 => 1,
+        _ => 2,
+    }
+}
+
+fn rounded(value: f64, decimals: usize) -> f64 {
+    format!("{value:.decimals$}")
+        .parse()
+        .expect("invariant: a finite f64 printed with fixed decimals parses back")
 }
 
 pub(crate) fn with_unit(value: &str, unit: Option<&str>) -> String {
@@ -100,46 +114,62 @@ pub(crate) fn with_unit(value: &str, unit: Option<&str>) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodeRef {
     pub(crate) path: String,
-    pub(crate) start: Option<u32>,
-    pub(crate) end: Option<u32>,
+    pub(crate) lines: Option<LineSpan>,
+}
+
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum CodeRefError {
+    #[error("a code reference needs a file path before its line numbers")]
+    EmptyPath,
+    #[error("code reference lines start at 1")]
+    LineZero,
 }
 
 impl CodeRef {
-    pub(crate) fn parse(text: &str) -> Self {
+    fn parse(text: &str) -> Result<Self, CodeRefError> {
         let text = text.trim();
-        let parsed = text.rsplit_once(':').and_then(|(path, lines)| {
-            let (start, end) = match lines.split_once('-') {
-                Some((start, end)) => (start.parse().ok()?, Some(end.parse().ok()?)),
-                None => (lines.parse().ok()?, None),
+        let numbered = text.rsplit_once(':').and_then(|(path, lines)| {
+            let (start, end): (u32, u32) = if let Some((start, end)) = lines.split_once('-') {
+                (start.parse().ok()?, end.parse().ok()?)
+            } else {
+                let line = lines.parse().ok()?;
+                (line, line)
             };
             Some((path, start, end))
         });
-        match parsed {
-            Some((path, start, end)) => Self {
-                path: String::from(path.to_owned()),
-                start: Some(start),
-                end,
-            },
-            None => Self {
-                path: String::from(text.to_owned()),
-                start: None,
-                end: None,
-            },
+        let (path, lines) = match numbered {
+            Some((_, 0, _) | (_, _, 0)) => return Err(CodeRefError::LineZero),
+            Some((path, start, end)) => (
+                path,
+                Some(LineSpan {
+                    start: start.min(end),
+                    end: start.max(end),
+                }),
+            ),
+            None => (text, None),
+        };
+        match path.trim() {
+            "" => Err(CodeRefError::EmptyPath),
+            _ => Ok(Self {
+                path: path.to_owned(),
+                lines,
+            }),
         }
     }
 
     pub(crate) fn display(&self) -> String {
-        match (self.start, self.end) {
-            (Some(start), Some(end)) => format!("{}:{start}-{end}", self.path),
-            (Some(start), None) => format!("{}:{start}", self.path),
-            _ => self.path.to_string(),
+        match self.lines {
+            Some(LineSpan { start, end }) if start == end => format!("{}:{start}", self.path),
+            Some(LineSpan { start, end }) => format!("{}:{start}-{end}", self.path),
+            None => self.path.clone(),
         }
     }
 }
 
 impl<'de> Deserialize<'de> for CodeRef {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(|text| Self::parse(&text))
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
     }
 }
 
@@ -152,6 +182,13 @@ pub(crate) struct LineSpan {
 impl LineSpan {
     pub(crate) fn contains(self, line: u32) -> bool {
         (self.start..=self.end).contains(&line)
+    }
+
+    pub(crate) fn offset(self, by: u32) -> Option<Self> {
+        Some(Self {
+            start: self.start.checked_add(by)?,
+            end: self.end.checked_add(by)?,
+        })
     }
 }
 
@@ -193,7 +230,7 @@ impl<'de> Deserialize<'de> for LineSpan {
     }
 }
 pub(crate) fn retained_vec<T>(values: &Vec<T>) -> usize {
-    values.capacity() * std::mem::size_of::<T>()
+    values.capacity() * size_of::<T>()
 }
 
 pub(crate) fn retained_strings(values: &Vec<String>) -> usize {
@@ -203,3 +240,7 @@ pub(crate) fn retained_strings(values: &Vec<String>) -> usize {
 pub(crate) fn retained_optional(value: Option<&String>) -> usize {
     value.map_or(0, String::capacity)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/ui/rich/kit.rs"]
+mod tests;

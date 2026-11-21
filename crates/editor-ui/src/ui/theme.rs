@@ -16,10 +16,10 @@ pub struct SrgbComponents {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Oklch {
-    pub(crate) l: f32,
-    pub(crate) c: f32,
-    pub(crate) h: f32,
-    pub(crate) a: f32,
+    l: f32,
+    c: f32,
+    h: f32,
+    a: f32,
     paint: Option<([f32; 4], palette::Hsla)>,
 }
 
@@ -116,6 +116,10 @@ pub enum Opacity {
 
 impl Opacity {
     #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "each opacity token is its own design value; tokens that share a value today stay separate"
+    )]
     pub const fn alpha(self) -> f32 {
         match self {
             Self::Disabled => 0.5,
@@ -206,7 +210,7 @@ impl Opacity {
 
 impl Oklch {
     #[must_use]
-    pub const fn new(l: f32, c: f32, h: f32) -> Self {
+    pub(crate) const fn new(l: f32, c: f32, h: f32) -> Self {
         Self {
             l,
             c,
@@ -230,15 +234,6 @@ impl Oklch {
         self.with_alpha(self.a * purpose.alpha())
     }
     #[must_use]
-    pub const fn in_hue_of(self, family: Self) -> Self {
-        Self {
-            c: family.c,
-            h: family.h,
-            paint: None,
-            ..self
-        }
-    }
-    #[must_use]
     pub fn fade(self, amount: f32) -> Self {
         self.with_alpha(self.a * amount.clamp(0.0, 1.0))
     }
@@ -260,10 +255,6 @@ impl Oklch {
             (from + delta * t).rem_euclid(360.0),
         )
         .with_alpha((to.a - self.a).mul_add(t, self.a))
-    }
-    #[must_use]
-    pub const fn alpha(self) -> f32 {
-        self.a
     }
     #[must_use]
     pub fn to_srgb(self) -> SrgbComponents {
@@ -304,7 +295,7 @@ impl Oklch {
         clippy::float_cmp,
         reason = "cache validity requires the exact source components"
     )]
-    pub fn to_palette_paint(self) -> palette::Hsla {
+    fn to_palette_paint(self) -> palette::Hsla {
         use palette::IntoColor;
         match self.paint {
             Some((source, paint)) if source == [self.l, self.c, self.h, self.a] => paint,
@@ -327,6 +318,20 @@ impl Oklch {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum Contrast {
+    #[default]
+    Standard,
+    High,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum Motion {
+    #[default]
+    Full,
+    Reduced,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ThemeMode {
     Light,
     #[default]
@@ -334,13 +339,6 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    #[must_use]
-    pub const fn toggled(self) -> Self {
-        match self {
-            Self::Light => Self::Dark,
-            Self::Dark => Self::Light,
-        }
-    }
     #[must_use]
     pub const fn is_dark(self) -> bool {
         matches!(self, Self::Dark)
@@ -372,18 +370,19 @@ pub struct BannerColors {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SyntaxColors {
-    pub comment: Oklch,
-    pub string: Oklch,
-    pub number: Oklch,
-    pub keyword: Oklch,
-    pub r#type: Oklch,
-    pub function: Oklch,
+    pub(crate) comment: Oklch,
+    pub(crate) string: Oklch,
+    pub(crate) number: Oklch,
+    pub(crate) keyword: Oklch,
+    pub(crate) r#type: Oklch,
+    pub(crate) function: Oklch,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnsiColors(pub [Oklch; 16]);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorTokens {
     pub mode: ThemeMode,
+    pub contrast: Contrast,
     pub gray: Scale,
     pub accent: Scale,
     pub accent_contrast: Oklch,
@@ -442,87 +441,89 @@ pub struct ColorTokens {
 mod polar {
     type Lch = (f32, f32, f32);
 
-    pub const WHITE: Lch = (1.0, 0.0, 0.0);
-    pub const BLACK: Lch = (0.0, 0.0, 0.0);
-    pub const PANEL: Lch = (0.988, 0.004, 264.0);
-    pub const GRAY_50: Lch = (0.985, 0.002, 247.839);
-    pub const GRAY_100: Lch = (0.967, 0.003, 264.542);
-    pub const GRAY_200: Lch = (0.928, 0.006, 264.531);
-    pub const GRAY_300: Lch = (0.872, 0.01, 258.338);
-    pub const GRAY_400: Lch = (0.707, 0.022, 261.325);
-    pub const GRAY_500: Lch = (0.551, 0.027, 264.364);
-    pub const GRAY_600: Lch = (0.446, 0.03, 256.802);
-    pub const GRAY_900: Lch = (0.21, 0.034, 264.665);
+    pub(super) const WHITE: Lch = (1.0, 0.0, 0.0);
+    pub(super) const BLACK: Lch = (0.0, 0.0, 0.0);
+    pub(super) const PANEL: Lch = (0.988, 0.004, 264.0);
+    pub(super) const GRAY_50: Lch = (0.985, 0.002, 247.839);
+    pub(super) const GRAY_100: Lch = (0.967, 0.003, 264.542);
+    pub(super) const GRAY_200: Lch = (0.928, 0.006, 264.531);
+    pub(super) const GRAY_300: Lch = (0.872, 0.01, 258.338);
+    pub(super) const GRAY_400: Lch = (0.707, 0.022, 261.325);
+    pub(super) const GRAY_500: Lch = (0.551, 0.027, 264.364);
+    pub(super) const SLATE_MUTED: Lch = (0.47, 0.03, 260.0);
+    pub(super) const SLATE_FAINT: Lch = (0.53, 0.027, 264.364);
+    pub(super) const GRAY_600: Lch = (0.446, 0.03, 256.802);
+    pub(super) const GRAY_900: Lch = (0.21, 0.034, 264.665);
 
-    pub const fn under_panel((l, c, h): Lch) -> Lch {
+    pub(super) const fn under_panel((l, c, h): Lch) -> Lch {
         (l - (WHITE.0 - PANEL.0), c, h)
     }
 
-    pub const POLAR_50: Lch = (0.8845, 0.0, 0.0);
-    pub const POLAR_100: Lch = (0.8373, 0.0, 0.0);
-    pub const POLAR_300: Lch = (0.7090, 0.0, 0.0);
-    pub const POLAR_400: Lch = (0.6154, 0.0, 0.0);
-    pub const POLAR_500: Lch = (0.5634, 0.0, 0.0);
-    pub const POLAR_600: Lch = (0.2801, 0.0, 0.0);
-    pub const POLAR_700: Lch = (0.2484, 0.0, 0.0);
-    pub const POLAR_800: Lch = (0.2100, 0.0, 0.0);
-    pub const POLAR_900: Lch = (0.1757, 0.0, 0.0);
-    pub const POLAR_950: Lch = (0.1394, 0.0, 0.0);
-    pub const GLASS_INK_DIM: Lch = (0.82, 0.012, 80.0);
-    pub const EMERALD_50: Lch = (0.979, 0.021, 166.113);
-    pub const EMERALD_300: Lch = (0.845, 0.143, 164.978);
-    pub const EMERALD_400: Lch = (0.765, 0.177, 163.223);
-    pub const EMERALD_500: Lch = (0.696, 0.17, 162.48);
-    pub const EMERALD_600: Lch = (0.596, 0.145, 163.225);
-    pub const EMERALD_700: Lch = (0.508, 0.118, 165.612);
-    pub const EMERALD_950: Lch = (0.262, 0.051, 172.552);
-    pub const RED_50: Lch = (0.971, 0.013, 17.38);
-    pub const RED_300: Lch = (0.808, 0.114, 19.571);
-    pub const RED_400: Lch = (0.704, 0.191, 22.216);
-    pub const RED_500: Lch = (0.637, 0.237, 25.331);
-    pub const RED_600: Lch = (0.577, 0.245, 27.325);
-    pub const RED_700: Lch = (0.505, 0.213, 27.518);
-    pub const RED_950: Lch = (0.258, 0.092, 26.042);
-    pub const PINK_400: Lch = (0.718, 0.202, 349.761);
-    pub const PINK_600: Lch = (0.592, 0.249, 0.584);
-    pub const AMBER_50: Lch = (0.987, 0.022, 95.277);
-    pub const AMBER_300: Lch = (0.879, 0.169, 91.605);
-    pub const AMBER_400: Lch = (0.828, 0.189, 84.429);
-    pub const AMBER_500: Lch = (0.769, 0.188, 70.08);
-    pub const AMBER_600: Lch = (0.666, 0.179, 58.318);
-    pub const AMBER_700: Lch = (0.555, 0.163, 48.998);
-    pub const AMBER_950: Lch = (0.279, 0.077, 45.635);
-    pub const INDIGO_50: Lch = (0.962, 0.018, 272.314);
-    pub const INDIGO_100: Lch = (0.93, 0.034, 272.788);
-    pub const INDIGO_200: Lch = (0.87, 0.065, 274.039);
-    pub const INDIGO_300: Lch = (0.785, 0.115, 274.713);
-    pub const INDIGO_400: Lch = (0.673, 0.182, 276.935);
-    pub const INDIGO_500: Lch = (0.585, 0.233, 277.117);
-    pub const INDIGO_600: Lch = (0.511, 0.262, 276.966);
-    pub const INDIGO_700: Lch = (0.457, 0.24, 277.023);
-    pub const INDIGO_800: Lch = (0.398, 0.195, 277.366);
-    pub const INDIGO_900: Lch = (0.359, 0.144, 278.697);
-    pub const INDIGO_950: Lch = (0.257, 0.09, 281.288);
-    pub const BLUE_100: Lch = (0.932, 0.032, 255.585);
-    pub const BLUE_200: Lch = (0.882, 0.059, 254.128);
-    pub const BLUE_300: Lch = (0.809, 0.105, 251.813);
-    pub const BLUE_400: Lch = (0.707, 0.165, 254.624);
-    pub const SKY_400: Lch = (0.676, 0.075, 250.22);
-    pub const SKY_700: Lch = (0.497, 0.106, 256.73);
-    pub const BLUE_500: Lch = (0.623, 0.214, 259.815);
-    pub const BLUE_600: Lch = (0.546, 0.245, 262.881);
-    pub const BLUE_700: Lch = (0.488, 0.243, 264.376);
-    pub const BLUE_900: Lch = (0.379, 0.146, 265.522);
-    pub const PURPLE_300: Lch = (0.827, 0.119, 306.383);
-    pub const PURPLE_400: Lch = (0.714, 0.203, 305.504);
-    pub const PURPLE_600: Lch = (0.558, 0.288, 302.321);
-    pub const PURPLE_700: Lch = (0.496, 0.265, 301.924);
-    pub const CYAN_300: Lch = (0.865, 0.127, 207.078);
-    pub const CYAN_400: Lch = (0.789, 0.154, 211.53);
-    pub const CYAN_600: Lch = (0.609, 0.126, 221.723);
-    pub const CYAN_700: Lch = (0.52, 0.105, 223.128);
-    pub const CLAUDE_CLAY: Lch = (0.6724, 0.1308, 38.76);
-    pub const CHART: [Lch; 8] = [
+    pub(super) const POLAR_50: Lch = (0.8845, 0.0, 0.0);
+    pub(super) const POLAR_100: Lch = (0.8373, 0.0, 0.0);
+    pub(super) const POLAR_300: Lch = (0.7090, 0.0, 0.0);
+    pub(super) const POLAR_400: Lch = (0.6154, 0.0, 0.0);
+    pub(super) const POLAR_500: Lch = (0.5634, 0.0, 0.0);
+    pub(super) const POLAR_600: Lch = (0.2801, 0.0, 0.0);
+    pub(super) const POLAR_700: Lch = (0.2484, 0.0, 0.0);
+    pub(super) const POLAR_800: Lch = (0.2100, 0.0, 0.0);
+    pub(super) const POLAR_900: Lch = (0.1757, 0.0, 0.0);
+    pub(super) const POLAR_950: Lch = (0.1394, 0.0, 0.0);
+    pub(super) const GLASS_INK_DIM: Lch = (0.82, 0.012, 80.0);
+    pub(super) const EMERALD_50: Lch = (0.979, 0.021, 166.113);
+    pub(super) const EMERALD_300: Lch = (0.845, 0.143, 164.978);
+    pub(super) const EMERALD_400: Lch = (0.765, 0.177, 163.223);
+    pub(super) const EMERALD_500: Lch = (0.696, 0.17, 162.48);
+    pub(super) const EMERALD_600: Lch = (0.596, 0.145, 163.225);
+    pub(super) const EMERALD_700: Lch = (0.508, 0.118, 165.612);
+    pub(super) const EMERALD_950: Lch = (0.262, 0.051, 172.552);
+    pub(super) const RED_50: Lch = (0.971, 0.013, 17.38);
+    pub(super) const RED_300: Lch = (0.808, 0.114, 19.571);
+    pub(super) const RED_400: Lch = (0.704, 0.191, 22.216);
+    pub(super) const RED_500: Lch = (0.637, 0.237, 25.331);
+    pub(super) const RED_600: Lch = (0.577, 0.245, 27.325);
+    pub(super) const RED_700: Lch = (0.505, 0.213, 27.518);
+    pub(super) const RED_950: Lch = (0.258, 0.092, 26.042);
+    pub(super) const PINK_400: Lch = (0.718, 0.202, 349.761);
+    pub(super) const PINK_600: Lch = (0.592, 0.249, 0.584);
+    pub(super) const AMBER_50: Lch = (0.987, 0.022, 95.277);
+    pub(super) const AMBER_300: Lch = (0.879, 0.169, 91.605);
+    pub(super) const AMBER_400: Lch = (0.828, 0.189, 84.429);
+    pub(super) const AMBER_500: Lch = (0.769, 0.188, 70.08);
+    pub(super) const AMBER_600: Lch = (0.666, 0.179, 58.318);
+    pub(super) const AMBER_700: Lch = (0.555, 0.163, 48.998);
+    pub(super) const AMBER_950: Lch = (0.279, 0.077, 45.635);
+    pub(super) const INDIGO_50: Lch = (0.962, 0.018, 272.314);
+    pub(super) const INDIGO_100: Lch = (0.93, 0.034, 272.788);
+    pub(super) const INDIGO_200: Lch = (0.87, 0.065, 274.039);
+    pub(super) const INDIGO_300: Lch = (0.785, 0.115, 274.713);
+    pub(super) const INDIGO_400: Lch = (0.673, 0.182, 276.935);
+    pub(super) const INDIGO_500: Lch = (0.585, 0.233, 277.117);
+    pub(super) const INDIGO_600: Lch = (0.511, 0.262, 276.966);
+    pub(super) const INDIGO_700: Lch = (0.457, 0.24, 277.023);
+    pub(super) const INDIGO_800: Lch = (0.398, 0.195, 277.366);
+    pub(super) const INDIGO_900: Lch = (0.359, 0.144, 278.697);
+    pub(super) const INDIGO_950: Lch = (0.257, 0.09, 281.288);
+    pub(super) const BLUE_100: Lch = (0.932, 0.032, 255.585);
+    pub(super) const BLUE_200: Lch = (0.882, 0.059, 254.128);
+    pub(super) const BLUE_300: Lch = (0.809, 0.105, 251.813);
+    pub(super) const BLUE_400: Lch = (0.707, 0.165, 254.624);
+    pub(super) const SKY_400: Lch = (0.676, 0.075, 250.22);
+    pub(super) const SKY_700: Lch = (0.497, 0.106, 256.73);
+    pub(super) const BLUE_500: Lch = (0.623, 0.214, 259.815);
+    pub(super) const BLUE_600: Lch = (0.546, 0.245, 262.881);
+    pub(super) const BLUE_700: Lch = (0.488, 0.243, 264.376);
+    pub(super) const BLUE_900: Lch = (0.379, 0.146, 265.522);
+    pub(super) const PURPLE_300: Lch = (0.827, 0.119, 306.383);
+    pub(super) const PURPLE_400: Lch = (0.714, 0.203, 305.504);
+    pub(super) const PURPLE_600: Lch = (0.558, 0.288, 302.321);
+    pub(super) const PURPLE_700: Lch = (0.496, 0.265, 301.924);
+    pub(super) const CYAN_300: Lch = (0.865, 0.127, 207.078);
+    pub(super) const CYAN_400: Lch = (0.789, 0.154, 211.53);
+    pub(super) const CYAN_600: Lch = (0.609, 0.126, 221.723);
+    pub(super) const CYAN_700: Lch = (0.52, 0.105, 223.128);
+    pub(super) const CLAUDE_CLAY: Lch = (0.6724, 0.1308, 38.76);
+    pub(super) const CHART: [Lch; 8] = [
         (0.7019, 0.1540, 32.23),
         (0.7979, 0.1127, 59.06),
         (0.8418, 0.0902, 72.08),
@@ -562,7 +563,49 @@ fn token(lch: (f32, f32, f32)) -> Oklch {
 }
 
 impl ColorTokens {
-    fn build(mode: ThemeMode) -> Self {
+    fn build(mode: ThemeMode, contrast: Contrast) -> Self {
+        let standard = Self::standard(mode);
+        match contrast {
+            Contrast::Standard => standard,
+            Contrast::High => standard.high_contrast(),
+        }
+    }
+
+    fn high_contrast(self) -> Self {
+        use polar::{
+            AMBER_300, BLUE_300, BLUE_700, BLUE_900, GRAY_200, GRAY_600, POLAR_300, POLAR_600,
+        };
+        let dark = self.mode.is_dark();
+        let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
+            token(if dark { dark_value } else { light })
+        };
+        Self {
+            contrast: Contrast::High,
+            link: pick(BLUE_900, BLUE_300),
+            selected: pick(GRAY_200, POLAR_600),
+            line: pick(GRAY_600, POLAR_300),
+            line_strong: self.text,
+            text_muted: self.text,
+            text_muted_glass: self.text,
+            text_faint: self.text,
+            ring: pick(BLUE_700, AMBER_300),
+            unread: pick(BLUE_900, BLUE_300),
+            thread_title_active: pick(BLUE_900, BLUE_300),
+            mention_skill: pick(BLUE_900, BLUE_300),
+            mention_connector: self.text,
+            syntax: SyntaxColors {
+                comment: self.text,
+                ..self.syntax
+            },
+            ..self
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one constructor assigning every palette token for the mode in display order"
+    )]
+    fn standard(mode: ThemeMode) -> Self {
         use polar::{
             AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950, BLACK,
             BLUE_100, BLUE_200, BLUE_300, BLUE_400, BLUE_500, BLUE_600, BLUE_700, BLUE_900, CHART,
@@ -573,7 +616,8 @@ impl ColorTokens {
             INDIGO_700, INDIGO_800, INDIGO_900, INDIGO_950, PANEL, PINK_400, PINK_600, POLAR_50,
             POLAR_100, POLAR_300, POLAR_400, POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900,
             POLAR_950, PURPLE_300, PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400,
-            RED_500, RED_600, RED_700, RED_950, SKY_400, SKY_700, WHITE, under_panel,
+            RED_500, RED_600, RED_700, RED_950, SKY_400, SKY_700, SLATE_FAINT, SLATE_MUTED, WHITE,
+            under_panel,
         };
         let dark = mode.is_dark();
         let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
@@ -632,7 +676,7 @@ impl ColorTokens {
             border: scale.border,
             text: scale.text,
         };
-        let text_faint = pick(GRAY_400, POLAR_500);
+        let text_faint = pick(SLATE_FAINT, POLAR_400);
         let ansi = if dark {
             [
                 POLAR_700,
@@ -674,6 +718,7 @@ impl ColorTokens {
         };
         Self {
             mode,
+            contrast: Contrast::Standard,
             gray,
             accent,
             accent_contrast,
@@ -698,10 +743,10 @@ impl ColorTokens {
             line: pick(under_panel(GRAY_200), POLAR_700),
             line_strong: pick(under_panel(GRAY_300), POLAR_600),
             text: pick(BLACK, WHITE),
-            text_muted: pick(GRAY_500, POLAR_300),
+            text_muted: pick(SLATE_MUTED, POLAR_300),
             text_muted_glass: pick(GRAY_500, GLASS_INK_DIM),
             text_faint,
-            ring: pick(BLUE_300, BLUE_700),
+            ring: token(BLUE_500),
             text_selection: pick(BLUE_100, BLUE_900),
             primary: pick(BLACK, WHITE),
             primary_hover: pick(POLAR_600, POLAR_50),
@@ -752,40 +797,9 @@ pub struct TypographyTokens {
     pub control_text: Pixels,
     pub editor_text_desktop: Pixels,
     pub label_text: Pixels,
-}
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum TextStep {
-    X3s,
-    X2s,
-    Xs,
-    Terminal,
-    XsMid,
-    Sm,
-    SmMid,
-    Base,
-    Lg,
-    Xl,
-    X2l,
+    pub scale: f32,
 }
 
-impl TypographyTokens {
-    #[must_use]
-    pub const fn size(step: TextStep) -> Pixels {
-        match step {
-            TextStep::X3s => px(10.0),
-            TextStep::X2s => px(11.0),
-            TextStep::Xs => px(12.0),
-            TextStep::Terminal => px(12.5),
-            TextStep::XsMid => px(13.0),
-            TextStep::Sm => px(14.0),
-            TextStep::SmMid => px(15.0),
-            TextStep::Base => px(16.0),
-            TextStep::Lg => px(18.0),
-            TextStep::Xl => px(20.0),
-            TextStep::X2l => px(22.0),
-        }
-    }
-}
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum FontSet {
     #[default]
@@ -794,27 +808,11 @@ pub enum FontSet {
 }
 
 impl FontSet {
-    pub const ALL: [Self; 2] = [Self::System, Self::Spline];
     #[must_use]
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::Spline => "spline",
-            Self::System => "system",
-        }
-    }
-    #[must_use]
-    pub fn from_key(key: Option<&str>) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|fonts| Some(fonts.key()) == key)
-            .unwrap_or_default()
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Spline => "Spline",
-            Self::System => "System",
+    pub(crate) const fn chosen(fonts: editor_core::Fonts) -> Self {
+        match fonts {
+            editor_core::Fonts::Spline => Self::Spline,
+            editor_core::Fonts::System => Self::System,
         }
     }
 
@@ -839,45 +837,44 @@ impl FontSet {
 pub struct FontRole {
     pub family: &'static str,
 }
+#[derive(Debug)]
 pub struct ProseTypography;
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "every field is a pixel measure and the suffix names the unit, as across the theme"
+)]
 pub struct ProseHeading {
-    pub size_px: f32,
-    pub line_px: f32,
-    pub tracking_px: f32,
-    pub margin_top_px: f32,
-    pub margin_bottom_px: f32,
+    pub(crate) size_px: f32,
+    pub(crate) line_px: f32,
+    pub(crate) tracking_px: f32,
+    pub(crate) margin_top_px: f32,
+    pub(crate) margin_bottom_px: f32,
 }
 
 impl ProseTypography {
-    pub const BODY_SIZE_PX: f32 = 16.0;
-    pub const BODY_LINE_PX: f32 = 28.0;
-    pub const BODY_WEIGHT: FontWeight = FontWeight(410);
-    pub const BODY_TRACKING_PX: f32 = -0.64;
-    pub const TRACKING_EM: f32 = -0.04;
-    #[must_use]
-    pub const fn body_tracking_px(size_px: f32) -> f32 {
-        size_px * Self::TRACKING_EM
-    }
-    pub const HEADING_WEIGHT: FontWeight = FontWeight(630);
+    pub(crate) const BODY_SIZE_PX: f32 = 16.0;
+    pub(crate) const BODY_LINE_PX: f32 = 28.0;
+    pub(crate) const BODY_WEIGHT: FontWeight = FontWeight(410);
+    const TRACKING_EM: f32 = -0.04;
+    pub(crate) const HEADING_WEIGHT: FontWeight = FontWeight(630);
     pub const STRONG_WEIGHT: FontWeight = FontWeight(600);
-    pub const LINK_WEIGHT: FontWeight = FontWeight::MEDIUM;
-    pub const CODE_SIZE_PX: f32 = 14.0;
-    pub const CODE_LINE_PX: f32 = 24.0;
-    pub const CODE_PAD_PX: f32 = 16.0;
-    pub const PARAGRAPH_MARGIN_PX: f32 = 20.0;
-    pub const FENCE_MARGIN_PX: f32 = 24.0;
-    pub const LIST_MARGIN_PX: f32 = 20.0;
-    pub const LIST_INDENT_PX: f32 = 26.0;
-    pub const ITEM_GAP_PX: f32 = 8.0;
-    pub const ITEM_PARAGRAPH_MARGIN_PX: f32 = 12.0;
-    pub const NESTED_LIST_MARGIN_PX: f32 = 12.0;
-    pub const TABLE_SIZE_PX: f32 = 14.0;
-    pub const TABLE_LINE_PX: f32 = 24.0;
-    pub const TABLE_MARGIN_PX: f32 = 28.0;
-    pub const TABLE_CELL_PAD_PX: f32 = 8.0;
+    pub(crate) const LINK_WEIGHT: FontWeight = FontWeight::MEDIUM;
+    pub(crate) const CODE_SIZE_PX: f32 = 14.0;
+    pub(crate) const CODE_LINE_PX: f32 = 24.0;
+    pub(crate) const PARAGRAPH_MARGIN_PX: f32 = 20.0;
+    pub(crate) const FENCE_MARGIN_PX: f32 = 24.0;
+    pub(crate) const LIST_MARGIN_PX: f32 = 20.0;
+    pub(crate) const LIST_INDENT_PX: f32 = 26.0;
+    pub(crate) const ITEM_GAP_PX: f32 = 8.0;
+    pub(crate) const ITEM_PARAGRAPH_MARGIN_PX: f32 = 12.0;
+    pub(crate) const NESTED_LIST_MARGIN_PX: f32 = 12.0;
+    pub(crate) const TABLE_SIZE_PX: f32 = 14.0;
+    pub(crate) const TABLE_LINE_PX: f32 = 24.0;
+    pub(crate) const TABLE_MARGIN_PX: f32 = 28.0;
+    pub(crate) const TABLE_CELL_PAD_PX: f32 = 8.0;
     #[must_use]
-    pub const fn heading(level: u8) -> ProseHeading {
+    pub(crate) const fn heading(level: u8) -> ProseHeading {
         match level {
             1 => ProseHeading {
                 size_px: 30.0,
@@ -914,9 +911,9 @@ impl ProseTypography {
 pub struct SpacingTokens;
 
 impl SpacingTokens {
-    pub const BASE_PX: f32 = 4.0;
+    const BASE_PX: f32 = 4.0;
     #[must_use]
-    pub fn steps(self, count: f32) -> Pixels {
+    pub(crate) fn steps(count: f32) -> Pixels {
         px(Self::BASE_PX * count)
     }
 }
@@ -941,9 +938,8 @@ pub enum RadiusStep {
 pub struct RadiusTokens;
 
 impl RadiusTokens {
-    pub const BASE_PX: f32 = 10.0;
     #[must_use]
-    pub const fn value(step: RadiusStep) -> Pixels {
+    pub(crate) const fn value(step: RadiusStep) -> Pixels {
         match step {
             RadiusStep::X3s => px(1.0),
             RadiusStep::X2s => px(2.0),
@@ -961,19 +957,14 @@ impl RadiusTokens {
             RadiusStep::X4l => px(26.0),
         }
     }
-    #[must_use]
-    pub fn nested(surface: Pixels, gap: Pixels) -> Pixels {
-        let inner = f32::from(surface) - f32::from(gap);
-        px(inner.max(0.0))
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadowLayer {
-    pub color: Oklch,
-    pub offset_x: Pixels,
-    pub offset_y: Pixels,
-    pub blur_radius: Pixels,
-    pub spread_radius: Pixels,
+    pub(crate) color: Oklch,
+    pub(crate) offset_x: Pixels,
+    pub(crate) offset_y: Pixels,
+    pub(crate) blur_radius: Pixels,
+    pub(crate) spread_radius: Pixels,
 }
 
 impl From<ShadowLayer> for aqua::ShadowLayer {
@@ -1004,42 +995,42 @@ impl From<ShadowLayer> for aqua_ui::style::GpuiShadowLayer {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElevationTokens {
-    pub hairline: ShadowLayer,
-    pub raised: [ShadowLayer; 3],
-    pub floating: [ShadowLayer; 2],
-    pub overlay: [ShadowLayer; 2],
+    pub(crate) hairline: ShadowLayer,
+    pub(crate) raised: [ShadowLayer; 3],
+    pub(crate) floating: [ShadowLayer; 2],
+    pub(crate) overlay: [ShadowLayer; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cast {
-    pub dy: f32,
-    pub blur: f32,
-    pub spread: f32,
-    pub alpha: f32,
+    pub(crate) dy: f32,
+    pub(crate) blur: f32,
+    pub(crate) spread: f32,
+    pub(crate) alpha: f32,
 }
 
 impl Cast {
-    pub const KEY: [Self; 2] = [
+    pub(crate) const KEY: [Self; 2] = [
         Self::new(1.5, 3.5, -1.0, 0.06),
         Self::new(4.0, 9.0, -1.0, 0.06),
     ];
-    pub const REST: [Self; 2] = [
+    pub(crate) const REST: [Self; 2] = [
         Self::new(1.5, 4.0, -1.0, 0.05),
         Self::new(5.0, 12.0, -2.0, 0.06),
     ];
-    pub const FLOAT: [Self; 2] = [
+    const FLOAT: [Self; 2] = [
         Self::new(2.0, 5.0, -1.0, 0.05),
         Self::new(8.0, 20.0, -4.0, 0.07),
     ];
-    pub const OVERLAY: [Self; 2] = [
+    pub(crate) const OVERLAY: [Self; 2] = [
         Self::new(2.0, 6.0, -1.0, 0.05),
         Self::new(14.0, 32.0, -6.0, 0.08),
     ];
-    pub const PRESS: [Self; 2] = [
+    pub(crate) const PRESS: [Self; 2] = [
         Self::new(1.0, 2.5, -0.5, 0.10),
         Self::new(3.0, 6.0, -1.0, 0.08),
     ];
-    pub const LIFT: [Self; 2] = [
+    pub(crate) const LIFT: [Self; 2] = [
         Self::new(1.0, 2.5, -0.5, 0.10),
         Self::new(4.0, 10.0, -2.0, 0.12),
     ];
@@ -1048,7 +1039,7 @@ impl Cast {
     const ALPHA_CAP: f32 = 0.6;
 
     #[must_use]
-    pub const fn new(dy: f32, blur: f32, spread: f32, alpha: f32) -> Self {
+    const fn new(dy: f32, blur: f32, spread: f32, alpha: f32) -> Self {
         Self {
             dy,
             blur,
@@ -1058,7 +1049,7 @@ impl Cast {
     }
 
     #[must_use]
-    pub fn alpha_in(self, mode: ThemeMode) -> f32 {
+    pub(crate) fn alpha_in(self, mode: ThemeMode) -> f32 {
         match mode {
             ThemeMode::Light => self.alpha,
             ThemeMode::Dark => (self.alpha * Self::DARK_WEIGHT).min(Self::ALPHA_CAP),
@@ -1068,7 +1059,7 @@ impl Cast {
 
 impl ElevationTokens {
     #[must_use]
-    pub const fn drops(&self, elevation: Elevation) -> &[ShadowLayer] {
+    pub(crate) const fn drops(&self, elevation: Elevation) -> &[ShadowLayer] {
         match elevation {
             Elevation::Raised => &self.raised,
             Elevation::Floating => &self.floating,
@@ -1117,16 +1108,17 @@ pub enum Elevation {
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DensityTokens {
-    pub control_default: Pixels,
-    pub command_list_max_height: Pixels,
-    pub control_sm: Pixels,
-    pub switch_default: (Pixels, Pixels),
-    pub badge_height: Pixels,
-    pub card_padding_compact: Pixels,
+    pub(crate) control_default: Pixels,
+    pub(crate) command_list_max_height: Pixels,
+    pub(crate) control_sm: Pixels,
+    pub(crate) switch_default: (Pixels, Pixels),
+    pub(crate) badge_height: Pixels,
+    pub(crate) card_padding_compact: Pixels,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InteractionTokens {
     pub focus_ring_width: Pixels,
+    pub motion: Motion,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArtisanTheme {
@@ -1160,10 +1152,27 @@ impl TypographyTokens {
             control_text: px(14.0),
             editor_text_desktop: px(14.0),
             label_text: px(12.0),
+            scale: 1.0,
         }
     }
+
     #[must_use]
-    pub const fn heading_tracking_px(&self, heading: &ProseHeading) -> f32 {
+    pub(crate) fn scaled(self, scale: f32) -> Self {
+        Self {
+            control_text: px(14.0 * scale),
+            editor_text_desktop: px(14.0 * scale),
+            label_text: px(12.0 * scale),
+            scale,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn size(&self, px: f32) -> f32 {
+        px * self.scale
+    }
+    #[must_use]
+    pub(crate) const fn heading_tracking_px(&self, heading: &ProseHeading) -> f32 {
         match self.fonts {
             FontSet::Spline => heading.tracking_px,
             FontSet::System => 0.0,
@@ -1177,16 +1186,31 @@ impl ArtisanTheme {
     }
     #[must_use]
     pub fn for_mode(mode: ThemeMode) -> &'static Self {
-        static LIGHT: OnceLock<ArtisanTheme> = OnceLock::new();
-        static DARK: OnceLock<ArtisanTheme> = OnceLock::new();
-        match mode {
-            ThemeMode::Light => LIGHT.get_or_init(|| Self::build(mode)),
-            ThemeMode::Dark => DARK.get_or_init(|| Self::build(mode)),
-        }
+        Self::for_mode_and_contrast(mode, Contrast::Standard)
     }
 
-    fn build(mode: ThemeMode) -> Self {
-        let colors = ColorTokens::build(mode);
+    #[must_use]
+    pub fn for_mode_and_contrast(mode: ThemeMode, contrast: Contrast) -> &'static Self {
+        static LIGHT: OnceLock<ArtisanTheme> = OnceLock::new();
+        static DARK: OnceLock<ArtisanTheme> = OnceLock::new();
+        static LIGHT_HIGH: OnceLock<ArtisanTheme> = OnceLock::new();
+        static DARK_HIGH: OnceLock<ArtisanTheme> = OnceLock::new();
+        let slot = match (mode, contrast) {
+            (ThemeMode::Light, Contrast::Standard) => &LIGHT,
+            (ThemeMode::Dark, Contrast::Standard) => &DARK,
+            (ThemeMode::Light, Contrast::High) => &LIGHT_HIGH,
+            (ThemeMode::Dark, Contrast::High) => &DARK_HIGH,
+        };
+        slot.get_or_init(|| Self::build(mode, contrast))
+    }
+
+    #[must_use]
+    pub(crate) const fn reduced_motion(&self) -> bool {
+        matches!(self.interaction.motion, Motion::Reduced)
+    }
+
+    fn build(mode: ThemeMode, contrast: Contrast) -> Self {
+        let colors = ColorTokens::build(mode, contrast);
         Self {
             colors,
             typography: TypographyTokens::new(FontSet::Spline),
@@ -1203,6 +1227,7 @@ impl ArtisanTheme {
             },
             interaction: InteractionTokens {
                 focus_ring_width: px(3.0),
+                motion: Motion::Full,
             },
         }
     }

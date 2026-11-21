@@ -1,4 +1,9 @@
-use super::{Kind, Mentions, Metrics, Reveal, Row, scroll_offset};
+#![expect(
+    clippy::float_cmp,
+    reason = "layout offsets and light levels are exact sums of fixed metrics, so equality is the contract"
+)]
+
+use super::{Kind, Mentions, Metrics, Reveal, Row, offered_threads, scroll_offset};
 
 fn row(kind: Kind, name: &str) -> Row {
     Row::new(kind, name.to_owned(), name.to_owned(), String::new())
@@ -208,4 +213,19 @@ fn a_catalog_refresh_keeps_the_highlighted_row() {
 
     assert_eq!(highlighted(&mentions), "scroll bug");
     assert_eq!(mentions.reveal, Some(Reveal::Highlighted));
+}
+
+#[test]
+fn an_archived_newer_duplicate_still_offers_the_live_thread_with_that_title() {
+    let (offered, titles) = offered_threads([
+        ("archived", "release notes", true),
+        ("live", "release notes", false),
+        ("older live", "release notes", false),
+        ("other", "scroll bug", false),
+    ]);
+    assert_eq!(
+        offered,
+        [("live", "release notes"), ("other", "scroll bug")]
+    );
+    assert_eq!(titles, ["release notes", "scroll bug"]);
 }

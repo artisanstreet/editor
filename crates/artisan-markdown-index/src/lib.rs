@@ -1,8 +1,3 @@
-//! Source offsets and exact parser events for lazily loaded Markdown leaves.
-//! The scan owns no source or block AST. Borrowed event payloads become offsets;
-//! decoded escapes and entities are interned. A fetched complete leaf replays
-//! these events, so reference links keep their original document resolution.
-
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -36,30 +31,45 @@ const SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const INDEX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-pub enum MarkdownIndexError {
-    #[error("Markdown source exceeds the 64 MiB indexing admission limit")]
-    SourceBudget,
+pub enum BuildIndexError {
+    #[error("Markdown source of {bytes} bytes exceeds the 64 MiB indexing admission limit")]
+    SourceTooLarge { bytes: usize },
     #[error("Markdown index exceeds its 16 MiB memory limit")]
-    IndexBudget,
+    IndexTooLarge,
     #[error("Markdown nesting exceeds 96 tags")]
-    NestingBudget,
-    #[error("The fetched Markdown leaf does not cover its complete indexed source range")]
-    IncompleteRange,
-    #[error("The indexed Markdown leaf has an unexpected semantic shape")]
-    InvalidShape,
+    NestingTooDeep,
 }
 
-/// One authored list marker surrounding a native semantic leaf.
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayLeafError {
+    #[error(
+        "the fetched Markdown source at {fetched_start} ({fetched_bytes} bytes) does not cover leaf {leaf:?}"
+    )]
+    IncompleteRange {
+        leaf: Range<usize>,
+        fetched_start: usize,
+        fetched_bytes: usize,
+    },
+    #[error("the Markdown token {token:?} in leaf {leaf:?} is text stored as structure")]
+    TextStoredAsStructure {
+        leaf: Range<usize>,
+        token: Range<usize>,
+    },
+    #[error("the Markdown token {token:?} lies outside its leaf {leaf:?}")]
+    TokenOutsideLeaf {
+        leaf: Range<usize>,
+        token: Range<usize>,
+    },
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ListLevel {
     pub source_start: usize,
     pub number: Option<u64>,
     pub task: Option<bool>,
-    /// Only the first leaf of an item draws the item's marker.
     pub first: bool,
 }
 
-/// Interned context independent of any fetched source bytes.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct LeafContext {
     pub lists: Vec<ListLevel>,
@@ -69,7 +79,6 @@ pub struct LeafContext {
     pub spacing: Vec<LeafSpacing>,
 }
 
-/// Source sibling kinds; the renderer's shared margin policy supplies pixels.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum BlockShape {
     Paragraph,
@@ -117,7 +126,6 @@ struct IndexedEvent {
     range: Range<usize>,
 }
 
-/// One native paragraph, heading, code unit, HTML unit, or table row.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexedLeaf {
     range: Range<usize>,
@@ -131,18 +139,200 @@ impl IndexedLeaf {
     }
 }
 
-/// Compact source topology. Drop the input String immediately after building.
 #[derive(Debug)]
 pub struct MarkdownIndex {
     leaves: Vec<IndexedLeaf>,
     contexts: Vec<LeafContext>,
     decoded: Vec<Arc<str>>,
     source_bytes: usize,
+    definitions: bool,
+    items: Vec<ItemStart>,
+    lists: Vec<ListShape>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListMark {
+    start: Option<u64>,
+    source_start: usize,
+    ordinal: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Marker {
+    indent: usize,
+    delimiter: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ItemStart {
+    line_start: usize,
+    first_leaf: usize,
+    list: ListMark,
+    marker: Marker,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ListShape {
+    source_start: usize,
+    loose: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Resume {
+    Start,
+    After(BlockShape),
+    Item { list: ListMark, marker: Marker },
+}
+
+const RESUME_ATTEMPTS: usize = 3;
+
 impl MarkdownIndex {
-    pub fn build(source: &str) -> Result<Self, MarkdownIndexError> {
+    pub fn build(source: &str) -> Result<Self, BuildIndexError> {
         build::build(source)
+    }
+
+    pub fn append(self, source: &str) -> Result<(Self, usize), BuildIndexError> {
+        let Some(previous) = source
+            .get(..self.source_bytes)
+            .filter(|_| !self.definitions)
+        else {
+            return Ok((Self::build(source)?, 0));
+        };
+        let mut points = self.resume_points(previous);
+        points.sort_by_key(|(kept, _, _)| std::cmp::Reverse(*kept));
+        for (kept, boundary, resume) in points.into_iter().take(RESUME_ATTEMPTS) {
+            let Some(suffix) = build::build_from(source, boundary, resume)? else {
+                continue;
+            };
+            if suffix.definitions {
+                break;
+            }
+            if let Resume::Item { list, .. } = resume
+                && !self.continues_alike(&suffix, list)
+            {
+                continue;
+            }
+            return Ok((self.merge(kept, boundary, suffix, source.len())?, kept));
+        }
+        Ok((Self::build(source)?, 0))
+    }
+
+    fn continues_alike(&self, suffix: &Self, mark: ListMark) -> bool {
+        let loose = |index: &Self| {
+            index
+                .lists
+                .iter()
+                .find(|list| list.source_start == mark.source_start)
+                .and_then(|list| list.loose)
+        };
+        loose(self).is_some_and(|before| loose(suffix) == Some(before))
+    }
+
+    fn merge(
+        mut self,
+        kept: usize,
+        boundary: usize,
+        suffix: Self,
+        source_bytes: usize,
+    ) -> Result<Self, BuildIndexError> {
+        self.leaves.truncate(kept);
+        let mut pool: std::collections::HashMap<LeafContext, usize> = self
+            .contexts
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(id, context)| (context, id))
+            .collect();
+        for mut leaf in suffix.leaves {
+            let context = &suffix.contexts[leaf.context];
+            leaf.context = *pool.entry(context.clone()).or_insert_with(|| {
+                self.contexts.push(context.clone());
+                self.contexts.len() - 1
+            });
+            self.leaves.push(leaf);
+        }
+        self.decoded.extend(suffix.decoded);
+        self.items.retain(|item| item.first_leaf < kept);
+        self.items
+            .extend(suffix.items.into_iter().map(|item| ItemStart {
+                first_leaf: item.first_leaf + kept,
+                ..item
+            }));
+        self.lists.retain(|list| list.source_start < boundary);
+        for list in suffix.lists {
+            if !self
+                .lists
+                .iter()
+                .any(|known| known.source_start == list.source_start)
+            {
+                self.lists.push(list);
+            }
+        }
+        self.source_bytes = source_bytes;
+        if self.resident_bytes() > INDEX_BYTES {
+            return Err(BuildIndexError::IndexTooLarge);
+        }
+        Ok(self)
+    }
+
+    fn resume_points(&self, previous: &str) -> Vec<(usize, usize, Resume)> {
+        let mut points = Vec::with_capacity(RESUME_ATTEMPTS + 1);
+        let follows = |kept: usize, boundary: usize| {
+            self.leaves
+                .get(kept)
+                .is_none_or(|next| next.range.start >= boundary)
+        };
+        for quoted in [false, true] {
+            let point = (1..=self.leaves.len()).rev().find_map(|kept| {
+                let leaf = &self.leaves[kept - 1];
+                let context = &self.contexts[leaf.context];
+                if !context.lists.is_empty()
+                    || context.quote_depth != usize::from(quoted)
+                    || context.table_source.is_some()
+                {
+                    return None;
+                }
+                let shape = match (leaf.kind, leaf.events.first().map(|event| &event.token)) {
+                    (Kind::Paragraph, _) => BlockShape::Paragraph,
+                    (
+                        Kind::Heading,
+                        Some(Token::Structural(Event::Start(Tag::Heading { level, .. }))),
+                    ) => BlockShape::Heading(*level as u8),
+                    _ => return None,
+                };
+                let boundary = if quoted {
+                    after_quoted_blank_line(previous, leaf.range.end)?
+                } else {
+                    after_blank_line(previous, leaf.range.end)?
+                };
+                follows(kept, boundary).then_some((kept, boundary, Resume::After(shape)))
+            });
+            points.extend(point);
+        }
+        points.extend(
+            self.items
+                .iter()
+                .rev()
+                .filter(|item| item.list.ordinal > 0 && item.first_leaf > 0)
+                .filter(|item| follows(item.first_leaf, item.line_start))
+                .filter(|item| {
+                    previous
+                        .get(item.line_start..)
+                        .is_some_and(|line| line.contains('\n'))
+                })
+                .take(RESUME_ATTEMPTS)
+                .map(|item| {
+                    (
+                        item.first_leaf,
+                        item.line_start,
+                        Resume::Item {
+                            list: item.list,
+                            marker: item.marker,
+                        },
+                    )
+                }),
+        );
+        points
     }
 
     pub fn record(&self, ordinal: usize) -> Option<LeafRecord> {
@@ -167,33 +357,30 @@ impl MarkdownIndex {
             .get(leaf)
             .map(|leaf| &self.contexts[leaf.context])
     }
-    pub const fn source_bytes(&self) -> usize {
-        self.source_bytes
-    }
     pub fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.leaves.capacity() * std::mem::size_of::<IndexedLeaf>()
-            + self.contexts.capacity() * std::mem::size_of::<LeafContext>()
-            + self.decoded.capacity() * std::mem::size_of::<Arc<str>>()
+        size_of::<Self>()
+            + self.leaves.capacity() * size_of::<IndexedLeaf>()
+            + self.contexts.capacity() * size_of::<LeafContext>()
+            + self.decoded.capacity() * size_of::<Arc<str>>()
             + self
                 .decoded
                 .iter()
-                .map(|text| text.len() + 2 * std::mem::size_of::<usize>())
+                .map(|text| text.len() + 2 * size_of::<usize>())
                 .sum::<usize>()
             + self
                 .contexts
                 .iter()
                 .map(|c| {
-                    c.lists.capacity() * std::mem::size_of::<ListLevel>()
-                        + c.table_alignments.capacity() * std::mem::size_of::<TableAlignment>()
-                        + c.spacing.capacity() * std::mem::size_of::<LeafSpacing>()
+                    c.lists.capacity() * size_of::<ListLevel>()
+                        + c.table_alignments.capacity() * size_of::<TableAlignment>()
+                        + c.spacing.capacity() * size_of::<LeafSpacing>()
                 })
                 .sum::<usize>()
             + self
                 .leaves
                 .iter()
                 .map(|leaf| {
-                    leaf.events.capacity() * std::mem::size_of::<IndexedEvent>()
+                    leaf.events.capacity() * size_of::<IndexedEvent>()
                         + leaf
                             .events
                             .iter()
@@ -210,27 +397,75 @@ impl MarkdownIndex {
     }
 }
 
+fn after_blank_line(text: &str, end: usize) -> Option<usize> {
+    let blank = |line: &str| line.trim_matches([' ', '\t', '\r']).is_empty();
+    let line_after = |start: usize| {
+        let rest = text.get(start..)?;
+        let newline = rest.find('\n')?;
+        Some((rest.get(..newline)?, start + newline + 1))
+    };
+    let line_start = if end > 0 && text.as_bytes().get(end - 1) != Some(&b'\n') {
+        let (tail, next) = line_after(end)?;
+        if !blank(tail) {
+            return None;
+        }
+        next
+    } else {
+        end
+    };
+    let (line, next) = line_after(line_start)?;
+    blank(line).then_some(next)
+}
+
+fn after_quoted_blank_line(text: &str, end: usize) -> Option<usize> {
+    let quoted = |line: &str, blank: bool| {
+        let line = line.trim_end_matches('\r');
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let rest = line.get(indent..)?.strip_prefix('>')?;
+        (indent <= 3 && rest.trim_matches([' ', '\t']).is_empty() == blank).then_some(())
+    };
+    let line_after = |start: usize| {
+        let rest = text.get(start..)?;
+        let newline = rest.find('\n')?;
+        Some((rest.get(..newline)?, start + newline + 1))
+    };
+    let line_start = if end > 0 && text.as_bytes().get(end - 1) != Some(&b'\n') {
+        line_after(end)
+            .filter(|(tail, _)| tail.trim_matches([' ', '\t', '\r']).is_empty())?
+            .1
+    } else {
+        end
+    };
+    let (blank, next) = line_after(line_start)?;
+    quoted(blank, true)?;
+    let (following, _) = line_after(next)?;
+    quoted(following, false)?;
+    Some(next)
+}
+
 fn resolve_text<'a>(
     text: &'a Text,
-    source: &'a str,
-    origin: usize,
-) -> Result<pulldown_cmark::CowStr<'a>, MarkdownIndexError> {
+    exact: &'a str,
+    leaf: &Range<usize>,
+) -> Result<pulldown_cmark::CowStr<'a>, ReplayLeafError> {
     let value = match text {
-        Text::Range(range) => source
-            .get(
-                range
-                    .start
-                    .checked_sub(origin)
-                    .ok_or(MarkdownIndexError::IncompleteRange)?
-                    ..range
-                        .end
-                        .checked_sub(origin)
-                        .ok_or(MarkdownIndexError::IncompleteRange)?,
-            )
-            .ok_or(MarkdownIndexError::IncompleteRange)?,
+        Text::Range(range) => local_range(range, leaf)
+            .and_then(|local| exact.get(local))
+            .ok_or_else(|| ReplayLeafError::TokenOutsideLeaf {
+                leaf: leaf.clone(),
+                token: range.clone(),
+            })?,
         Text::Decoded(value) => value.as_ref(),
     };
     Ok(value.into())
+}
+
+fn local_range(range: &Range<usize>, leaf: &Range<usize>) -> Option<Range<usize>> {
+    Some(range.start.checked_sub(leaf.start)?..range.end.checked_sub(leaf.start)?)
+}
+
+fn local_slice(range: &Range<usize>, exact: &str, leaf: &Range<usize>) -> Option<Range<usize>> {
+    local_range(range, leaf).filter(|local| exact.get(local.clone()).is_some())
 }
 
 #[expect(
@@ -258,10 +493,10 @@ fn event_heap_bytes(event: &Event<'_>) -> usize {
             id, classes, attrs, ..
         }) => {
             id.as_ref().map_or(0, |v| v.len())
-                + classes.capacity() * std::mem::size_of::<pulldown_cmark::CowStr<'_>>()
+                + classes.capacity() * size_of::<pulldown_cmark::CowStr<'_>>()
                 + classes.iter().map(|v| v.len()).sum::<usize>()
                 + attrs.capacity()
-                    * std::mem::size_of::<(
+                    * size_of::<(
                         pulldown_cmark::CowStr<'_>,
                         Option<pulldown_cmark::CowStr<'_>>,
                     )>()
@@ -270,9 +505,7 @@ fn event_heap_bytes(event: &Event<'_>) -> usize {
                     .map(|(key, value)| key.len() + value.as_ref().map_or(0, |v| v.len()))
                     .sum::<usize>()
         }
-        Event::Start(Tag::Table(alignments)) => {
-            alignments.capacity() * std::mem::size_of::<Alignment>()
-        }
+        Event::Start(Tag::Table(alignments)) => alignments.capacity() * size_of::<Alignment>(),
         _ => 0,
     }
 }
@@ -281,12 +514,9 @@ fn event_heap_bytes(event: &Event<'_>) -> usize {
 pub struct LeafRecord {
     pub leaf: IndexedLeaf,
     pub context: LeafContext,
-    /// Another semantic row follows in the same authored table.
     pub table_continues: bool,
 }
 impl LeafRecord {
-    /// A physical literal line includes its LF delimiter. The final empty line
-    /// has an empty range, so line ordinals remain faithful to authored text.
     pub fn literal(range: Range<usize>) -> Self {
         Self {
             leaf: IndexedLeaf {
@@ -309,26 +539,26 @@ impl LeafRecord {
             Kind::Paragraph | Kind::Heading | Kind::Code | Kind::Html => None,
         }
     }
+    pub fn exact_source<'a>(
+        &self,
+        start: usize,
+        source: &'a str,
+    ) -> Result<&'a str, ReplayLeafError> {
+        local_range(&self.leaf.range, &(start..start))
+            .and_then(|local| source.get(local))
+            .ok_or_else(|| ReplayLeafError::IncompleteRange {
+                leaf: self.leaf.range.clone(),
+                fetched_start: start,
+                fetched_bytes: source.len(),
+            })
+    }
     pub fn replay(
         &self,
         start: usize,
         source: &str,
-    ) -> Result<Vec<(Event<'static>, Range<usize>)>, MarkdownIndexError> {
+    ) -> Result<Vec<(Event<'static>, Range<usize>)>, ReplayLeafError> {
         let leaf = &self.leaf;
-        let local_start = leaf
-            .range
-            .start
-            .checked_sub(start)
-            .ok_or(MarkdownIndexError::IncompleteRange)?;
-        let local_end = leaf
-            .range
-            .end
-            .checked_sub(start)
-            .ok_or(MarkdownIndexError::IncompleteRange)?;
-        let exact = source
-            .get(local_start..local_end)
-            .ok_or(MarkdownIndexError::IncompleteRange)?;
-        let origin = leaf.range.start;
+        let exact = self.exact_source(start, source)?;
         let mut events = Vec::with_capacity(leaf.events.len() + 2);
         if let Kind::TableRow { .. } = leaf.kind {
             let alignments = self
@@ -346,22 +576,28 @@ impl LeafRecord {
         }
         for event in &leaf.events {
             let value = match &event.token {
+                Token::Structural(
+                    Event::Text(_) | Event::Code(_) | Event::Html(_) | Event::InlineHtml(_),
+                ) => {
+                    return Err(ReplayLeafError::TextStoredAsStructure {
+                        leaf: leaf.range.clone(),
+                        token: event.range.clone(),
+                    });
+                }
                 Token::Structural(event) => event.clone(),
-                Token::Text(value) => Event::Text(resolve_text(value, exact, origin)?),
-                Token::Code(value) => Event::Code(resolve_text(value, exact, origin)?),
-                Token::Html(value) => Event::Html(resolve_text(value, exact, origin)?),
-                Token::InlineHtml(value) => Event::InlineHtml(resolve_text(value, exact, origin)?),
+                Token::Text(value) => Event::Text(resolve_text(value, exact, &leaf.range)?),
+                Token::Code(value) => Event::Code(resolve_text(value, exact, &leaf.range)?),
+                Token::Html(value) => Event::Html(resolve_text(value, exact, &leaf.range)?),
+                Token::InlineHtml(value) => {
+                    Event::InlineHtml(resolve_text(value, exact, &leaf.range)?)
+                }
             };
-            let range = event
-                .range
-                .start
-                .checked_sub(origin)
-                .ok_or(MarkdownIndexError::IncompleteRange)?
-                ..event
-                    .range
-                    .end
-                    .checked_sub(origin)
-                    .ok_or(MarkdownIndexError::IncompleteRange)?;
+            let range = local_slice(&event.range, exact, &leaf.range).ok_or_else(|| {
+                ReplayLeafError::TokenOutsideLeaf {
+                    leaf: leaf.range.clone(),
+                    token: event.range.clone(),
+                }
+            })?;
             events.push((value.into_static(), range));
         }
         if matches!(leaf.kind, Kind::TableRow { .. }) {
@@ -373,39 +609,18 @@ impl LeafRecord {
 mod event_serde {
     use pulldown_cmark::Event;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub fn serialize<S: Serializer>(
+    pub(crate) fn serialize<S: Serializer>(
         event: &Event<'static>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         event.serialize(serializer)
     }
-    pub fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Event<'static>, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         let encoded = serde_json::to_string(&value).map_err(serde::de::Error::custom)?;
         let event: Event<'_> = serde_json::from_str(&encoded).map_err(serde::de::Error::custom)?;
         Ok(event.into_static())
-    }
-}
-
-#[cfg(test)]
-mod sparse_table_context_tests {
-    use super::*;
-    #[test]
-    fn exact_table_membership_survives_sparse_record_replay() {
-        let index = MarkdownIndex::build(
-            "| A | B |\n| --- | --- |\n| one | two |\n| three | four |\n\nafter\n",
-        )
-        .unwrap();
-        assert!(index.record(0).unwrap().table_continues);
-        assert!(index.record(1).unwrap().table_continues);
-        assert!(!index.record(2).unwrap().table_continues);
-        assert!(!index.record(3).unwrap().table_continues);
-        let last = index.record(2).unwrap();
-        let wire = serde_json::to_string(&last).unwrap();
-        let decoded: LeafRecord = serde_json::from_str(&wire).unwrap();
-        assert_eq!(decoded.context, last.context);
-        assert!(!decoded.table_continues);
     }
 }

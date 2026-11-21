@@ -28,7 +28,7 @@ pub struct AttachmentTile {
     label: String,
     image: Option<aqua::ImageHandle>,
     glyph: Option<AssetId>,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
     reveal_elapsed: Option<Duration>,
     preparing: bool,
     shake_elapsed: Option<Duration>,
@@ -39,7 +39,17 @@ pub struct AttachmentTile {
     activate: Option<Rc<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for AttachmentTile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachmentTile").finish_non_exhaustive()
+    }
+}
+
 impl AttachmentTile {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the attachment tile stores this theme copy and paints from it when built"
+    )]
     pub fn new(id: impl Into<Key>, theme: ArtisanTheme, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -58,48 +68,62 @@ impl AttachmentTile {
             activate: None,
         }
     }
+    #[must_use]
     pub fn preview(mut self, image: Option<aqua::ImageHandle>, elapsed: Option<Duration>) -> Self {
         self.image = image;
         self.reveal_elapsed = elapsed;
         self
     }
+    #[must_use]
     pub const fn file(mut self, glyph: AssetId) -> Self {
         self.glyph = Some(glyph);
         self
     }
+    #[must_use]
     pub const fn preparing(mut self, preparing: bool) -> Self {
         self.preparing = preparing;
         self
     }
-    pub fn error(mut self, error: Option<String>) -> Self {
+    #[must_use]
+    pub fn error(mut self, error: Option<editor_core::Problem>) -> Self {
         self.error = error;
         self
     }
+    #[must_use]
     pub const fn shaking(mut self, elapsed: Option<Duration>) -> Self {
         self.shake_elapsed = elapsed;
         self
     }
+    #[must_use]
     pub const fn reduced_motion(mut self, reduced: bool) -> Self {
         self.reduced_motion = reduced;
         self
     }
+    #[must_use]
     pub const fn removable(mut self, removable: bool) -> Self {
         self.removable = removable;
         self
     }
+    #[must_use]
     pub fn on_remove(mut self, action: impl Fn() + 'static) -> Self {
         self.remove = Some(Rc::new(action));
         self
     }
+    #[must_use]
     pub fn on_retry(mut self, action: impl Fn() + 'static) -> Self {
         self.retry = Some(Rc::new(action));
         self
     }
+    #[must_use]
     pub fn on_activate(mut self, action: impl Fn() + 'static) -> Self {
         self.activate = Some(Rc::new(action));
         self
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one attachment tile build with its thumbnail, label and controls"
+    )]
     pub fn build(self) -> Element {
         let theme = self.theme;
         let failed = self.error.is_some();
@@ -112,11 +136,9 @@ impl AttachmentTile {
             UiBox::new()
                 .padded(Space::S6)
                 .child(
-                    caption(
-                        format!("{} failed: {error}", self.label),
-                        theme.colors.destructive_text,
-                    )
-                    .build(),
+                    caption(error.headline().to_owned(), theme.colors.destructive_text)
+                        .wrap(true)
+                        .build(),
                 )
                 .build()
         } else if let Some(image) = self.image.clone() {
@@ -181,14 +203,19 @@ impl AttachmentTile {
                 "retry",
                 theme,
                 AssetId::TABLER_REFRESH,
-                "Retry image preview",
+                "Load the image preview again",
                 IconButtonSize::Sm,
                 Finish::Plain,
             )
             .nested(radius, CORNER_INSET)
             .on_activate(move |_| action())
             .build()
-            .style(Style::new().absolute_at(Some(CORNER_INSET), None, None, Some(CORNER_INSET)));
+            .style(Style::new().absolute_at(
+                Some(CORNER_INSET),
+                None,
+                None,
+                Some(CORNER_INSET),
+            ));
             layers = layers.child(retry);
         }
         if let Some(action) = self.remove {
@@ -212,12 +239,11 @@ impl AttachmentTile {
         let mut element = MediaFrame::attachment(self.id, theme, layers.build())
             .error(failed)
             .build();
-        if !self.reduced_motion {
-            if let Some(elapsed) = self.shake_elapsed.filter(|elapsed| *elapsed < SHAKE) {
-                element = element.style(
-                    Style::new().transform(Transform2D::translate(shake_offset(elapsed), 0.0)),
-                );
-            }
+        if !self.reduced_motion
+            && let Some(elapsed) = self.shake_elapsed.filter(|elapsed| *elapsed < SHAKE)
+        {
+            element = element
+                .style(Style::new().transform(Transform2D::translate(shake_offset(elapsed), 0.0)));
         }
         element
     }

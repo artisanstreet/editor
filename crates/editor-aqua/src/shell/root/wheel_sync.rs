@@ -4,35 +4,49 @@ use aqua::prelude::AquaWindowId;
 use aqua::{AppCtx, UiApp};
 
 impl RootViews {
-    pub(super) fn follow_tail_early(
+    pub(super) fn take_scroll_request(
+        &mut self,
+        conversation: &mut crate::conversation::controller::Conversation,
+    ) {
+        if let Some(latest) = conversation.scroll_actions().pop() {
+            self.scroll.scroll_request = Some(latest);
+        }
+    }
+
+    fn follow_tail_early(
         &mut self,
         conversation: &mut crate::conversation::controller::Conversation,
         ui: &mut UiApp,
     ) {
-        use crate::conversation::adapter::ScrollDirective;
-        self.scroll_requests.extend(conversation.scroll_actions());
+        use crate::conversation::adapter::{ScrollDirective, ScrollResolution, resolve_scroll};
+        self.take_scroll_request(conversation);
+        let Some(action) = &self.scroll.scroll_request else {
+            return;
+        };
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let now = std::time::Instant::now();
-        while let Some(action) = self.scroll_requests.front() {
-            let landing = *action == crate::conversation::controller::ScrollAction::Tail;
-            let Some(directive @ ScrollDirective::FollowEnd) =
-                crate::conversation::adapter::scroll_directive(conversation, action.clone(), reduced)
-            else {
-                break;
-            };
-            let Some(_) = crate::conversation::scroll::apply_directive(
-                ui,
-                &mut self.smooth_scroll,
-                &directive,
-                now,
-                0.0,
-            ) else {
-                break;
-            };
-            if landing {
-                self.wheel.cancel_transcript();
+        let landing = *action == crate::conversation::controller::ScrollAction::Tail;
+        let directive = match resolve_scroll(conversation, action, reduced) {
+            ScrollResolution::Ready(directive @ ScrollDirective::FollowEnd) => directive,
+            ScrollResolution::Cancelled => {
+                self.scroll.scroll_request = None;
+                return;
             }
-            self.scroll_requests.pop_front();
+            ScrollResolution::Ready(ScrollDirective::EaseToEnd | ScrollDirective::ToRow { .. })
+            | ScrollResolution::AwaitingRows => return,
+        };
+        if crate::conversation::scroll::apply_directive(
+            ui,
+            &mut self.scroll.smooth_scroll,
+            &directive,
+            conversation.clock().now(),
+            0.0,
+        )
+        .is_some()
+        {
+            if landing {
+                self.scroll.wheel.cancel_transcript();
+            }
+            self.scroll.scroll_request = None;
         }
     }
 
@@ -43,14 +57,14 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        let advance = self.wheel.advance(ui);
+        let advance = self.scroll.wheel.advance(ui, ctx.now());
         if advance.transcript_moved {
-            self.observations.note_reader_move();
+            self.transcript.observations.note_reader_move();
         }
-        if advance.threads_moved {
-            if let Some(workspace) = shell.entry.workspace_mut() {
-                workspace.sidebar.page_at_viewport(&mut shell.core, true);
-            }
+        if advance.threads_moved
+            && let Some(workspace) = shell.entry.workspace_mut()
+        {
+            workspace.sidebar.page_at_viewport(&mut shell.core, true);
         }
         if advance.active {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
@@ -58,15 +72,20 @@ impl RootViews {
         advance.threads_moved
     }
 
-    pub(super) fn advance_wheel_glides(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
+    pub(super) fn advance_wheel_glides(
+        &mut self,
+        shell: &mut Shell,
+        ui: &mut UiApp,
+        now: aqua::Instant,
+    ) -> bool {
         if let Some(workspace) = shell.entry.workspace_mut() {
             self.follow_tail_early(&mut workspace.conversation, ui);
         }
-        let advance = self.wheel.advance(ui);
-        if advance.threads_moved {
-            if let Some(workspace) = shell.entry.workspace_mut() {
-                workspace.sidebar.page_at_viewport(&mut shell.core, true);
-            }
+        let advance = self.scroll.wheel.advance(ui, now);
+        if advance.threads_moved
+            && let Some(workspace) = shell.entry.workspace_mut()
+        {
+            workspace.sidebar.page_at_viewport(&mut shell.core, true);
         }
         advance.active
     }

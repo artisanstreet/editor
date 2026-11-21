@@ -1,15 +1,13 @@
-//! Every Artisan MCP tool: its schema for `tools/list`, and what it does.
-
+use crate::forge::ForgeError;
 use crate::format;
-use crate::server::Tool;
-use crate::transcript::{self, Options};
-use anyhow::{Context, Result};
+use crate::server::{Failure, Tool};
+use crate::transcript::{self, Options, RenderError};
 use artisan_api::{
     EditorCall, EngineId, InstallState, ItemId, ItemsQuery, McpMutation, McpServer, Permissions,
-    ProjectId, SettingOwner, SignInState, ThreadId, ThreadsQuery, UpdateThread, setting_decl,
+    ProjectId, SettingOwner, SignInState, ThreadId, UpdateThread, setting_decl,
 };
 use forge_runs::{Hub, Refused, SpawnAgent};
-use forge_store::{GrepQuery, RecallScope};
+use forge_store::{GrepCursor, GrepQuery, RecallKind, RecallScope, SearchCursor};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -17,8 +15,85 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-/// The names engines know Forge's own servers by (the Artisan MCP and
-/// computer use); no added server may take them.
+#[derive(Debug, thiserror::Error)]
+pub enum CallToolError {
+    #[error(transparent)]
+    Refused(#[from] Refused),
+    #[error("{step}")]
+    Forge {
+        step: &'static str,
+        #[source]
+        source: Box<ForgeError>,
+    },
+    #[error("thread {thread} disappeared while it was changed")]
+    Vanished { thread: ThreadId },
+    #[error("render the thread")]
+    Render(#[source] RenderError),
+    #[error("list the models of {engine}")]
+    Models {
+        engine: EngineId,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("read the saved MCP servers")]
+    McpServers(#[source] serde_json::Error),
+    #[error("read the Editor's answer to {call}")]
+    EditorReply {
+        call: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+impl CallToolError {
+    pub(crate) fn failure(&self) -> Failure<'_> {
+        match self {
+            Self::Refused(refused) => Failure::Refused(refused.to_string()),
+            Self::Forge { source, .. } => source.failure(),
+            Self::Vanished { .. }
+            | Self::Render(_)
+            | Self::Models { .. }
+            | Self::McpServers(_)
+            | Self::EditorReply { .. } => Failure::Broken,
+        }
+    }
+}
+
+type Result<T, E = CallToolError> = std::result::Result<T, E>;
+
+const STRING_WRITE: &str = "invariant: writing to a String cannot fail";
+
+fn editor_reply<T: DeserializeOwned>(call: &'static str, reply: Value) -> Result<T> {
+    serde_json::from_value(reply).map_err(|source| CallToolError::EditorReply { call, source })
+}
+
+#[derive(Deserialize)]
+struct EditorHost {
+    id: String,
+    name: String,
+    address: String,
+    connected: bool,
+    is_caller: bool,
+}
+
+#[derive(Deserialize)]
+struct PairedHost {
+    name: String,
+    address: String,
+}
+
+#[derive(Deserialize)]
+struct SignInStarted {
+    authorize_url: String,
+}
+
+fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> CallToolError {
+    move |source| CallToolError::Forge {
+        step,
+        source: Box::new(source.into()),
+    }
+}
+
 const OWN_SERVERS: [&str; 2] = ["artisan", "computer"];
 
 const HARNESS: &str = "claude, codex or opencode";
@@ -28,7 +103,7 @@ fn scope_properties() -> Value {
         "thread": { "type": "string", "description": "Only this thread." },
         "project": { "type": "string", "description": "Only this project's threads (an id from list_projects)." },
         "harness": { "type": "string", "description": format!("Only threads on this harness: {HARNESS}.") },
-        "kinds": { "type": "array", "items": { "type": "string", "enum": ["user", "assistant", "tool", "agent", "plan", "question", "notice", "error", "image"] }, "description": "Only these item kinds." },
+        "kinds": { "type": "array", "items": { "type": "string", "enum": ["user", "assistant", "tool", "agent", "plan", "question", "notice", "error", "image", "compaction"] }, "description": "Only these item kinds." },
         "since_days": { "type": "number", "description": "Only items from the last this many days." },
         "skip_archived": { "type": "boolean", "description": "Leave archived threads out (default false)." },
     })
@@ -56,7 +131,7 @@ fn read_properties() -> Value {
     })
 }
 
-pub fn tools() -> Vec<Tool> {
+pub(crate) fn tools() -> Vec<Tool> {
     [
         recall_tools(),
         thread_tools(),
@@ -72,7 +147,6 @@ pub fn tools() -> Vec<Tool> {
     .collect()
 }
 
-/// Finding and reading threads.
 fn recall_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -83,7 +157,7 @@ fn recall_tools() -> Vec<Tool> {
                     "query": { "type": "string", "description": "Words to find; an exact phrase ranks first." },
                     "include_output": { "type": "boolean", "description": "Also search tool output (slower; default false)." },
                     "limit": { "type": "integer", "description": "Hits per page (default 15, at most 100)." },
-                    "offset": { "type": "integer", "description": "Skip this many hits (`next` from a previous page)." },
+                    "cursor": { "type": "string", "description": "The cursor a previous page said continues." },
                 }))
             },
             required: &["query"],
@@ -101,7 +175,7 @@ fn recall_tools() -> Vec<Tool> {
                     "include_output": { "type": "boolean", "description": "Also read tool output." },
                     "context": { "type": "integer", "description": "Lines around each match (at most 10)." },
                     "max_matches": { "type": "integer", "description": "Default 50, at most 500." },
-                    "cursor": { "type": "integer", "description": "`next` from a previous page." },
+                    "cursor": { "type": "string", "description": "The cursor a previous page said continues." },
                 }))
             },
             required: &["pattern"],
@@ -153,7 +227,6 @@ fn recall_tools() -> Vec<Tool> {
     ]
 }
 
-/// Starting, messaging and changing threads, and what waits on the user.
 fn thread_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -231,7 +304,6 @@ fn thread_tools() -> Vec<Tool> {
     ]
 }
 
-/// Running agents on any harness.
 fn agent_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -332,7 +404,6 @@ fn agent_tools() -> Vec<Tool> {
     ]
 }
 
-/// Reading and changing settings.
 fn setting_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -365,7 +436,6 @@ fn setting_tools() -> Vec<Tool> {
     ]
 }
 
-/// The Forge hosts the Editor connects to.
 fn host_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -416,7 +486,6 @@ fn host_tools() -> Vec<Tool> {
     ]
 }
 
-/// The projects threads work in.
 fn project_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -449,7 +518,6 @@ fn project_tools() -> Vec<Tool> {
     ]
 }
 
-/// MCP servers, skills, the global prompt and harness setup.
 #[expect(
     clippy::too_many_lines,
     reason = "one schema per tool, in the order the docs list them"
@@ -572,7 +640,6 @@ fn extension_tools() -> Vec<Tool> {
     ]
 }
 
-/// Opening places in the Editor.
 fn navigation_tools() -> Vec<Tool> {
     vec![
         Tool {
@@ -603,8 +670,6 @@ fn navigate_user_schema() -> Value {
     })
 }
 
-/// Opens a settings page when the user asked to be taken there. Best
-/// effort: the change stands when no Editor answers.
 async fn navigate_if_asked(hub: &Hub, navigate_user: bool, page: &str) -> String {
     if !navigate_user {
         return String::new();
@@ -620,7 +685,6 @@ async fn navigate_if_asked(hub: &Hub, navigate_user: bool, page: &str) -> String
     }
 }
 
-/// The settings page a setting is changed on.
 fn setting_page(key: &str) -> &'static str {
     match key {
         "suggestions" | "you_should_know" | "summary_titles" | "thread_retention_days" => "threads",
@@ -628,7 +692,6 @@ fn setting_page(key: &str) -> &'static str {
     }
 }
 
-/// What `list_mcp_servers` says about a server's sign-in.
 const fn auth_note(status: Option<&artisan_api::McpAuthStatus>) -> &'static str {
     match status {
         Some(artisan_api::McpAuthStatus::NeedsSignIn) => " · needs sign-in (sign_in_mcp_server)",
@@ -645,8 +708,6 @@ fn args<T: DeserializeOwned>(arguments: Value) -> Result<T> {
         .map_err(|error| Refused(format!("Those arguments don't fit: {error}")).into())
 }
 
-/// A thread argument: its id, or the `artisan://thread/<host>/<thread>`
-/// link that opens it in the Editor.
 fn thread_id(value: &str) -> ThreadId {
     let id = value
         .trim()
@@ -683,7 +744,7 @@ struct Scope {
     project: Option<String>,
     harness: Option<String>,
     #[serde(default)]
-    kinds: Vec<String>,
+    kinds: Vec<RecallKind>,
     since_days: Option<f64>,
     #[serde(default)]
     skip_archived: bool,
@@ -694,7 +755,7 @@ impl Scope {
         clippy::cast_possible_truncation,
         reason = "a day count is fractional; `as` truncates it to whole milliseconds and saturates"
     )]
-    fn recall(self) -> Result<RecallScope> {
+    fn recall(self, now: artisan_api::Timestamp) -> Result<RecallScope> {
         Ok(RecallScope {
             thread: self.thread.as_deref().map(thread_id),
             project: self.project.map(ProjectId::from),
@@ -702,7 +763,7 @@ impl Scope {
             kinds: self.kinds,
             since: self
                 .since_days
-                .map(|days| artisan_api::now() - (days * 86_400_000.0) as i64),
+                .map(|days| now - (days * 86_400_000.0) as i64),
             until: None,
             skip_archived: self.skip_archived,
         })
@@ -724,22 +785,22 @@ struct Read {
     include_output: bool,
 }
 
-/// A page of a thread's top-level items as text.
 async fn read_thread(hub: &Hub, thread: &ThreadId, read: Read) -> Result<String> {
     let store = hub.store();
     let found = store
         .thread(thread)
-        .await?
+        .await
+        .map_err(forge("load the thread"))?
         .ok_or_else(|| Refused(format!("There is no thread {thread}.")))?;
     let options = Options {
         whole: read.whole,
         output: read.include_output,
-        unbounded: false,
     };
     let (items, older) = if let Some(id) = &read.item {
         let item = store
             .item(&ItemId::from(id.as_str()))
-            .await?
+            .await
+            .map_err(forge("load the item"))?
             .filter(|item| &item.thread_id == thread)
             .ok_or_else(|| Refused(format!("Thread {thread} has no item {id}.")))?;
         let before = read.before.unwrap_or(5).min(50);
@@ -758,7 +819,8 @@ async fn read_thread(hub: &Hub, thread: &ThreadId, read: Read) -> Result<String>
                         limit: Some(before),
                     },
                 )
-                .await?
+                .await
+                .map_err(forge("read a page of the thread"))?
                 .items
         };
         let later = if after == 0 {
@@ -774,7 +836,8 @@ async fn read_thread(hub: &Hub, thread: &ThreadId, read: Read) -> Result<String>
                         limit: Some(after),
                     },
                 )
-                .await?
+                .await
+                .map_err(forge("read a page of the thread"))?
                 .items
         };
         let older = earlier.first().map(|first| first.position);
@@ -793,7 +856,8 @@ async fn read_thread(hub: &Hub, thread: &ThreadId, read: Read) -> Result<String>
                     limit: Some(read.limit.unwrap_or(20).clamp(1, 100)),
                 },
             )
-            .await?;
+            .await
+            .map_err(forge("read a page of the thread"))?;
         let older = page
             .more
             .then(|| page.items.first().map(|item| item.position))
@@ -803,27 +867,37 @@ async fn read_thread(hub: &Hub, thread: &ThreadId, read: Read) -> Result<String>
     let mut items = items;
     items.sort_by_key(|item| item.position);
     let mut out = format!("{}\n\n---\n\n", format::thread(hub, &found));
-    out.push_str(&transcript::render(store, &items, &options).await?);
+    out.push_str(
+        &transcript::render(store, &items, &options)
+            .await
+            .map_err(CallToolError::Render)?,
+    );
     match older {
         Some(cursor) => {
-            writeln!(out, "---\n\nOlder items: call again with cursor {cursor}.")?;
+            writeln!(out, "---\n\nOlder items: call again with cursor {cursor}.")
+                .expect(STRING_WRITE);
         }
         None => out.push_str("---\n\nThat is the start of the thread.\n"),
     }
     Ok(out)
 }
 
-/// Asks the user before an agent changes trust or removes something, unless
-/// the thread has Full access.
 async fn approve(hub: &Hub, caller: &ThreadId, tool: &str, description: String) -> Result<()> {
-    hub.ask_approval(caller, tool, description).await
+    hub.ask_approval(caller, tool, description)
+        .await
+        .map_err(forge("ask the user's approval"))
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per MCP tool, in the order tools() lists them"
 )]
-pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) -> Result<String> {
+pub(crate) async fn call(
+    hub: &Hub,
+    caller: &ThreadId,
+    name: &str,
+    arguments: Value,
+) -> Result<String> {
     let store = hub.store();
     match name {
         "search_threads" => {
@@ -833,25 +907,29 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 #[serde(default)]
                 include_output: bool,
                 limit: Option<u32>,
-                offset: Option<u32>,
+                cursor: Option<SearchCursor>,
                 #[serde(flatten)]
                 scope: Scope,
             }
             let search: Search = args(arguments)?;
-            let offset = search.offset.unwrap_or(0);
             let page = store
                 .recall_search(
-                    search.scope.recall()?,
+                    search.scope.recall(hub.store().now())?,
                     search.query,
                     search.include_output,
                     search.limit.unwrap_or(15),
-                    search.offset.unwrap_or(0),
+                    search.cursor,
                 )
-                .await?;
-            if page.hits.is_empty() {
-                return Ok("No matches.".to_owned());
-            }
-            Ok(format::search(&page, offset))
+                .await
+                .map_err(forge("search the threads"))?;
+            Ok(format::with_coverage(
+                *store.recall_index().borrow(),
+                if page.hits.is_empty() {
+                    "No matches.".to_owned()
+                } else {
+                    format::search(&page, search.cursor.is_some())
+                },
+            ))
         }
         "grep_threads" => {
             #[derive(Deserialize)]
@@ -863,14 +941,14 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 include_output: bool,
                 context: Option<u32>,
                 max_matches: Option<u32>,
-                cursor: Option<i64>,
+                cursor: Option<GrepCursor>,
                 #[serde(flatten)]
                 scope: Scope,
             }
             let grep: Grep = args(arguments)?;
             let page = store
                 .recall_grep(
-                    grep.scope.recall()?,
+                    grep.scope.recall(hub.store().now())?,
                     GrepQuery {
                         pattern: grep.pattern,
                         ignore_case: grep.ignore_case,
@@ -880,20 +958,25 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         cursor: grep.cursor,
                     },
                 )
-                .await?;
-            if page.matches.is_empty() && page.next.is_none() {
-                return Ok("No matches.".to_owned());
-            }
-            Ok(format::grep(&page))
+                .await
+                .map_err(forge("grep the threads"))?;
+            Ok(format::with_coverage(
+                *store.recall_index().borrow(),
+                if page.matches.is_empty() && page.next.is_none() {
+                    "No matches.".to_owned()
+                } else {
+                    format::grep(&page)
+                },
+            ))
         }
         "read_thread" => {
             let read: Read = args(arguments)?;
-            // A hit's item names its thread.
             let thread = match (&read.thread, &read.item) {
                 (Some(thread), _) => thread_id(thread),
                 (None, Some(item)) => store
                     .item(&ItemId::from(item.as_str()))
-                    .await?
+                    .await
+                    .map_err(forge("load the item"))?
                     .map(|item| item.thread_id)
                     .ok_or_else(|| Refused(format!("There is no item {item}.")))?,
                 (None, None) => caller.clone(),
@@ -917,53 +1000,16 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     touching.path,
                     touching.limit.unwrap_or(30),
                 )
-                .await?;
-            if touches.is_empty() {
-                return Ok("No thread touched a matching path.".to_owned());
-            }
-            Ok(format::touches(&touches))
-        }
-        "list_threads" => {
-            #[derive(Deserialize)]
-            struct List {
-                project: Option<String>,
-                state: Option<String>,
-                title: Option<String>,
-                parent: Option<String>,
-                limit: Option<u32>,
-            }
-            let list: List = args(arguments)?;
-            let limit = list.limit.unwrap_or(30).clamp(1, 200) as usize;
-            if let Some(parent) = list.parent {
-                let threads = store.agent_threads(&thread_id(&parent)).await?;
-                return Ok(format::threads(hub, &threads));
-            }
-            let state = list.state.as_deref().unwrap_or("any");
-            let page = store
-                .threads_page(ThreadsQuery {
-                    archived: state == "archived",
-                    limit: Some(200),
-                    query: list.title,
-                    ..ThreadsQuery::default()
-                })
-                .await?;
-            let threads: Vec<&artisan_api::Thread> = page
-                .threads
-                .iter()
-                .filter(|thread| thread.spawned_by.is_none())
-                .filter(|thread| {
-                    list.project
-                        .as_deref()
-                        .is_none_or(|project| thread.project_id.as_str() == project)
-                })
-                .filter(|thread| match state {
-                    "working" => hub.is_live(&thread.id),
-                    "unread" => thread.is_unread(),
-                    _ => true,
-                })
-                .take(limit)
-                .collect();
-            Ok(format::threads(hub, threads))
+                .await
+                .map_err(forge("find the threads touching the path"))?;
+            Ok(format::with_coverage(
+                *store.recall_index().borrow(),
+                if touches.is_empty() {
+                    "No thread touched a matching path.".to_owned()
+                } else {
+                    format::touches(&touches)
+                },
+            ))
         }
         "create_thread" => {
             #[derive(Deserialize)]
@@ -1000,7 +1046,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         background: false,
                     },
                 )
-                .await?;
+                .await
+                .map_err(forge("start the thread"))?;
             let mut out = format!("Started {}", format::thread(hub, &thread));
             format::warnings(&mut out, &warnings);
             Ok(out)
@@ -1018,9 +1065,13 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             let target = store
                 .thread(&thread)
-                .await?
+                .await
+                .map_err(forge("load the thread"))?
                 .ok_or_else(|| Refused(format!("There is no thread {thread}.")))?;
-            let item = hub.send_as_agent(caller, &thread, send.text).await?;
+            let item = hub
+                .send_as_agent(caller, &thread, send.text)
+                .await
+                .map_err(forge("send the message"))?;
             let title = format::thread(hub, &target);
             Ok(
                 if matches!(
@@ -1047,9 +1098,12 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             let target = store
                 .thread(&thread)
-                .await?
+                .await
+                .map_err(forge("load the thread"))?
                 .ok_or_else(|| Refused(format!("There is no thread {thread}.")))?;
-            hub.cancel(&thread).await?;
+            hub.cancel(&thread)
+                .await
+                .map_err(forge("stop the thread"))?;
             Ok(format!("Stopped {}", format::thread(hub, &target)))
         }
         "update_thread" => {
@@ -1072,7 +1126,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             )]
             let mut current = store
                 .thread(&thread)
-                .await?
+                .await
+                .map_err(forge("load the thread"))?
                 .ok_or_else(|| Refused(format!("There is no thread {thread}.")))?;
             if update.title.is_some() || update.archived.is_some() {
                 current = store
@@ -1084,32 +1139,50 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                             ..UpdateThread::default()
                         },
                     )
-                    .await?
-                    .context("the thread disappeared")?;
+                    .await
+                    .map_err(forge("update the thread"))?
+                    .ok_or_else(|| CallToolError::Vanished {
+                        thread: thread.clone(),
+                    })?;
             }
             if update.settled == Some(true) {
                 current = store
                     .settle_thread(&thread, current.activity_seq)
-                    .await?
-                    .context("the thread disappeared")?;
+                    .await
+                    .map_err(forge("settle the thread"))?
+                    .ok_or_else(|| CallToolError::Vanished {
+                        thread: thread.clone(),
+                    })?;
             }
             if update.unread == Some(true) {
                 current = store
                     .mark_unread(&thread)
-                    .await?
-                    .context("the thread disappeared")?;
+                    .await
+                    .map_err(forge("mark the thread unread"))?
+                    .ok_or_else(|| CallToolError::Vanished {
+                        thread: thread.clone(),
+                    })?;
             }
             Ok(format!("Now {}", format::thread(hub, &current)))
         }
         "list_requests" => {
             let mut requests = Vec::new();
-            for pending in store.items_awaiting_user().await? {
-                let Some(item) = store.item(&pending.id).await? else {
+            for pending in store
+                .items_awaiting_user()
+                .await
+                .map_err(forge("list what waits on the user"))?
+            {
+                let Some(item) = store
+                    .item(&pending.id)
+                    .await
+                    .map_err(forge("load the item"))?
+                else {
                     continue;
                 };
                 let title = store
                     .thread(&pending.thread_id)
-                    .await?
+                    .await
+                    .map_err(forge("load the thread"))?
                     .and_then(|thread| thread.title);
                 let what = match &item.kind {
                     artisan_api::ItemKind::Question { .. } => "question",
@@ -1155,16 +1228,17 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         .as_deref()
                         .map(|model| format!(" · new threads start on `{model}`"))
                         .unwrap_or_default(),
-                )?;
-                writeln!(
-                    out,
-                    "{}\n",
-                    status.discovery.description(artisan_api::now())
-                )?;
+                )
+                .expect(STRING_WRITE);
+                writeln!(out, "{}\n", status.discovery.description(hub.store().now()))
+                    .expect(STRING_WRITE);
                 if !installed || status.models.is_empty() {
                     continue;
                 }
-                out.push_str(&format::models(&status.models)?);
+                out.push_str(
+                    &format::models(&status.models)
+                        .map_err(|source| CallToolError::Models { engine, source })?,
+                );
             }
             Ok(out.trim_end().to_owned())
         }
@@ -1203,7 +1277,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         background: spawn.background,
                     },
                 )
-                .await?;
+                .await
+                .map_err(forge("start the agent"))?;
             let mut out = format!("Started {}", format::agent(&info));
             out.push_str(if spawn_background {
                 "\nIts result arrives as a message when it finishes."
@@ -1228,7 +1303,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     wait.any,
                     Duration::from_secs(wait.timeout_seconds.unwrap_or(300)),
                 )
-                .await?;
+                .await
+                .map_err(forge("wait for the agents"))?;
             Ok(format::agents(&agents))
         }
         "message_agent" => {
@@ -1240,7 +1316,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let message: Message = args(arguments)?;
             let info = hub
                 .message_agent(caller, &message.agent, message.text)
-                .await?;
+                .await
+                .map_err(forge("message the agent"))?;
             Ok(format!("Sent to {}", format::agent(&info)))
         }
         "read_agent" => {
@@ -1249,7 +1326,10 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .agent
                 .clone()
                 .ok_or_else(|| Refused("Name the agent to read.".to_owned()))?;
-            let info = hub.agent_status(caller, &agent).await?;
+            let info = hub
+                .agent_status(caller, &agent)
+                .await
+                .map_err(forge("read the agent"))?;
             read_thread(hub, &info.thread, read).await
         }
         "cancel_agent" => {
@@ -1258,11 +1338,14 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 agent: String,
             }
             let cancel: Cancel = args(arguments)?;
-            let info = hub.cancel_agent(caller, &cancel.agent).await?;
+            let info = hub
+                .cancel_agent(caller, &cancel.agent)
+                .await
+                .map_err(forge("stop the agent"))?;
             Ok(format::agent(&info))
         }
         "list_agents" => {
-            let agents = hub.agents(caller).await?;
+            let agents = hub.agents(caller).await.map_err(forge("list the agents"))?;
             if agents.is_empty() {
                 return Ok("This thread has started no agents.".to_owned());
             }
@@ -1276,7 +1359,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     SettingOwner::Forge => Some(
                         store
                             .setting(decl.key)
-                            .await?
+                            .await
+                            .map_err(forge("read the setting"))?
                             .unwrap_or_else(|| decl.default_value()),
                     ),
                     SettingOwner::Editor if editor_open => hub
@@ -1295,11 +1379,19 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 };
                 let allowed = match &decl.kind {
                     artisan_api::SettingKind::Bool => "true or false".to_owned(),
+                    artisan_api::SettingKind::SystemSwitch => {
+                        "true, false or null to follow the system".to_owned()
+                    }
                     artisan_api::SettingKind::ModelCustomizations => {
                         "versioned model customization object: {version: 1, rules: [...]}"
                             .to_owned()
                     }
                     artisan_api::SettingKind::Text { hint } => (*hint).to_owned(),
+                    artisan_api::SettingKind::Options { values } => values
+                        .iter()
+                        .map(|value| format!("\"{value}\""))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     artisan_api::SettingKind::Choice { values } => values
                         .iter()
                         .map(|value| {
@@ -1322,7 +1414,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         SettingOwner::Forge => "this host",
                         SettingOwner::Editor => "this device",
                     },
-                )?;
+                )
+                .expect(STRING_WRITE);
             }
             Ok(out)
         }
@@ -1341,12 +1434,13 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let value = match decl.owner {
                 SettingOwner::Forge => store
                     .setting(decl.key)
-                    .await?
+                    .await
+                    .map_err(forge("read the setting"))?
                     .unwrap_or_else(|| decl.default_value()),
-                SettingOwner::Editor => {
-                    hub.call_editor(EditorCall::SettingGet { key: get.key })
-                        .await?
-                }
+                SettingOwner::Editor => hub
+                    .call_editor(EditorCall::SettingGet { key: get.key })
+                    .await
+                    .map_err(forge("read the setting from the Editor"))?,
             };
             Ok(format!("{} (`{}`) is `{value}`.", decl.label, decl.key))
         }
@@ -1365,7 +1459,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     set.key
                 ))
             })?;
-            decl.check(&set.value).map_err(Refused)?;
+            decl.check(&set.value)
+                .map_err(|error| Refused(error.to_string()))?;
             if decl.needs_approval {
                 approve(
                     hub,
@@ -1379,14 +1474,16 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 SettingOwner::Forge => {
                     store
                         .set_setting(set.key.clone(), set.value.clone())
-                        .await?;
+                        .await
+                        .map_err(forge("save the setting"))?;
                 }
                 SettingOwner::Editor => {
                     hub.call_editor(EditorCall::SettingSet {
                         key: set.key.clone(),
                         value: set.value.clone(),
                     })
-                    .await?;
+                    .await
+                    .map_err(forge("save the setting in the Editor"))?;
                 }
             }
             let note = navigate_if_asked(hub, set.navigate_user, setting_page(&set.key)).await;
@@ -1396,31 +1493,31 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             ))
         }
         "list_hosts" => {
-            let hosts = hub.call_editor(EditorCall::HostsList).await?;
+            let hosts = hub
+                .call_editor(EditorCall::HostsList)
+                .await
+                .map_err(forge("list the hosts in the Editor"))?;
+            let hosts: Vec<EditorHost> = editor_reply("list_hosts", hosts)?;
             let lines: Vec<String> = hosts
-                .as_array()
                 .into_iter()
-                .flatten()
                 .map(|host| {
-                    let text =
-                        |key: &str| host.get(key).and_then(Value::as_str).unwrap_or_default();
-                    let mut states = Vec::new();
-                    if host.get("connected") == Some(&Value::Bool(true)) {
-                        states.push("connected");
-                    }
-                    if host.get("is_caller") == Some(&Value::Bool(true)) {
-                        states.push("this thread's host");
-                    }
+                    let states: Vec<&str> = [
+                        host.connected.then_some("connected"),
+                        host.is_caller.then_some("this thread's host"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
                     format!(
                         "- **{}** · {}{} `{}`",
-                        text("name"),
-                        text("address"),
+                        host.name,
+                        host.address,
                         if states.is_empty() {
                             String::new()
                         } else {
                             format!(" · {}", states.join(", "))
                         },
-                        text("id"),
+                        host.id,
                     )
                 })
                 .collect();
@@ -1450,18 +1547,15 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 code: add.code,
                 fingerprint: add.fingerprint,
             };
-            let added = hub.call_editor(call).await?;
+            let added = hub
+                .call_editor(call)
+                .await
+                .map_err(forge("pair the host in the Editor"))?;
+            let added: PairedHost = editor_reply("add_host", added)?;
             let note = navigate_if_asked(hub, navigate_user, "hosts").await;
             Ok(format!(
                 "Paired with **{}** ({}).{note}",
-                added
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("the host"),
-                added
-                    .get("address")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
+                added.name, added.address
             ))
         }
         "remove_host" => {
@@ -1480,7 +1574,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             hub.call_editor(EditorCall::HostRemove {
                 host: remove.host.clone(),
             })
-            .await?;
+            .await
+            .map_err(forge("unpair the host in the Editor"))?;
             Ok(format!("Unpaired {}.", remove.host))
         }
         "switch_host" => {
@@ -1492,11 +1587,12 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             hub.call_editor(EditorCall::HostSwitch {
                 host: switch.host.clone(),
             })
-            .await?;
+            .await
+            .map_err(forge("switch the Editor host"))?;
             Ok(format!("The Editor is on {} now.", switch.host))
         }
         "list_projects" => {
-            let state = store.state().await?;
+            let state = store.state().await.map_err(forge("load the projects"))?;
             if state.projects.is_empty() {
                 return Ok("No projects.".to_owned());
             }
@@ -1525,7 +1621,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     path: add.path,
                     name: add.name,
                 })
-                .await?;
+                .await
+                .map_err(forge("add the project"))?;
             Ok(format!(
                 "Added **{}** `{}` `{}`",
                 project.name, project.path, project.id
@@ -1540,7 +1637,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let id = ProjectId::from(remove.project);
             let project = store
                 .project(&id)
-                .await?
+                .await
+                .map_err(forge("load the project"))?
                 .ok_or_else(|| Refused(format!("There is no project {id}.")))?;
             approve(
                 hub,
@@ -1552,7 +1650,10 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 ),
             )
             .await?;
-            store.remove_project(&id).await?;
+            store
+                .remove_project(&id)
+                .await
+                .map_err(forge("remove the project"))?;
             Ok(format!("Removed {}.", project.name))
         }
         "list_mcp_servers" => {
@@ -1560,15 +1661,15 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             if servers.is_empty() {
                 return Ok("No MCP servers besides Artisan's own.".to_owned());
             }
-            let auth = hub.mcp_auth().await?;
+            let auth = hub
+                .mcp()
+                .auth()
+                .await
+                .map_err(forge("read the MCP sign-in states"))?;
             Ok(servers
                 .iter()
                 .map(|server| {
-                    let target = server.url.clone().unwrap_or_else(|| {
-                        format!("{} {}", server.command, server.args.join(" "))
-                            .trim()
-                            .to_owned()
-                    });
+                    let target = listed_destination(server);
                     let env = if server.env.is_empty() {
                         String::new()
                     } else {
@@ -1625,8 +1726,9 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .await?
                 .into_iter()
                 .find(|server| server.name == add.name);
-            let servers = store
-                .mutate_mcp(McpMutation::Upsert {
+            let servers = hub
+                .mcp()
+                .mutate(McpMutation::Upsert {
                     previous,
                     server: McpServer {
                         name: add.name,
@@ -1637,10 +1739,16 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         ..McpServer::default()
                     },
                 })
-                .await?;
-            // Find out now whether it needs a sign-in, so the answer can say.
-            hub.check_mcp_auth().await;
-            let sign_in = match hub.mcp_auth().await?.get(&added) {
+                .await
+                .map_err(forge("save the MCP servers"))?;
+            hub.mcp().check_auth().await;
+            let sign_in = match hub
+                .mcp()
+                .auth()
+                .await
+                .map_err(forge("read the MCP sign-in states"))?
+                .get(&added)
+            {
                 Some(artisan_api::McpAuthStatus::NeedsSignIn) => {
                     " It needs a sign-in first: sign_in_mcp_server."
                 }
@@ -1673,8 +1781,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 format!("Remove the MCP server {} from every harness", remove.name),
             )
             .await?;
-            store.mutate_mcp(McpMutation::Remove { previous }).await?;
-            hub.check_mcp_auth().await;
+            hub.mcp()
+                .mutate(McpMutation::Remove { previous })
+                .await
+                .map_err(forge("save the MCP servers"))?;
+            hub.mcp().check_auth().await;
             Ok(format!("Removed {}.", remove.name))
         }
         "sign_in_mcp_server" => {
@@ -1690,11 +1801,9 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     server: sign_in.name.clone(),
                     navigate_user: sign_in.navigate_user,
                 })
-                .await?;
-            let url = started
-                .get("authorize_url")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
+                .await
+                .map_err(forge("start the MCP sign-in in the Editor"))?;
+            let SignInStarted { authorize_url: url } = editor_reply("sign_in_mcp_server", started)?;
             Ok(if sign_in.navigate_user {
                 format!(
                     "Opened {}'s sign-in page in the user's browser and its card in Settings → Extensions. Once they approve, new threads get its tools. If the page didn't open, the link is {url}",
@@ -1708,7 +1817,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             })
         }
         "list_skills" => {
-            let skills = hub.skill_catalog().await?;
+            let skills = hub
+                .extensions()
+                .skill_catalog()
+                .await
+                .map_err(forge("list the skills"))?;
             if skills.is_empty() {
                 return Ok("No skills.".to_owned());
             }
@@ -1737,7 +1850,10 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 enabled: bool,
             }
             let enable: Enable = args(arguments)?;
-            hub.set_skill_enabled(&enable.id, enable.enabled).await?;
+            hub.extensions()
+                .set_skill_enabled(&enable.id, enable.enabled)
+                .await
+                .map_err(forge("switch the skill"))?;
             Ok(format!(
                 "{} is {}.",
                 enable.id,
@@ -1762,14 +1878,20 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .await?;
             }
             let skill = hub
+                .extensions()
                 .install_skill(install.path.into(), install.replace)
-                .await?;
+                .await
+                .map_err(forge("install the skill"))?;
             Ok(format!(
                 "Installed {skill} for every harness. New threads get it."
             ))
         }
         "get_global_prompt" => {
-            let prompt = hub.global_prompt().await?;
+            let prompt = hub
+                .extensions()
+                .global_prompt()
+                .await
+                .map_err(forge("load the global prompt"))?;
             Ok(if prompt.text.trim().is_empty() {
                 "The global prompt is empty.".to_owned()
             } else {
@@ -1785,7 +1907,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             let set: Set = args(arguments)?;
             let navigate_user = set.navigate_user;
-            let current = hub.global_prompt().await?;
+            let current = hub
+                .extensions()
+                .global_prompt()
+                .await
+                .map_err(forge("load the global prompt"))?;
             approve(
                 hub,
                 caller,
@@ -1797,11 +1923,13 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             )
             .await?;
             let saved = hub
+                .extensions()
                 .save_global_prompt(artisan_api::SavePrompt {
                     base_version: current.version,
                     text: set.text,
                 })
-                .await?;
+                .await
+                .map_err(forge("save the global prompt"))?;
             let note = navigate_if_asked(hub, navigate_user, "global-prompt").await;
             Ok(format!("Saved version {}.{note}", saved.version))
         }
@@ -1829,7 +1957,10 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         default.model
                     ))
                 })?;
-            store.set_default_model(engine, model).await?;
+            store
+                .set_default_model(engine, model)
+                .await
+                .map_err(forge("save the default model"))?;
             let page = format!("engines/{}", engine.as_str());
             let note = navigate_if_asked(hub, default.navigate_user, &page).await;
             Ok(format!(
@@ -1859,10 +1990,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 let engines = background.engines().clone();
                 match engines.install(engine).await {
                     Ok(_) => {
-                        if let Err(error) = background.reconcile_global_prompt().await {
+                        if let Err(error) = background.extensions().reconcile_global_prompt().await
+                        {
                             tracing::warn!(%engine, "reconcile prompt after install: {error:#}");
                         }
-                        if let Err(error) = background.reconcile_skills().await {
+                        if let Err(error) = background.extensions().reconcile_skills().await {
                             tracing::warn!(%engine, "reconcile skills after install: {error:#}");
                         }
                         engines.refresh(engine).await;
@@ -1887,8 +2019,13 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             hub.call_editor(EditorCall::OpenThread {
                 thread: thread.clone(),
             })
-            .await?;
-            let title = store.thread(&thread).await?.and_then(|thread| thread.title);
+            .await
+            .map_err(forge("open the thread in the Editor"))?;
+            let title = store
+                .thread(&thread)
+                .await
+                .map_err(forge("load the thread"))?
+                .and_then(|thread| thread.title);
             Ok(format!(
                 "Opened **{}**.",
                 title.as_deref().unwrap_or("the thread")
@@ -1903,18 +2040,144 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             hub.call_editor(EditorCall::OpenSettings {
                 page: open.page.clone(),
             })
-            .await?;
+            .await
+            .map_err(forge("open the settings in the Editor"))?;
             Ok(format!("Opened settings: {}.", open.page))
         }
         _ => Err(Refused(format!("Unknown tool {name}")).into()),
     }
 }
 
+const REDACTED: &str = "<redacted>";
+
+const SECRET_WORDS: [&str; 12] = [
+    "key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "auth",
+    "credential",
+    "cookie",
+    "session",
+    "bearer",
+    "header",
+    "private",
+];
+
+const SECRET_PREFIXES: [&str; 8] = [
+    "sk-",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "akia",
+    "bearer ",
+];
+
+fn listed_destination(server: &McpServer) -> String {
+    server.url.as_deref().map_or_else(
+        || {
+            std::iter::once(server.command.clone())
+                .chain(redacted_args(&server.args))
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+        sanitized_url,
+    )
+}
+
+fn sanitized_url(written: &str) -> String {
+    url::Url::parse(written).map_or_else(
+        |_| REDACTED.to_owned(),
+        |url| {
+            let host = url.host_str().unwrap_or_default();
+            let port = url
+                .port()
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default();
+            let path: Vec<&str> = url
+                .path()
+                .split('/')
+                .map(|segment| {
+                    if looks_like_token(segment) {
+                        REDACTED
+                    } else {
+                        segment
+                    }
+                })
+                .collect();
+            format!("{}://{host}{port}{}", url.scheme(), path.join("/"))
+        },
+    )
+}
+
+const TOKEN_CHARACTERS: usize = 20;
+
+fn looks_like_token(text: &str) -> bool {
+    text.len() >= TOKEN_CHARACTERS
+        && text.bytes().any(|byte| byte.is_ascii_digit())
+        && text.bytes().any(|byte| byte.is_ascii_alphabetic())
+        && text.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'+' | b'=' | b'%')
+        })
+}
+
+fn names_secret(key: &str) -> bool {
+    let key = key.trim_start_matches('-').to_ascii_lowercase();
+    !key.is_empty() && SECRET_WORDS.iter().any(|word| key.contains(word))
+}
+
+fn looks_secret(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    SECRET_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
+fn redacted_arg(arg: &str) -> String {
+    if arg.contains("://") {
+        return sanitized_url(arg);
+    }
+    if looks_secret(arg) || looks_like_token(arg) {
+        return REDACTED.to_owned();
+    }
+    for separator in ['=', ':'] {
+        if let Some((key, _)) = arg.split_once(separator)
+            && names_secret(key)
+        {
+            return format!("{key}{separator}{REDACTED}");
+        }
+    }
+    arg.to_owned()
+}
+
+fn redacted_args(args: &[String]) -> Vec<String> {
+    let mut shown = Vec::with_capacity(args.len());
+    let mut value_is_secret = false;
+    for arg in args {
+        if value_is_secret {
+            shown.push(REDACTED.to_owned());
+            value_is_secret = false;
+            continue;
+        }
+        let flag = arg.starts_with('-') && !arg.contains('=');
+        value_is_secret = flag && names_secret(arg);
+        shown.push(redacted_arg(arg));
+    }
+    shown
+}
+
 async fn mcp_servers(hub: &Hub) -> Result<Vec<McpServer>> {
-    Ok(hub
-        .store()
+    hub.store()
         .setting("mcp_servers")
-        .await?
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default())
+        .await
+        .map_err(forge("read the MCP servers"))?
+        .map_or_else(
+            || Ok(Vec::new()),
+            |value| serde_json::from_value(value).map_err(CallToolError::McpServers),
+        )
 }

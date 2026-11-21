@@ -49,9 +49,9 @@ pub(crate) fn percent(share: f64) -> String {
     }
     let percent = share * 100.0;
     if percent > 0.0 && percent < 1.0 {
-        format!("{percent:.1}%")
+        format!("{}%", crate::ui::locale::decimal(percent, 1))
     } else {
-        format!("{percent:.0}%")
+        format!("{}%", crate::ui::locale::decimal(percent, 0))
     }
 }
 

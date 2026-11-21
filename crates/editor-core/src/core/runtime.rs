@@ -13,20 +13,23 @@ pub fn runtime() -> &'static Runtime {
             .thread_name("forge-net")
             .enable_all()
             .build()
-            .expect("start the network runtime")
+            .expect(
+                "invariant: the OS starts the two network threads, as std::thread::spawn assumes",
+            )
     })
 }
 
-pub async fn run_http<T: Send + 'static>(
-    future: impl std::future::Future<Output = Result<T, artisan_account::network::NetworkError>>
-    + Send
-    + 'static,
+pub(crate) async fn run_http<T: Send + 'static>(
+    future: impl Future<Output = Result<T, artisan_account::network::NetworkError>> + Send + 'static,
 ) -> Result<T, artisan_account::network::NetworkError> {
     match tokio_util::task::AbortOnDropHandle::new(runtime().spawn(future)).await {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!("Core request task did not finish: {error}");
-            Err(artisan_account::network::NetworkError::Transport)
+            Err(artisan_account::network::NetworkError::Stopped {
+                action: "call Core",
+                source: error,
+            })
         }
     }
 }

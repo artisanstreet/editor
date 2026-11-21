@@ -52,30 +52,27 @@ impl Motion {
                 0.0,
             ),
         };
-        match resized || reduced {
-            true => {
+        if resized || reduced {
+            self.left = Glide::Resting(left);
+            self.right = Glide::Resting(right);
+            self.height = Glide::Resting(height);
+        } else {
+            if self.target.is_some_and(|previous| previous.tab.is_none()) && !self.animating() {
                 self.left = Glide::Resting(left);
                 self.right = Glide::Resting(right);
-                self.height = Glide::Resting(height);
             }
-            false => {
-                if self.target.is_some_and(|previous| previous.tab.is_none()) && !self.animating() {
-                    self.left = Glide::Resting(left);
-                    self.right = Glide::Resting(right);
-                }
-                let transition = match tab {
-                    Some(_) => SLIDE,
-                    None => CLOSE,
-                };
-                self.left = self.left.retarget(left, now, transition, false);
-                self.right = self.right.retarget(right, now, transition, false);
-                self.height = self.height.retarget(height, now, transition, false);
-            }
+            let transition = match tab {
+                Some(_) => SLIDE,
+                None => CLOSE,
+            };
+            self.left = self.left.retarget(left, now, transition, false);
+            self.right = self.right.retarget(right, now, transition, false);
+            self.height = self.height.retarget(height, now, transition, false);
         }
         self.target = Some(next);
     }
 
-    pub fn destination(&self) -> Option<Rect> {
+    pub(crate) fn destination(&self) -> Option<Rect> {
         let body = self.target?.body;
         Some(Rect::from_edges(
             self.left.target(),
@@ -101,9 +98,10 @@ impl Motion {
     pub fn advance(&mut self, now: Instant, reduced: bool) -> bool {
         let changed = self.animating();
         for glide in [&mut self.left, &mut self.right, &mut self.height] {
-            *glide = match reduced {
-                true => Glide::Resting(glide.target()),
-                false => glide.settle(now),
+            *glide = if reduced {
+                Glide::Resting(glide.target())
+            } else {
+                glide.settle(now)
             };
         }
         changed

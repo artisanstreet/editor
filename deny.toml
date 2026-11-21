@@ -1,0 +1,36 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained; only the vendored syntect uses it, to load its packed syntax and theme dumps" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; editor-ui formats local times with it and forge-engines parses provider dates with it" },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; only rav1d uses it, through aqua-avif" },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; only serde_yaml_ng uses it, which forge-engines reads skill frontmatter with" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+deny = [{ crate = "anyhow" }]
+skip = []
+skip-tree = []

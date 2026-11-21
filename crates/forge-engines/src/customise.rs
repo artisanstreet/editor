@@ -1,15 +1,4 @@
-//! Skills, MCP servers and the global prompt (§2.10a).
-//!
-//! Forge's data is the source of truth. [`materialize`] runs right before
-//! every engine spawn: it writes the prompt file, links each skill folder
-//! into the engine home, removes links Forge placed for skills that no
-//! longer exist, moves every skill Artisan didn't install into the
-//! quarantine, and returns the launch arguments that carry MCP servers.
-//! It never edits files engines rewrite themselves (`.claude.json`,
-//! `config.toml`).
-
 use crate::Launch;
-use anyhow::{Context, Result};
 use artisan_api::EngineId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -18,34 +7,28 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "legacy-import")]
-mod legacy;
-#[cfg(feature = "legacy-import")]
-pub use legacy::import_legacy_extensions;
 mod prompt;
 mod skills;
 
 pub use prompt::{
-    PromptApplied, PromptFile, apply_prompt, inspect_prompt, normalize_prompt, prompt_digest,
-    read_prompt_file,
+    ApplyPromptError, PromptApplied, PromptFile, apply_prompt, inspect_prompt, normalize_prompt,
+    prompt_digest, read_prompt_file,
 };
-pub use skills::{adopt_skill, discard_skill, enabled_skills, install_skill, skill_catalog};
+pub use skills::{
+    AdoptSkillError, DiscardSkillError, FindSkillError, InstallSkillError, PlacedSkill,
+    ReadSkillsError, RecoverSkillError, UndoSkillError, adopt_skill, discard_skill, enabled_skills,
+    install_skill, place_skill, skill_catalog, undo_skill,
+};
 
-/// Marks a skill folder Forge copied (where symlinks are unavailable).
 const COPY_MARKER: &str = ".artisan-skill";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Customisation {
-    /// The global prompt; empty removes the prompt file. `None` while the
-    /// user hasn't chosen one: the engines' files are left as they are.
     pub prompt: Option<String>,
     pub mcp_servers: Vec<McpServer>,
-    /// `<data>/extensions/skills`: one plain folder per skill.
     pub skills_dir: PathBuf,
-    /// Whether Artisan's own skills go into the engines.
     #[serde(default)]
     pub first_party: bool,
-    /// Skill ids (`artisan.<name>`, `local.<folder>`) the user turned off.
     #[serde(default)]
     pub disabled_skills: BTreeSet<String>,
 }
@@ -54,7 +37,6 @@ pub use artisan_api::McpServer;
 
 struct Paths {
     prompt: PathBuf,
-    /// Prompt files that would shadow ours.
     shadows: Vec<PathBuf>,
     skills: PathBuf,
 }
@@ -81,60 +63,172 @@ fn paths(engine: EngineId, home: &Path) -> Option<Paths> {
     })
 }
 
-/// Explicit skill mutation/install boundary; catalog reads never call this.
-pub fn reconcile_skills(homes: &[(EngineId, Option<PathBuf>)], c: &Customisation) -> Result<()> {
-    let wanted = skills::wanted(c)?;
+#[derive(Debug, thiserror::Error)]
+pub enum ReconcileSkillsError {
+    #[error("prepare the skills")]
+    Wanted(#[source] ReadSkillsError),
+    #[error("linking {engine} skills into {}", path.display())]
+    Link {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: SkillsFolderError,
+    },
+}
+
+pub(crate) type SkillsFolderError = io::Error;
+
+pub fn reconcile_skills(
+    homes: &[(EngineId, Option<PathBuf>)],
+    c: &Customisation,
+) -> Result<(), ReconcileSkillsError> {
+    let wanted = skills::wanted(c).map_err(ReconcileSkillsError::Wanted)?;
     let owned = skills::owned_roots(&c.skills_dir);
     for (engine, home) in homes {
-        if let Some(paths) = home.as_deref().and_then(|home| paths(*engine, home)) {
-            skills::quarantine_foreign(*engine, &paths.skills, &c.skills_dir, &owned);
-            sync_skills(&paths.skills, &wanted, &owned)
-                .with_context(|| format!("linking {engine} skills"))?;
+        if let Some(home) = home.as_deref()
+            && let Some(paths) = paths(*engine, home)
+        {
+            skills::quarantine_foreign(*engine, home, &c.skills_dir, &owned);
+            sync_skills(*engine, home, &wanted, &owned).map_err(|source| {
+                ReconcileSkillsError::Link {
+                    engine: *engine,
+                    path: paths.skills.clone(),
+                    source,
+                }
+            })?;
         }
     }
     Ok(())
 }
 
-/// Brings `home` in line with `c` and returns how to pass MCP servers.
-///
-/// # Errors
-///
-/// When the prompt, a skill link or the MCP config file can't be written.
-pub fn materialize(engine: EngineId, home: &Path, c: &Customisation) -> Result<Launch> {
+#[derive(Debug, thiserror::Error)]
+pub enum MaterializeError {
+    #[error("bringing the global prompt in line for {engine}")]
+    Prompt {
+        engine: EngineId,
+        #[source]
+        source: Box<ApplyPromptError>,
+    },
+    #[error("preparing the skills for {engine}")]
+    Wanted {
+        engine: EngineId,
+        #[source]
+        source: ReadSkillsError,
+    },
+    #[error("linking {engine} skills into {}", path.display())]
+    Link {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: SkillsFolderError,
+    },
+    #[error("passing MCP servers to {engine}")]
+    Launch {
+        engine: EngineId,
+        #[source]
+        source: LaunchError,
+    },
+}
+
+pub(crate) fn materialize(
+    engine: EngineId,
+    home: &Path,
+    c: &Customisation,
+) -> Result<Launch, MaterializeError> {
     if let Some(paths) = paths(engine, home) {
         if let Some(prompt) = &c.prompt {
-            match apply_prompt(engine, home, prompt, false) {
-                Some(PromptApplied::Drifted(_)) => {
+            match prompt::reconcile(engine, home, prompt, false) {
+                Some(Ok((prompt::Reconciled::Drifted, _))) => {
                     tracing::info!(%engine, file = %paths.prompt.display(), "the global prompt was edited outside Artisan; leaving it until the user decides");
                 }
-                Some(PromptApplied::Failed(reason)) => {
-                    tracing::warn!(%engine, file = %paths.prompt.display(), reason = %reason, "couldn't write the global prompt");
+                Some(Err(source)) => {
+                    return Err(MaterializeError::Prompt {
+                        engine,
+                        source: Box::new(source),
+                    });
                 }
-                Some(PromptApplied::Synced) | None => {}
+                Some(Ok((prompt::Reconciled::Synced, _))) | None => {}
             }
         }
         let wanted =
-            skills::wanted(c).with_context(|| format!("preparing the skills for {engine}"))?;
+            skills::wanted(c).map_err(|source| MaterializeError::Wanted { engine, source })?;
         let owned = skills::owned_roots(&c.skills_dir);
-        // An engine only reads skills Artisan installed.
-        skills::quarantine_foreign(engine, &paths.skills, &c.skills_dir, &owned);
-        sync_skills(&paths.skills, &wanted, &owned)
-            .with_context(|| format!("linking {engine} skills into {}", paths.skills.display()))?;
+        skills::quarantine_foreign(engine, home, &c.skills_dir, &owned);
+        sync_skills(engine, home, &wanted, &owned).map_err(|source| MaterializeError::Link {
+            engine,
+            path: paths.skills.clone(),
+            source,
+        })?;
     }
-    launch(engine, home, &c.mcp_servers).with_context(|| format!("passing MCP servers to {engine}"))
+    launch(engine, home, &c.mcp_servers)
+        .map_err(|source| MaterializeError::Launch { engine, source })
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if fs::read(path).is_ok_and(|current| current == bytes) {
-        return Ok(());
+    match fs::read(path) {
+        Ok(current) if current == bytes => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    // Engines read these files while other runs start; never show a half write.
     let temp = path.with_extension("artisan-tmp");
     fs::write(&temp, bytes)?;
     fs::rename(&temp, path)
+}
+
+pub(crate) struct GatewayConfig {
+    inline: String,
+    env: Vec<(String, String)>,
+}
+
+impl GatewayConfig {
+    pub(crate) fn for_claude(servers: &[(String, String)]) -> Self {
+        let variable = |name: &str| -> String {
+            let name: String = name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            format!("ARTISAN_GATEWAY_{name}")
+        };
+        let config: Map<String, Value> = servers
+            .iter()
+            .map(|(name, _)| {
+                let url = format!("${{{}}}", variable(name));
+                (name.clone(), json!({ "type": "http", "url": url }))
+            })
+            .collect();
+        Self {
+            inline: json!({ "mcpServers": config }).to_string(),
+            env: servers
+                .iter()
+                .map(|(name, url)| (variable(name), url.clone()))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn claude_args(&self, args: &[String]) -> Vec<String> {
+        let mut args = args.to_vec();
+        match args.iter().position(|arg| arg == "--mcp-config") {
+            Some(flag) => args.insert((flag + 2).min(args.len()), self.inline.clone()),
+            None => args.extend(["--mcp-config".to_owned(), self.inline.clone()]),
+        }
+        args
+    }
+
+    pub(crate) fn env(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
 }
 
 fn remove_file_if_present(path: &Path) -> io::Result<()> {
@@ -144,38 +238,52 @@ fn remove_file_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Whose an entry in an engine's skills folder is.
+fn discard_leftover(path: &Path) {
+    if let Err(error) = fs::remove_dir_all(path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), %error, "couldn't remove a leftover skill folder");
+    }
+}
+
 enum Entry {
     Missing,
-    /// Forge's link or copy; the link target when it is a link.
     Ours(Option<PathBuf>),
-    /// The user's or the engine's; never touched.
     Theirs,
 }
 
-/// `owned` holds the folders Forge links into (see [`skills::owned_roots`]).
-fn inspect(path: &Path, owned: &[PathBuf]) -> Entry {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return Entry::Missing;
+fn inspect(path: &Path, owned: &[PathBuf]) -> io::Result<Entry> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
+        Err(error) => return Err(error),
     };
     if metadata.file_type().is_symlink() {
-        let Ok(target) = fs::read_link(path) else {
-            return Entry::Theirs;
-        };
+        let target = fs::read_link(path)?;
         if owned.iter().any(|root| target.starts_with(root)) {
-            return Entry::Ours(Some(target));
+            return Ok(Entry::Ours(Some(target)));
         }
-        return Entry::Theirs;
+        return Ok(Entry::Theirs);
     }
     if metadata.is_dir() && path.join(COPY_MARKER).is_file() {
-        return Entry::Ours(None);
+        return Ok(Entry::Ours(None));
     }
-    Entry::Theirs
+    Ok(Entry::Theirs)
 }
 
-/// Links every wanted skill (name → folder) into an engine's skills folder
-/// and removes Forge's links to anything else, including skills turned off.
 fn sync_skills(
+    engine: EngineId,
+    home: &Path,
+    wanted: &BTreeMap<String, PathBuf>,
+    owned: &[PathBuf],
+) -> Result<(), SkillsFolderError> {
+    match paths(engine, home) {
+        Some(paths) => sync_skill_folder(&paths.skills, wanted, owned),
+        None => Ok(()),
+    }
+}
+
+fn sync_skill_folder(
     engine_skills: &Path,
     wanted: &BTreeMap<String, PathBuf>,
     owned: &[PathBuf],
@@ -184,12 +292,14 @@ fn sync_skills(
         return Ok(());
     }
     fs::create_dir_all(engine_skills)?;
+    let staging = staging_root(engine_skills);
+    discard_other_processes_leftovers(&staging);
     for entry in fs::read_dir(engine_skills)? {
         let path = entry?.path();
         let keep = path
             .file_name()
             .is_some_and(|name| wanted.contains_key(&*name.to_string_lossy()));
-        if !keep && let Entry::Ours(_) = inspect(&path, owned) {
+        if !keep && let Entry::Ours(_) = inspect(&path, owned)? {
             remove_entry(&path)?;
             tracing::debug!(link = %path.display(), "removed a stale skill link");
         }
@@ -197,47 +307,43 @@ fn sync_skills(
     for (name, target) in wanted {
         let target = target.clone();
         let link = engine_skills.join(name);
-        match inspect(&link, owned) {
+        match inspect(&link, owned)? {
             Entry::Theirs => {
                 tracing::debug!(skill = %name, folder = %link.display(), "a skill folder of the user's has this name; leaving it");
                 continue;
             }
             Entry::Ours(Some(current)) if current == target => continue,
-            Entry::Ours(None) if copied_skill_matches(&link, &target) => continue,
-            Entry::Ours(_) => remove_entry(&link)?,
-            Entry::Missing => {}
+            Entry::Ours(None) if copied_skill_matches(&link, &target)? => continue,
+            Entry::Ours(_) | Entry::Missing => {}
         }
-        place(&target, &link)?;
+        place(&target, &link, &staging)?;
     }
     Ok(())
 }
 
-fn copied_skill_matches(link: &Path, target: &Path) -> bool {
+fn copied_skill_matches(link: &Path, target: &Path) -> io::Result<bool> {
     use std::io::Read as _;
     let path = link.join(COPY_MARKER);
-    let Ok(metadata) = fs::metadata(&path) else {
-        return false;
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
     };
     if !metadata.is_file() || metadata.len() > 64 * 1024 {
-        return false;
+        return Ok(false);
     }
-    let Ok(file) = fs::File::open(&path) else {
-        return false;
-    };
-    let mut marker = String::new();
-    if file
+    let mut marker = Vec::new();
+    fs::File::open(&path)?
         .take(64 * 1024 + 1)
-        .read_to_string(&mut marker)
-        .is_err()
-        || marker.len() > 64 * 1024
-    {
-        return false;
-    }
-
-    let Ok((digest, _, _)) = skills::measure_inner(target, true) else {
-        return false;
+        .read_to_end(&mut marker)?;
+    let Ok(marker) = String::from_utf8(marker) else {
+        return Ok(false);
     };
-    marker == format!("{}\n{digest}", target.display())
+    if marker.len() > 64 * 1024 {
+        return Ok(false);
+    }
+    let (digest, _, _) = skills::measure_cached(target)?;
+    Ok(marker == format!("{}\n{digest}", target.display()))
 }
 
 fn remove_entry(path: &Path) -> io::Result<()> {
@@ -245,39 +351,132 @@ fn remove_entry(path: &Path) -> io::Result<()> {
     if metadata.is_dir() {
         fs::remove_dir_all(path)
     } else {
-        // A symlink (to a directory, on Windows too) or a file.
         fs::remove_file(path).or_else(|_| fs::remove_dir(path))
     }
 }
 
-fn place(target: &Path, link: &Path) -> io::Result<()> {
+fn staging_root(engine_skills: &Path) -> PathBuf {
+    engine_skills.with_file_name(".artisan-skills-staging")
+}
+
+fn staged_name(kind: &str, name: &std::ffi::OsStr) -> String {
+    static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        ".{kind}-{}-{}-{}",
+        std::process::id(),
+        STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        name.to_string_lossy()
+    )
+}
+
+fn other_process_leftover<'name>(file_name: &'name str, kind: &str) -> Option<&'name str> {
+    let rest = file_name
+        .strip_prefix('.')?
+        .strip_prefix(kind)?
+        .strip_prefix('-')?;
+    let (process, rest) = rest.split_once('-')?;
+    let (_, name) = rest.split_once('-')?;
+    let process: u32 = process.parse().ok()?;
+    (process != std::process::id()).then_some(name)
+}
+
+fn discard_other_processes_leftovers(staging: &Path) {
+    let entries = match fs::read_dir(staging) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::warn!(path = %staging.display(), %error, "couldn't look for leftover staged skills");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let leftover = ["prepared", "copy", "retired"]
+            .iter()
+            .any(|kind| other_process_leftover(&file_name, kind).is_some());
+        if leftover && let Err(error) = remove_entry(&entry.path()) {
+            tracing::warn!(path = %entry.path().display(), %error, "couldn't remove a leftover staged skill");
+        }
+    }
+}
+
+fn link_name(link: &Path) -> &std::ffi::OsStr {
+    link.file_name()
+        .expect("invariant: a skill entry is <skills folder>/<name>")
+}
+
+fn swap_in(prepared: &Path, destination: &Path, retired: &Path) -> io::Result<()> {
+    match fs::rename(destination, retired) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return fs::rename(prepared, destination);
+        }
+        Err(error) => return Err(error),
+    }
+    if let Err(error) = fs::rename(prepared, destination) {
+        return match fs::rename(retired, destination) {
+            Ok(()) => Err(error),
+            Err(restore) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; the previous copy stays at {}: {restore}",
+                    retired.display()
+                ),
+            )),
+        };
+    }
+    if let Err(error) = remove_entry(retired) {
+        tracing::warn!(path = %retired.display(), %error, "couldn't remove a replaced skill copy");
+    }
+    Ok(())
+}
+
+fn publish(prepared: &Path, link: &Path, staging: &Path) -> io::Result<()> {
+    let retired = staging.join(staged_name("retired", link_name(link)));
+    swap_in(prepared, link, &retired).inspect_err(|_| {
+        if let Err(error) = remove_entry(prepared) {
+            tracing::warn!(path = %prepared.display(), %error, "couldn't remove a staged skill");
+        }
+    })
+}
+
+fn place(target: &Path, link: &Path, staging: &Path) -> io::Result<()> {
+    fs::create_dir_all(staging)?;
+    let prepared = staging.join(staged_name("prepared", link_name(link)));
     #[cfg(unix)]
-    let linked = std::os::unix::fs::symlink(target, link);
+    let linked = std::os::unix::fs::symlink(target, &prepared);
     #[cfg(windows)]
-    let linked = std::os::windows::fs::symlink_dir(target, link);
+    let linked = std::os::windows::fs::symlink_dir(target, &prepared);
     #[cfg(not(any(unix, windows)))]
     let linked: io::Result<()> = Err(io::ErrorKind::Unsupported.into());
     match linked {
-        Ok(()) => Ok(()),
-        // Windows without Developer Mode can't create symlinks.
+        Ok(()) => publish(&prepared, link, staging),
         Err(error) if cfg!(windows) => {
             tracing::debug!(error = %error, skill = %target.display(), "symlink refused; copying the skill");
-            copy_dir(target, link)?;
-            {
-                let (digest, _, _) = skills::measure(target)?;
-                fs::write(
-                    link.join(COPY_MARKER),
-                    format!("{}\n{digest}", target.display()),
-                )
-            }
+            publish_copy(target, link, staging)
         }
         Err(error) => Err(error),
     }
 }
 
-/// Copies a folder; files come out writable even if the source was not.
+fn publish_copy(target: &Path, link: &Path, staging: &Path) -> io::Result<()> {
+    fs::create_dir_all(staging)?;
+    let prepared = staging.join(staged_name("copy", link_name(link)));
+    let copied = copy_dir(target, &prepared).and_then(|()| {
+        let (digest, _, _) = skills::measure(target)?;
+        fs::write(
+            prepared.join(COPY_MARKER),
+            format!("{}\n{digest}", target.display()),
+        )
+    });
+    if let Err(error) = copied {
+        discard_leftover(&prepared);
+        return Err(error);
+    }
+    publish(&prepared, link, staging)
+}
+
 fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
-    // Validate the whole supported shape before publishing or backing up anything.
     let entries = skills::entries(from)?;
     fs::create_dir_all(to)?;
     for entry in entries {
@@ -294,7 +493,7 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
                 permissions.set_mode(permissions.mode() | 0o200);
             }
             #[cfg(not(unix))]
-            #[allow(
+            #[expect(
                 clippy::permissions_set_readonly_false,
                 reason = "Windows has no Unix mode bits; clearing readonly is the correct API there"
             )]
@@ -305,22 +504,117 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
     Ok(())
 }
 
-// --- launch channels -------------------------------------------------------
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchError {
+    #[error("write Forge's {engine} launch configuration")]
+    Config {
+        engine: EngineId,
+        #[source]
+        source: crate::home::ConfigError,
+    },
+    #[error("encode {}", path.display())]
+    EncodeJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("encode {}", path.display())]
+    EncodeToml {
+        path: PathBuf,
+        #[source]
+        source: toml::ser::Error,
+    },
+    #[error("reading {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("{} isn't UTF-8", path.display())]
+    NotText {
+        path: PathBuf,
+        #[source]
+        source: std::str::Utf8Error,
+    },
+    #[error("MCP server names must be nonempty and unique: {name:?}")]
+    ServerName { name: String },
+}
 
-fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch> {
+const CLAUDE_MCP_CONFIG: &str = ".artisan/claude-mcp.json";
+const CODEX_CONFIG: &str = ".codex/config.toml";
+const PRIVATE_FILE: u32 = 0o600;
+
+fn codex_server(server: &McpServer) -> toml::Table {
+    let mut entry = toml::Table::new();
+    if let Some(url) = &server.url {
+        entry.insert("url".into(), url.clone().into());
+        if !server.headers.is_empty() {
+            entry.insert(
+                "http_headers".into(),
+                toml::Value::Table(
+                    server
+                        .headers
+                        .iter()
+                        .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                        .collect(),
+                ),
+            );
+        }
+    } else {
+        entry.insert("command".into(), server.command.clone().into());
+        entry.insert(
+            "args".into(),
+            toml::Value::Array(
+                server
+                    .args
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+        entry.insert(
+            "env".into(),
+            toml::Value::Table(
+                server
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                    .collect(),
+            ),
+        );
+    }
+    entry
+}
+
+fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch, LaunchError> {
     let mut launch = Launch {
         mcp_servers: servers.to_vec(),
         ..Launch::default()
     };
     match engine {
         EngineId::Claude => {
-            // A file, not an inline argument, so env values stay out of `ps`.
-            let path = home.join(".artisan/claude-mcp.json");
+            let path = home.join(CLAUDE_MCP_CONFIG);
+            let configuring = |source| LaunchError::Config { engine, source };
             if servers.is_empty() {
-                remove_file_if_present(&path)?;
+                crate::home::remove_config(engine, home, Path::new(CLAUDE_MCP_CONFIG))
+                    .map_err(configuring)?;
             } else {
                 let config = json!({ "mcpServers": claude_servers(servers) });
-                write_if_changed(&path, serde_json::to_string_pretty(&config)?.as_bytes())?;
+                let text = serde_json::to_string_pretty(&config).map_err(|source| {
+                    LaunchError::EncodeJson {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                crate::home::write_config(
+                    engine,
+                    home,
+                    Path::new(CLAUDE_MCP_CONFIG),
+                    text.as_bytes(),
+                    PRIVATE_FILE,
+                )
+                .map_err(configuring)?;
                 launch.args = vec![
                     "--mcp-config".to_owned(),
                     path.to_string_lossy().into_owned(),
@@ -328,67 +622,42 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
             }
         }
         EngineId::Codex => {
-            let path = home.join(".codex/config.toml");
-            let mut config: toml::Table = match fs::read_to_string(&path) {
-                Ok(text) => {
-                    toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?
+            let path = home.join(CODEX_CONFIG);
+            let configuring = |source| LaunchError::Config { engine, source };
+            let editing = crate::home::edit_config(engine, home, Path::new(CODEX_CONFIG))
+                .map_err(configuring)?;
+            let mut config: toml::Table = match editing.base() {
+                Some(bytes) => {
+                    let text =
+                        std::str::from_utf8(bytes).map_err(|source| LaunchError::NotText {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    toml::from_str(text).map_err(|source| LaunchError::Parse {
+                        path: path.clone(),
+                        source,
+                    })?
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => toml::Table::new(),
-                Err(error) => return Err(error.into()),
+                None => toml::Table::new(),
             };
             let mut entries = toml::Table::new();
             for server in servers {
-                anyhow::ensure!(
-                    !server.name.is_empty() && !entries.contains_key(&server.name),
-                    "MCP server names must be nonempty and unique"
-                );
-                let mut entry = toml::Table::new();
-                if let Some(url) = &server.url {
-                    entry.insert("url".into(), url.clone().into());
-                    if !server.headers.is_empty() {
-                        entry.insert(
-                            "http_headers".into(),
-                            toml::Value::Table(
-                                server
-                                    .headers
-                                    .iter()
-                                    .map(|(key, value)| {
-                                        (key.clone(), toml::Value::String(value.clone()))
-                                    })
-                                    .collect(),
-                            ),
-                        );
-                    }
-                } else {
-                    entry.insert("command".into(), server.command.clone().into());
-                    entry.insert(
-                        "args".into(),
-                        toml::Value::Array(
-                            server
-                                .args
-                                .iter()
-                                .cloned()
-                                .map(toml::Value::String)
-                                .collect(),
-                        ),
-                    );
-                    entry.insert(
-                        "env".into(),
-                        toml::Value::Table(
-                            server
-                                .env
-                                .iter()
-                                .map(|(key, value)| {
-                                    (key.clone(), toml::Value::String(value.clone()))
-                                })
-                                .collect(),
-                        ),
-                    );
+                if server.name.is_empty() || entries.contains_key(&server.name) {
+                    return Err(LaunchError::ServerName {
+                        name: server.name.clone(),
+                    });
                 }
-                entries.insert(server.name.clone(), entry.into());
+                entries.insert(server.name.clone(), codex_server(server).into());
             }
             config.insert("mcp_servers".into(), entries.into());
-            write_if_changed(&path, toml::to_string_pretty(&config)?.as_bytes())?;
+            let text =
+                toml::to_string_pretty(&config).map_err(|source| LaunchError::EncodeToml {
+                    path: path.clone(),
+                    source,
+                })?;
+            editing
+                .write(text.as_bytes(), PRIVATE_FILE)
+                .map_err(configuring)?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {
@@ -402,37 +671,20 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
     Ok(launch)
 }
 
-/// The MCP server name engines see the Artisan MCP under; its tools read
-/// `mcp__artisan__<tool>` in Claude.
 pub const ARTISAN_MCP: &str = "artisan";
 
-/// The MCP server name engines see computer use under.
 pub const COMPUTER_MCP: &str = "computer";
 
-/// Adds one of Forge's own servers for the thread (`name` at `url`, from
-/// Forge's gateway) to a launch. It is per thread, so it never goes into a
-/// file engines share.
 pub fn with_gateway_mcp(engine: EngineId, launch: &mut Launch, name: &str, url: &str) {
-    // The transport adapters read the servers off the launch; the gateway
-    // server is one of them, per thread.
     launch.mcp_servers.push(McpServer {
         name: name.to_owned(),
         url: Some(url.to_owned()),
         ..McpServer::default()
     });
     match engine {
-        EngineId::Claude => {
-            // `--mcp-config` takes files and JSON strings, several at once.
-            let inline =
-                json!({ "mcpServers": { name: { "type": "http", "url": url } } }).to_string();
-            match launch.args.iter().position(|arg| arg == "--mcp-config") {
-                Some(flag) => launch.args.insert(flag + 2, inline),
-                None => launch.args.extend(["--mcp-config".to_owned(), inline]),
-            }
+        EngineId::Claude | EngineId::Codex => {
+            launch.gateway_mcp.push((name.to_owned(), url.to_owned()));
         }
-        // Codex's app-server is shared by threads; it takes the servers in
-        // each thread's own config.
-        EngineId::Codex => launch.gateway_mcp.push((name.to_owned(), url.to_owned())),
         EngineId::OpenCode => merge_opencode_config(
             launch,
             &json!({ "mcp": { name: { "type": "remote", "url": url, "enabled": true } } }),
@@ -483,16 +735,19 @@ fn opencode_servers(servers: &[McpServer]) -> Map<String, Value> {
         .collect()
 }
 
-/// Merges another JSON object into an `OPENCODE_CONFIG_CONTENT` value in
-/// `launch` (the `OpenCode` adapter adds its agents this way).
-pub fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
+fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
     let index = launch
         .env
         .iter()
         .position(|(key, _)| key == "OPENCODE_CONFIG_CONTENT");
-    let mut config = index
-        .and_then(|index| serde_json::from_str::<Value>(&launch.env[index].1).ok())
-        .unwrap_or_else(|| json!({}));
+    let mut config = index.map_or_else(
+        || json!({}),
+        |index| {
+            serde_json::from_str::<Value>(&launch.env[index].1).unwrap_or_else(|error| {
+                unreachable!("invariant: Forge writes OPENCODE_CONFIG_CONTENT as JSON: {error}")
+            })
+        },
+    );
     if let (Some(config), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
         for (key, value) in extra {
             match (config.get_mut(key), value) {
@@ -512,26 +767,39 @@ pub fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
     }
 }
 
-// --- imports ---------------------------------------------------------------
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error("copying {} into {}", from.display(), to.display())]
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("placing {}", path.display())]
+    Place {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
 
-fn import_folder(from: &Path, skills_dir: &Path, name: &str) -> Result<bool> {
+fn import_folder(from: &Path, skills_dir: &Path, name: &str) -> Result<bool, ImportError> {
     let to = skills_dir.join(name);
     if to.exists() {
         return Ok(false);
     }
-    // Copy beside the destination, then rename, so a half copy never looks like a skill.
     let staging = skills_dir.join(format!(".import-{name}"));
-    // A leftover of an interrupted import, usually absent.
-    fs::remove_dir_all(&staging).ok();
-    copy_dir(from, &staging)
-        .with_context(|| format!("copying {} into {}", from.display(), skills_dir.display()))?;
-    fs::rename(&staging, &to).with_context(|| format!("placing {}", to.display()))?;
+    discard_leftover(&staging);
+    copy_dir(from, &staging).map_err(|source| ImportError::Copy {
+        from: from.to_owned(),
+        to: skills_dir.to_owned(),
+        source,
+    })?;
+    fs::rename(&staging, &to).map_err(|source| ImportError::Place { path: to, source })?;
     Ok(true)
 }
 
-/// A `SKILL.md`'s front matter as YAML, or, when it is not valid YAML
-/// (`description: Use when: X`), its top-level `key: value` lines, as
-/// Claude Code reads them.
 fn frontmatter(text: &str) -> Option<serde_yaml_ng::Value> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines();
@@ -559,8 +827,6 @@ fn frontmatter(text: &str) -> Option<serde_yaml_ng::Value> {
         .or_else(|| lenient_frontmatter(&yaml))
 }
 
-/// Front matter YAML refuses, read as `key: value` lines: everything after
-/// a key's first `:`, unquoted.
 fn lenient_frontmatter(yaml: &str) -> Option<serde_yaml_ng::Value> {
     let mut map = serde_yaml_ng::Mapping::new();
     for line in yaml.lines() {
@@ -606,14 +872,13 @@ fn read_skill_header(path: &Path) -> io::Result<String> {
                 "skill metadata is unclosed or exceeds 64 KiB",
             ));
         }
-        if header[start..].trim() == "---" {
+        if header.split_at(start).1.trim() == "---" {
             return Ok(header);
         }
     }
 }
 
-/// The `name` in a `SKILL.md`'s front matter.
-pub fn skill_name(text: &str) -> Option<String> {
+pub(crate) fn skill_name(text: &str) -> Option<String> {
     skill_metadata(text).map(|(name, _)| name)
 }
 
@@ -621,8 +886,6 @@ fn skill_metadata(text: &str) -> Option<(String, String)> {
     skill_metadata_in(text, None)
 }
 
-/// A `SKILL.md`'s name and description; without a `name`, the skill takes
-/// its folder's, as Claude Code does.
 fn skill_metadata_in(text: &str, folder: Option<&str>) -> Option<(String, String)> {
     let data = frontmatter(text)?;
     let field = |key: &str| {
@@ -642,362 +905,31 @@ fn skill_metadata_in(text: &str, folder: Option<&str>) -> Option<(String, String
     Some((name, field("description").unwrap_or_default()))
 }
 
-#[cfg(any(test, feature = "legacy-import"))]
-fn frontmatter_name(text: &str) -> Option<String> {
-    skill_metadata(text).map(|(name, _)| name)
-}
+#[cfg(all(test, unix))]
+#[path = "../tests/customise/unit.rs"]
+mod tests;
 
 #[cfg(test)]
-fn frontmatter_field(text: &str, key: &str) -> Option<String> {
-    frontmatter(text)?
-        .get(key.trim_end_matches(':'))?
-        .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
+#[cfg(unix)]
+#[path = "../tests/customise/launch.rs"]
+mod launch_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn skill(dir: &Path, name: &str) {
-        fs::create_dir_all(dir.join(name)).unwrap();
-        fs::write(
-            dir.join(name).join("SKILL.md"),
-            format!("---\nname: {name}\n---\nbody"),
-        )
-        .unwrap();
-    }
-
-    fn listing(dir: &Path, root: &Path) -> Vec<String> {
-        let mut out: Vec<String> = fs::read_dir(dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| {
-                        let path = entry.path();
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        fs::read_link(&path).map_or_else(
-                            |_| format!("{name}/"),
-                            |target| {
-                                format!(
-                                    "{name} -> {}",
-                                    target.strip_prefix(root).unwrap_or(&target).display()
-                                )
-                            },
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        out.sort();
-        out
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn materialize_writes_prompt_links_skills_and_passes_mcp() {
-        let root = tempfile::tempdir().unwrap();
-        let root = root.path();
-        let skills_dir = root.join("data/extensions/skills");
-        skill(&skills_dir, "review");
-        skill(&skills_dir, "deploy");
-        let c = Customisation {
-            prompt: Some("Be brief.".into()),
-            mcp_servers: vec![
-                McpServer {
-                    name: "files".into(),
-                    command: "npx".into(),
-                    args: vec!["-y".into(), "@mcp/files".into()],
-                    env: BTreeMap::from([("ROOT".into(), "/srv \"x\"".into())]),
-                    ..McpServer::default()
-                },
-                McpServer {
-                    name: "docs.web".into(),
-                    url: Some("https://mcp.example/docs".into()),
-                    ..McpServer::default()
-                },
-            ],
-            skills_dir: skills_dir.clone(),
-            ..Customisation::default()
-        };
-
-        let mut report = Vec::new();
-        for engine in EngineId::ALL {
-            let home = root.join(engine.as_str());
-            let paths = paths(engine, &home);
-            if let Some(paths) = &paths {
-                // Folders Artisan didn't install (quarantined, so `deploy`
-                // gets Artisan's link), a stale Forge link, a link from the old
-                // store, and a Codex override that would shadow the prompt.
-                skill(&paths.skills, "mine");
-                skill(&paths.skills, "deploy");
-                fs::create_dir_all(&paths.skills).unwrap();
-                std::os::unix::fs::symlink(skills_dir.join("gone"), paths.skills.join("gone"))
-                    .unwrap();
-                std::os::unix::fs::symlink(
-                    root.join("data/extensions/store/abc"),
-                    paths.skills.join("old"),
-                )
-                .unwrap();
-                for shadow in &paths.shadows {
-                    fs::write(shadow, "override").unwrap();
-                }
-            }
-            let launch = materialize(engine, &home, &c).unwrap();
-            let files = paths.map(|paths| {
-                (
-                    paths
-                        .prompt
-                        .strip_prefix(&home)
-                        .unwrap()
-                        .display()
-                        .to_string(),
-                    fs::read_to_string(&paths.prompt).unwrap(),
-                    paths.shadows.iter().all(|shadow| !shadow.exists()),
-                    listing(&paths.skills, root),
-                )
-            });
-            let mcp_file = fs::read_to_string(home.join(".artisan/claude-mcp.json")).ok();
-            let args: Vec<String> = launch
-                .args
-                .iter()
-                .map(|arg| arg.replace(&root.display().to_string(), "<root>"))
-                .collect();
-            report.push((engine.as_str(), files, args, launch.env, mcp_file));
-        }
-        insta::assert_debug_snapshot!(report);
-
-        // A skill deleted in Forge disappears from the engine on the next spawn;
-        // a cleared prompt removes the file.
-        fs::remove_dir_all(skills_dir.join("review")).unwrap();
-        let cleared = Customisation {
-            prompt: Some(String::new()),
-            mcp_servers: Vec::new(),
-            skills_dir,
-            ..Customisation::default()
-        };
-        let home = root.join("claude");
-        let launch = materialize(EngineId::Claude, &home, &cleared).unwrap();
-        assert_eq!(
-            listing(&home.join(".claude/skills"), root),
-            ["deploy -> data/extensions/skills/deploy"]
-        );
-        assert!(!home.join(".claude/CLAUDE.md").exists());
-        assert!(launch.args.is_empty() && !home.join(".artisan/claude-mcp.json").exists());
-    }
-
-    #[cfg(feature = "legacy-import")]
-    #[test]
-    fn imports_copy_real_skill_folders_once() {
-        let root = tempfile::tempdir().unwrap();
-        let root = root.path();
-        let skills_dir = root.join("skills");
-        skill(&skills_dir, "kept");
-        let claude = root.join("claude");
-        let codex = root.join("codex");
-        skill(&claude.join(".claude/skills"), "design");
-        skill(&claude.join(".claude/skills"), "kept");
-        skill(&codex.join(".codex/skills"), "design");
-        skill(&codex.join(".codex/skills/.system"), "builtin");
-        fs::create_dir_all(codex.join(".codex/skills/notes")).unwrap();
-        let old = root.join("old");
-        skill(&old.join("extensions/store"), "digest1");
-        fs::write(
-            old.join("extensions/store/digest1/SKILL.md"),
-            "---\nname: \"legacy\"\n---\n",
-        )
-        .unwrap();
-        skill(&old.join("extensions/store"), "digest2");
-        fs::write(
-            old.join("extensions/store/digest2/SKILL.md"),
-            "---\nname: ../escape\n---\n",
-        )
-        .unwrap();
-
-        assert!(
-            import_folder(&claude.join(".claude/skills/design"), &skills_dir, "design").unwrap()
-        );
-        assert!(
-            !import_folder(&codex.join(".codex/skills/design"), &skills_dir, "design").unwrap()
-        );
-        assert!(!import_folder(&claude.join(".claude/skills/kept"), &skills_dir, "kept").unwrap());
-        let legacy = import_legacy_extensions(&old, &skills_dir);
-        assert_eq!(legacy, ["legacy"]);
-        assert_eq!(listing(&skills_dir, root), ["design/", "kept/", "legacy/"]);
-        assert!(skills_dir.join("design/SKILL.md").is_file());
-    }
-}
+#[path = "../tests/customise/reform.rs"]
+mod reform_tests;
 
 #[cfg(test)]
-mod reform_tests {
-    use super::*;
-    #[test]
-    fn yaml_frontmatter_understands_multiline_and_quoted_values() {
-        let text = "---\nname: 'review'\ndescription: >\n  First line\n  second line\n---\nbody";
-        assert_eq!(frontmatter_name(text).as_deref(), Some("review"));
-        assert_eq!(
-            frontmatter_field(text, "description:").as_deref(),
-            Some("First line second line")
-        );
-        assert_eq!(frontmatter_name("---\nname: '../outside'\n---"), None);
-    }
-    #[test]
-    fn a_bom_or_loose_yaml_does_not_hide_a_skill() {
-        assert_eq!(
-            skill_metadata("\u{feff}---\nname: review\ndescription: Saved by Notepad\n---\n"),
-            Some(("review".to_owned(), "Saved by Notepad".to_owned()))
-        );
-        assert_eq!(
-            skill_metadata("---\nname: review\ndescription: Use when: X\n---\n"),
-            Some(("review".to_owned(), "Use when: X".to_owned()))
-        );
-        assert_eq!(
-            skill_metadata_in("---\ndescription: Reviews code\n---\n", Some("review")),
-            Some(("review".to_owned(), "Reviews code".to_owned()))
-        );
-    }
-    #[test]
-    fn codex_mcp_preserves_distinct_names_and_keeps_secrets_out_of_args() {
-        let directory = tempfile::tempdir().unwrap();
-        let server = |name: &str| McpServer {
-            name: name.into(),
-            command: "tool".into(),
-            args: vec![],
-            env: std::collections::BTreeMap::from([("TOKEN".into(), "private".into())]),
-            ..McpServer::default()
-        };
-        let result = launch(
-            EngineId::Codex,
-            directory.path(),
-            &[server("docs.web"), server("docs_web")],
-        )
-        .unwrap();
-        assert!(result.args.is_empty());
-        let config: toml::Table = toml::from_str(
-            &fs::read_to_string(directory.path().join(".codex/config.toml")).unwrap(),
-        )
-        .unwrap();
-        let servers = config["mcp_servers"].as_table().unwrap();
-        assert_eq!(servers.len(), 2);
-        assert_eq!(
-            servers["docs.web"]["env"]["TOKEN"].as_str(),
-            Some("private")
-        );
-    }
-    #[cfg(unix)]
-    #[test]
-    fn unsupported_skill_links_are_rejected_before_copying() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("SKILL.md"), "---\nname: linked\n---").unwrap();
-        std::os::unix::fs::symlink(&source, source.join("cycle")).unwrap();
-        let destination = directory.path().join("copy");
-        assert!(copy_dir(&source, &destination).is_err());
-        assert!(!destination.exists());
-        fs::remove_file(source.join("cycle")).unwrap();
-        let root_link = directory.path().join("root-link");
-        std::os::unix::fs::symlink(&source, &root_link).unwrap();
-        assert!(copy_dir(&root_link, &destination).is_err());
-        assert!(!destination.exists());
-    }
-}
+#[path = "../tests/customise/catalog_read.rs"]
+mod catalog_read_tests;
 
 #[cfg(test)]
-mod catalog_read_tests {
-    use super::*;
-    #[test]
-    fn browsing_catalog_does_not_materialize_engine_homes() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path().join("engine-home");
-        let settings = Customisation {
-            skills_dir: directory.path().join("skills"),
-            first_party: true,
-            ..Customisation::default()
-        };
-        let _ = skill_catalog(&[(EngineId::Claude, Some(home.clone()))], &settings).unwrap();
-        assert!(!home.exists());
-        assert!(!settings.skills_dir.exists());
-    }
-}
+#[path = "../tests/customise/marker_budget.rs"]
+mod marker_budget_tests;
 
 #[cfg(test)]
-mod marker_budget_tests {
-    use super::*;
-    #[test]
-    fn oversized_copy_marker_does_not_read_unbounded_data() {
-        let folder = tempfile::tempdir().unwrap();
-        let link = folder.path().join("copy");
-        let target = folder.path().join("target");
-        fs::create_dir_all(&link).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        let file = fs::File::create(link.join(COPY_MARKER)).unwrap();
-        file.set_len(64 * 1024 + 1).unwrap();
-        assert!(!copied_skill_matches(&link, &target));
-    }
-}
+#[path = "../tests/customise/copied_reconciliation.rs"]
+mod copied_reconciliation_tests;
 
 #[cfg(test)]
-mod copied_reconciliation_tests {
-    use super::*;
-    #[test]
-    fn unchanged_real_copied_skill_keeps_files_and_timestamps_on_reconciliation() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source");
-        let engine = dir.path().join("engine");
-        let copy = engine.join("skill");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(
-            source.join("SKILL.md"),
-            "---\nname: skill\ndescription: fixture\n---\nUse this skill.\n",
-        )
-        .unwrap();
-        copy_dir(&source, &copy).unwrap();
-        let (digest, _, _) = skills::measure(&source).unwrap();
-        fs::write(
-            copy.join(COPY_MARKER),
-            format!("{}\n{digest}", source.display()),
-        )
-        .unwrap();
-        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12345);
-        for name in ["SKILL.md", COPY_MARKER] {
-            fs::File::options()
-                .write(true)
-                .open(copy.join(name))
-                .unwrap()
-                .set_times(fs::FileTimes::new().set_modified(old))
-                .unwrap();
-        }
-        let wanted = BTreeMap::from([("skill".to_owned(), source.clone())]);
-        for _ in 0..3 {
-            sync_skills(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
-        }
-        assert!(fs::symlink_metadata(&copy).unwrap().is_dir());
-        assert!(
-            !fs::symlink_metadata(&copy)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        for name in ["SKILL.md", COPY_MARKER] {
-            assert_eq!(
-                fs::metadata(copy.join(name)).unwrap().modified().unwrap(),
-                old,
-                "unchanged copied {name} must not be rewritten"
-            );
-        }
-        fs::write(
-            source.join("SKILL.md"),
-            "---\nname: skill\ndescription: changed\n---\nChanged instructions.\n",
-        )
-        .unwrap();
-        assert!(!copied_skill_matches(&copy, &source));
-        sync_skills(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
-        assert_eq!(
-            fs::read(copy.join("SKILL.md")).unwrap(),
-            fs::read(source.join("SKILL.md")).unwrap()
-        );
-    }
-}
+#[path = "../tests/customise/publish_copy.rs"]
+mod publish_copy_tests;

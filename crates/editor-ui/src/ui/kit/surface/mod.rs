@@ -67,15 +67,15 @@ pub enum Surface {
 
 impl Surface {
     #[must_use]
-    pub const fn corner(self) -> Corner {
+    const fn corner(self) -> Corner {
         match self {
             Self::Menu
             | Self::Picker(Picker::List)
             | Self::Tooltip(_)
             | Self::Inset
             | Self::Code
-            | Self::Callout(_) => Corner::Fixed(Radius::Panel),
-            Self::Media(Media::Frame) => Corner::Fixed(Radius::Panel),
+            | Self::Callout(_)
+            | Self::Media(Media::Frame) => Corner::Fixed(Radius::Panel),
             Self::Dialog | Self::Picker(Picker::Sheet) | Self::Card | Self::Bubble => {
                 Corner::Fixed(Radius::Shell)
             }
@@ -96,8 +96,8 @@ impl Surface {
             | Self::Picker(Picker::Sheet)
             | Self::Card
             | Self::Code
-            | Self::Composer => Some(Space::S8),
-            Self::Field => Some(Space::S8),
+            | Self::Composer
+            | Self::Field => Some(Space::S8),
             Self::Callout(_) | Self::Bubble => Some(Space::S12),
             Self::Tooltip(Tooltip::Card) => Some(Space::S16),
             Self::Media(_) => None,
@@ -105,7 +105,7 @@ impl Surface {
     }
 
     #[must_use]
-    pub const fn material(self) -> Material {
+    const fn material(self) -> Material {
         match self {
             Self::Menu
             | Self::Tooltip(_)
@@ -124,7 +124,7 @@ impl Surface {
     }
 
     #[must_use]
-    pub const fn elevation(self) -> Elevation {
+    pub(crate) const fn elevation(self) -> Elevation {
         match self {
             Self::Menu
             | Self::Picker(_)
@@ -148,7 +148,18 @@ impl Surface {
     pub fn radius_px(self) -> f32 {
         match self {
             Self::Pill(height) => Corner::Full.resolve(height),
-            _ => self.corner().resolve(0.0),
+            Self::Menu
+            | Self::Picker(_)
+            | Self::Tooltip(_)
+            | Self::Dialog
+            | Self::Card
+            | Self::Inset
+            | Self::Code
+            | Self::Composer
+            | Self::Field
+            | Self::Media(_)
+            | Self::Callout(_)
+            | Self::Bubble => self.corner().resolve(0.0),
         }
     }
 
@@ -168,7 +179,18 @@ impl Surface {
         let padding = Style::new().padding(Length::Px(self.padding_px()));
         let sized = match self {
             Self::Pill(height) => padding.height(Length::Px(height)),
-            _ => padding,
+            Self::Menu
+            | Self::Picker(_)
+            | Self::Tooltip(_)
+            | Self::Dialog
+            | Self::Card
+            | Self::Inset
+            | Self::Code
+            | Self::Composer
+            | Self::Field
+            | Self::Media(_)
+            | Self::Callout(_)
+            | Self::Bubble => padding,
         };
         let shell = || {
             UiBox::new()
@@ -224,7 +246,11 @@ pub fn tint(theme: &ArtisanTheme, tone: Tone) -> crate::ui::theme::Oklch {
 #[must_use]
 pub fn backdrop(theme: &ArtisanTheme) -> Style {
     Style::new().gpui_background(GpuiBackground::Solid(
-        theme.colors.background.at(Opacity::Backdrop).to_reference_paint(),
+        theme
+            .colors
+            .background
+            .at(Opacity::Backdrop)
+            .to_reference_paint(),
     ))
 }
 

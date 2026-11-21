@@ -1,11 +1,18 @@
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use editor_aqua::ui::markdown::MarkdownEngine;
+use editor_aqua::ui::markdown::presenter::BodyServices;
 use editor_aqua::ui::markdown::presenter::MarkdownPresenter;
+use editor_aqua::ui::markdown::presenter::SelectionPlace;
+use editor_aqua::ui::markdown::visual::BodyContext;
 use editor_aqua::ui::markdown::visual::BodyTone;
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
 use std::rc::Rc;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one image completion scenario walked step by step"
+)]
 fn completed_image_invalidates_retained_loading_row() {
     use aqua::images::{ImageAssets, ImageStatus};
     use aqua_ui::{
@@ -21,11 +28,7 @@ fn completed_image_invalidates_retained_loading_row() {
             source::{MediaFetcher, MediaSource},
         },
     };
-    use std::{
-        cell::Cell,
-        sync::Arc,
-        time::{Duration, Instant},
-    };
+    use std::{cell::Cell, sync::Arc};
 
     let mut encoded = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgba8(2, 1)
@@ -37,21 +40,27 @@ fn completed_image_invalidates_retained_loading_row() {
     )
     .into();
     let fetcher = MediaFetcher::new("retained-image", |_| {
-        Box::pin(async { Err(editor_aqua::ui::media::source::MediaFailure::Missing) })
+        Box::pin(async {
+            Err(editor_aqua::ui::media::source::MediaLoadError::Fetch(
+                editor_aqua::ui::media::source::MediaFailure::Missing,
+            ))
+        })
     })
     .owned_by(&[1], 1);
     let images = Images::new();
     let assets = ImageAssets::default();
     let mut presenter = MarkdownPresenter::default();
+    let engine = MarkdownEngine::new().unwrap();
     presenter
         .prepare(
-            &MarkdownEngine::new().unwrap(),
+            &engine,
             &format!(
                 "```artisan-image\n{}\n```",
-                serde_json::json!({"src": source.raw, "width": 2, "height": 1})
+                serde_json::json!({"src": source.raw(), "width": 2, "height": 1})
             ),
         )
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
     presenter
         .set_media_services(
             "item",
@@ -74,27 +83,38 @@ fn completed_image_invalidates_retained_loading_row() {
     let settled = Rc::new(Cell::new(false));
     let renders = Rc::new(Cell::new(0));
     let list = || {
-        let revision = settled.clone();
-        let settled = settled.clone();
-        let presenter = presenter.clone();
-        let renders = renders.clone();
+        let revision = Rc::clone(&settled);
+        let settled = Rc::clone(&settled);
+        let presenter = Rc::clone(&presenter);
+        let renders = Rc::clone(&renders);
         List::new()
             .items([0_usize])
             .key(|_| "image-row")
             .revision(move |_| revision.get().then_some(1))
             .row(move |_| {
                 renders.set(renders.get() + 1);
-                let invalidated = settled.clone();
+                let invalidated = Rc::clone(&settled);
+                let glyph: editor_aqua::ui::markdown::GlyphFactory =
+                    Rc::new(|_, _, _| aqua_ui::element::Box::new().build());
+                let invalidate: Rc<dyn Fn()> = Rc::new(move || invalidated.set(false));
                 let element = presenter
                     .render(
                         "item",
-                        ArtisanTheme::for_mode(ThemeMode::Dark),
-                        BodyTone::Foreground,
-                        SelectionDocumentId(1),
-                        &[1],
+                        BodyContext::plain(
+                            ArtisanTheme::for_mode(ThemeMode::Dark),
+                            BodyTone::Foreground,
+                        ),
+                        SelectionPlace {
+                            document: SelectionDocumentId(1),
+                            order: &[1],
+                        },
                         |index| SelectionSourceId(index as u64 + 1),
-                        Rc::new(|_, _, _| aqua_ui::element::Box::new().build()),
-                        Rc::new(move || invalidated.set(false)),
+                        BodyServices {
+                            glyph: &glyph,
+                            invalidate: &invalidate,
+                            charts: None,
+                            code: None,
+                        },
                     )
                     .unwrap()
                     .element;
@@ -114,7 +134,11 @@ fn completed_image_invalidates_retained_loading_row() {
             .into_iter()
             .any(|node| match &app.tree().get(node).unwrap().kind {
                 NodeKind::Text(text) => text.text().contains("Loading image"),
-                _ => false,
+                NodeKind::Box(_)
+                | NodeKind::Media(_)
+                | NodeKind::Scroll(_)
+                | NodeKind::Canvas(_)
+                | NodeKind::Viewport3D(_) => false,
             })
     };
     let mut app = aqua::UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
@@ -129,19 +153,16 @@ fn completed_image_invalidates_retained_loading_row() {
     app.layout().unwrap();
     assert_eq!(renders.get(), 1, "unchanged settled rows must be retained");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let ready = loop {
-        images.drain(&assets);
-        presenter.drain_media();
-        if let Some(result) = images.request(&fetcher, &source, "image-0", 99, Arc::new(|| {})) {
-            break result.unwrap();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the synthetic PNG must finish decoding"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    };
+    let ready = test_support::wait::wait_for(
+        "the synthetic PNG to finish decoding",
+        test_support::wait::LIVENESS,
+        || {
+            images.drain(&assets);
+            presenter.drain_media();
+            images.request(&fetcher, &source, "image-0", 99, Arc::new(|| {}))
+        },
+    )
+    .unwrap();
     assert!(
         matches!(
             ready.status(),
@@ -169,7 +190,11 @@ fn completed_image_invalidates_retained_loading_row() {
             .into_iter()
             .any(|node| match &app.tree().get(node).unwrap().kind {
                 NodeKind::Media(media) => media.image.is_some(),
-                _ => false,
+                NodeKind::Box(_)
+                | NodeKind::Text(_)
+                | NodeKind::Scroll(_)
+                | NodeKind::Canvas(_)
+                | NodeKind::Viewport3D(_) => false,
             }),
         "the rebuilt row must mount the Ready image"
     );
@@ -187,16 +212,28 @@ fn preparation_proof_and_complete_selection_follow_source_revision() {
     let original = presenter
         .prepare(&engine, "## Heading\n\nA **strong** paragraph.")
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = presenter
         .render(
             "item",
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext::plain(
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                BodyTone::Foreground,
+            ),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     assert_eq!(rendered.selection_sources.len(), 2);
@@ -216,16 +253,28 @@ fn nested_lists_keep_selection_leaves_in_source_order() {
     presenter
         .prepare(&engine, "Before\n\n- alpha\n  - beta\n- gamma\n\nAfter")
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = presenter
         .render(
             "item",
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext::plain(
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                BodyTone::Foreground,
+            ),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     let values: Vec<_> = rendered
@@ -250,16 +299,28 @@ fn table_cells_register_tab_and_row_separators_in_order() {
     presenter
         .prepare(&engine, "| A | B |\n|---|---|\n| one | two |")
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let rendered = presenter
         .render(
             "item",
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext::plain(
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                BodyTone::Foreground,
+            ),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
         )
         .unwrap();
     let values: Vec<_> = rendered
@@ -291,17 +352,21 @@ fn projected_rows_share_complete_sources_and_revision_bound_ranges() {
         presenter
             .render_projected(
                 row,
-                ArtisanTheme::for_mode(ThemeMode::Dark),
-                BodyTone::Foreground,
-                SelectionDocumentId(1),
-                &[7],
+                BodyContext {
+                    theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(1),
+                    order: &[7],
+                },
                 |index| {
                     allocations.set(allocations.get() + 1);
                     SelectionSourceId(index as u64 + 10)
                 },
-                None,
-                None,
-                None,
             )
             .unwrap()
     };
@@ -341,7 +406,12 @@ fn projected_rows_share_complete_sources_and_revision_bound_ranges() {
     );
     assert_eq!(selected(&nested), selected(&first));
     assert_eq!(selected(&table), selected(&first));
-    assert!(source[nested.source_range.clone()].contains("beta"));
+    assert!(
+        source
+            .get(nested.source_range.clone())
+            .expect("the test text slices on a char boundary")
+            .contains("beta")
+    );
     assert!(presenter.projected_is_current(2, &nested.source_range, &nested.proof));
     presenter.prepare(&engine, "replacement").unwrap();
     assert!(!presenter.projected_is_current(2, &nested.source_range, &nested.proof));
@@ -349,14 +419,18 @@ fn projected_rows_share_complete_sources_and_revision_bound_ranges() {
     let replacement = presenter
         .render_projected(
             0,
-            ArtisanTheme::for_mode(ThemeMode::Dark),
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext {
+                theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            None,
-            None,
-            None,
         )
         .unwrap();
     assert_eq!(
@@ -378,21 +452,31 @@ fn projected_ready_rich_row_uses_retained_dispatch_and_complete_text_sources() {
     presenter.prepare(&engine, source).unwrap();
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
     let services = editor_aqua::ui::markdown::presenter::HeatmapServices::new(*theme);
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let row = presenter
-        .render_projected_with_services(
+        .render_projected_with_code(
             1,
             "item",
-            theme,
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext {
+                theme,
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
-            None,
-            None,
-            None,
-            Some(&services),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: Some(&services),
+                code: None,
+            },
         )
         .unwrap();
     let values: Vec<_> = row
@@ -401,7 +485,12 @@ fn projected_ready_rich_row_uses_retained_dispatch_and_complete_text_sources() {
         .map(|source| source.text.as_ref())
         .collect();
     assert_eq!(values, ["Before", "After"]);
-    assert!(source[row.source_range.clone()].contains("artisan-heatmap"));
+    assert!(
+        source
+            .get(row.source_range.clone())
+            .expect("the test text slices on a char boundary")
+            .contains("artisan-heatmap")
+    );
     assert!(presenter.projected_is_current(1, &row.source_range, &row.proof));
 }
 
@@ -412,7 +501,7 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
     let source = "Before\n\n```rust\nlet x = 1;\nlet y = 2;\n```\n\nAfter";
     presenter.prepare(&engine, source).unwrap();
     let captured = Rc::new(std::cell::RefCell::new(String::new()));
-    let capture = captured.clone();
+    let capture = Rc::clone(&captured);
     let code = editor_aqua::ui::markdown::presenter::CodeServices {
         copy_enabled: true,
         reference: None,
@@ -422,22 +511,31 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
         }),
     };
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let row = presenter
         .render_projected_with_code(
             1,
             "item",
-            theme,
-            BodyTone::Foreground,
-            SelectionDocumentId(1),
-            &[7],
+            BodyContext {
+                theme,
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
             |index| SelectionSourceId(index as u64 + 10),
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
-            None,
-            None,
-            None,
-            None,
-            Some(&code),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: Some(&code),
+            },
         )
         .unwrap();
     let values: Vec<_> = row
@@ -449,25 +547,21 @@ fn projected_code_keeps_offscreen_line_sources_and_display_copy() {
     assert_eq!(captured.borrow().as_str(), "let x = 1;\nlet y = 2;");
 }
 
-#[cfg(feature = "test-support")]
 #[test]
 fn rich_identity_survives_surrounding_edits_but_not_replacement() {
-    let engine = MarkdownEngine::new().unwrap();
-    let mut presenter = MarkdownPresenter::default();
+    use test_support::editor::rich::MountedBody;
     let chart = "```artisan-heatmap\n{\"values\":[[1]]}\n```";
-    let first = presenter
-        .prepare(&engine, &format!("before\n\n{chart}"))
-        .unwrap();
-    let id = presenter.rich_identities()[0];
-    presenter
-        .prepare(&engine, &format!("extra\n\nbefore\n\n{chart}\n\nafter"))
-        .unwrap();
-    assert_eq!(presenter.rich_identities(), [id]);
-    assert!(!presenter.is_current(&first));
-    presenter.prepare(&engine, "plain only").unwrap();
-    assert!(presenter.rich_identities().is_empty());
-    presenter.prepare(&engine, chart).unwrap();
-    assert_ne!(presenter.rich_identities(), [id]);
+    let mut body = MountedBody::new(&format!("before\n\n{chart}"));
+    let unselected = body.label();
+    body.press(aqua_core::NamedKey::End);
+    let selected = body.label();
+    assert_ne!(selected, unselected);
+    body.edit(&format!("extra\n\nbefore\n\n{chart}\n\nafter"));
+    assert_eq!(body.label(), selected);
+    body.edit("plain only");
+    assert!(body.texts().iter().all(|text| text == "plain only"));
+    body.edit(chart);
+    assert_eq!(body.label(), unselected);
 }
 
 #[test]
@@ -484,14 +578,18 @@ fn projected_reveal_metadata_tracks_keyed_cells_and_streaming_tail() {
         presenter
             .render_projected(
                 row,
-                ArtisanTheme::for_mode(ThemeMode::Dark),
-                BodyTone::Foreground,
-                SelectionDocumentId(9),
-                &[3],
+                BodyContext {
+                    theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(9),
+                    order: &[3],
+                },
                 |index| SelectionSourceId(index as u64 + 100),
-                None,
-                None,
-                None,
             )
             .unwrap()
     };
@@ -505,7 +603,13 @@ fn projected_reveal_metadata_tracks_keyed_cells_and_streaming_tail() {
     reveal.begin_frame(std::time::Instant::now(), true, true, false, false);
     let text = row.reveal_text(&reveal);
     assert_eq!(text[0].end, text[0].text.len());
-    assert_eq!(&text[1].text[..text[1].end], "two words");
+    assert_eq!(
+        text[1]
+            .text
+            .get(..text[1].end)
+            .expect("the test text slices on a char boundary"),
+        "two words"
+    );
     assert!(std::sync::Arc::ptr_eq(
         &row.selection_batch,
         &same.selection_batch
@@ -522,7 +626,7 @@ fn mermaid_fence_renders_as_a_diagram_with_source_copy_and_no_text_selection() {
     );
     presenter.prepare(&engine, &source).unwrap();
     let copied = Rc::new(std::cell::RefCell::new(Vec::new()));
-    let capture = copied.clone();
+    let capture = Rc::clone(&copied);
     let code = editor_aqua::ui::markdown::presenter::CodeServices {
         copy_enabled: true,
         reference: None,
@@ -533,22 +637,31 @@ fn mermaid_fence_renders_as_a_diagram_with_source_copy_and_no_text_selection() {
     };
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
     let render = |row: usize| {
+        let glyph: editor_aqua::ui::markdown::GlyphFactory =
+            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+        let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
         presenter
             .render_projected_with_code(
                 row,
                 "item",
-                theme,
-                BodyTone::Foreground,
-                SelectionDocumentId(1),
-                &[7],
+                BodyContext {
+                    theme,
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(1),
+                    order: &[7],
+                },
                 |index| SelectionSourceId(index as u64 + 10),
-                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                Rc::new(|| {}),
-                None,
-                None,
-                None,
-                None,
-                Some(&code),
+                BodyServices {
+                    glyph: &glyph,
+                    invalidate: &invalidate,
+                    charts: None,
+                    code: Some(&code),
+                },
             )
             .unwrap()
     };
@@ -580,24 +693,89 @@ fn streaming_rich_fence_renders_its_placeholder_and_invalid_one_keeps_its_code()
     };
     let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
     for row in 0..presenter.projected_count().unwrap() {
+        let glyph: editor_aqua::ui::markdown::GlyphFactory =
+            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+        let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
         presenter
             .render_projected_with_code(
                 row,
                 "item",
-                theme,
-                BodyTone::Foreground,
-                SelectionDocumentId(1),
-                &[7],
+                BodyContext {
+                    theme,
+                    tone: BodyTone::Foreground,
+                    on_link: None,
+                    on_color: None,
+                    scope: None,
+                },
+                SelectionPlace {
+                    document: SelectionDocumentId(1),
+                    order: &[7],
+                },
                 |index| SelectionSourceId(index as u64 + 10),
-                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                Rc::new(|| {}),
-                None,
-                None,
-                None,
-                None,
-                Some(&code),
+                BodyServices {
+                    glyph: &glyph,
+                    invalidate: &invalidate,
+                    charts: None,
+                    code: Some(&code),
+                },
             )
             .unwrap();
+    }
+}
+
+#[test]
+fn callout_draws_the_documented_subtitle_and_caption() {
+    let engine = MarkdownEngine::new().unwrap();
+    let mut presenter = MarkdownPresenter::default();
+    let source = "```artisan-callout\n{\"kind\":\"warning\",\"title\":\"Stale copy fails CI\",\"subtitle\":\"Checked on every push\",\"caption\":\"From ci.yml\",\"body\":\"Regenerate it.\"}\n```";
+    presenter.prepare(&engine, source).unwrap();
+    let code = editor_aqua::ui::markdown::presenter::CodeServices {
+        copy_enabled: false,
+        reference: None,
+        copy: Rc::new(|_, _| aqua_ui::element::ui::Box::new().build()),
+    };
+    let glyph: editor_aqua::ui::markdown::GlyphFactory =
+        Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
+    let drawn = presenter
+        .render_projected_with_code(
+            0,
+            "item",
+            BodyContext {
+                theme: ArtisanTheme::for_mode(ThemeMode::Dark),
+                tone: BodyTone::Foreground,
+                on_link: None,
+                on_color: None,
+                scope: None,
+            },
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[7],
+            },
+            |index| SelectionSourceId(index as u64 + 10),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: Some(&code),
+            },
+        )
+        .expect("a callout with the documented envelope draws");
+    let texts = test_support::editor::ui::painted_texts(&test_support::editor::ui::mounted(
+        900.0,
+        700.0,
+        drawn.element,
+    ));
+    for expected in [
+        "Stale copy fails CI",
+        "Checked on every push",
+        "Regenerate it.",
+        "From ci.yml",
+    ] {
+        assert!(
+            texts.iter().any(|text| text == expected),
+            "{expected} in {texts:?}"
+        );
     }
 }
 
@@ -605,9 +783,7 @@ fn streaming_rich_fence_renders_its_placeholder_and_invalid_one_keeps_its_code()
 fn leaf_proofs_survive_appends_but_not_edits_to_their_own_leaf() {
     let engine = MarkdownEngine::new().unwrap();
     let mut presenter = MarkdownPresenter::default();
-    presenter
-        .prepare(&engine, "alpha\n\nbeta\n\ngam")
-        .unwrap();
+    presenter.prepare(&engine, "alpha\n\nbeta\n\ngam").unwrap();
     let first = presenter.projected_leaf_info(0).unwrap();
     let second = presenter.projected_leaf_info(1).unwrap();
     let third = presenter.projected_leaf_info(2).unwrap();

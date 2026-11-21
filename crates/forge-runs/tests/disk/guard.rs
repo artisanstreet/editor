@@ -1,12 +1,14 @@
 use super::*;
-async fn fixture_on_disk(script: Script, free: Arc<AtomicU64>) -> (Fixture, Arc<AtomicU64>) {
-    let checks = Arc::new(AtomicU64::new(0));
-    let observed = Arc::clone(&checks);
-    let harness: Arc<dyn Harness> = Arc::new(Scripted(script));
+async fn fixture_on_disk(
+    script: impl FnOnce(tokio::sync::watch::Receiver<u64>) -> Script,
+    free: Arc<AtomicU64>,
+) -> (Fixture, tokio::sync::watch::Receiver<u64>) {
+    let (counted, probes) = tokio::sync::watch::channel(0);
+    let harness: Arc<dyn Harness> = Arc::new(Scripted(script(probes.clone())));
     let probe = disk::Probe {
         free_space: Arc::new(move |_| {
             let available = free.load(Ordering::Relaxed);
-            observed.fetch_add(1, Ordering::Release);
+            counted.send_modify(|probes| *probes += 1);
             Ok(available)
         }),
         every: Duration::from_millis(10),
@@ -17,17 +19,26 @@ async fn fixture_on_disk(script: Script, free: Arc<AtomicU64>) -> (Fixture, Arc<
         probe,
     )
     .await;
-    (fixture, checks)
+    (fixture, probes)
 }
 
-async fn observed_disk(checks: &AtomicU64) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while checks.load(Ordering::Acquire) < 2 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
+const PATHS_PER_CHECK: u64 = 2;
+
+async fn two_more_checks(probes: &mut tokio::sync::watch::Receiver<u64>) -> bool {
+    let seen = *probes.borrow_and_update();
+    tokio::time::timeout(
+        test_support::wait::LIVENESS,
+        probes.wait_for(|probed| *probed >= seen + 2 * PATHS_PER_CHECK),
+    )
     .await
-    .unwrap();
+    .is_ok_and(|probed| probed.is_ok())
+}
+
+async fn observed_disk(probes: &mut tokio::sync::watch::Receiver<u64>) {
+    assert!(
+        two_more_checks(probes).await,
+        "the guard checks the disk twice more"
+    );
 }
 
 const GIB: u64 = 1 << 30;
@@ -61,20 +72,25 @@ fn errors(items: &[Item]) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_low_disk_tells_the_agent_once_to_free_space() {
     let free = Arc::new(AtomicU64::new(7 * GIB + GIB / 2));
-    let (fixture, _checks) = fixture_on_disk(
-        Arc::new(|_turn, mut io| {
-            Box::pin(async move {
-                let Some(Input::Steer(steer)) = io.inbox.recv().await else {
-                    return Outcome::failed("no steer");
-                };
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                if io.inbox.try_recv().is_ok() {
-                    return Outcome::failed("told twice");
-                }
-                io.emit(reply("m1", &steer.text)).await;
-                Outcome::done()
+    let (fixture, _probes) = fixture_on_disk(
+        |probes| {
+            Arc::new(move |_turn, mut io| {
+                let mut probes = probes.clone();
+                Box::pin(async move {
+                    let Some(Input::Steer(steer)) = io.inbox.recv().await else {
+                        return Outcome::failed("no steer");
+                    };
+                    if !two_more_checks(&mut probes).await {
+                        return Outcome::failed("the guard stopped checking");
+                    }
+                    if io.inbox.try_recv().is_ok() {
+                        return Outcome::failed("told twice");
+                    }
+                    io.emit(reply("m1", &steer.text)).await;
+                    Outcome::done()
+                })
             })
-        }),
+        },
         free,
     )
     .await;
@@ -84,7 +100,7 @@ async fn a_low_disk_tells_the_agent_once_to_free_space() {
         .await
         .unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Done, "{:?}", runs[0].error);
+    assert_eq!(runs[0].status(), RunStatus::Done, "{:?}", runs[0].error());
     let items = fixture.items().await;
     let told = texts(&items)
         .into_iter()
@@ -111,13 +127,15 @@ async fn a_low_disk_tells_the_agent_once_to_free_space() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_full_disk_stops_the_run_and_says_why() {
     let free = Arc::new(AtomicU64::new(50 * GIB));
-    let (fixture, checks) = fixture_on_disk(
-        Arc::new(|_turn, io| {
-            Box::pin(async move {
-                io.cancel.cancelled().await;
-                Outcome::cancelled()
+    let (fixture, mut probes) = fixture_on_disk(
+        |_| {
+            Arc::new(|_turn, io| {
+                Box::pin(async move {
+                    io.cancel.cancelled().await;
+                    Outcome::cancelled()
+                })
             })
-        }),
+        },
         Arc::clone(&free),
     )
     .await;
@@ -126,11 +144,11 @@ async fn a_full_disk_stops_the_run_and_says_why() {
         .send_message(&fixture.thread_id, message("build it"))
         .await
         .unwrap();
-    observed_disk(&checks).await;
+    observed_disk(&mut probes).await;
     assert!(fixture.hub.is_live(&fixture.thread_id));
     free.store(2 * GIB, Ordering::Relaxed);
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert_eq!(runs[0].status(), RunStatus::Failed);
     let shown = errors(&fixture.items().await);
     assert_eq!(shown.len(), 1, "{shown:?}");
     assert!(
@@ -143,19 +161,24 @@ async fn a_full_disk_stops_the_run_and_says_why() {
 async fn a_run_sent_on_a_full_disk_can_clean_it_up() {
     let free = Arc::new(AtomicU64::new(2 * GIB));
     let disk = Arc::clone(&free);
-    let (fixture, _checks) = fixture_on_disk(
-        Arc::new(move |_turn, mut io| {
-            let disk = Arc::clone(&disk);
-            Box::pin(async move {
-                let Some(Input::Steer(_)) = io.inbox.recv().await else {
-                    return Outcome::failed("no steer");
-                };
-                disk.store(40 * GIB, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                io.emit(reply("m1", "freed 38 GiB")).await;
-                Outcome::done()
+    let (fixture, _probes) = fixture_on_disk(
+        |probes| {
+            Arc::new(move |_turn, mut io| {
+                let disk = Arc::clone(&disk);
+                let mut probes = probes.clone();
+                Box::pin(async move {
+                    let Some(Input::Steer(_)) = io.inbox.recv().await else {
+                        return Outcome::failed("no steer");
+                    };
+                    disk.store(40 * GIB, Ordering::Relaxed);
+                    if !two_more_checks(&mut probes).await {
+                        return Outcome::failed("the guard stopped checking");
+                    }
+                    io.emit(reply("m1", "freed 38 GiB")).await;
+                    Outcome::done()
+                })
             })
-        }),
+        },
         free,
     )
     .await;
@@ -165,20 +188,22 @@ async fn a_run_sent_on_a_full_disk_can_clean_it_up() {
         .await
         .unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Done, "{:?}", runs[0].error);
+    assert_eq!(runs[0].status(), RunStatus::Done, "{:?}", runs[0].error());
     assert!(errors(&fixture.items().await).is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_sent_on_a_full_disk_stops_if_it_keeps_filling_it() {
     let free = Arc::new(AtomicU64::new(2 * GIB));
-    let (fixture, checks) = fixture_on_disk(
-        Arc::new(|_turn, io| {
-            Box::pin(async move {
-                io.cancel.cancelled().await;
-                Outcome::cancelled()
+    let (fixture, mut probes) = fixture_on_disk(
+        |_| {
+            Arc::new(|_turn, io| {
+                Box::pin(async move {
+                    io.cancel.cancelled().await;
+                    Outcome::cancelled()
+                })
             })
-        }),
+        },
         Arc::clone(&free),
     )
     .await;
@@ -187,14 +212,64 @@ async fn a_run_sent_on_a_full_disk_stops_if_it_keeps_filling_it() {
         .send_message(&fixture.thread_id, message("build it"))
         .await
         .unwrap();
-    observed_disk(&checks).await;
+    observed_disk(&mut probes).await;
     assert!(fixture.hub.is_live(&fixture.thread_id));
     free.store(GIB / 2, Ordering::Relaxed);
     let runs = fixture.settled().await;
-    assert_eq!(runs[0].status, RunStatus::Failed);
+    assert_eq!(runs[0].status(), RunStatus::Failed);
     let shown = errors(&fixture.items().await);
     assert!(
         shown[0].starts_with("Stopped: only 0.5 GiB free on "),
+        "{shown:?}"
+    );
+}
+
+async fn a_run_on_a_disk_that_goes(from: u64, through: &[u64]) -> (RunStatus, Vec<String>) {
+    let free = Arc::new(AtomicU64::new(from));
+    let (fixture, mut probes) = fixture_on_disk(
+        |_| {
+            Arc::new(|_turn, io| {
+                Box::pin(async move {
+                    io.cancel.cancelled().await;
+                    Outcome::cancelled()
+                })
+            })
+        },
+        Arc::clone(&free),
+    )
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("build it"))
+        .await
+        .unwrap();
+    for &next in through {
+        observed_disk(&mut probes).await;
+        assert!(fixture.hub.is_live(&fixture.thread_id));
+        free.store(next, Ordering::Relaxed);
+    }
+    let runs = tokio::time::timeout(test_support::wait::LIVENESS, fixture.settled())
+        .await
+        .expect("the guard stops the run");
+    (runs[0].status(), errors(&fixture.items().await))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_sent_on_a_nearly_empty_disk_still_stops_before_it_runs_out() {
+    let (status, shown) = a_run_on_a_disk_that_goes(GIB / 2, &[GIB / 10]).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert!(
+        shown[0].starts_with("Stopped: only 0.1 GiB free on "),
+        "{shown:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disk_that_recovered_stops_runs_at_the_normal_line_again() {
+    let (status, shown) = a_run_on_a_disk_that_goes(2 * GIB, &[40 * GIB, 5 * GIB / 2]).await;
+    assert_eq!(status, RunStatus::Failed);
+    assert!(
+        shown[0].starts_with("Stopped: only 2.5 GiB free on "),
         "{shown:?}"
     );
 }

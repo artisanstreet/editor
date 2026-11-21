@@ -3,7 +3,8 @@ use super::{
     ui::{self, Ink},
     view::ViewAction,
 };
-use editor_core::{AccountPhase, Core, LocalForge};
+use aqua_ui::element::{Box as UiBox, Element};
+use editor_core::{AccountLink, AccountPhase, Core, LocalForge};
 use editor_ui::{
     kit::{ButtonTone, Space, TextRole},
     text::{
@@ -12,7 +13,6 @@ use editor_ui::{
     },
     theme::ArtisanTheme,
 };
-use aqua_ui::element::{Box as UiBox, Element};
 use std::rc::Rc;
 
 fn text(theme: &ArtisanTheme, value: impl Into<String>, muted: bool) -> Element {
@@ -28,7 +28,9 @@ fn button(
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
+    ui::button(theme, id, label, tone, disabled, move || {
+        emit(action.clone());
+    })
 }
 fn line(theme: &ArtisanTheme, title: impl Into<String>, detail: impl Into<String>) -> UiBox {
     ui::stack(Space::S4)
@@ -47,19 +49,25 @@ fn editor(
         EditorEvent::Submitted => emit(submit.clone()),
         EditorEvent::Changed => emit(ViewAction::AccountEdited),
         EditorEvent::PresentationChanged => emit(ViewAction::AccountPresentationChanged),
-        _ => {}
+        EditorEvent::SelectionChanged { .. }
+        | EditorEvent::List(_)
+        | EditorEvent::PastedFiles { .. } => {}
     })
     .element_with_notice_keyed(key, Mode::SingleLine, theme, placeholder, false, false)
 }
 
-pub fn sign_in(
+#[expect(
+    clippy::too_many_lines,
+    reason = "the sign-in card renders each account phase as one branch of a single layout"
+)]
+fn sign_in(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let action = |id, label, tone, disabled, action| {
-        button(theme, id, label, tone, disabled, action, emit.clone())
+        button(theme, id, label, tone, disabled, action, Rc::clone(emit))
     };
     let start = || {
         action(
@@ -83,12 +91,12 @@ pub fn sign_in(
             body = body
                 .child(text(theme, "Email", false))
                 .child(editor(
-                    controller.sign_in.email.clone(),
+                    Rc::clone(&controller.sign_in.email),
                     "sign-in-email",
                     "you@example.com",
                     ViewAction::AccountRequestLink,
                     theme,
-                    emit.clone(),
+                    Rc::clone(emit),
                 ))
                 .child(
                     ui::actions()
@@ -107,16 +115,19 @@ pub fn sign_in(
                 );
             if let AccountPhase::Error { message } = core.account().phase() {
                 body = body.child(
-                    ui::stack(Space::S8)
-                        .child(ui::error_text(theme, message.clone()))
-                        .child(ui::actions().child(start()).build())
-                        .build(),
+                    ui::problem(
+                        theme,
+                        "sign-in-error",
+                        &editor_core::Problem::new(message.clone()),
+                    )
+                    .action(start())
+                    .build(),
                 );
             }
         }
         AccountPhase::Restoring => {
             body = body.child(text(theme, "This device's sign-in was saved by an earlier Editor. Checking it with the account service…", true))
-                .child(ui::actions().child(action("sign-in-retry", "Retry", ButtonTone::Neutral, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonTone::Neutral, false, ViewAction::AccountSignOut)).build());
+                .child(ui::actions().child(action("sign-in-retry", "Try again", ButtonTone::Neutral, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonTone::Neutral, false, ViewAction::AccountSignOut)).build());
         }
         AccountPhase::Pending { email, .. } => {
             body = body
@@ -143,12 +154,12 @@ pub fn sign_in(
                 ));
             if *totp_required {
                 body = body.child(editor(
-                    controller.sign_in.second_factor.clone(),
+                    Rc::clone(&controller.sign_in.second_factor),
                     "sign-in-second-factor",
                     "6-digit code",
                     ViewAction::AccountFinish,
                     theme,
-                    emit.clone(),
+                    Rc::clone(emit),
                 ));
             }
             body = body.child(
@@ -172,11 +183,15 @@ pub fn sign_in(
     body.build()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the Forges page lays out its enrollment states in one top-to-bottom column"
+)]
 pub fn forges(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let account = core.account();
     let email = account
@@ -221,7 +236,7 @@ pub fn forges(
                             tone,
                             false,
                             action,
-                            emit.clone(),
+                            Rc::clone(emit),
                         ))
                         .child(button(
                             theme,
@@ -230,7 +245,7 @@ pub fn forges(
                             ButtonTone::Quiet,
                             false,
                             ViewAction::ForgeRemove(id),
-                            emit.clone(),
+                            Rc::clone(emit),
                         ))
                         .build(),
                 )
@@ -271,7 +286,7 @@ pub fn forges(
         ButtonTone::Neutral,
         false,
         ViewAction::ForgeRefresh,
-        emit.clone(),
+        Rc::clone(emit),
     ));
     if let Some((id, label, action)) = action {
         local_actions = local_actions.child(button(
@@ -281,7 +296,7 @@ pub fn forges(
             ButtonTone::Primary,
             false,
             action,
-            emit.clone(),
+            Rc::clone(emit),
         ));
     }
     rows = rows.child(
@@ -290,49 +305,52 @@ pub fn forges(
             .build(),
     );
     rows = rows.child(
-        line(
-            theme,
-            "Another machine",
-            "Claim the code its `ae account enroll` printed.",
-        )
-        .child(
-            ui::actions()
-                .child(ui::grow(editor(
-                    controller.forge_code.clone(),
-                    "forges-code",
-                    "Code from another machine",
-                    ViewAction::ForgeClaim,
-                    theme,
-                    emit.clone(),
-                )))
-                .child(button(
-                    theme,
-                    "forges-claim",
-                    "Claim",
-                    ButtonTone::Primary,
-                    false,
-                    ViewAction::ForgeClaim,
-                    emit.clone(),
-                ))
-                .build(),
-        )
-        .build(),
+        ui::stack(Space::S4)
+            .child(text(theme, "Another machine", false))
+            .child(ui::markdown(
+                theme,
+                TextRole::Label,
+                Ink::Muted,
+                "Run `ae account enroll` on it, then claim the code it printed.",
+            ))
+            .child(
+                ui::actions()
+                    .child(ui::grow(editor(
+                        Rc::clone(&controller.forge_code),
+                        "forges-code",
+                        "Code from another machine",
+                        ViewAction::ForgeClaim,
+                        theme,
+                        Rc::clone(emit),
+                    )))
+                    .child(button(
+                        theme,
+                        "forges-claim",
+                        "Claim",
+                        ButtonTone::Primary,
+                        false,
+                        ViewAction::ForgeClaim,
+                        Rc::clone(emit),
+                    ))
+                    .build(),
+            )
+            .build(),
     );
-    if let Some(error) = controller
-        .forge_error
-        .as_deref()
-        .or_else(|| account.last_error())
-    {
-        rows = rows.child(ui::error_text(theme, error));
+    if let Some(error) = account.last_error() {
+        rows = rows.child(ui::problem(theme, "account-error", error).build());
     }
     rows.build()
 }
 
-pub fn page(
+#[expect(
+    clippy::too_many_lines,
+    reason = "the account page lays out every sign-in phase in one top-to-bottom column"
+)]
+pub(crate) fn page(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let page = editor_core::SettingsPage::Account;
     let mut content = ui::column().child(ui::header(
@@ -356,7 +374,7 @@ pub fn page(
             ButtonTone::Neutral,
             false,
             ViewAction::AccountRefresh,
-            emit.clone(),
+            Rc::clone(emit),
         ))
         .child(button(
             theme,
@@ -365,7 +383,7 @@ pub fn page(
             ButtonTone::Quiet,
             false,
             ViewAction::AccountSignOut,
-            emit.clone(),
+            Rc::clone(emit),
         ))
         .child(button(
             theme,
@@ -374,7 +392,7 @@ pub fn page(
             ButtonTone::Neutral,
             false,
             ViewAction::AccountSignOutEverywhere,
-            emit.clone(),
+            Rc::clone(emit),
         ))
         .build();
     content = content.child(ui::section(
@@ -392,13 +410,51 @@ pub fn page(
             )],
         ),
     ));
+    let policies = ui::actions()
+        .child(button(
+            theme,
+            "account-terms",
+            "Terms of Service",
+            ButtonTone::Quiet,
+            false,
+            ViewAction::OpenUrl(AccountLink::Terms.url()),
+            Rc::clone(emit),
+        ))
+        .child(button(
+            theme,
+            "account-privacy",
+            "Privacy Policy",
+            ButtonTone::Quiet,
+            false,
+            ViewAction::OpenUrl(AccountLink::Privacy.url()),
+            Rc::clone(emit),
+        ))
+        .build();
     content
         .child(ui::section(
             theme,
             "Forges",
             Some("A connected Forge can run anything on its machine."),
             None,
-            ui::card(theme, vec![ui::block(forges(controller, core, theme, emit))]),
+            ui::card(
+                theme,
+                vec![ui::block(forges(controller, core, theme, emit))],
+            ),
+        ))
+        .child(ui::section(
+            theme,
+            "Policies",
+            None,
+            None,
+            ui::card(
+                theme,
+                vec![ui::row(
+                    theme,
+                    "Terms and privacy",
+                    "The terms and privacy policy your Artisan account is under.",
+                    Some(policies),
+                )],
+            ),
         ))
         .build()
 }

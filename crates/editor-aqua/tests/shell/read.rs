@@ -1,193 +1,130 @@
 use artisan_api::{
-    EngineConfig, EngineId, Item, ItemId, ItemKind, ItemsPage, Phase, ProjectId, Run, RunId,
-    RunStatus, Status, TextContent, Thread, ThreadId, Usage,
+    EngineConfig, EngineId, Item, ItemsPage, ProjectId, Run, RunId, RunOutcome, RunState, Thread,
+    ThreadId, UpdateThread, Usage,
 };
 use editor_aqua::conversation::fold::{Row, Slot};
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen};
 use editor_aqua::shell::application::SectionViews;
-use editor_aqua::shell::host::{Shell, ShellResources};
 use editor_aqua::shell::root::RootViews;
+use test_support::editor::forge::{StubForge, empty_state};
+use test_support::editor::shell::{Motion, RootFrames, ThreadShell, headless, window_id};
+use test_support::items::{assistant_reply, item};
 
 const REPLY_SEQ: u64 = 4;
 const RUN_SEQ: u64 = 5;
 
-struct Frame<'a> {
-    root: &'a mut RootViews,
-    shell: &'a mut Shell,
-    ui: &'a mut aqua::UiApp,
-}
-
-impl aqua::Application for Frame<'_> {
-    fn on_window_event(
-        &mut self,
-        _: &mut aqua::AppCtx<'_>,
-        _: aqua::prelude::AquaWindowId,
-        _: &aqua::prelude::WindowEvent,
-    ) {
-    }
-    fn on_input(
-        &mut self,
-        _: &mut aqua::AppCtx<'_>,
-        _: aqua::prelude::AquaWindowId,
-        _: &aqua::prelude::InputEvent,
-    ) {
-    }
-    fn build_scene(
-        &mut self,
-        _: &aqua::prelude::ObservedWindowState,
-        _: aqua::Instant,
-    ) -> Option<aqua::Instant> {
-        None
-    }
-    fn on_frame_completed(
-        &mut self,
-        ctx: &mut aqua::AppCtx<'_>,
-        id: aqua::prelude::AquaWindowId,
-        sequence: u64,
-    ) {
-        self.root.frame_completed(self.shell, self.ui, ctx, id, sequence);
-    }
-}
-
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one focus-and-read scenario walked step by step"
+)]
 fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
-    let directory = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: directory.path().to_owned(),
-    };
-    let mut resources = ShellResources::new(1.0).unwrap();
-    let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
-    shell.core = Core::for_tests(files).unwrap();
-    shell.core.set_image_assets(resources.images.clone());
-    let config = HostConfig {
-        id: HostId("read-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        shell.core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    shell.core.add_test_host(&config, client);
     let thread = ThreadId("read-thread".into());
     let run = RunId("read-run".into());
-    let host = shell.core.host_mut(&config.id).unwrap();
-    host.threads.insert(
-        thread.clone(),
-        Thread {
-            id: thread.clone(),
-            project_id: ProjectId::scratch(),
-            title: Some("Unread reply".into()),
-            config: EngineConfig::new(EngineId::Claude),
-            activity_seq: RUN_SEQ,
-            activity_at: 0,
-            read_seq: 1,
-            marked_unread: false,
-            settled_seq: 0,
-            seq: RUN_SEQ,
-            created_at: 0,
-            updated_at: 0,
-            archived: false,
-            parent_thread_id: None,
-            spawned_by: None,
-            parked_until: None,
-        },
-    );
-    host.runs.insert(
-        thread.clone(),
-        Run {
-            config: None,
-            id: run.clone(),
-            thread_id: thread.clone(),
-            engine: EngineId::Claude,
-            model: None,
-            input_cutoff: 0,
-            status: RunStatus::Done,
-            usage: Usage::default(),
-            session_id: None,
-            error: None,
-            seq: RUN_SEQ,
-            started_at: 0,
-            ended_at: Some(0),
-            continuation: None,
-        },
-    );
-    shell.core.navigate(Screen::Thread {
-        host: config.id.clone(),
-        thread: thread.clone(),
-    });
-    shell.entry.sync(&shell.core);
-    let workspace = shell.entry.workspace_mut().unwrap();
-    workspace.show_sidebar = false;
-    workspace
-        .conversation
-        .open_thread(&mut shell.core, config.id.clone(), thread.clone());
-    workspace.sync_composer(&shell.core, &mut resources.ui);
-    let reply = Item {
-        id: ItemId("read-reply".into()),
-        thread_id: thread.clone(),
-        position: 1,
-        seq: REPLY_SEQ,
-        run_id: Some(run),
-        parent_id: None,
-        status: Status::Done,
+    let mut state = empty_state();
+    state.threads.push(Thread {
+        id: thread.clone(),
+        project_id: ProjectId::scratch(),
+        title: Some("Unread reply".into()),
+        config: EngineConfig::new(EngineId::Claude),
+        activity_seq: RUN_SEQ,
+        activity_at: 0,
+        read_seq: 1,
+        marked_unread: false,
+        settled_seq: 0,
+        seq: RUN_SEQ,
         created_at: 0,
         updated_at: 0,
-        kind: ItemKind::AssistantMessage {
-            text: TextContent::Inline("The videos are both under 20 MB now.".into()),
-            phase: Phase::Final,
+        archived: false,
+        parent_thread_id: None,
+        spawned_by: None,
+        parked_until: None,
+    });
+    state.runs.push(Run {
+        config: None,
+        id: run.clone(),
+        thread_id: thread.clone(),
+        engine: EngineId::Claude,
+        model: None,
+        input_cutoff: 0,
+        state: RunState::Finished {
+            outcome: RunOutcome::Done,
+            error: None,
+            ended_at: 0,
         },
+        usage: Usage::default(),
+        session_id: None,
+        seq: RUN_SEQ,
+        started_at: 0,
+        continuation: None,
+    });
+    state.head = RUN_SEQ;
+    let forge = editor_aqua::core::runtime::runtime()
+        .block_on(StubForge::serve(state, axum::Router::new()));
+    let mut opened = ThreadShell::open_stubbed(&forge, "read-host", "read-thread", Motion::Full);
+    let reply = Item {
+        position: 1,
+        run_id: Some(run),
+        ..item(
+            "read-reply",
+            thread.clone(),
+            REPLY_SEQ,
+            assistant_reply("The videos are both under 20 MB now."),
+        )
     };
-    workspace.conversation.view.as_mut().unwrap().apply_page(
-        editor_aqua::conversation::viewport::Fetch::Tail,
-        ItemsPage {
-            items: vec![reply.clone()],
-            runs: Vec::new(),
-            more: false,
-            work: Vec::new(),
-        },
-    );
-    workspace.conversation.rows.push((
+    let window = opened.window("read");
+    let host = opened.host.id.clone();
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
+    let workspace = shell.entry.workspace_mut().unwrap();
+    workspace
+        .conversation_mut()
+        .view
+        .as_mut()
+        .unwrap()
+        .apply_page(
+            editor_aqua::conversation::viewport::Fetch::Tail,
+            ItemsPage {
+                items: vec![reply.clone()],
+                runs: Vec::new(),
+                more: false,
+                work: Vec::new(),
+            },
+        );
+    workspace.conversation_mut().rows.make_mut().push((
         Row::Text {
-            id: reply.id.clone(),
+            id: reply.id,
             slot: Slot::Prose,
             block: 0,
             run: None,
         },
         1,
     ));
-    workspace.conversation.landing = None;
-    let id = aqua::prelude::AquaWindowId::new(1).unwrap();
-    let mut size = aqua::prelude::WindowOptions::default().inner_size;
-    size.width = 1000.0;
-    size.height = 700.0;
-    let window = aqua::prelude::ObservedWindowState::new(id, "read".into(), size);
+    workspace.conversation_mut().landing = None;
     assert!(!window.focused);
-    resources.ui.set_viewport(1000.0, 700.0, 1.0);
     let mut root = RootViews::default();
     let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
     resources.ui.mount(|_| element).unwrap();
     resources.ui.build_frame().unwrap();
-    let mut runtime = aqua::Aqua::new(aqua::AquaConfig {
-        headless: true,
-        ..aqua::AquaConfig::default()
-    })
-    .unwrap();
-    runtime.add_headless_window(window);
-    let pending = |shell: &Shell| shell.core.host(&config.id).unwrap().pending_read(&thread);
-    let mut frame = Frame {
+    let mut runtime = headless(window);
+    let id = window_id();
+    let acknowledgement = format!("/threads/{thread}");
+    let mut frame = RootFrames {
         root: &mut root,
         shell: &mut shell,
         ui: &mut resources.ui,
     };
     runtime.dispatch_frame_completed(&mut frame, id, 1);
-    assert_eq!(
-        pending(frame.shell),
-        None,
+    assert!(
+        !frame
+            .shell
+            .core
+            .host(&host)
+            .unwrap()
+            .has_requests_in_flight()
+            && !forge.asked("PATCH", &acknowledgement),
         "a reply painted behind an unfocused window has not been read"
     );
     runtime.dispatch_window_event(
@@ -196,8 +133,9 @@ fn a_reply_painted_while_unfocused_is_read_once_the_window_gains_focus() {
         &aqua::prelude::WindowEvent::Focused(id, true),
     );
     runtime.dispatch_frame_completed(&mut frame, id, 2);
+    let read = forge.take("PATCH", &acknowledgement).json::<UpdateThread>();
     assert_eq!(
-        pending(frame.shell),
+        read.read_seq,
         Some(RUN_SEQ),
         "focusing the window over an unchanged reply must mark the finished run read"
     );

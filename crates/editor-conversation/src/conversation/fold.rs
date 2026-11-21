@@ -1,11 +1,12 @@
 use super::activity;
 use super::phase::{self, Phase};
-use super::thread::ThreadView;
+use super::thread::{ItemAnswer, ThreadView};
 use artisan_api::{
-    Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId, RunStatus, Seq,
-    Status, Timestamp,
+    Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId, RunOutcome,
+    RunStatus, Seq, Status, Timestamp,
 };
-use std::collections::{HashMap, HashSet};
+use editor_ui::text::slice::slice;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher as _};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -17,9 +18,9 @@ pub enum Row {
     Work {
         run: Option<RunId>,
         segment: usize,
-        entries: Vec<ItemId>,
-        unloaded: Vec<Seq>,
+        members: WorkMembers,
     },
+    WorkHeader(RunId),
     EarlierWork {
         run: Option<RunId>,
         first: Seq,
@@ -30,7 +31,7 @@ pub enum Row {
         run: Option<RunId>,
     },
     Chain {
-        ids: Vec<ItemId>,
+        ids: NonEmpty<ItemId>,
         run: Option<RunId>,
     },
     Text {
@@ -48,7 +49,99 @@ pub enum Row {
     AgentStatus(ItemId, Option<String>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NonEmpty<T>(Vec<T>);
+
+impl<T> NonEmpty<T> {
+    #[must_use]
+    fn from_vec(items: Vec<T>) -> Option<Self> {
+        (!items.is_empty()).then_some(Self(items))
+    }
+
+    #[must_use]
+    pub(crate) fn first(&self) -> &T {
+        self.0
+            .first()
+            .expect("invariant: a non-empty list has a first member")
+    }
+
+    #[must_use]
+    fn last(&self) -> &T {
+        self.0
+            .last()
+            .expect("invariant: a non-empty list has a last member")
+    }
+
+    #[must_use]
+    pub(crate) fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a NonEmpty<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WorkMembers {
+    entries: Vec<ItemId>,
+    spans: Vec<Seq>,
+}
+
+impl WorkMembers {
+    #[must_use]
+    fn from_item(first: ItemId) -> Self {
+        Self {
+            entries: vec![first],
+            spans: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    fn from_span(first: Seq) -> Self {
+        Self {
+            entries: Vec::new(),
+            spans: vec![first],
+        }
+    }
+
+    fn push_item(&mut self, id: ItemId) {
+        self.entries.push(id);
+    }
+
+    fn push_span(&mut self, first: Seq) {
+        self.spans.push(first);
+    }
+
+    #[must_use]
+    pub(crate) fn entries(&self) -> &[ItemId] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub(crate) fn spans(&self) -> &[Seq] {
+        &self.spans
+    }
+
+    fn loose_key(&self) -> RowKey {
+        match (self.entries.first(), self.spans.first()) {
+            (Some(entry), _) => RowKey::Loose(entry.clone()),
+            (None, Some(first)) => RowKey::LooseSpan(*first),
+            (None, None) => unreachable!("invariant: work members start with an item or a span"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
     Prose,
     Plain(PlainSection),
@@ -118,7 +211,7 @@ impl std::fmt::Display for Slot {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PlainSection {
     Error,
     ImageCaption,
@@ -142,7 +235,7 @@ impl PlainSection {
         }
     }
 }
-pub fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64> {
+pub(crate) fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64> {
     if agent_scope {
         vec![
             match slot {
@@ -162,14 +255,14 @@ pub fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64>
     }
 }
 
-pub fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     const ROW_BYTES: usize = 1024;
     let mut ranges = Vec::new();
     let mut start = 0;
     while start < text.len() {
         let mut end = text.floor_char_boundary((start + ROW_BYTES).min(text.len()));
         if end < text.len() {
-            let prefix = &text[start..end];
+            let prefix = slice(text, start..end);
             if let Some((index, space)) = prefix
                 .char_indices()
                 .rev()
@@ -188,7 +281,7 @@ pub fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     ranges
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TextSection {
     Proposal,
     AgentResult,
@@ -200,7 +293,7 @@ pub enum TextSection {
     AgentMessage,
 }
 impl TextSection {
-    pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
+    fn inline_text(self, item: &Item) -> Option<&str> {
         if self == Self::AgentTask
             && let ItemKind::Agent {
                 prompt: None,
@@ -216,7 +309,7 @@ impl TextSection {
                 return Some("[This message is encrypted.]");
             }
             if description.is_empty() {
-                return Some("Task message not provided by the harness.");
+                return Some("Task message not provided by the engine.");
             }
         }
         if self == Self::AgentMessage
@@ -283,7 +376,7 @@ impl TextSection {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RowKey {
     Projected(Box<Self>, usize),
     Item(ItemId),
@@ -301,7 +394,7 @@ pub enum RowKey {
 }
 
 impl Row {
-    pub(crate) const fn text(id: ItemId, slot: Slot) -> Self {
+    const fn text(id: ItemId, slot: Slot) -> Self {
         Self::Text {
             id,
             slot,
@@ -313,6 +406,7 @@ impl Row {
         match self {
             Self::Projected { row, .. } => row,
             Self::Work { .. }
+            | Self::WorkHeader(_)
             | Self::EarlierWork { .. }
             | Self::WorkEntry { .. }
             | Self::Chain { .. }
@@ -330,6 +424,7 @@ impl Row {
         match self {
             Self::Projected { visual, .. } => Some(*visual),
             Self::Work { .. }
+            | Self::WorkHeader(_)
             | Self::EarlierWork { .. }
             | Self::WorkEntry { .. }
             | Self::Chain { .. }
@@ -352,18 +447,23 @@ impl Row {
             | Self::Compaction(id)
             | Self::Image(id)
             | Self::AgentResult(id) => Some(id),
-            Self::Work { entries, .. } => entries.first(),
-            Self::Chain { ids, .. } => ids.first(),
-            Self::Gap | Self::Status(_) | Self::AgentStatus(..) | Self::EarlierWork { .. } => None,
+            Self::Work { members, .. } => members.entries().first(),
+            Self::Chain { ids, .. } => Some(ids.first()),
+            Self::WorkHeader(_)
+            | Self::Gap
+            | Self::Status(_)
+            | Self::AgentStatus(..)
+            | Self::EarlierWork { .. } => None,
         }
     }
 
     pub(crate) fn last_anchor(&self) -> Option<&ItemId> {
         match self {
             Self::Projected { row, .. } => row.last_anchor(),
-            Self::Work { entries, .. } => entries.last(),
-            Self::Chain { ids, .. } => ids.last(),
-            row @ (Self::EarlierWork { .. }
+            Self::Work { members, .. } => members.entries().last(),
+            Self::Chain { ids, .. } => Some(ids.last()),
+            row @ (Self::WorkHeader(_)
+            | Self::EarlierWork { .. }
             | Self::WorkEntry { .. }
             | Self::Text { .. }
             | Self::Prompt(_)
@@ -378,7 +478,7 @@ impl Row {
 
     pub(crate) fn member(&self) -> Option<&ItemId> {
         match self.semantic() {
-            Self::Work { .. } => None,
+            Self::Work { .. } | Self::WorkHeader(_) => None,
             Self::EarlierWork { member, .. } => Some(member),
             row @ (Self::Projected { .. }
             | Self::WorkEntry { .. }
@@ -418,34 +518,28 @@ impl Row {
                     | Slot::Plain(PlainSection::Error),
                 block: 0,
                 ..
-            } => RowKey::Item(id.clone()),
+            }
+            | Self::WorkEntry { id, .. }
+            | Self::Prompt(id)
+            | Self::Compaction(id)
+            | Self::Image(id) => RowKey::Item(id.clone()),
             Self::Text {
                 id, slot, block, ..
             } => RowKey::Text(id.clone(), *slot, *block),
-            Self::Chain { ids, .. } => RowKey::Chain(ids.first().cloned().unwrap_or_default()),
+            Self::Chain { ids, .. } => RowKey::Chain(ids.first().clone()),
             Self::Work {
                 run: Some(run),
                 segment,
                 ..
             } => RowKey::Work(run.clone(), *segment),
+            Self::WorkHeader(run) => RowKey::Work(run.clone(), 0),
             Self::Work {
-                run: None,
-                entries,
-                unloaded,
-                ..
-            } => match (entries.first(), unloaded.first()) {
-                (Some(entry), _) => RowKey::Loose(entry.clone()),
-                (None, Some(first)) => RowKey::LooseSpan(*first),
-                (None, None) => RowKey::Loose(ItemId::default()),
-            },
+                run: None, members, ..
+            } => members.loose_key(),
             Self::EarlierWork { first, .. } => RowKey::EarlierWork(*first),
             Self::Gap => RowKey::Gap,
             Self::Status(run) => RowKey::Status(run.clone()),
             Self::AgentStatus(id, _) => RowKey::AgentStatus(id.clone()),
-            other @ (Self::WorkEntry { .. }
-            | Self::Prompt(_)
-            | Self::Compaction(_)
-            | Self::Image(_)) => RowKey::Item(other.anchor().cloned().unwrap_or_default()),
         }
     }
 
@@ -461,7 +555,7 @@ impl Row {
             | Self::Chain { run, .. }
             | Self::EarlierWork { run, .. }
             | Self::Text { run, .. } => run.as_ref(),
-            Self::Status(run) => Some(run),
+            Self::Status(run) | Self::WorkHeader(run) => Some(run),
             Self::Prompt(_)
             | Self::Compaction(_)
             | Self::Image(_)
@@ -501,12 +595,14 @@ impl RunSummary {
     }
 }
 
+#[derive(Debug)]
 pub struct Folded {
-    pub rows: Vec<(Row, u64)>,
-    pub runs: HashMap<RunId, RunSummary>,
+    pub rows: Vec<Row>,
+    pub runs: BTreeMap<RunId, RunSummary>,
+    pub turns: Turns,
 }
 
-pub const fn in_composer_strip(item: &Item) -> bool {
+pub(crate) const fn in_composer_strip(item: &Item) -> bool {
     matches!(
         &item.kind,
         ItemKind::Notice {
@@ -516,33 +612,46 @@ pub const fn in_composer_strip(item: &Item) -> bool {
     )
 }
 
-pub fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
-    let find = |id: &RunId| {
-        latest
-            .filter(|latest| &latest.id == id)
-            .or_else(|| view.runs.get(id))
-    };
-    let mut current = run.clone();
-    while let Some(carried) = find(&current).filter(|run| run.continuation.is_some()) {
-        let previous = view
+fn run_order(run: &Run) -> (Timestamp, &RunId) {
+    (run.started_at, &run.id)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Turns {
+    roots: HashMap<RunId, RunId>,
+}
+
+impl Turns {
+    fn new(view: &ThreadView, latest: Option<&Run>) -> Self {
+        let mut runs: Vec<&Run> = view
             .runs
             .values()
+            .filter(|run| latest.is_none_or(|latest| latest.id != run.id))
             .chain(latest)
-            .filter(|other| other.started_at < carried.started_at)
-            .max_by_key(|other| other.started_at);
-        match previous {
-            Some(previous)
-                if !matches!(
-                    previous.status,
-                    RunStatus::Done | RunStatus::Failed | RunStatus::Refused
-                ) =>
-            {
-                current = previous.id.clone();
-            }
-            _ => break,
+            .collect();
+        runs.sort_by(|a, b| run_order(a).cmp(&run_order(b)));
+        let mut roots: HashMap<RunId, RunId> = HashMap::with_capacity(runs.len());
+        let mut previous: Option<&Run> = None;
+        for run in runs {
+            let root = previous
+                .filter(|_| run.continuation.is_some())
+                .filter(|previous| {
+                    !matches!(
+                        previous.status(),
+                        RunStatus::Done | RunStatus::Failed | RunStatus::Refused
+                    )
+                })
+                .and_then(|previous| roots.get(&previous.id).cloned())
+                .unwrap_or_else(|| run.id.clone());
+            roots.insert(run.id.clone(), root);
+            previous = Some(run);
         }
+        Self { roots }
     }
-    current
+
+    fn of(&self, run: &RunId) -> RunId {
+        self.roots.get(run).unwrap_or(run).clone()
+    }
 }
 
 fn ended_empty(item: &Item) -> bool {
@@ -570,18 +679,18 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
         .filter(|item| scope.is_none_or(|agent| descends_from(view, item, agent) || to_scope(item)))
         .collect();
     let loaded: HashSet<&ItemId> = shown.iter().map(|item| &item.id).collect();
-    let children = children(&shown);
     let unloaded: Vec<&artisan_api::WorkSpan> = if scope.is_none() {
         view.shown_work().collect()
     } else {
         Vec::new()
     };
-    let runs = summaries(view, &shown, &unloaded, latest);
-    let turn = |run: &Option<RunId>| run.as_ref().map(|run| turn_of(view, latest, run));
+    let turns = Turns::new(view, latest);
+    let runs = summaries(view, &shown, &unloaded, latest, &turns);
+    let turn = |run: &Option<RunId>| run.as_ref().map(|run| turns.of(run));
     let mut rows: Vec<Row> = Vec::new();
-    let mut work: Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)> = None;
+    let mut work: Option<(Option<RunId>, WorkMembers)> = None;
     let mut segments: HashMap<Option<RunId>, usize> = HashMap::new();
-    let mut run_starts: HashMap<RunId, Seq> = HashMap::new();
+    let mut run_starts: BTreeMap<RunId, Seq> = BTreeMap::new();
     for item in &shown {
         if let (Some(run), ItemKind::UserMessage { steer: false, .. }) =
             (turn(&item.run_id), &item.kind)
@@ -589,15 +698,13 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
             run_starts.entry(run).or_insert(item.position);
         }
     }
-    let mut flush = |work: &mut Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)>,
-                     rows: &mut Vec<Row>| {
-        if let Some((run, entries, unloaded)) = work.take() {
+    let mut flush = |work: &mut Option<(Option<RunId>, WorkMembers)>, rows: &mut Vec<Row>| {
+        if let Some((run, members)) = work.take() {
             let next = segments.entry(run.clone()).or_default();
             rows.push(Row::Work {
                 run,
                 segment: *next,
-                entries,
-                unloaded,
+                members,
             });
             *next += 1;
         }
@@ -647,7 +754,9 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
                 from_agent: Some(_),
                 ..
             } => None,
-            ItemKind::UserMessage { .. } => Some(Row::text(item.id.clone(), Slot::Text(TextSection::User))),
+            ItemKind::UserMessage { .. } => {
+                Some(Row::text(item.id.clone(), Slot::Text(TextSection::User)))
+            }
             ItemKind::AssistantMessage {
                 phase: TextPhase::Final,
                 ..
@@ -688,10 +797,10 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
         };
         context.clone_from(&run);
         match &mut work {
-            Some((current, entries, _)) if *current == run => entries.push(item.id.clone()),
+            Some((current, members)) if *current == run => members.push_item(item.id.clone()),
             _ => {
                 flush(&mut work, &mut rows);
-                work = Some((run, vec![item.id.clone()], Vec::new()));
+                work = Some((run, WorkMembers::from_item(item.id.clone())));
             }
         }
     }
@@ -730,33 +839,26 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
         }
     } else if view.window().gap.is_some() {
         rows.push(Row::Gap);
-    } else if let Some(run) = latest.filter(|run| run.status.is_live()) {
+    } else if let Some(run) = latest.filter(|run| run.status().is_live()) {
         rows.push(Row::Status(run.id.clone()));
     }
     if scope.is_none() {
-        head_every_run(&mut rows, &shown, &run_starts, latest, &turn);
+        rows = head_every_run(rows, &shown, &run_starts, latest, &turn);
     }
-    let rows = rows
-        .into_iter()
-        .map(|row| {
-            let version = version(view, &row, &children, &runs);
-            (row, version)
-        })
-        .collect();
-    Folded { rows, runs }
+    Folded { rows, runs, turns }
 }
 
 fn head_every_run(
-    rows: &mut Vec<Row>,
+    rows: Vec<Row>,
     shown: &[&Item],
-    run_starts: &HashMap<RunId, Seq>,
+    run_starts: &BTreeMap<RunId, Seq>,
     latest: Option<&Run>,
     turn: &impl Fn(&Option<RunId>) -> Option<RunId>,
-) {
+) -> Vec<Row> {
     let headed: HashSet<RunId> = rows
         .iter()
         .filter_map(|row| match row {
-            Row::Work { run: Some(run), .. } => Some(run.clone()),
+            Row::Work { run: Some(run), .. } | Row::WorkHeader(run) => Some(run.clone()),
             Row::Projected { .. }
             | Row::Work { .. }
             | Row::EarlierWork { .. }
@@ -772,55 +874,67 @@ fn head_every_run(
             | Row::AgentStatus(..) => None,
         })
         .collect();
-    let work_header = |run: RunId| Row::Work {
-        run: Some(run),
-        segment: 0,
-        entries: Vec::new(),
-        unloaded: Vec::new(),
-    };
-    let mut inserts: Vec<(usize, RunId)> = run_starts
-        .iter()
-        .filter(|(run, _)| !headed.contains(*run))
-        .filter_map(|(run, start)| {
-            let message = shown.iter().find(|item| {
-                item.position == *start
-                    && matches!(item.kind, ItemKind::UserMessage { steer: false, .. })
-            })?;
-            let at = rows
-                .iter()
-                .rposition(|row| row.anchor() == Some(&message.id))?;
-            Some((at + 1, run.clone()))
-        })
-        .collect();
-    inserts.sort_by_key(|&(at, _)| std::cmp::Reverse(at));
-    let inserted: HashSet<RunId> = inserts.iter().map(|(_, run)| run.clone()).collect();
-    for (at, run) in inserts {
-        rows.insert(at, work_header(run));
-    }
-    if let Some(run) = latest.filter(|run| run.status.is_live()) {
-        let id = turn(&Some(run.id.clone())).unwrap_or_else(|| run.id.clone());
-        if !headed.contains(&id) && !inserted.contains(&id) {
-            let status = rows
-                .iter()
-                .rposition(|row| matches!(row, Row::Status(_)))
-                .unwrap_or(rows.len());
-            rows.insert(status, work_header(id));
+    let mut opening: HashMap<Seq, &ItemId> = HashMap::new();
+    for item in shown {
+        if matches!(item.kind, ItemKind::UserMessage { steer: false, .. }) {
+            opening.entry(item.position).or_insert(&item.id);
         }
     }
+    let mut heads: HashMap<&ItemId, Vec<&RunId>> = HashMap::new();
+    for (run, start) in run_starts {
+        if !headed.contains(run)
+            && let Some(message) = opening.get(start)
+        {
+            heads.entry(message).or_default().push(run);
+        }
+    }
+    let mut last: BTreeMap<&ItemId, usize> = BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(anchor) = row.anchor()
+            && heads.contains_key(anchor)
+        {
+            last.insert(anchor, index);
+        }
+    }
+    let mut after: HashMap<usize, Vec<RunId>> = HashMap::new();
+    for (message, index) in last {
+        let runs = after.entry(index).or_default();
+        runs.extend(heads[message].iter().map(|run| (*run).clone()));
+        runs.sort();
+    }
+    let inserted: HashSet<RunId> = after.values().flatten().cloned().collect();
+    let mut headed_rows = Vec::with_capacity(rows.len() + inserted.len() + 1);
+    for (index, row) in rows.into_iter().enumerate() {
+        headed_rows.push(row);
+        if let Some(runs) = after.remove(&index) {
+            headed_rows.extend(runs.into_iter().map(Row::WorkHeader));
+        }
+    }
+    if let Some(run) = latest.filter(|run| run.status().is_live()) {
+        let id = turn(&Some(run.id.clone())).unwrap_or_else(|| run.id.clone());
+        if !headed.contains(&id) && !inserted.contains(&id) {
+            let status = headed_rows
+                .iter()
+                .rposition(|row| matches!(row, Row::Status(_)))
+                .unwrap_or(headed_rows.len());
+            headed_rows.insert(status, Row::WorkHeader(id));
+        }
+    }
+    headed_rows
 }
 
-pub fn span_member(first: Seq) -> ItemId {
+pub(crate) fn span_member(first: Seq) -> ItemId {
     ItemId::from(format!("unloaded-work:{first}"))
 }
 
 fn fold_span(
     span: &artisan_api::WorkSpan,
     turn: &impl Fn(&Option<RunId>) -> Option<RunId>,
-    run_starts: &HashMap<RunId, Seq>,
+    run_starts: &BTreeMap<RunId, Seq>,
     context: &mut Option<RunId>,
-    work: &mut Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)>,
+    work: &mut Option<(Option<RunId>, WorkMembers)>,
     rows: &mut Vec<Row>,
-    flush: &mut impl FnMut(&mut Option<(Option<RunId>, Vec<ItemId>, Vec<Seq>)>, &mut Vec<Row>),
+    flush: &mut impl FnMut(&mut Option<(Option<RunId>, WorkMembers)>, &mut Vec<Row>),
 ) {
     let run = if turn(&span.run_id)
         .and_then(|run| run_starts.get(&run))
@@ -832,18 +946,18 @@ fn fold_span(
     };
     context.clone_from(&run);
     match work {
-        Some((current, _, unloaded)) if *current == run => unloaded.push(span.first),
+        Some((current, members)) if *current == run => members.push_span(span.first),
         _ => {
             flush(work, rows);
-            *work = Some((run, Vec::new(), vec![span.first]));
+            *work = Some((run, WorkMembers::from_span(span.first)));
         }
     }
 }
 
 pub fn expanded(
     view: &ThreadView,
-    rows: Vec<(Row, u64)>,
-    runs: &HashMap<RunId, RunSummary>,
+    rows: Vec<Row>,
+    runs: &BTreeMap<RunId, RunSummary>,
 ) -> Vec<(Row, u64)> {
     let children = children(&view.shown().collect::<Vec<_>>());
     let mut expanded = Vec::new();
@@ -851,13 +965,12 @@ pub fn expanded(
         let revision = version(view, &row, &children, runs);
         expanded.push((row, revision));
     };
-    for (row, revision) in rows {
+    for row in rows {
         match row {
             Row::Work {
                 run,
                 segment,
-                entries,
-                unloaded,
+                members,
             } => {
                 let open = run
                     .as_ref()
@@ -867,15 +980,14 @@ pub fn expanded(
                     emit(Row::Work {
                         run: run.clone(),
                         segment,
-                        entries: entries.clone(),
-                        unloaded: unloaded.clone(),
+                        members: members.clone(),
                     });
                 }
                 if !open {
                     continue;
                 }
-                let mut rest = entries.as_slice();
-                for first in &unloaded {
+                let mut rest = members.entries();
+                for first in members.spans() {
                     let before = rest
                         .iter()
                         .take_while(|id| view.position_of(id).is_some_and(|at| at < *first))
@@ -925,6 +1037,7 @@ pub fn expanded(
                 }
             }
             other @ (Row::Projected { .. }
+            | Row::WorkHeader(_)
             | Row::EarlierWork { .. }
             | Row::WorkEntry { .. }
             | Row::Chain { .. }
@@ -933,10 +1046,7 @@ pub fn expanded(
             | Row::Compaction(_)
             | Row::Gap
             | Row::Status(_)
-            | Row::AgentStatus(..)) => {
-                let _ = revision;
-                emit(other);
-            }
+            | Row::AgentStatus(..)) => emit(other),
         }
     }
     expanded
@@ -969,7 +1079,8 @@ fn expand_entries(
                 .and_then(|ui| ui.chain_open)
                 .unwrap_or(false);
             emit(Row::Chain {
-                ids: ids.clone(),
+                ids: NonEmpty::from_vec(ids.clone())
+                    .expect("invariant: a chain starts at a counted activity entry"),
                 run: run.cloned(),
             });
             if chain_open {
@@ -1057,7 +1168,7 @@ fn expand_entries(
     }
 }
 
-pub const fn agent_report(item: &Item) -> Option<&artisan_api::TextContent> {
+const fn agent_report(item: &Item) -> Option<&artisan_api::TextContent> {
     match &item.kind {
         ItemKind::Agent { result, .. } => result.as_ref(),
         ItemKind::UserMessage { .. }
@@ -1091,7 +1202,7 @@ fn agent_names(items: &[&Item]) -> HashMap<ItemId, String> {
         .collect()
 }
 
-pub fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>> {
+fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>> {
     let mut children: HashMap<ItemId, Vec<&Item>> = HashMap::new();
     for item in items {
         if let Some(parent) = &item.parent_id {
@@ -1101,12 +1212,17 @@ pub fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>> {
     children
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass grouping shown items, unloaded spans and the latest run into each run's summary"
+)]
 fn summaries(
     view: &ThreadView,
     shown: &[&Item],
     unloaded: &[&artisan_api::WorkSpan],
     latest: Option<&Run>,
-) -> HashMap<RunId, RunSummary> {
+    roots: &Turns,
+) -> BTreeMap<RunId, RunSummary> {
     let mut by_run: HashMap<&RunId, Vec<&Item>> = HashMap::new();
     for item in shown {
         if let Some(run) = &item.run_id {
@@ -1125,7 +1241,7 @@ fn summaries(
     if let Some(run) = latest {
         by_run.entry(&run.id).or_default();
     }
-    let mut summaries: HashMap<RunId, RunSummary> = by_run
+    let mut summaries: BTreeMap<RunId, RunSummary> = by_run
         .into_iter()
         .map(|(run_id, items)| {
             let latest = latest
@@ -1136,7 +1252,7 @@ fn summaries(
                     (
                         phase::turn_phase(run, &items, &view.live),
                         Some(run.started_at),
-                        run.ended_at,
+                        run.ended_at(),
                     )
                 });
             let live = !matches!(phase, Phase::Unknown | Phase::Settled(_));
@@ -1146,7 +1262,7 @@ fn summaries(
                 view.work_open
                     .get(run_id)
                     .copied()
-                    .unwrap_or_else(|| phase != Phase::Settled(RunStatus::Done))
+                    .unwrap_or_else(|| phase != Phase::Settled(RunOutcome::Done))
             };
             (
                 run_id.clone(),
@@ -1155,6 +1271,15 @@ fn summaries(
                     started_at,
                     ended_at: if live { None } else { ended_at },
                     open,
+                    worked: unloaded_work.contains(run_id)
+                        || items.iter().any(|item| {
+                            matches!(
+                                item.kind,
+                                ItemKind::Tool { .. }
+                                    | ItemKind::Agent { .. }
+                                    | ItemKind::Plan { .. }
+                            )
+                        }),
                     doing: live
                         .then(|| {
                             let steps: Vec<&Item> = items
@@ -1165,31 +1290,19 @@ fn summaries(
                             activity::doing(&steps, &agent_names(shown))
                         })
                         .flatten(),
-                    worked: unloaded_work.contains(run_id)
-                        || items.iter().any(|item| {
-                            matches!(
-                                item.kind,
-                                ItemKind::Tool { .. }
-                                    | ItemKind::Agent { .. }
-                                    | ItemKind::Plan { .. }
-                            )
-                        }),
                 },
             )
         })
         .collect();
-    let mut turns: HashMap<RunId, Vec<RunId>> = HashMap::new();
+    let mut turns: BTreeMap<RunId, Vec<RunId>> = BTreeMap::new();
     for run in summaries.keys() {
-        turns
-            .entry(turn_of(view, latest, run))
-            .or_default()
-            .push(run.clone());
+        turns.entry(roots.of(run)).or_default().push(run.clone());
     }
     for (root, mut members) in turns {
         if members.len() < 2 && members.first() == Some(&root) {
             continue;
         }
-        members.sort_by_key(|run| summaries[run].started_at);
+        members.sort_by(|a, b| (summaries[a].started_at, a).cmp(&(summaries[b].started_at, b)));
         let (first, last) = (
             &summaries[&members[0]],
             &summaries[&members[members.len() - 1]],
@@ -1201,7 +1314,7 @@ fn summaries(
             view.work_open
                 .get(&root)
                 .copied()
-                .unwrap_or_else(|| last.phase != Phase::Settled(RunStatus::Done))
+                .unwrap_or_else(|| last.phase != Phase::Settled(RunOutcome::Done))
         };
         let merged = RunSummary {
             phase: last.phase,
@@ -1230,19 +1343,20 @@ const STATUS_GAP: f32 = 32.0;
     clippy::too_many_lines,
     reason = "the spacing rules between every pair of row kinds read as one table"
 )]
-pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
+pub fn gap(view: &ThreadView, turns: &Turns, rows: &[(Row, u64)], index: usize) -> f32 {
     let run_of = |row: &Row| -> Option<RunId> {
         match row {
             Row::Work { run, .. }
             | Row::WorkEntry { run, .. }
             | Row::Chain { run, .. }
             | Row::EarlierWork { run, .. } => run.clone(),
+            Row::WorkHeader(run) => Some(run.clone()),
             Row::Text {
                 slot: slot @ Slot::Text(_),
                 run,
                 ..
             } if !slot.is_bubble() => run.clone(),
-            Row::Status(run) => Some(turn_of(view, None, run)),
+            Row::Status(run) => Some(turns.of(run)),
             other @ (Row::Projected { .. }
             | Row::Text { .. }
             | Row::Prompt(_)
@@ -1254,7 +1368,7 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
                 .anchor()
                 .and_then(|id| view.item(id))
                 .and_then(|item| item.run_id.as_ref())
-                .map(|run| turn_of(view, None, run)),
+                .map(|run| turns.of(run)),
         }
     };
     let row = &rows[index].0;
@@ -1298,6 +1412,7 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
             (_, Row::Text { block: 1.., .. }) => 0.0,
             (
                 Row::Work { .. }
+                | Row::WorkHeader(_)
                 | Row::WorkEntry { .. }
                 | Row::Chain { .. }
                 | Row::EarlierWork { .. }
@@ -1314,12 +1429,12 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
                 },
             ) if run == previous_run && !row.is_bubble() && !previous.is_bubble() => 8.0,
             (
-                Row::Work { .. },
+                Row::Work { .. } | Row::WorkHeader(_),
                 Row::Text {
                     slot: Slot::Prose, ..
                 },
             ) => REPLY_SEAM,
-            (Row::Work { .. }, Row::Status(_)) => STATUS_AFTER_WORK,
+            (Row::Work { .. } | Row::WorkHeader(_), Row::Status(_)) => STATUS_AFTER_WORK,
             (_, Row::Status(_)) => STATUS_GAP,
             (
                 _,
@@ -1352,13 +1467,13 @@ fn version(
     view: &ThreadView,
     row: &Row,
     children: &HashMap<ItemId, Vec<&Item>>,
-    runs: &HashMap<RunId, RunSummary>,
+    runs: &BTreeMap<RunId, RunSummary>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     row.hash(&mut hasher);
     row.run().and_then(|run| runs.get(run)).hash(&mut hasher);
     let mut stack: Vec<&ItemId> = match row {
-        Row::Work { .. } => Vec::new(),
+        Row::Work { .. } | Row::WorkHeader(_) => Vec::new(),
         Row::Chain { ids, .. } => ids.iter().collect(),
         Row::Status(run) => {
             runs.get(run)
@@ -1368,13 +1483,13 @@ fn version(
                 .get(&LiveTarget::Reasoning {
                     run_id: run.clone(),
                 })
-                .map(std::sync::Arc::as_ptr)
+                .map(|live| std::sync::Arc::as_ptr(&live.text))
                 .hash(&mut hasher);
             view.live
                 .get(&LiveTarget::Status {
                     run_id: run.clone(),
                 })
-                .map(std::sync::Arc::as_ptr)
+                .map(|live| std::sync::Arc::as_ptr(&live.text))
                 .hash(&mut hasher);
             Vec::new()
         }
@@ -1396,6 +1511,10 @@ fn version(
             item.seq.hash(&mut hasher);
         }
         view.ui.get(id).hash(&mut hasher);
+        view.answers
+            .get(id)
+            .map(ItemAnswer::state)
+            .hash(&mut hasher);
         for target in [
             LiveTarget::Text {
                 item_id: id.clone(),
@@ -1409,7 +1528,7 @@ fn version(
         ] {
             view.live
                 .get(&target)
-                .map(std::sync::Arc::as_ptr)
+                .map(|live| std::sync::Arc::as_ptr(&live.text))
                 .hash(&mut hasher);
         }
         if !matches!(

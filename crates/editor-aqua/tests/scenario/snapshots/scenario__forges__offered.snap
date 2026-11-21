@@ -1,0 +1,14 @@
+---
+source: crates/editor-aqua/tests/scenario/forges.rs
+expression: "editor.settle_part(\"the palette to offer the other Forge\", Role::Dialog,\nSome(\"Search threads and commands\"), |view|\n{\n    view.find(Role::Button, \"Switch to Studio\").is_some() &&\n    view.find(Role::Button, \"Studio work\").is_some() &&\n    !view.shows(\"Searching threads\")\n})"
+---
+Dialog "Search threads and commands"
+  Heading "Search threads and commands"
+  Button "Close"
+  TextInput "Search threads and commands" value="Studio" [focused]
+  Button "Switch to Studio" [selected]
+    Label "Switch to Studio"
+    Label "Host"
+  Button "Studio work"
+    Label "Studio work"
+    Label "Studio"

@@ -1,0 +1,149 @@
+{
+  "items": [
+    {
+      "id": "01a1f000-0000-7000-8000-000000000100",
+      "thread_id": "01a1f000-0000-7000-8000-000000000002",
+      "position": 9,
+      "seq": 16,
+      "run_id": "01a1eefe-8c8f-7580-82e8-e05331d4c2ba",
+      "parent_id": null,
+      "status": "done",
+      "created_at": 1795011021965,
+      "updated_at": 1795011021970,
+      "kind": {
+        "type": "user_message",
+        "text": "List the files",
+        "images": [],
+        "steer": false
+      }
+    },
+    {
+      "id": "01a1eefe-8c93-7a53-912d-ad996ee31249",
+      "thread_id": "01a1f000-0000-7000-8000-000000000002",
+      "position": 18,
+      "seq": 18,
+      "run_id": "01a1eefe-8c8f-7580-82e8-e05331d4c2ba",
+      "parent_id": null,
+      "status": "done",
+      "created_at": 1795011021971,
+      "updated_at": 1795011021971,
+      "kind": {
+        "type": "assistant_message",
+        "text": "Answered: List the files",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "01a1f000-0000-7000-8000-000000000101",
+      "thread_id": "01a1f000-0000-7000-8000-000000000002",
+      "position": 21,
+      "seq": 25,
+      "run_id": "01a1eefe-8cf3-7b51-ac3c-6736386f06c9",
+      "parent_id": null,
+      "status": "done",
+      "created_at": 1795011022066,
+      "updated_at": 1795011022070,
+      "kind": {
+        "type": "user_message",
+        "text": "Summarise the crate",
+        "images": [],
+        "steer": false
+      }
+    },
+    {
+      "id": "01a1eefe-8cf7-75d3-b7c7-eb18b8a89baa",
+      "thread_id": "01a1f000-0000-7000-8000-000000000002",
+      "position": 27,
+      "seq": 27,
+      "run_id": "01a1eefe-8cf3-7b51-ac3c-6736386f06c9",
+      "parent_id": null,
+      "status": "done",
+      "created_at": 1795011022071,
+      "updated_at": 1795011022071,
+      "kind": {
+        "type": "assistant_message",
+        "text": "Answered: Summarise the crate",
+        "phase": "final"
+      }
+    }
+  ],
+  "runs": [
+    {
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null,
+        "permissions": "auto",
+        "options": {}
+      },
+      "id": "01a1eefe-8c8f-7580-82e8-e05331d4c2ba",
+      "thread_id": "01a1f000-0000-7000-8000-000000000002",
+      "engine": "claude",
+      "model": null,
+      "input_cutoff": 9,
+      "status": "done",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": null,
+        "context_used": null,
+        "context_window": null,
+        "cost_usd": null
+      },
+      "session_id": "00000000-0000-4000-8000-0000000f1c26",
+      "error": null,
+      "seq": 19,
+      "started_at": 1795011021968,
+      "ended_at": 1795011021972
+    },
+    {
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null,
+        "permissions": "auto",
+        "options": {}
+      },
+      "id": "01a1eefe-8cf3-7b51-ac3c-6736386f06c9",
+      "thread_id": "01a1f000-0000-7000-8000-000000000002",
+      "engine": "claude",
+      "model": null,
+      "input_cutoff": 21,
+      "status": "done",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache_read": 0,
+        "cache_write": null,
+        "context_used": null,
+        "context_window": null,
+        "cost_usd": null
+      },
+      "session_id": "00000000-0000-4000-8000-0000000f1c26",
+      "error": null,
+      "seq": 28,
+      "started_at": 1795011022068,
+      "ended_at": 1795011022071
+    }
+  ],
+  "more": false,
+  "work": [
+    {
+      "run_id": "01a1eefe-8c8f-7580-82e8-e05331d4c2ba",
+      "first": 17,
+      "last": 17,
+      "count": 1,
+      "worked": true
+    },
+    {
+      "run_id": "01a1eefe-8cf3-7b51-ac3c-6736386f06c9",
+      "first": 26,
+      "last": 26,
+      "count": 1,
+      "worked": true
+    }
+  ]
+}

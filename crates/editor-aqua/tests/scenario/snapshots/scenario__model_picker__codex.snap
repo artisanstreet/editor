@@ -1,0 +1,29 @@
+---
+source: crates/editor-aqua/tests/scenario/model_picker.rs
+expression: "editor.settle_part(\"the Codex tab\", Role::Menu, None, |view|\n{\n    view.focused().is_some_and(|focused|\n    {\n        focused.role == Role::Button && focused.label.as_deref() ==\n        Some(\"Codex\")\n    })\n})"
+---
+Menu
+  TabList "Model settings"
+    Tab "Model" [selected]
+      Label
+      Label "Model"
+  Image
+  Button "Claude Code"
+  Button "Codex" [selected, focused]
+  Button "OpenCode"
+  ScrollView
+    Group "Claude Code"
+      Label "Claude Code"
+    Label "Claude Code is not ready: signed out."
+    Button "Sign in to Claude Code"
+      Label "Sign in to Claude Code"
+    Group "Codex"
+      Label "Codex"
+    Label "Codex is not ready: not installed."
+    Button "Install Codex"
+      Label "Install Codex"
+    Group "OpenCode"
+      Label "OpenCode"
+    Label "OpenCode is not ready: not installed."
+    Button "Install OpenCode"
+      Label "Install OpenCode"

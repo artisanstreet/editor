@@ -19,6 +19,7 @@ use editor_assets::AssetId;
 use super::{Change, FileTree, Model, Row, RowKind};
 use crate::ui::{
     kit::{self, Density, Hover, IconSize, Space, Spaced, Surface, TextRole, live},
+    locale,
     rich::actions::{OpenReference, ResourceScope},
     theme::{ArtisanTheme, Oklch},
 };
@@ -26,8 +27,8 @@ use crate::ui::{
 const ROW: kit::Row = kit::Row::ListItem(Density::Dense);
 const DEPTH_INDENT: f32 = 16.0;
 
-fn row_height() -> f32 {
-    ROW.height().unwrap_or_default()
+fn row_height(theme: &ArtisanTheme) -> f32 {
+    ROW.height(theme)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +41,7 @@ pub(crate) enum Navigation {
     Right,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     Activate(usize),
     Navigate(usize, Navigation),
@@ -78,7 +79,7 @@ impl FileTreeState {
                 .iter()
                 .any(|row| matches!(&row.kind, RowKind::Dir { key: current, .. } if current == key))
         });
-        self.model = Some(tree.0.clone());
+        self.model = Some(Arc::clone(&tree.0));
         true
     }
 
@@ -93,10 +94,10 @@ impl FileTreeState {
                 hidden_below = None;
             }
             visible.push(index);
-            if let RowKind::Dir { key, .. } = &row.kind {
-                if self.collapsed.contains(key) {
-                    hidden_below = Some(row.depth);
-                }
+            if let RowKind::Dir { key, .. } = &row.kind
+                && self.collapsed.contains(key)
+            {
+                hidden_below = Some(row.depth);
             }
         }
         visible
@@ -227,14 +228,10 @@ fn text(
         .build()
 }
 
-fn count(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
-}
-
+#[expect(
+    clippy::too_many_lines,
+    reason = "one file tree row with its indent, disclosure, name and input handling"
+)]
 fn row(
     tree: &FileTree,
     id: &str,
@@ -257,7 +254,7 @@ fn row(
                     },
                     theme.colors.text_muted,
                     theme.colors.text,
-                    (!open).then(|| count(*files, "file")),
+                    (!open).then(|| locale::count(*files, "file", "files")),
                     None,
                     row.name.clone(),
                     false,
@@ -302,10 +299,10 @@ fn row(
     }
     let mut content = UiBox::new()
         .width(Length::Pct(100.0))
-        .height(row_height())
+        .height(row_height(theme))
         .spaced(ROW.gap())
         .padded(ROW.pad().x)
-        .radius(ROW.radius_in(Surface::Card))
+        .radius(kit::Row::radius_in(Surface::Card))
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
@@ -315,7 +312,7 @@ fn row(
         .child(live::layer(
             Hover::Neutral,
             theme,
-            ROW.radius_in(Surface::Card),
+            kit::Row::radius_in(Surface::Card),
             false,
         ))
         .child(
@@ -371,10 +368,10 @@ fn row(
         );
     }
     let pressed = Rc::new(Cell::new(None));
-    let down = pressed.clone();
-    let cancelled = pressed.clone();
-    let click = emit.clone();
-    let accessibility = emit.clone();
+    let down = Rc::clone(&pressed);
+    let cancelled = Rc::clone(&pressed);
+    let click = Rc::clone(&emit);
+    let accessibility = Rc::clone(&emit);
     let key_emit = emit;
     let mut element = live::track(content.build())
         .with_key(node_id(id, index, row, &tree.0))
@@ -398,10 +395,10 @@ fn row(
             let was_pressed = pressed.take();
             if let RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) =
                 &event.input
+                && was_pressed == Some(pointer.contact)
+                && event.bounds.contains(pointer.position)
             {
-                if was_pressed == Some(pointer.contact) && event.bounds.contains(pointer.position) {
-                    click(Action::Activate(index));
-                }
+                click(Action::Activate(index));
             }
             InputResponse {
                 pointer_capture: CaptureRequest::Release,
@@ -429,6 +426,19 @@ fn row(
             let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
                 return InputResponse::default();
             };
+            if matches!(
+                key.key,
+                InputKey::Named(NamedKey::Enter) | InputKey::Char(' ')
+            ) && key.modifiers.is_empty()
+            {
+                if !key.repeat {
+                    key_emit(Action::Activate(index));
+                }
+                return InputResponse {
+                    stop_propagation: true,
+                    ..InputResponse::handled()
+                };
+            }
             let command = match key.key {
                 InputKey::Named(NamedKey::Up) => Navigation::Previous,
                 InputKey::Named(NamedKey::Down) => Navigation::Next,
@@ -436,7 +446,7 @@ fn row(
                 InputKey::Named(NamedKey::End) => Navigation::Last,
                 InputKey::Named(NamedKey::Left) => Navigation::Left,
                 InputKey::Named(NamedKey::Right) if expanded.is_some() => Navigation::Right,
-                _ => return InputResponse::default(),
+                InputKey::Char(_) | InputKey::Named(_) => return InputResponse::default(),
             };
             key_emit(Action::Navigate(index, command));
             InputResponse {
@@ -455,7 +465,7 @@ impl FileTree {
         &self,
         theme: &ArtisanTheme,
         id: &str,
-        state: Rc<RefCell<FileTreeState>>,
+        state: &Rc<RefCell<FileTreeState>>,
         emit: Rc<dyn Fn(Action)>,
     ) -> Element {
         state.borrow_mut().reconcile(self);
@@ -466,7 +476,7 @@ impl FileTree {
             .style(Style::new().align(AlignItems::CENTER).wrap(true))
             .child(text(
                 theme,
-                count(self.0.entries.len(), "file"),
+                locale::count(self.0.entries.len(), "file", "files"),
                 TextRole::Caption,
                 theme.colors.text_muted,
                 false,
@@ -488,20 +498,21 @@ impl FileTree {
                 ));
             }
         }
-        let height = f32::from(u16::try_from(visible.len().min(14)).unwrap_or(14)) * row_height();
-        let tree = FileTree(self.0.clone());
+        let height =
+            f32::from(u16::try_from(visible.len().min(14)).unwrap_or(14)) * row_height(theme);
+        let tree = Self(Arc::clone(&self.0));
         let row_id = id.to_owned();
         let theme = *theme;
         let list = List::new()
             .items(visible)
             .key(|index| *index)
-            .row(move |index| row(&tree, &row_id, *index, &theme, &collapsed, emit.clone()))
+            .row(move |index| row(&tree, &row_id, *index, &theme, &collapsed, Rc::clone(&emit)))
             .style(
                 Style::new()
                     .width(Length::Pct(100.0))
                     .height(Length::Px(height)),
             )
-            .estimated_row_height(Length::Px(row_height()))
+            .estimated_row_height(Length::Px(row_height(&theme)))
             .measured_uniform_rows()
             .virtualize()
             .build()

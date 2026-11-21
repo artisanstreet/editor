@@ -2,7 +2,7 @@ use artisan_api::{Collection, InspectorSummary};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Entry {
-    Fact(&'static str),
+    Fact(Fact),
     Heading(&'static str),
     Agent(usize),
     Plan(usize),
@@ -11,13 +11,22 @@ pub enum Entry {
     Workflow(usize),
 }
 
-pub fn entries(summary: &InspectorSummary) -> Vec<Entry> {
-    let mut entries = ["Project", "Forge", "Branch", "Worktree"]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fact {
+    Project,
+    Machine,
+    Branch,
+    Worktree,
+    Edits,
+}
+
+pub(crate) fn entries(summary: &InspectorSummary) -> Vec<Entry> {
+    let mut entries = [Fact::Project, Fact::Machine, Fact::Branch, Fact::Worktree]
         .into_iter()
         .map(Entry::Fact)
         .collect::<Vec<_>>();
     if summary.edits.is_some() {
-        entries.push(Entry::Fact("Edit operations"));
+        entries.push(Entry::Fact(Fact::Edits));
     }
     if !summary.agents.is_empty() {
         entries.push(Entry::Heading("Agents"));

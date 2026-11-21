@@ -1,7 +1,8 @@
+use crate::core::client::ForgeFault;
 use crate::core::{ConnectionStatus, Core, HostData, HostId, HostInstance};
 use crate::ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use crate::ui::theme::ArtisanTheme;
-use aqua_core::{DisplayItem, Rect, Role};
+use aqua_core::{DisplayItem, LiveRegion, Rect, Role};
 use aqua_text::StyledSpan;
 use aqua_ui::{
     AlignItems,
@@ -20,24 +21,25 @@ const REASSURANCE_DELAY: Duration = Duration::from_secs(5);
 const REASSURANCE_FADE: Duration = Duration::from_millis(500);
 const TEXT_WIDTH: f32 = 440.0;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct WordmarkLoader {
     mounted: Option<Instant>,
 }
 
 impl WordmarkLoader {
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.mounted = None;
     }
 
-    pub fn build(
+    pub(crate) fn build(
         &mut self,
-        theme: ArtisanTheme,
-        now: Instant,
+        theme: &ArtisanTheme,
+        clock: &crate::core::Clock,
         reduced_motion: bool,
         key: &'static str,
     ) -> Element {
-        let mounted = *self.mounted.get_or_insert(now);
+        let mounted = *self.mounted.get_or_insert_with(|| clock.now());
+        let clock = clock.clone();
         let started = mounted + MARK_DELAY;
         let height = 48.0 * 2.2515;
         let width = height * (136.675 / 225.15);
@@ -53,14 +55,14 @@ impl WordmarkLoader {
             .on_paint(move |bounds| {
                 let vector = |color| DisplayItem::GpuiSvg {
                     bounds,
-                    source: source.clone(),
+                    source: std::sync::Arc::clone(&source),
                     tint: Some(color),
                     opacity: 1.0,
                 };
                 if reduced_motion {
                     return vec![vector(foreground.to_reference_paint())];
                 }
-                let elapsed = Instant::now().checked_duration_since(started);
+                let elapsed = clock.now().checked_duration_since(started);
                 let Some(elapsed) = elapsed else {
                     return Vec::new();
                 };
@@ -70,9 +72,9 @@ impl WordmarkLoader {
                 let slice_width = band / 9.0;
                 let leading = (bounds.w + band).mul_add(progress, -band);
                 let mut items = vec![vector(muted.fade(opacity).to_reference_paint())];
-                for slice in 0..9 {
-                    let left = slice_width.mul_add(slice as f32, leading);
-                    let position = (slice as f32 + 0.5) / 9.0;
+                for slice in 0_u8..9 {
+                    let left = slice_width.mul_add(f32::from(slice), leading);
+                    let position = (f32::from(slice) + 0.5) / 9.0;
                     let strength = (position * std::f32::consts::TAU).cos().mul_add(-0.5, 0.5);
                     items.push(DisplayItem::PushGpuiContentMask {
                         bounds: Rect {
@@ -95,7 +97,7 @@ impl WordmarkLoader {
             .aria_label("Loading")
     }
 
-    pub fn deadline(&self, now: Instant, reduced_motion: bool) -> Option<Instant> {
+    pub(crate) fn deadline(&self, now: Instant, reduced_motion: bool) -> Option<Instant> {
         if reduced_motion {
             return None;
         }
@@ -104,7 +106,7 @@ impl WordmarkLoader {
             .filter(|deadline| *deadline > now)
     }
 
-    pub fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
+    pub(crate) fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
         !reduced_motion
             && self
                 .mounted
@@ -112,68 +114,171 @@ impl WordmarkLoader {
     }
 }
 
-#[derive(Default)]
+#[must_use]
+pub(crate) fn lost(status: &ConnectionStatus) -> Option<Element> {
+    match status {
+        ConnectionStatus::Live | ConnectionStatus::Connecting => None,
+        ConnectionStatus::Reconnecting { .. } | ConnectionStatus::Offline { .. } => Some(
+            UiBox::new()
+                .width(0.0)
+                .height(0.0)
+                .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, None))
+                .build()
+                .exclude_from_hit_testing()
+                .with_key("forge-connection-lost")
+                .role(Role::Text)
+                .aria_label("Lost the connection to Forge. Reconnecting…")
+                .aria_live(LiveRegion::Polite),
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Command {
+    StartWsl,
+    RetryNow,
+    ManageForges,
+}
+
+type Commands = Rc<RefCell<Vec<(HostId, HostInstance, Command)>>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Owner {
+    NewThread(HostId),
+    Thread(HostId, artisan_api::ThreadId),
+}
+
+#[derive(Debug, Default)]
 pub struct ConnectionPresenter {
+    owner: Option<Owner>,
     host: Option<(HostId, HostInstance)>,
     phase: Option<(bool, Instant)>,
     mark: WordmarkLoader,
-    starts: Rc<RefCell<Vec<(HostId, HostInstance)>>>,
+    commands: Commands,
+    last_failure: Option<crate::core::Problem>,
+}
+
+fn command_button(
+    key: &'static str,
+    theme: &ArtisanTheme,
+    tone: ButtonTone,
+    label: impl Into<String>,
+    commands: &Commands,
+    identity: &(HostId, HostInstance),
+    command: Command,
+) -> Button {
+    let commands = Rc::clone(commands);
+    let (host, instance) = identity.clone();
+    Button::text(key, *theme, tone, label)
+        .debug_selector(key)
+        .on_activate(move |_| {
+            commands
+                .borrow_mut()
+                .push((host.clone(), instance, command));
+        })
 }
 
 impl ConnectionPresenter {
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
+        self.owner = None;
         self.host = None;
         self.phase = None;
         self.mark.reset();
-        self.starts.borrow_mut().clear();
+        self.commands.borrow_mut().clear();
+        self.last_failure = None;
     }
 
-    pub fn waiting(&mut self, theme: ArtisanTheme, now: Instant, reduced_motion: bool) -> Element {
+    pub fn hold(&mut self, owner: Option<Owner>) {
+        if self.owner != owner {
+            self.reset();
+            self.owner = owner;
+        }
+    }
+
+    pub fn waiting(
+        &mut self,
+        theme: &ArtisanTheme,
+        clock: &crate::core::Clock,
+        reduced_motion: bool,
+    ) -> Element {
         self.mark
-            .build(theme, now, reduced_motion, "forge-connecting")
+            .build(theme, clock, reduced_motion, "forge-connecting")
     }
 
-    pub fn dispatch(&mut self, core: &mut Core) {
-        for (id, instance) in std::mem::take(&mut *self.starts.borrow_mut()) {
-            if self.host.as_ref() == Some(&(id.clone(), instance)) {
-                if let Some(host) = core.host_mut_if_instance(&id, instance) {
-                    host.start_wsl();
+    pub fn dispatch(&self, core: &mut Core) {
+        for (id, instance, command) in std::mem::take(&mut *self.commands.borrow_mut()) {
+            if self.host.as_ref() != Some(&(id.clone(), instance)) {
+                continue;
+            }
+            match command {
+                Command::StartWsl => {
+                    if let Some(host) = core.host_mut_if_instance(&id, instance) {
+                        host.start_wsl();
+                    }
+                }
+                Command::RetryNow => {
+                    if let Some(host) = core.host_if_instance(&id, instance) {
+                        host.retry_now();
+                    }
+                }
+                Command::ManageForges => {
+                    core.navigate(crate::core::Screen::Settings(
+                        crate::core::SettingsPage::Hosts,
+                    ));
                 }
             }
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one presenter covering every connection phase the new-thread screen shows"
+    )]
     pub fn build(
         &mut self,
         host: &HostData,
-        theme: ArtisanTheme,
-        now: Instant,
+        theme: &ArtisanTheme,
+        clock: &crate::core::Clock,
         reduced_motion: bool,
     ) -> Option<Element> {
+        let now = clock.now();
         let identity = (host.id.clone(), host.instance());
         if self.host.as_ref() != Some(&identity) {
-            self.reset();
+            self.phase = None;
+            self.mark.reset();
+            self.commands.borrow_mut().clear();
             self.host = Some(identity.clone());
         }
-        let code = match &host.status {
+        let fault = match &host.status {
             ConnectionStatus::Live => {
                 self.phase = None;
                 self.mark.reset();
+                self.last_failure = None;
                 return None;
             }
-            ConnectionStatus::Connecting => None,
-            ConnectionStatus::Offline { code, .. } => *code,
+            ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. } => None,
+            ConnectionStatus::Offline { fault, reason, .. } => {
+                self.last_failure = Some(reason.clone());
+                *fault
+            }
         };
-        let failure = match code {
-            Some(artisan_api::ErrorCode::Unauthorized) => Some((
+        let failure = match fault {
+            Some(ForgeFault::Unauthorized) => Some((
                 "Could not authenticate with Forge",
                 "The paired credential was rejected. Add a fresh Forge invitation to pair this client again.",
             )),
-            Some(artisan_api::ErrorCode::VersionMismatch) => Some((
+            Some(ForgeFault::Incompatible) => Some((
                 "Forge and Editor versions differ",
                 "Update Forge or the Editor so both use the same protocol.",
             )),
-            _ => None,
+            Some(
+                ForgeFault::Unrecognised
+                | ForgeFault::Unreachable
+                | ForgeFault::Unreadable
+                | ForgeFault::TooLarge
+                | ForgeFault::Failed,
+            )
+            | None => None,
         };
         if let Some((title, detail)) = failure {
             self.phase = None;
@@ -182,12 +287,29 @@ impl ConnectionPresenter {
                 .layout("column")
                 .style(Style::new().align(AlignItems::CENTER))
                 .spaced(Space::S8)
-                .child(TextRole::Heading.text(&theme, title).build())
+                .child(
+                    TextRole::Heading
+                        .text(theme, title)
+                        .build()
+                        .role(Role::Heading(1)),
+                )
                 .child(
                     UiBox::new()
                         .style(Style::new().max_width(Length::Px(TEXT_WIDTH)))
-                        .child(label(&theme, detail, theme.colors.text_muted))
+                        .child(label(theme, detail, theme.colors.text_muted))
                         .build(),
+                )
+                .child(
+                    command_button(
+                        "manage-forges",
+                        theme,
+                        ButtonTone::Neutral,
+                        "Forges",
+                        &self.commands,
+                        &identity,
+                        Command::ManageForges,
+                    )
+                    .build(),
                 )
                 .build();
             return Some(content.debug_selector("new-thread-status"));
@@ -202,7 +324,7 @@ impl ConnectionPresenter {
         };
         let mark = self
             .mark
-            .build(theme, now, reduced_motion, "forge-connecting");
+            .build(theme, clock, reduced_motion, "forge-connecting");
         let mut section = UiBox::new()
             .layout("column")
             .spaced(Space::S32)
@@ -232,20 +354,52 @@ impl ConnectionPresenter {
                         },
                     )
                 };
-                let starts = Rc::clone(&self.starts);
-                let action = Button::text("start-wsl-forge", theme, ButtonTone::Primary, label)
-                    .disabled(wsl.starting)
-                    .debug_selector("start-wsl-forge")
-                    .on_activate(move |_| starts.borrow_mut().push(identity.clone()))
-                    .build();
-                (detail, Some(action))
-            } else if reached {
-                ("Connection dropped — getting you back…".to_owned(), None)
+                let action = command_button(
+                    "start-wsl-forge",
+                    theme,
+                    ButtonTone::Primary,
+                    label,
+                    &self.commands,
+                    &identity,
+                    Command::StartWsl,
+                )
+                .disabled(wsl.starting)
+                .build();
+                (detail, vec![action])
             } else {
-                ("Connecting to Artisan Forge…".to_owned(), None)
+                let detail = if reached {
+                    "Connection dropped — getting you back…"
+                } else {
+                    "Connecting to Artisan Forge…"
+                };
+                let actions = self.last_failure.is_some().then(|| {
+                    vec![
+                        command_button(
+                            "retry-forge",
+                            theme,
+                            ButtonTone::Primary,
+                            "Try again now",
+                            &self.commands,
+                            &identity,
+                            Command::RetryNow,
+                        )
+                        .build(),
+                        command_button(
+                            "manage-forges",
+                            theme,
+                            ButtonTone::Neutral,
+                            "Forges",
+                            &self.commands,
+                            &identity,
+                            Command::ManageForges,
+                        )
+                        .build(),
+                    ]
+                });
+                (detail.to_owned(), actions.unwrap_or_default())
             };
             let first = "This is taking more time than expected…";
-            let typography = TextRole::Label.style(&theme);
+            let typography = TextRole::Label.style(theme);
             let color = theme.colors.text_muted.to_reference_text_color();
             let color = [
                 color.hue_degrees,
@@ -254,8 +408,7 @@ impl ConnectionPresenter {
                 color.alpha,
             ];
             let spans = vec![
-                StyledSpan::new(first, TextRole::LabelStrong.style(&theme))
-                    .gpui_source_color(color),
+                StyledSpan::new(first, TextRole::LabelStrong.style(theme)).gpui_source_color(color),
                 StyledSpan::new(format!(" {detail}"), typography).gpui_source_color(color),
             ];
             let mut line = UiBox::new()
@@ -268,14 +421,27 @@ impl ConnectionPresenter {
                 )
                 .child(Text::new(format!("{first} {detail}")).spans(spans).build());
             if let Some(error) = host.wsl.as_ref().and_then(|wsl| wsl.error.as_ref()) {
+                line = line.child(
+                    crate::ui::kit::ProblemNotice::new("wsl-start-problem", *theme, error).build(),
+                );
+            }
+            if host.wsl.is_none()
+                && let Some(reason) = &self.last_failure
+            {
                 line = line.child(label(
-                    &theme,
-                    &format!("Couldn't start it: {error}"),
-                    theme.colors.destructive_text,
+                    theme,
+                    &format!("Last attempt: {}", reason.headline()),
+                    theme.colors.text_muted,
                 ));
             }
-            if let Some(action) = action {
-                line = line.child(action);
+            if !action.is_empty() {
+                line = line.child(
+                    UiBox::new()
+                        .layout("row")
+                        .spaced(Space::S8)
+                        .children(action)
+                        .build(),
+                );
             }
             let elapsed = now
                 .saturating_duration_since(since + REASSURANCE_DELAY)
@@ -287,7 +453,7 @@ impl ConnectionPresenter {
             } else if t < 0.5 {
                 2.0 * t * t
             } else {
-                1.0 - (-2.0 * t + 2.0).powi(2) / 2.0
+                1.0 - (-2.0f32).mul_add(t, 2.0).powi(2) / 2.0
             };
             section = section.child(line.opacity(opacity).build());
         }
@@ -305,7 +471,7 @@ impl ConnectionPresenter {
         }
     }
 
-    pub fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
+    pub(crate) fn animating(&self, now: Instant, reduced_motion: bool) -> bool {
         !reduced_motion
             && (self.mark.animating(now, false)
                 || self.phase.is_some_and(|(_, since)| {
@@ -319,5 +485,6 @@ fn label(theme: &ArtisanTheme, value: &str, ink: crate::ui::theme::Oklch) -> Ele
     TextRole::Label
         .text(theme, value.to_owned())
         .gpui_source_color(ink.to_reference_text_color())
+        .wrap(true)
         .build()
 }

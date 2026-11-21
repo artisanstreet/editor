@@ -14,9 +14,10 @@ use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 use std::rc::Rc;
 
-pub const OVERLAY: &str = "artisan-frame-search-overlay";
+pub(crate) const OVERLAY: &str = "artisan-frame-search-overlay";
 pub const QUERY: &str = "sidebar-thread-search";
-pub const RAIL_KEY: KeySize = KeySize::Md;
+const SCOPE: &str = "artisan-frame-search-scope";
+const RAIL_KEY: KeySize = KeySize::Md;
 const BAR: KeySize = KeySize::Lg;
 const BLUR: f32 = 4.0;
 const RISE: f32 = 8.0;
@@ -25,7 +26,7 @@ const RESULTS_DELAY: f32 = 0.3;
 const BAR_FADE: f32 = 0.4;
 
 #[must_use]
-pub fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> Element {
+pub(crate) fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> Element {
     let content = UiBox::new()
         .layout("row")
         .spaced(Space::S8)
@@ -48,11 +49,12 @@ pub fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> El
                 .build(),
         )
         .build();
-    keyed_field(theme, content, new_thread_key(emit))
+    keyed_field(theme, content, new_thread_key(theme, emit))
 }
 
-fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
+fn new_thread_key(theme: &ArtisanTheme, emit: Rc<dyn Fn(Event)>) -> Element {
     field_key(
+        theme,
         "artisan-sidebar-new-thread",
         "New thread",
         BAR,
@@ -67,7 +69,7 @@ fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
     clippy::disallowed_methods,
     reason = "the search glyph pads only its right side, by the key's lip, so it centres on the key face"
 )]
-pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
+pub(crate) fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
     let edge = RAIL_KEY.edge();
     let lip = key_lip(RAIL_KEY);
     let search = Rc::clone(emit);
@@ -98,6 +100,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
         .child(
             HitArea::new(
                 "artisan-sidebar-rail-search",
+                theme,
                 Role::Button,
                 "Search threads",
             )
@@ -111,6 +114,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
         .layout("row")
         .child(field)
         .child(field_key(
+            theme,
             "artisan-sidebar-rail-new-thread",
             "New thread",
             RAIL_KEY,
@@ -122,7 +126,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
 }
 
 #[must_use]
-pub const fn rail_width() -> f32 {
+pub(crate) const fn rail_width() -> f32 {
     2.0 * RAIL_KEY.edge() + key_lip(RAIL_KEY)
 }
 
@@ -140,6 +144,12 @@ pub struct Overlay {
     pub bar: Option<Element>,
     pub results: Option<Element>,
     pub emit: Rc<dyn Fn(Event)>,
+}
+
+impl std::fmt::Debug for Overlay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Overlay").finish_non_exhaustive()
+    }
 }
 
 #[must_use]
@@ -219,24 +229,27 @@ pub fn overlay(theme: &ArtisanTheme, overlay: Overlay) -> Element {
         )
         .build();
     let escape = Rc::clone(&emit);
-    root.child(scrim(theme, progress, emit))
+    let scope = UiBox::new()
+        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
+        .child(scrim(theme, progress, emit))
         .child(list)
         .child(field)
         .build()
-        .with_key(OVERLAY)
-        .on_input(
-            InputKind::KeyDown,
-            EventPhase::Bubble,
-            move |event| match &event.input {
-                RoutedInput::Native(InputEvent::KeyDown(key))
-                    if key.key == Pressed::Named(NamedKey::Escape) =>
-                {
-                    escape(Event::Search(false));
-                    InputResponse::handled()
-                }
-                _ => InputResponse::default(),
-            },
-        )
+        .with_key(SCOPE)
+        .modal_scope();
+    root.child(scope).build().with_key(OVERLAY).on_input(
+        InputKind::KeyDown,
+        EventPhase::Bubble,
+        move |event| {
+            if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input
+                && key.key == Pressed::Named(NamedKey::Escape)
+            {
+                escape(Event::Search(false));
+                return InputResponse::handled();
+            }
+            InputResponse::default()
+        },
+    )
 }
 
 fn scrim(theme: &ArtisanTheme, progress: f32, emit: Rc<dyn Fn(Event)>) -> Element {

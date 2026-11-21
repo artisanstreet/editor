@@ -2,17 +2,16 @@ pub mod live;
 
 use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
-use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Transform2D};
-use aqua_ui::element::{Box as UiBox, Element};
-use aqua_ui::style::{GpuiShadowLayer, Length, Style};
+use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop};
+use aqua_ui::style::{GpuiShadowLayer, Style};
 use std::time::{Duration, Instant};
 
 const SMOOTH_OUT: CubicBezier = CubicBezier::new(0.22, 1.0, 0.36, 1.0);
-pub const QUICK: Transition = Transition {
+const QUICK: Transition = Transition {
     duration: Duration::from_millis(150),
     easing: SMOOTH_OUT,
 };
-pub const FAST: Transition = Transition {
+const FAST: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: SMOOTH_OUT,
 };
@@ -27,23 +26,14 @@ pub enum Hover {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
-    pub top: Oklch,
-    pub bottom: Oklch,
-    pub ring: Oklch,
+    top: Oklch,
+    bottom: Oklch,
+    ring: Oklch,
 }
 
 impl Material {
     #[must_use]
-    pub fn animate_to(self, to: Self, progress: f32) -> Self {
-        Self {
-            top: self.top.animate_to(to.top, progress),
-            bottom: self.bottom.animate_to(to.bottom, progress),
-            ring: self.ring.animate_to(to.ring, progress),
-        }
-    }
-
-    #[must_use]
-    pub fn fill(self) -> GpuiBackground {
+    fn fill(self) -> GpuiBackground {
         GpuiBackground::LinearGradient {
             angle: 180.0,
             color_space: GpuiGradientColorSpace::Oklab,
@@ -61,7 +51,7 @@ impl Material {
     }
 
     #[must_use]
-    pub fn ring(self) -> GpuiShadowLayer {
+    fn ring(self) -> GpuiShadowLayer {
         GpuiShadowLayer {
             dx: 0.0,
             dy: 0.0,
@@ -73,7 +63,7 @@ impl Material {
     }
 
     #[must_use]
-    pub fn style(self) -> Style {
+    fn style(self) -> Style {
         Style::new()
             .gpui_background(self.fill())
             .gpui_shadows(vec![self.ring()])
@@ -81,16 +71,17 @@ impl Material {
 }
 
 #[must_use]
-pub fn neutral_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
-    match theme.colors.mode.is_dark() {
-        true => (ink.with_alpha(0.09), ink.with_alpha(0.03)),
-        false => (ink.with_alpha(0.02), ink.with_alpha(0.06)),
+pub(crate) fn neutral_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
+    if theme.colors.mode.is_dark() {
+        (ink.with_alpha(0.09), ink.with_alpha(0.03))
+    } else {
+        (ink.with_alpha(0.02), ink.with_alpha(0.06))
     }
 }
 
 impl Hover {
     #[must_use]
-    pub fn material(self, theme: &ArtisanTheme) -> Material {
+    fn material(self, theme: &ArtisanTheme) -> Material {
         let dark = theme.colors.mode.is_dark();
         match self {
             Self::Neutral => {
@@ -119,33 +110,6 @@ impl Hover {
     #[must_use]
     pub fn style(self, theme: &ArtisanTheme) -> Style {
         self.material(theme).style()
-    }
-
-    #[must_use]
-    pub fn layer(
-        self,
-        theme: &ArtisanTheme,
-        lit: Highlight,
-        now: Instant,
-        height: f32,
-        radius: f32,
-    ) -> Element {
-        let scale = lit.scale(now);
-        UiBox::new()
-            .style(self.style(theme))
-            .style(
-                Style::new()
-                    .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                    .radius(Length::Px(radius))
-                    .opacity(lit.opacity(now))
-                    .transform(
-                        Transform2D::translate(0.0, -height)
-                            .then(Transform2D::scale(1.0, scale))
-                            .then(Transform2D::translate(0.0, height)),
-                    ),
-            )
-            .build()
-            .exclude_from_hit_testing()
     }
 }
 

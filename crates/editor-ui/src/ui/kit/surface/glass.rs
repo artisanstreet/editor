@@ -5,7 +5,7 @@ use aqua_core::{DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradien
 use aqua_ui::element::{Canvas, Element};
 use aqua_ui::style::Style;
 
-pub const BLUR: f32 = 20.0;
+pub(crate) const BLUR: f32 = 20.0;
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 
@@ -75,17 +75,22 @@ fn gradient(angle: f32, from: Oklch, to: Oklch, end: f32) -> GpuiBackground {
 }
 
 #[must_use]
-pub fn fills(theme: &ArtisanTheme, shade: Shade) -> [GpuiBackground; 3] {
+pub(crate) fn fills(theme: &ArtisanTheme, shade: Shade) -> [GpuiBackground; 3] {
     let glass = Glass::of(theme, shade);
     [
         GpuiBackground::Solid(glass.base.to_reference_paint()),
         gradient(145.0, glass.near, glass.far, 1.0),
-        gradient(180.0, WHITE.with_alpha(glass.sheen), WHITE.with_alpha(0.0), 0.44),
+        gradient(
+            180.0,
+            WHITE.with_alpha(glass.sheen),
+            WHITE.with_alpha(0.0),
+            0.44,
+        ),
     ]
 }
 
 #[must_use]
-pub fn rims(theme: &ArtisanTheme, shade: Shade) -> [(f32, Oklch); 2] {
+pub(crate) fn rims(theme: &ArtisanTheme, shade: Shade) -> [(f32, Oklch); 2] {
     [
         (1.0, WHITE.with_alpha(0.1)),
         (-1.0, Glass::of(theme, shade).rim_shade),
@@ -108,7 +113,7 @@ fn rim(bounds: Rect, corners: CornerRadii, dy: f32, color: Oklch, inset: bool) -
 }
 
 #[must_use]
-pub fn paint(theme: &ArtisanTheme, shade: Shade, radius: f32) -> Element {
+pub(crate) fn paint(theme: &ArtisanTheme, shade: Shade, radius: f32) -> Element {
     let fills = fills(theme, shade);
     let rims = rims(theme, shade);
     Canvas::new()
@@ -126,7 +131,10 @@ pub fn paint(theme: &ArtisanTheme, shade: Shade, radius: f32) -> Element {
                 corners,
                 background: *background,
             }))
-            .chain(rims.iter().map(|(dy, color)| rim(bounds, corners, *dy, *color, true)))
+            .chain(
+                rims.iter()
+                    .map(|(dy, color)| rim(bounds, corners, *dy, *color, true)),
+            )
             .chain(std::iter::once(rim(
                 bounds,
                 corners,

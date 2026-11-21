@@ -1,0 +1,187 @@
+use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+async fn serve(response: impl Fn() -> String + Send + 'static) -> (u16, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the test server");
+    let port = listener.local_addr().expect("test server address").port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).await;
+            let _written = stream.write_all(response().as_bytes()).await;
+        }
+    });
+    (port, hits)
+}
+
+fn redirect_to(location: String) -> impl Fn() -> String + Send + 'static {
+    move || {
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    }
+}
+
+#[tokio::test]
+async fn a_remote_image_cannot_redirect_into_this_machine_or_its_network() {
+    let (inner, inner_hits) =
+        serve(|| "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc".to_owned())
+            .await;
+    for target in [
+        format!("http://127.0.0.1:{inner}/secret"),
+        format!("http://localhost:{inner}/secret"),
+        format!("http://[::ffff:127.0.0.1]:{inner}/secret"),
+    ] {
+        let (outer, outer_hits) = serve(redirect_to(target.clone())).await;
+        let http = editor_core::media_http::MediaHttpClient::new(
+            test_support::editor::media::LoopbackStubs(vec![std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                outer,
+            ))]),
+        );
+        let source = MediaSource::from(format!("http://127.0.0.1:{outer}/pixel.png"));
+        let result = load_image_bytes(&source, None, &http).await;
+        let Err(MediaLoadError::Fetch(failure @ MediaFailure::ServerUnreachable(_))) = &result
+        else {
+            panic!("following {target} gave {result:?}");
+        };
+        assert!(
+            ::diagnostics::chain(failure).contains("which is not on the public internet"),
+            "the failure keeps why the redirect was refused: {}",
+            ::diagnostics::chain(failure)
+        );
+        assert_eq!(outer_hits.load(Ordering::SeqCst), 1);
+    }
+    assert_eq!(
+        inner_hits.load(Ordering::SeqCst),
+        0,
+        "a redirect reached a local service"
+    );
+}
+
+#[tokio::test]
+async fn an_image_server_error_keeps_its_status_as_the_cause() {
+    let (port, _hits) = serve(|| {
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_owned()
+    })
+    .await;
+    let http =
+        editor_core::media_http::MediaHttpClient::new(test_support::editor::media::LoopbackStubs(
+            vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))],
+        ));
+    let source = MediaSource::from(format!("http://127.0.0.1:{port}/pixel.png"));
+    let result = load_image_bytes(&source, None, &http).await;
+    let Err(MediaLoadError::Fetch(failure @ MediaFailure::Unreadable(_))) = &result else {
+        panic!("a 503 gave {result:?}");
+    };
+    assert_eq!(
+        ::diagnostics::chain(failure),
+        "the file could not be read: the web server answered 503"
+    );
+}
+
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+fn captured_log() -> Captured {
+    static LOG: LazyLock<Captured> = LazyLock::new(|| {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a global subscriber");
+        captured
+    });
+    LOG.clone()
+}
+
+const SENTINEL: &str = "SENTINEL-c0ffee-signed-token";
+
+#[tokio::test]
+async fn a_failed_remote_image_never_writes_its_url_credentials_to_the_log() {
+    let captured = captured_log();
+    let (dropped, _) = serve(String::new).await;
+    let (truncated, _) = serve(|| {
+        "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nabc".to_owned()
+    })
+    .await;
+    let (inner, inner_hits) = serve(String::new).await;
+    let (redirecting, _) = serve(move || {
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://user:{SENTINEL}@127.0.0.1:{inner}/next?sig={SENTINEL}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    })
+    .await;
+    let http =
+        editor_core::media_http::MediaHttpClient::new(test_support::editor::media::LoopbackStubs(
+            [dropped, truncated, redirecting]
+                .into_iter()
+                .map(|port| std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+                .collect(),
+        ));
+    for port in [dropped, truncated, redirecting] {
+        let source = MediaSource::from(format!(
+            "http://user:{SENTINEL}@127.0.0.1:{port}/{SENTINEL}/pixel.png?sig={SENTINEL}"
+        ));
+        let result = load_image_bytes(&source, None, &http).await;
+        let Err(MediaLoadError::Fetch(failure)) = &result else {
+            panic!("the load on port {port} gave {result:?}");
+        };
+        let chain = ::diagnostics::chain(failure);
+        assert!(
+            !chain.contains(SENTINEL),
+            "the failure names the URL: {chain}"
+        );
+        assert!(
+            chain.contains(&format!("http://127.0.0.1:{port}")),
+            "the failure still names the server: {chain}"
+        );
+        let debug = format!("{result:?}");
+        assert!(
+            !debug.contains(SENTINEL),
+            "the failure's debug names the URL: {debug}"
+        );
+    }
+    assert_eq!(inner_hits.load(Ordering::SeqCst), 0);
+    let log = String::from_utf8_lossy(&captured.0.lock().expect("log lock")).into_owned();
+    for port in [dropped, truncated, redirecting] {
+        let origin = format!("http://127.0.0.1:{port}");
+        assert!(
+            log.lines()
+                .any(|line| line.contains("fetch image") && line.contains(&origin)),
+            "the failure for {origin} was logged: {log}"
+        );
+    }
+    assert!(!log.contains(SENTINEL), "the log names a URL: {log}");
+}

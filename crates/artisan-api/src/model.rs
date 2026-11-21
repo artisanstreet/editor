@@ -2,7 +2,8 @@ mod configuration;
 mod customization;
 mod specification;
 
-pub use customization::validate_model_customizations;
+pub use customization::ModelCustomizationsError;
+pub(crate) use customization::validate_model_customizations;
 
 use crate::{EngineConfig, EngineId, Model, Permissions, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -106,10 +107,6 @@ impl ModelAxis {
             Self::Permission => "Permission",
         }
     }
-
-    pub const fn shown(self, options: usize) -> bool {
-        options > 0
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,9 +204,9 @@ impl DiscoveryState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIdentity {
-    pub harness: EngineId,
-    pub native_id: String,
-    pub gateway: Option<String>,
+    harness: EngineId,
+    native_id: String,
+    gateway: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,16 +377,20 @@ pub struct ModelCustomization {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelCustomizationSet {
-    pub version: u32,
-    pub rules: Vec<ModelCustomization>,
+pub(crate) struct ModelCustomizationSet {
+    version: u32,
+    rules: Vec<ModelCustomization>,
 }
 
-pub fn model_customizations(value: &serde_json::Value) -> Result<Vec<ModelCustomization>, String> {
-    let set: ModelCustomizationSet =
-        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+pub fn model_customizations(
+    value: &serde_json::Value,
+) -> Result<Vec<ModelCustomization>, ModelCustomizationsError> {
+    let set =
+        ModelCustomizationSet::deserialize(value).map_err(ModelCustomizationsError::Decode)?;
     if set.version != 1 {
-        return Err("Unsupported model customization version.".into());
+        return Err(ModelCustomizationsError::Version {
+            version: set.version,
+        });
     }
     validate_model_customizations(&set.rules)?;
     Ok(set.rules)

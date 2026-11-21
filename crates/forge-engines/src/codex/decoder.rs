@@ -1,18 +1,18 @@
-//! Pure decoding of `codex app-server` JSON-RPC (one JSON object per line).
-//!
-//! The decoder follows the run's root thread plus every child thread its
-//! agents spawn. Each child thread becomes an `Agent` item (keyed by the
-//! `spawnAgent` call) and everything the child does is decoded the same way
-//! with `parent` set to that item. It also keeps the JSON-RPC bookkeeping:
-//! request ids, responses for the driver, and replies to Codex's own
-//! requests (`requests`). Shapes were captured from Codex 0.162.1 (see
-//! `transcripts/codex`) and its generated app-server schema (`protocol`).
-//!
-//! Each line is parsed once into `protocol` types. What the decoder can't
-//! read is logged with its method and thread and skipped, except a turn's
-//! end, which the run waits for: an unreadable `turn/completed` fails it.
-
 mod requests;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("decode a Codex protocol frame")]
+    Frame(#[source] serde_json::Error),
+    #[error("read Codex turn/completed of thread {thread:?}")]
+    TurnCompleted {
+        thread: Option<String>,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Codex protocol frame has neither a method nor an id")]
+    Unaddressed,
+}
 
 use super::protocol::{
     CallStatus, CodexError, CollabCall, CollabStatus, CollabTool, CompletedTurn, ExecutionStatus,
@@ -20,59 +20,46 @@ use super::protocol::{
     SubAgentActivityKind, ThreadInfo, ThreadStarted, TokenUsage, TurnStatus, UserInput,
 };
 use crate::{EngineEvent, LiveKind, Outcome};
-use anyhow::Context as _;
 use artisan_api::{
     AgentAction, ErrorKind, FileChange, FileOp, ItemKind, MessageDirection, NoticeKind, Output,
-    Phase, PlanStep, RunStatus, Status, StepStatus, TextContent, ToolKind, Usage,
+    Phase, PlanStep, Status, StepStatus, TextContent, ToolKind, Usage,
 };
 use requests::{Approvals, Questions};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-/// The key of the run's plan (`turn/plan/updated`); one per run.
 const PLAN_KEY: &str = "plan";
 
-/// Child frames held until Codex says which spawn they belong to.
 const DEFERRED_FRAMES: usize = 256;
 const DEFERRED_BYTES: usize = 4 * 1024 * 1024;
 
-pub use crate::rpc::Response;
+pub(super) use crate::rpc::Response;
 
 #[derive(Default)]
-pub struct Decoder {
+pub(super) struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
     rpc: crate::rpc::State,
     citations: super::citations::Citations,
     root: Option<String>,
-    /// Followed child threads → the `Agent` item their items belong to.
     children: HashMap<String, String>,
-    /// Spawn calls awaiting an explicit receiver thread relation.
     spawning: Vec<String>,
-    /// Frames of child threads not bound yet, with their line sizes.
     deferred: HashMap<String, Vec<(Notification, usize)>>,
     deferred_bytes: usize,
-    /// Child thread → text of its last agent message, the agent's result.
     child_replies: HashMap<String, TextContent>,
     items: HashMap<String, Tracked>,
-    /// Each thread's agent message still streaming. Codex finishes one
-    /// before it starts the next, so a new one means it dropped the open
-    /// one unfinished (a steer restarts its reply).
+    retired: crate::retained::Retired,
+    awaiting_completion: HashSet<String>,
     open_messages: HashMap<Scope, String>,
     approvals: Approvals,
     questions: Questions,
     turn: Option<String>,
     turn_end: Option<Outcome>,
-    /// A user message reached the root turn and nothing ran after it yet.
     unanswered: bool,
-    /// The last turn completed without answering a steer it took.
     stranded: bool,
     usage: Usage,
-    /// The last error Codex reported, so a failed turn doesn't repeat it.
     last_error: Option<String>,
-    /// Whether that error passes by itself.
     last_retry: Option<crate::Retry>,
     notices: u32,
-    /// User messages to send for answered async questions.
     messages: Vec<String>,
 }
 
@@ -82,11 +69,8 @@ struct Tracked {
     kind: ItemKind,
 }
 
-/// Where a frame belongs: the root thread (`None`) or a child thread's
-/// agent item (`Some`).
 type Scope = Option<String>;
 
-/// What Codex's `thread/start`, `thread/resume` and `turn/start` answer.
 #[derive(serde::Deserialize)]
 struct Started {
     thread: Option<StartedThread>,
@@ -100,59 +84,50 @@ struct StartedThread {
 }
 
 impl Decoder {
-    /// Queues a request and returns its id.
-    pub fn request(&mut self, method: &str, params: Value) -> u64 {
+    pub(super) fn request(&mut self, method: &str, params: Value) -> u64 {
         self.rpc.request(method, params)
     }
 
-    pub fn take_outbox(&mut self) -> Vec<Value> {
+    pub(super) fn take_outbox(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.rpc.outbox)
     }
 
-    pub fn take_responses(&mut self) -> Vec<Response> {
+    pub(super) fn take_responses(&mut self) -> Vec<Response> {
         std::mem::take(&mut self.rpc.responses)
     }
 
-    /// How the root thread's last turn ended, once.
-    pub const fn take_turn_end(&mut self) -> Option<Outcome> {
+    pub(super) const fn take_turn_end(&mut self) -> Option<Outcome> {
         self.turn_end.take()
     }
 
-    /// Whether the last turn ended right after taking a steer, so Codex
-    /// recorded it but never answered (seen on 0.162.1 when `turn/steer`
-    /// lands a few ms before the turn completes). Once.
-    pub fn take_stranded(&mut self) -> bool {
+    pub(super) fn take_stranded(&mut self) -> bool {
         std::mem::take(&mut self.stranded)
     }
 
-    /// Messages answering async questions, to send as user input.
-    pub fn take_messages(&mut self) -> Vec<String> {
+    pub(super) fn take_messages(&mut self) -> Vec<String> {
         std::mem::take(&mut self.messages)
     }
 
-    pub fn thread(&self) -> Option<&str> {
+    pub(super) fn thread(&self) -> Option<&str> {
         self.root.as_deref()
     }
 
-    /// The root thread's running turn.
-    pub fn active_turn(&self) -> Option<&str> {
+    pub(super) fn active_turn(&self) -> Option<&str> {
         self.turn.as_deref()
     }
 
-    /// One line from Codex.
-    pub fn feed(&mut self, line: &str) -> anyhow::Result<Vec<EngineEvent>> {
-        let frame: Frame = serde_json::from_str(line).context("decoding Codex protocol JSON")?;
+    pub(super) fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
+        let frame: Frame = serde_json::from_str(line).map_err(DecodeError::Frame)?;
         let mut out = Vec::new();
         match (frame.method, frame.id) {
             (Some(method), Some(rpc)) => self.server_request(rpc, &method, &frame.params, &mut out),
             (Some(method), None) => match Notification::parse(&method, &frame.params) {
                 Ok(notice) => self.notification(notice, line.len(), &mut out),
-                // The run waits for its turn's end; one it can't read fails it.
-                Err(error) if method == "turn/completed" => {
-                    return Err(anyhow::Error::new(error).context(format!(
-                        "reading Codex turn/completed of thread {:?}",
-                        frame.params["threadId"].as_str()
-                    )));
+                Err(source) if method == "turn/completed" => {
+                    return Err(DecodeError::TurnCompleted {
+                        thread: frame.params["threadId"].as_str().map(str::to_owned),
+                        source,
+                    });
                 }
                 Err(error) => tracing::warn!(
                     method,
@@ -163,17 +138,47 @@ impl Decoder {
                 ),
             },
             (None, Some(rpc)) => self.response(&rpc, frame.result, frame.error.as_ref(), &mut out),
-            (None, None) => anyhow::bail!("Codex protocol frame has neither a method nor an id"),
+            (None, None) => return Err(DecodeError::Unaddressed),
         }
         let out = self.reasoning_summary.normalize(out, false);
         let out = self.citations.normalize(out);
-        Ok(crate::retained::settle(self, out))
+        let out = crate::retained::settle(self, out);
+        self.retire_settled();
+        Ok(out)
     }
 
-    /// The user's answer to the approval or question on `key`.
-    pub fn answer(&mut self, key: &str, answer: &artisan_api::Answer) -> Vec<EngineEvent> {
+    pub(super) fn answer(&mut self, key: &str, answer: &artisan_api::Answer) -> Vec<EngineEvent> {
         let events = self.answer_raw(key, answer);
-        crate::retained::settle(self, events)
+        let events = crate::retained::settle(self, events);
+        self.retire_settled();
+        events
+    }
+
+    fn retire_settled(&mut self) {
+        let settled: Vec<String> = self
+            .items
+            .iter()
+            .filter(|(key, tracked)| {
+                tracked.status.is_terminal()
+                    && !matches!(
+                        tracked.kind,
+                        ItemKind::Agent { .. }
+                            | ItemKind::Plan { .. }
+                            | ItemKind::Notice {
+                                kind: NoticeKind::Goal { .. },
+                                ..
+                            }
+                    )
+                    && !self.approvals.contains_key(*key)
+                    && !self.questions.contains_key(*key)
+                    && !self.awaiting_completion.contains(*key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in settled {
+            self.items.remove(&key);
+            self.retired.insert(key);
+        }
     }
 
     fn response(
@@ -186,8 +191,6 @@ impl Decoder {
         let Some(response) = self.rpc.respond(rpc, result, error) else {
             return;
         };
-        // `thread/start` and `thread/resume` answer with the thread;
-        // `turn/start` with the turn.
         if let Ok(value) = &response.result
             && let Ok(started) = <Started as serde::Deserialize>::deserialize(value)
         {
@@ -207,7 +210,6 @@ impl Decoder {
         self.rpc.responses.push(response);
     }
 
-    /// The scope of a thread; `None` for threads we don't follow.
     fn scope(&self, thread: &str) -> Option<Scope> {
         if self.root.as_deref() == Some(thread) {
             return Some(None);
@@ -322,6 +324,9 @@ impl Decoder {
                         tracing::warn!(thread, "Codex text delta omitted itemId");
                         return;
                     };
+                    if self.retired.contains(&key) {
+                        return;
+                    }
                     out.push(live(LiveKind::Text { key }, text));
                 }
             }
@@ -421,8 +426,6 @@ impl Decoder {
             }
             Notification::GoalCleared(_) => {
                 let key = goal_key(scope.as_ref());
-                // Codex clears at every turn, goal or not: only a goal this
-                // session showed is reported cleared.
                 let text = match self.items.get(&key).map(|item| &item.kind) {
                     Some(ItemKind::Notice { text, .. }) if text.byte_len() > 0 => text.clone(),
                     _ => return,
@@ -506,7 +509,6 @@ impl Decoder {
             );
             return;
         }
-        // A child with no spawn call we saw is its own agent.
         let agent = thread.id.clone();
         let kind = ItemKind::Agent {
             engine: None,
@@ -550,23 +552,17 @@ impl Decoder {
                         };
                         self.error_item(None, kind, &message, out);
                     }
-                    // The turn's own error says why, else the error notice
-                    // before it.
                     let retry = match turn.error.as_ref() {
                         Some(error) if error.codex_error_info.is_some() => error.retry(),
                         _ => self.last_retry,
                     };
-                    Outcome {
-                        status: if refused {
-                            RunStatus::Refused
-                        } else {
-                            RunStatus::Failed
-                        },
-                        error: Some(message),
-                        retry: retry.filter(|_| !refused),
+                    match (refused, retry) {
+                        (true, _) => Outcome::Refused,
+                        (false, Some(retry)) => Outcome::retryable(message, retry),
+                        (false, None) => Outcome::failed(message),
                     }
                 }
-                TurnStatus::Completed | TurnStatus::Ended => {
+                TurnStatus::Completed => {
                     self.stranded = std::mem::take(&mut self.unanswered);
                     Outcome::done()
                 }
@@ -580,7 +576,7 @@ impl Decoder {
         let status = match turn.status {
             TurnStatus::Interrupted => Status::Cancelled,
             TurnStatus::Failed => Status::Failed,
-            TurnStatus::Completed | TurnStatus::Ended => Status::Done,
+            TurnStatus::Completed => Status::Done,
         };
         let reply = self
             .child_replies
@@ -632,6 +628,9 @@ impl Decoder {
                     tracing::warn!(thread, item = id, "Codex agentMessage omitted its text");
                     return;
                 };
+                if self.retired.contains(&id) {
+                    return;
+                }
                 let phase = match phase {
                     Some(MessagePhase::Commentary) => Phase::Commentary,
                     _ => Phase::Final,
@@ -641,7 +640,6 @@ impl Decoder {
                         self.open_messages.remove(&scope);
                     }
                     if scope.is_some() && !text.is_empty() {
-                        // Kept until the child's turn ends; Forge has the text.
                         let mut reply = TextContent::from(text.as_str());
                         forge_content::compact_text(&mut reply);
                         self.child_replies.insert(thread.to_owned(), reply);
@@ -790,14 +788,13 @@ impl Decoder {
                 arguments,
                 content_items,
             } => {
-                // A question Codex asked through `requestUserInput` settles
-                // when the tool call behind it ends.
                 if matches!(
                     self.items.get(&id).map(|tracked| &tracked.kind),
                     Some(ItemKind::Question { .. })
                 ) {
                     if completed && let Some(status) = call_status(status, success, completed) {
                         self.questions.remove(&id);
+                        self.awaiting_completion.remove(&id);
                         if let Some(tracked) = self.items.get_mut(&id) {
                             let next = tracked.status.advance(status);
                             if next != tracked.status {
@@ -843,10 +840,6 @@ impl Decoder {
                     _ => None,
                 };
                 let Some(query) = web_query(query, action).or(known) else {
-                    // Codex starts searches without metadata and can complete
-                    // an opaque action as query:"", action:{type:"other"}.
-                    // Neither is an execution failure: wait for a query, or
-                    // leave this optional card out.
                     tracing::debug!(
                         thread,
                         item = id,
@@ -931,10 +924,13 @@ impl Decoder {
             tracing::warn!(thread, "Codex item supplied an empty id");
             return;
         }
+        if self.retired.contains(&key) {
+            return;
+        }
         if completed {
-            // Codex ended the item; nothing it asked about it waits anymore.
             self.approvals.remove(&key);
             self.questions.remove(&key);
+            self.awaiting_completion.remove(&key);
         }
         let status = if !completed && self.approvals.contains_key(&key) {
             Status::AwaitingUser
@@ -945,7 +941,6 @@ impl Decoder {
         out.push(self.event(&key));
     }
 
-    /// A tool kind for `key`, keeping the title and approval it has.
     fn tool_kind(
         &self,
         key: &str,
@@ -994,9 +989,11 @@ impl Decoder {
             text: TextContent::default(),
             direction: MessageDirection::Sent,
         };
-        let kind = self.tool_kind(&activity.id, tool, None, None);
-        self.track(activity.id.clone(), scope.clone(), Status::Done, kind);
-        out.push(self.event(&activity.id));
+        if !self.retired.contains(&activity.id) {
+            let kind = self.tool_kind(&activity.id, tool, None, None);
+            self.track(activity.id.clone(), scope.clone(), Status::Done, kind);
+            out.push(self.event(&activity.id));
+        }
         recover
     }
 
@@ -1129,12 +1126,11 @@ impl Decoder {
                 }
                 CollabTool::SpawnAgent | CollabTool::Other => None,
             };
-            if let Some(tool) = tool {
+            if let Some(tool) = tool.filter(|_| !self.retired.contains(&key)) {
                 let kind = self.tool_kind(&key, tool, None, None);
                 self.track(key.clone(), scope, status, kind);
                 out.push(self.event(&key));
             }
-            // `wait` reports what the agents said; fill results we missed.
             for (thread, state) in call.agents_states {
                 let (Some(agent), Some(message)) = (self.children.get(&thread), state.message)
                 else {
@@ -1222,7 +1218,6 @@ impl Decoder {
             |agent| format!("{PLAN_KEY}:{agent}"),
         );
         let status = if done { Status::Done } else { Status::Running };
-        // A plan is replaced in place and may reopen.
         self.items.remove(&key);
         let kind = ItemKind::Plan {
             steps: steps.into(),
@@ -1234,8 +1229,6 @@ impl Decoder {
     }
 
     fn token_usage(&mut self, root: bool, usage: &TokenUsage, out: &mut Vec<EngineEvent>) {
-        // `last` is one model call; `total` is the whole thread, history
-        // included on resume, so the run sums `last`.
         let last = &usage.last;
         let cached = last.cached_input_tokens;
         self.usage.input += last.input_tokens.saturating_sub(cached);
@@ -1253,8 +1246,6 @@ impl Decoder {
         out.push(EngineEvent::Usage(self.usage.clone()));
     }
 
-    /// A completed item Codex left a required field out of: an error the
-    /// user sees, never an empty card.
     fn malformed(&mut self, scope: Scope, item: &str, message: &str, out: &mut Vec<EngineEvent>) {
         tracing::warn!(item, message, "Codex sent a malformed item");
         self.error_item(scope, ErrorKind::Execution, message, out);
@@ -1286,6 +1277,9 @@ impl Decoder {
         text: impl Into<TextContent>,
         out: &mut Vec<EngineEvent>,
     ) {
+        if self.retired.contains(key) {
+            return;
+        }
         self.items.remove(key);
         let kind = ItemKind::Notice {
             kind,
@@ -1295,8 +1289,6 @@ impl Decoder {
         out.push(self.event(key));
     }
 
-    /// Ends a message Codex dropped unfinished. It never completes it nor
-    /// keeps it in its history, so it ends empty: nothing it streamed stays.
     fn drop_message(&mut self, key: &str, out: &mut Vec<EngineEvent>) {
         let Some(tracked) = self.items.get_mut(key) else {
             return;
@@ -1312,9 +1304,7 @@ impl Decoder {
         out.push(self.event(key));
     }
 
-    /// Settles what is still open when the run ends: plans keep their
-    /// steps, everything else stopped with the run.
-    pub fn finish(&mut self) -> Vec<EngineEvent> {
+    pub(super) fn finish(&mut self) -> Vec<EngineEvent> {
         self.approvals.clear();
         self.questions.clear();
         let mut keys: Vec<String> = self
@@ -1335,7 +1325,6 @@ impl Decoder {
         keys.sort();
         keys.into_iter()
             .filter_map(|key| {
-                // Present: the keys were collected from `items` above.
                 let tracked = self.items.get_mut(&key)?;
                 let status = if matches!(tracked.kind, ItemKind::Plan { .. }) {
                     Status::Done
@@ -1396,7 +1385,6 @@ fn goal_key(scope: Option<&String>) -> String {
     scope.map_or_else(|| "goal".to_owned(), |agent| format!("goal:{agent}"))
 }
 
-/// A shell or patch item's status; `None` when Codex sent none we know.
 fn execution_status(status: Option<ExecutionStatus>) -> Option<Status> {
     Some(match status? {
         ExecutionStatus::InProgress => Status::Running,
@@ -1407,8 +1395,6 @@ fn execution_status(status: Option<ExecutionStatus>) -> Option<Status> {
     })
 }
 
-/// An MCP or dynamic call's status: these have no `declined`, and a
-/// dynamic call that completed unsuccessfully failed.
 fn call_status(
     status: Option<CallStatus>,
     success: Option<bool>,
@@ -1427,7 +1413,6 @@ fn call_status(
     })
 }
 
-/// What a web action looked up: the first query or address it names.
 fn web_query(query: Option<String>, action: Option<super::protocol::WebAction>) -> Option<String> {
     let action = action.unwrap_or(super::protocol::WebAction {
         query: None,
@@ -1449,7 +1434,6 @@ fn web_query(query: Option<String>, action: Option<super::protocol::WebAction>) 
         })
 }
 
-/// A child's first message as text; images and mentions carry none.
 fn user_text(content: Vec<UserInput>) -> Option<String> {
     let text: Vec<String> = content
         .into_iter()
@@ -1461,7 +1445,6 @@ fn user_text(content: Vec<UserInput>) -> Option<String> {
     (!text.is_empty()).then(|| text.join("\n"))
 }
 
-/// Tool arguments as compact JSON; nothing for an empty call.
 fn arguments_text(value: Value) -> Option<String> {
     match value {
         Value::Null => None,
@@ -1489,7 +1472,6 @@ fn file_change(change: super::protocol::FileChange) -> FileChange {
     }
 }
 
-/// The command as the model wrote it: Codex wraps it in `<shell> -lc '…'`.
 fn display_command(command: &str) -> String {
     let Some(words) = shlex::split(command) else {
         return command.to_owned();
@@ -1508,3 +1490,7 @@ fn display_command(command: &str) -> String {
         _ => command.to_owned(),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/codex/decoder.rs"]
+mod decoder_tests;

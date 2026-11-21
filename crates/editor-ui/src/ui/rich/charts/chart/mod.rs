@@ -4,8 +4,6 @@ pub mod model;
 pub(crate) mod plot;
 mod view;
 
-#[cfg(feature = "test-support")]
-pub use view::ChartFixture;
 pub(crate) use view::{ChartState, Services, view};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -25,38 +23,78 @@ pub(crate) enum XValue {
     Text(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SeriesData {
+    Values(Vec<Option<f64>>),
+    Points(Vec<(XValue, Option<f64>)>),
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(try_from = "RawSeries")]
 pub(crate) struct SeriesSpec {
+    name: String,
+    data: SeriesData,
+}
+
+#[derive(Deserialize)]
+struct RawSeries {
     #[serde(default)]
-    pub(crate) name: String,
+    name: String,
     #[serde(default)]
-    pub(crate) values: Option<Vec<Option<f64>>>,
+    values: Option<Vec<Option<f64>>>,
     #[serde(default)]
-    pub(crate) points: Option<Vec<(XValue, Option<f64>)>>,
+    points: Option<Vec<(XValue, Option<f64>)>>,
+}
+
+impl TryFrom<RawSeries> for SeriesSpec {
+    type Error = String;
+
+    fn try_from(raw: RawSeries) -> Result<Self, String> {
+        let data = match (raw.values, raw.points) {
+            (Some(values), None) => SeriesData::Values(values),
+            (None, Some(points)) => SeriesData::Points(points),
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "series `{}` gives both `values` and `points`; give one",
+                    raw.name
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "series `{}` gives neither `values` nor `points`",
+                    raw.name
+                ));
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            data,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct Axis {
     #[serde(default)]
-    pub(crate) label: Option<String>,
+    label: Option<String>,
     #[serde(default)]
-    pub(crate) unit: Option<String>,
+    unit: Option<String>,
     #[serde(default)]
-    pub(crate) min: Option<f64>,
+    min: Option<f64>,
     #[serde(default)]
-    pub(crate) max: Option<f64>,
+    max: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct Annotation {
     #[serde(default)]
-    pub(crate) x: Option<XValue>,
+    x: Option<XValue>,
     #[serde(default)]
-    pub(crate) y: Option<f64>,
+    y: Option<f64>,
     #[serde(default)]
-    pub(crate) x_end: Option<XValue>,
+    x_end: Option<XValue>,
     #[serde(default)]
-    pub(crate) label: String,
+    label: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -71,48 +109,48 @@ pub(crate) enum ParamKind {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct Param {
     #[serde(default)]
-    pub(crate) id: String,
+    id: String,
     #[serde(default)]
-    pub(crate) kind: ParamKind,
+    kind: ParamKind,
     #[serde(default)]
-    pub(crate) label: String,
-    pub(crate) min: f64,
-    pub(crate) max: f64,
+    label: String,
+    min: f64,
+    max: f64,
     #[serde(default)]
-    pub(crate) step: Option<f64>,
-    pub(crate) value: f64,
+    step: Option<f64>,
+    value: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(crate) struct ChartSpec {
     #[serde(default)]
-    pub(crate) mark: Mark,
+    mark: Mark,
     #[serde(default)]
-    pub(crate) stacked: bool,
+    stacked: bool,
     #[serde(default)]
-    pub(crate) normalize: bool,
+    normalize: bool,
     #[serde(default)]
-    pub(crate) categories: Option<Vec<String>>,
-    pub(crate) series: Vec<SeriesSpec>,
+    categories: Option<Vec<String>>,
+    series: Vec<SeriesSpec>,
     #[serde(default)]
-    pub(crate) x: Axis,
+    x: Axis,
     #[serde(default)]
-    pub(crate) y: Axis,
+    y: Axis,
     #[serde(default)]
-    pub(crate) annotations: Vec<Annotation>,
+    annotations: Vec<Annotation>,
     #[serde(default)]
-    pub(crate) params: Vec<Param>,
+    params: Vec<Param>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ChartStyle {
-    pub(crate) mark: Mark,
-    pub(crate) stacked: bool,
-    pub(crate) normalize: bool,
-    pub(crate) x: Axis,
-    pub(crate) y: Axis,
-    pub(crate) annotations: Vec<Annotation>,
-    pub(crate) params: Vec<Param>,
+    mark: Mark,
+    stacked: bool,
+    normalize: bool,
+    x: Axis,
+    y: Axis,
+    annotations: Vec<Annotation>,
+    params: Vec<Param>,
 }
 impl ChartStyle {
     pub(crate) fn resident_bytes(&self) -> usize {
@@ -124,7 +162,7 @@ impl ChartStyle {
             XValue::Text(text) => text.capacity(),
             XValue::Number(_) => 0,
         };
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + axis(&self.x)
             + axis(&self.y)
             + retained_vec(&self.annotations)
@@ -160,11 +198,11 @@ impl From<ChartSpec> for ChartStyle {
 }
 
 impl ChartStyle {
-    pub(crate) const fn stacks(&self) -> bool {
+    const fn stacks(&self) -> bool {
         self.stacked || self.normalize
     }
 
-    pub(crate) fn thresholds(&self) -> impl Iterator<Item = (usize, &Param)> {
+    fn thresholds(&self) -> impl Iterator<Item = (usize, &Param)> {
         self.params
             .iter()
             .enumerate()
@@ -237,3 +275,7 @@ pub(crate) fn press(
         }
     })
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/charts/chart.rs"]
+mod tests;

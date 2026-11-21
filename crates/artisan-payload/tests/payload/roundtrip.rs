@@ -26,7 +26,10 @@ fn a_packed_program_is_written_back_byte_for_byte_and_runnable() {
         "a build without one carries nothing"
     );
     let missing = folder.path().join("missing");
-    assert!(Payload::new(&[]).write_program(&missing).is_err());
+    assert!(matches!(
+        Payload::new(&[]).write_program(&missing),
+        Err(WritePayloadError::Absent { .. })
+    ));
     assert!(
         !missing.exists(),
         "nothing is written for an absent payload"

@@ -1,0 +1,38 @@
+---
+source: crates/editor-aqua/tests/scenario/states.rs
+expression: settled
+---
+Group "Artisan Editor"
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Greeting" [selected]
+        Label "Greeting"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Greeting"
+    Group "Project / Greeting"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Greeting"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  Label "No messages yet."
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  Group [focused]
+    Label "Couldn't save the draft. Forge couldn't be reached."
+    Button "Try again"
+      Label "Try again"
+    Label "Details"
+  ScrollView
+    TextInput "Message" value="Say hello"
+  Button "Send message"
+  Label "Lost the connection to Forge. Reconnecting…"

@@ -1,12 +1,12 @@
 use super::{Inspector, InspectorAction, TerminalDialog};
+use aqua::UiApp;
+use aqua_text::document::{SelectionDocumentId, SelectionSourceError, SelectionSourceId};
 use editor_conversation::controller::Conversation;
 use editor_core::{Core, CoreEvent};
 use editor_sources::SourceView;
-use aqua::UiApp;
-use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct SourceIds {
     pub source_document: SelectionDocumentId,
     pub command_document: SelectionDocumentId,
@@ -19,25 +19,40 @@ pub struct SourceIds {
 }
 
 pub struct InspectorOwner {
-    pub inspector: Inspector,
-    pub terminal: Rc<RefCell<TerminalDialog>>,
-    pub source: SourceView,
-    pub command: SourceView,
-    pub output: SourceView,
-    pub detail: SourceView,
+    inspector: Inspector,
+    terminal: Rc<RefCell<TerminalDialog>>,
+    source: SourceView,
+    command: SourceView,
+    output: SourceView,
+    detail: SourceView,
     ids: SourceIds,
     terminal_hovered: bool,
     copied_until: Option<aqua::Instant>,
+    copy_failure: Option<Box<dyn std::error::Error>>,
     reveal_pending: bool,
     scope: u64,
     pulse_starts: Rc<RefCell<HashMap<usize, u32>>>,
 }
 
+impl std::fmt::Debug for InspectorOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InspectorOwner").finish_non_exhaustive()
+    }
+}
+
 impl InspectorOwner {
-    pub fn new(core: &Core, ids: SourceIds) -> Self {
+    pub const fn inspector(&self) -> &Inspector {
+        &self.inspector
+    }
+
+    pub fn take_copy_failure(&mut self) -> Option<Box<dyn std::error::Error>> {
+        self.copy_failure.take()
+    }
+
+    pub fn new(ids: SourceIds) -> Self {
         Self {
             inspector: Inspector::default(),
-            terminal: Rc::new(RefCell::new(TerminalDialog::new(core))),
+            terminal: Rc::default(),
             source: SourceView::new(ids.source_document, ids.source),
             command: SourceView::new(ids.command_document, ids.command),
             output: SourceView::new(ids.output_document, ids.output),
@@ -45,6 +60,7 @@ impl InspectorOwner {
             ids,
             terminal_hovered: false,
             copied_until: None,
+            copy_failure: None,
             reveal_pending: false,
             scope: 0,
             pulse_starts: Rc::default(),
@@ -75,7 +91,7 @@ impl InspectorOwner {
         true
     }
 
-    pub fn dispatch(
+    fn dispatch(
         &mut self,
         core: &mut Core,
         conversation: &mut Conversation,
@@ -86,7 +102,7 @@ impl InspectorOwner {
             InspectorAction::Retry => self.inspector.retry_summary(core),
             InspectorAction::OpenAgent { id, thread } => {
                 self.inspector
-                    .open_agent_target(core, conversation, id, thread)
+                    .open_agent_target(core, conversation, id, thread);
             }
             InspectorAction::OpenPlan => {
                 let before = self
@@ -179,6 +195,7 @@ impl InspectorOwner {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum SourceTarget {
     Inspector,
     Command,
@@ -189,7 +206,7 @@ pub enum SourceTarget {
 pub enum OwnerAction {
     Inspector {
         scope: u64,
-        action: super::InspectorAction,
+        action: InspectorAction,
     },
     Terminal {
         generation: u64,
@@ -206,6 +223,25 @@ pub enum OwnerAction {
     },
 }
 
+impl std::fmt::Debug for OwnerAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnerAction").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BuildInspectorError {
+    #[error("register the {target:?} source view's selection")]
+    Source {
+        target: SourceTarget,
+        #[source]
+        source: SelectionSourceError,
+    },
+    #[error("register the checklist detail's selection")]
+    Checklist(#[source] SelectionSourceError),
+}
+
+#[derive(Debug)]
 pub struct InspectorElements {
     pub panel: aqua_ui::element::Element,
     pub terminal: Option<aqua_ui::element::Element>,
@@ -228,71 +264,75 @@ fn present_step(step: &artisan_api::PlanStep, index: u64) -> editor_sources::Col
 }
 
 impl InspectorOwner {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one inspector build from core state, viewport, motion and the action sink"
+    )]
     pub fn build(
-        &mut self,
+        &self,
         core: &Core,
         ui: &mut UiApp,
-        theme: editor_ui::theme::ArtisanTheme,
+        theme: &editor_ui::theme::ArtisanTheme,
         viewport_height: f32,
         reduced_motion: bool,
         now: aqua::Instant,
-        action: Rc<dyn Fn(OwnerAction)>,
-    ) -> anyhow::Result<InspectorElements> {
-        let source = match &self.inspector.source {
-            Some(content) => {
-                let callback = Rc::clone(&action);
-                let identity = content.identity();
-                Some(self.source.render(
-                    ui,
-                    content,
-                    theme,
-                    Rc::new(move |event| {
+        action: &Rc<dyn Fn(OwnerAction)>,
+    ) -> Result<InspectorElements, BuildInspectorError> {
+        let source = if let Some(content) = &self.inspector.source {
+            let callback = Rc::clone(action);
+            let identity = content.identity();
+            Some(
+                self.source
+                    .render(ui, content, theme, move |event| {
                         callback(OwnerAction::Source {
                             target: SourceTarget::Inspector,
                             identity,
                             action: event,
-                        })
-                    }),
-                )?)
-            }
-            None => {
-                self.source.release(ui);
-                None
-            }
+                        });
+                    })
+                    .map_err(|source| BuildInspectorError::Source {
+                        target: SourceTarget::Inspector,
+                        source,
+                    })?,
+            )
+        } else {
+            self.source.release(ui);
+            None
         };
         let plan = if let Some(plan) = &self.inspector.plan {
-            let selected = plan.borrow().selected.is_some();
-            let plan_callback = Rc::clone(&action);
+            let selected = plan.borrow().selected().is_some();
+            let plan_callback = Rc::clone(action);
             let identity = plan.borrow().identity();
-            let callback = Rc::new(move |event| {
-                plan_callback(OwnerAction::Plan {
-                    identity,
-                    action: event,
-                })
-            });
+            let callback: Rc<dyn Fn(editor_sources::CollectionAction<artisan_api::PlanStep>)> =
+                Rc::new(move |event| {
+                    plan_callback(OwnerAction::Plan {
+                        identity,
+                        action: event,
+                    });
+                });
             if selected {
                 let browser = plan.borrow();
-                let stored = match &browser.detail {
-                    Some(content) => {
-                        let callback = Rc::clone(&action);
-                        let identity = content.identity();
-                        Some(self.detail.render(
-                            ui,
-                            content,
-                            theme,
-                            Rc::new(move |event| {
+                let stored = if let Some(content) = browser.detail() {
+                    let callback = Rc::clone(action);
+                    let identity = content.identity();
+                    Some(
+                        self.detail
+                            .render(ui, content, theme, move |event| {
                                 callback(OwnerAction::Source {
                                     target: SourceTarget::Detail,
                                     identity,
                                     action: event,
-                                })
-                            }),
-                        )?)
-                    }
-                    None => {
-                        self.detail.release(ui);
-                        None
-                    }
+                                });
+                            })
+                            .map_err(|source| BuildInspectorError::Source {
+                                target: SourceTarget::Detail,
+                                source,
+                            })?,
+                    )
+                } else {
+                    self.detail.release(ui);
+                    None
                 };
                 let detail = editor_sources::collection_detail(
                     &browser,
@@ -301,30 +341,30 @@ impl InspectorOwner {
                     self.ids.detail_document,
                     self.ids.detail,
                     stored,
-                    callback,
-                )
-                .map_err(anyhow::Error::msg)?;
+                    &callback,
+                );
                 if let Some(selection) = detail.selection {
-                    ui.register_selection_source_in(self.ids.detail_document, selection)?;
+                    ui.register_selection_source_in(self.ids.detail_document, selection)
+                        .map_err(BuildInspectorError::Checklist)?;
                 }
                 Some(detail.element)
             } else {
                 self.detail.release(ui);
                 Some(editor_sources::collection_list(
-                    Rc::clone(plan),
+                    plan,
                     "Checklist",
                     theme,
                     Some(viewport_height * 0.4),
                     Rc::new(present_step),
                     false,
-                    callback,
+                    &callback,
                 ))
             }
         } else {
             self.detail.release(ui);
             None
         };
-        let inspector_callback = Rc::clone(&action);
+        let inspector_callback = Rc::clone(action);
         let scope = self.scope;
         self.pulse_starts.borrow_mut().retain(|index, _| {
             !reduced_motion
@@ -335,6 +375,12 @@ impl InspectorOwner {
                     .get(*index)
                     .is_some_and(|agent| agent.status == artisan_api::Status::Running)
         });
+        let on_inspector: Rc<dyn Fn(InspectorAction)> = Rc::new(move |event| {
+            inspector_callback(OwnerAction::Inspector {
+                scope,
+                action: event,
+            });
+        });
         let panel = super::inspector_view(
             core,
             &self.inspector,
@@ -343,108 +389,96 @@ impl InspectorOwner {
             plan,
             reduced_motion,
             Rc::clone(&self.pulse_starts),
-            Rc::new(move |event| {
-                inspector_callback(OwnerAction::Inspector {
-                    scope,
-                    action: event,
-                })
-            }),
-        )
-        .map_err(anyhow::Error::msg)?;
+            &on_inspector,
+        );
         let (opened, command, output) = {
             let terminal = self.terminal.borrow();
-            match &terminal.job {
-                Some(job) => {
-                    let command = match &job.command_source {
-                        Some(content) => {
-                            let callback = Rc::clone(&action);
-                            let identity = content.identity();
-                            Some(self.command.render(
-                                ui,
-                                content,
-                                theme,
-                                Rc::new(move |event| {
-                                    callback(OwnerAction::Source {
-                                        target: SourceTarget::Command,
-                                        identity,
-                                        action: event,
-                                    })
-                                }),
-                            )?)
-                        }
-                        None => {
-                            self.command.release(ui);
-                            None
-                        }
-                    };
-                    let output = match &job.output_source {
-                        Some(content) => {
-                            let callback = Rc::clone(&action);
-                            let identity = content.identity();
-                            Some(self.output.render(
-                                ui,
-                                content,
-                                theme,
-                                Rc::new(move |event| {
-                                    callback(OwnerAction::Source {
-                                        target: SourceTarget::Output,
-                                        identity,
-                                        action: event,
-                                    })
-                                }),
-                            )?)
-                        }
-                        None => {
-                            self.output.release(ui);
-                            None
-                        }
-                    };
-                    (true, command, output)
-                }
-                None => {
+            if let Some(job) = &terminal.job {
+                let command = if let Some(content) = &job.command_source {
+                    let callback = Rc::clone(action);
+                    let identity = content.identity();
+                    Some(
+                        self.command
+                            .render(ui, content, theme, move |event| {
+                                callback(OwnerAction::Source {
+                                    target: SourceTarget::Command,
+                                    identity,
+                                    action: event,
+                                });
+                            })
+                            .map_err(|source| BuildInspectorError::Source {
+                                target: SourceTarget::Command,
+                                source,
+                            })?,
+                    )
+                } else {
                     self.command.release(ui);
+                    None
+                };
+                let output = if let Some(content) = &job.output_source {
+                    let callback = Rc::clone(action);
+                    let identity = content.identity();
+                    Some(
+                        self.output
+                            .render(ui, content, theme, move |event| {
+                                callback(OwnerAction::Source {
+                                    target: SourceTarget::Output,
+                                    identity,
+                                    action: event,
+                                });
+                            })
+                            .map_err(|source| BuildInspectorError::Source {
+                                target: SourceTarget::Output,
+                                source,
+                            })?,
+                    )
+                } else {
                     self.output.release(ui);
-                    (false, None, None)
-                }
+                    None
+                };
+                (true, command, output)
+            } else {
+                self.command.release(ui);
+                self.output.release(ui);
+                (false, None, None)
             }
         };
-        let terminal = if opened {
-            let callback = Rc::clone(&action);
+        let terminal = opened.then(|| {
+            let callback = Rc::clone(action);
             let generation = self.terminal.borrow().generation();
-            Some(
-                super::terminal_view(
-                    Rc::clone(&self.terminal),
-                    theme,
-                    viewport_height,
-                    self.terminal_hovered,
-                    self.copied_until.is_some_and(|deadline| now < deadline),
-                    command,
-                    output,
-                    Rc::new(move |event| {
-                        callback(OwnerAction::Terminal {
-                            generation,
-                            action: event,
-                        })
-                    }),
-                )
-                .map_err(anyhow::Error::msg)?,
+            let on_terminal: Rc<dyn Fn(super::TerminalAction)> = Rc::new(move |event| {
+                callback(OwnerAction::Terminal {
+                    generation,
+                    action: event,
+                });
+            });
+            super::terminal_view(
+                Rc::clone(&self.terminal),
+                theme,
+                viewport_height,
+                self.terminal_hovered,
+                self.copied_until.is_some_and(|deadline| now < deadline),
+                command,
+                output,
+                &on_terminal,
             )
-        } else {
-            None
-        };
+        });
         Ok(InspectorElements { panel, terminal })
     }
 }
 
 impl InspectorOwner {
     pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
+        if let Some(mailbox) = self.terminal.borrow().wake_mailbox() {
+            ctx.bind_mailbox(window, mailbox);
+        }
         if let Some(content) = &self.inspector.source {
             self.source.bind(content, ctx, window);
         }
         if let Some(plan) = &self.inspector.plan {
             let plan = plan.borrow();
             ctx.bind_mailbox(window, plan.window().wake_mailbox());
-            if let Some(content) = &plan.detail {
+            if let Some(content) = plan.detail() {
                 self.detail.bind(content, ctx, window);
             }
         }
@@ -458,12 +492,7 @@ impl InspectorOwner {
         }
     }
 
-    pub fn drain(
-        &mut self,
-        core: &Core,
-        ui: &mut UiApp,
-        ctx: &mut aqua::AppCtx<'_>,
-    ) -> bool {
+    pub fn drain(&mut self, core: &Core, ui: &mut UiApp, ctx: &mut aqua::AppCtx<'_>) -> bool {
         let before = self.view_state();
         if let Some(content) = &mut self.inspector.source {
             self.source.drain(core, content, ctx);
@@ -471,7 +500,7 @@ impl InspectorOwner {
         if let Some(plan) = &self.inspector.plan {
             let mut plan = plan.borrow_mut();
             plan.drain(core);
-            if let Some(content) = &mut plan.detail {
+            if let Some(content) = plan.detail_mut() {
                 self.detail.drain(core, content, ctx);
             }
         }
@@ -495,6 +524,11 @@ impl InspectorOwner {
         terminal_changed || self.view_state() != before
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one match dispatching every inspector action to core, conversation, UI and dialogs"
+    )]
     pub fn dispatch_action(
         &mut self,
         core: &mut Core,
@@ -526,13 +560,9 @@ impl InspectorOwner {
                 {
                     let mut plan = plan.borrow_mut();
                     let selected = plan
-                        .selected
-                        .as_ref()
+                        .selected()
                         .map(|(index, page)| (*index, std::sync::Arc::as_ptr(page) as usize));
-                    let detail = plan
-                        .detail
-                        .as_ref()
-                        .map(editor_sources::ContentText::identity);
+                    let detail = plan.detail().map(editor_sources::ContentText::identity);
                     editor_sources::dispatch_collection(
                         &mut plan,
                         core,
@@ -541,13 +571,9 @@ impl InspectorOwner {
                         None,
                     );
                     let next_selected = plan
-                        .selected
-                        .as_ref()
+                        .selected()
                         .map(|(index, page)| (*index, std::sync::Arc::as_ptr(page) as usize));
-                    let next_detail = plan
-                        .detail
-                        .as_ref()
-                        .map(editor_sources::ContentText::identity);
+                    let next_detail = plan.detail().map(editor_sources::ContentText::identity);
                     if selected != next_selected || detail != next_detail {
                         self.detail.release(ui);
                         self.detail = SourceView::new(self.ids.detail_document, self.ids.detail);
@@ -563,34 +589,35 @@ impl InspectorOwner {
                     if let Some(content) = &mut self.inspector.source
                         && content.identity() == identity
                     {
-                        self.source.action(core, content, ctx, routes, window, action);
+                        self.source
+                            .action(core, content, ctx, routes, window, action);
                     }
                 }
                 SourceTarget::Detail => {
-                    if let Some(plan) = &self.inspector.plan {
-                        if let Some(content) = &mut plan.borrow_mut().detail
-                            && content.identity() == identity
-                        {
-                            self.detail.action(core, content, ctx, routes, window, action);
-                        }
+                    if let Some(plan) = &self.inspector.plan
+                        && let Some(content) = plan.borrow_mut().detail_mut()
+                        && content.identity() == identity
+                    {
+                        self.detail
+                            .action(core, content, ctx, routes, window, action);
                     }
                 }
                 SourceTarget::Command => {
-                    if let Some(job) = &mut self.terminal.borrow_mut().job {
-                        if let Some(content) = &mut job.command_source
-                            && content.identity() == identity
-                        {
-                            self.command.action(core, content, ctx, routes, window, action);
-                        }
+                    if let Some(job) = &mut self.terminal.borrow_mut().job
+                        && let Some(content) = &mut job.command_source
+                        && content.identity() == identity
+                    {
+                        self.command
+                            .action(core, content, ctx, routes, window, action);
                     }
                 }
                 SourceTarget::Output => {
-                    if let Some(job) = &mut self.terminal.borrow_mut().job {
-                        if let Some(content) = &mut job.output_source
-                            && content.identity() == identity
-                        {
-                            self.output.action(core, content, ctx, routes, window, action);
-                        }
+                    if let Some(job) = &mut self.terminal.borrow_mut().job
+                        && let Some(content) = &mut job.output_source
+                        && content.identity() == identity
+                    {
+                        self.output
+                            .action(core, content, ctx, routes, window, action);
                     }
                 }
             },
@@ -606,12 +633,15 @@ impl InspectorOwner {
                             && core.host_if_instance(&job.host, job.instance).is_some()
                             && job.output_source.is_none()
                         {
-                            if let Err(error) = ctx.clipboard().set_text(job.copy_output()) {
-                                tracing::warn!(%error, "could not copy shell output");
+                            match ctx.clipboard().set_text(job.copy_output()) {
+                                Ok(()) => {
+                                    let deadline =
+                                        ctx.now() + std::time::Duration::from_millis(1750);
+                                    self.copied_until = Some(deadline);
+                                    ctx.request_animation_deadline(window, deadline);
+                                }
+                                Err(error) => self.copy_failure = Some(Box::new(error)),
                             }
-                            let deadline = ctx.now() + std::time::Duration::from_millis(1750);
-                            self.copied_until = Some(deadline);
-                            ctx.request_animation_deadline(window, deadline);
                         }
                     }
                     super::TerminalAction::Hover(hovered) => self.terminal_hovered = hovered,
@@ -677,7 +707,7 @@ impl InspectorOwner {
 struct ViewState {
     open: Option<(editor_core::HostId, artisan_api::ThreadId)>,
     summary: usize,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
     source: Option<editor_sources::ContentViewState>,
     plan_identity: Option<u64>,
     plan: Option<editor_sources::CollectionViewState>,
@@ -685,7 +715,7 @@ struct ViewState {
     terminal_generation: u64,
     terminal_following: bool,
     terminal_loading: bool,
-    terminal_error: Option<String>,
+    terminal_error: Option<editor_core::Problem>,
     command: Option<editor_sources::ContentViewState>,
     output: Option<editor_sources::ContentViewState>,
     hovered: bool,
@@ -725,8 +755,8 @@ impl InspectorOwner {
             }),
             terminal_generation: terminal.generation(),
             terminal_following: terminal.following,
-            terminal_loading: terminal.loading,
-            terminal_error: terminal.error.clone(),
+            terminal_loading: terminal.loading(),
+            terminal_error: terminal.error().cloned(),
             command: terminal
                 .job
                 .as_ref()

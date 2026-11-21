@@ -1,12 +1,10 @@
-//! Providers send prose and heading deltas; the Client receives one concise line.
-
 use crate::{EngineEvent, LiveKind};
 use pulldown_cmark::{Event, Parser};
 const MAX_RAW_BYTES: usize = 16 * 1024;
 const MAX_LABEL_CHARS: usize = 200;
 
-#[derive(Default)]
-pub struct Summary {
+#[derive(Debug, Default)]
+pub(crate) struct Summary {
     raw: String,
     shown: String,
 }
@@ -31,18 +29,14 @@ impl Summary {
                     self.raw.clear();
                 }
                 if first_clause {
-                    let mut take = (MAX_RAW_BYTES - self.raw.len()).min(text.len());
-                    while !text.is_char_boundary(take) {
-                        take -= 1;
-                    }
-                    self.raw.push_str(&text[..take]);
+                    let (kept, _) =
+                        text.split_at(text.floor_char_boundary(MAX_RAW_BYTES - self.raw.len()));
+                    self.raw.push_str(kept);
                 } else if text.len() > MAX_RAW_BYTES {
-                    let mut start = text.len() - MAX_RAW_BYTES;
-                    while !text.is_char_boundary(start) {
-                        start += 1;
-                    }
+                    let (_, kept) =
+                        text.split_at(text.ceil_char_boundary(text.len() - MAX_RAW_BYTES));
                     self.raw.clear();
-                    self.raw.push_str(&text[start..]);
+                    self.raw.push_str(kept);
                 } else {
                     self.raw.push_str(&text);
                 }
@@ -83,11 +77,8 @@ impl Summary {
 )]
 fn plain(markdown: &str) -> String {
     let mut text = String::new();
-    let mut end = markdown.len().min(2048);
-    while !markdown.is_char_boundary(end) {
-        end -= 1;
-    }
-    for event in Parser::new(&markdown[..end]) {
+    let (bounded, _) = markdown.split_at(markdown.floor_char_boundary(2048));
+    for event in Parser::new(bounded) {
         match event {
             Event::Text(value) | Event::Code(value) => text.push_str(&value),
             Event::SoftBreak | Event::HardBreak => text.push(' '),
@@ -108,7 +99,7 @@ fn clause_end(line: &str, first_clause: bool) -> Option<usize> {
             words += 1;
             in_word = true;
         }
-        let remainder = &line[index + character.len_utf8()..];
+        let (_, remainder) = line.split_at(index + character.len_utf8());
         if !(remainder.is_empty() || remainder.starts_with(char::is_whitespace)) {
             return None;
         }
@@ -127,7 +118,7 @@ fn label(raw: &str, first_clause: bool) -> String {
     let line = if first_clause {
         raw.lines()
             .filter(|line| !line.trim().starts_with("```") && !line.trim().starts_with("~~~"))
-            .map(|line| plain(clause_end(line, true).map_or(line, |end| &line[..end])))
+            .map(|line| plain(clause_end(line, true).map_or(line, |end| line.split_at(end).0)))
             .find(|line| !line.is_empty())
             .unwrap_or_default()
     } else {
@@ -144,7 +135,9 @@ fn label(raw: &str, first_clause: bool) -> String {
         })
     };
     let cut = clause_end(&line, first_clause);
-    let line = cut.map_or(line.as_str(), |index| &line[..index]).trim();
+    let line = cut
+        .map_or(line.as_str(), |index| line.split_at(index).0)
+        .trim();
     let mut label = line.chars().take(MAX_LABEL_CHARS).collect::<String>();
     if line.chars().nth(MAX_LABEL_CHARS).is_some() {
         label.pop();
@@ -154,60 +147,5 @@ fn label(raw: &str, first_clause: bool) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn first_clause_keeps_arithmetic_delimiters_from_later_prose() {
-        assert_eq!(
-            label("17*23: breaking it into 17*20 gives 340", true),
-            "17*23"
-        );
-    }
-
-    #[test]
-    fn provider_reasoning_is_bounded_canonical_replacement_text() {
-        let mut summary = Summary::default();
-        let events = summary.normalize(
-            vec![EngineEvent::Live {
-                target: LiveKind::Reasoning,
-                text: "**Check ownership**\n\nI will check the run.".into(),
-                append: true,
-            }],
-            false,
-        );
-        assert_eq!(
-            events,
-            vec![EngineEvent::Live {
-                target: LiveKind::Reasoning,
-                text: "Check ownership".into(),
-                append: false
-            }]
-        );
-        summary.normalize(
-            vec![EngineEvent::Live {
-                target: LiveKind::Reasoning,
-                text: "x".repeat(100_000),
-                append: true,
-            }],
-            false,
-        );
-        assert!(summary.raw.len() <= MAX_RAW_BYTES);
-        assert!(summary.shown.chars().count() <= MAX_LABEL_CHARS);
-        let clear = summary.normalize(
-            vec![EngineEvent::Live {
-                target: LiveKind::Reasoning,
-                text: String::new(),
-                append: false,
-            }],
-            false,
-        );
-        assert_eq!(
-            clear,
-            vec![EngineEvent::Live {
-                target: LiveKind::Reasoning,
-                text: String::new(),
-                append: false
-            }]
-        );
-    }
-}
+#[path = "../tests/reasoning/unit.rs"]
+mod tests;

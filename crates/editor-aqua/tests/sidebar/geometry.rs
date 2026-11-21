@@ -48,7 +48,12 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
         .iter()
         .filter_map(|entry| match entry {
             Entry::Project { id, .. } => Some(id.clone()),
-            _ => None,
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::History
+            | Entry::Heading(_)
+            | Entry::Gap(_)
+            | Entry::Spacer => None,
         })
         .collect();
     assert_eq!(projects, vec![a, b, scratch]);
@@ -56,7 +61,13 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
         .iter()
         .filter_map(|entry| match entry {
             Entry::Thread(row, ThreadLayout::Grouped) => Some(row.id.clone()),
-            _ => None,
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::Project { .. }
+            | Entry::History
+            | Entry::Heading(_)
+            | Entry::Gap(_)
+            | Entry::Spacer => None,
         })
         .collect();
     assert_eq!(threads, vec![a1.id, a2.id, b1.id, b2.id, scratch1.id]);
@@ -71,7 +82,13 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
         .skip_while(|entry| !matches!(entry, Entry::History))
         .filter_map(|entry| match entry {
             Entry::Thread(row, ThreadLayout::Standalone) => Some(row.id.clone()),
-            _ => None,
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::Project { .. }
+            | Entry::History
+            | Entry::Heading(_)
+            | Entry::Gap(_)
+            | Entry::Spacer => None,
         })
         .collect();
     assert_eq!(history_entries, vec![history.id]);
@@ -105,13 +122,23 @@ fn a_search_ranks_fuzzy_matches_from_inbox_and_history_and_marks_what_matched() 
                 let marks: Vec<String> = row
                     .matched
                     .iter()
-                    .map(|range| row.title[range.clone()].to_owned())
+                    .map(|range| {
+                        row.title
+                            .get(range.clone())
+                            .expect("the test text slices on a char boundary")
+                            .to_owned()
+                    })
                     .collect();
                 (row.title, marks)
             })
             .collect::<Vec<_>>()
     };
-    let titles = |query: &str| found(query).into_iter().map(|row| row.0).collect::<Vec<_>>();
+    let titles = |query: &str| {
+        found(query)
+            .into_iter()
+            .map(|row| row.0)
+            .collect::<Vec<_>>()
+    };
 
     let unfiltered = lists().searched("  ");
     assert_eq!((unfiltered.inbox.len(), unfiltered.history.len()), (2, 1));
@@ -168,7 +195,7 @@ fn message_hits_follow_the_thread_matches_under_their_own_heading() {
     let lists = Lists {
         inbox: vec![row(&project, "Scene bound fix")],
         history: Vec::new(),
-        hits: vec![found.clone(), hit("the scene bound is 512", (4, 15)).unwrap()],
+        hits: vec![found, hit("the scene bound is 512", (4, 15)).unwrap()],
         next_tick: None,
     };
     let listed = entries(&lists, true);
@@ -189,4 +216,53 @@ fn message_hits_follow_the_thread_matches_under_their_own_heading() {
     );
     let keys = entry_keys(&listed);
     assert_ne!(keys[4], keys[6]);
+}
+
+#[test]
+fn gaps_and_the_history_spacer_lead_the_next_row_instead_of_listing_empty_items() {
+    use editor_aqua::sidebar::geometry::{Listed, listed};
+    let column = [
+        Entry::Heading("Today"),
+        Entry::Gap(2.0),
+        Entry::Heading("Yesterday"),
+        Entry::Gap(12.0),
+        Entry::Gap(2.0),
+        Entry::Heading("Earlier"),
+        Entry::Spacer,
+        Entry::History,
+        Entry::Gap(2.0),
+        Entry::Heading("Older"),
+    ];
+    let rows = listed(&column);
+    assert_eq!(
+        rows,
+        [
+            Listed {
+                entry: 0,
+                gap: 0.0,
+                spaced: false
+            },
+            Listed {
+                entry: 2,
+                gap: 2.0,
+                spaced: false
+            },
+            Listed {
+                entry: 5,
+                gap: 14.0,
+                spaced: false
+            },
+            Listed {
+                entry: 7,
+                gap: 0.0,
+                spaced: true
+            },
+            Listed {
+                entry: 9,
+                gap: 2.0,
+                spaced: false
+            },
+        ]
+    );
+    assert!((rows[3].lead(40.0) - 40.0).abs() < 1e-4);
 }

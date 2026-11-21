@@ -1,96 +1,111 @@
-//! How `ae` talks to people and to agents. In a terminal: prompts, spinners
-//! and progress bars (cliclack, on stderr). Without one: plain lines on
-//! stderr and no questions; a choice that has no flag value fails at once
-//! with the flag to pass. Data (tables, JSON) always goes to stdout.
-
 use std::fmt::Display;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write as _};
 
-/// Whether someone can answer questions and watch progress.
-pub fn interactive() -> bool {
+pub(crate) fn print(text: impl Display) {
+    let _stdout_closed = writeln!(std::io::stdout().lock(), "{text}");
+}
+
+pub(crate) fn status(text: impl Display) {
+    let _stderr_closed = writeln!(std::io::stderr().lock(), "{text}");
+}
+
+pub(crate) fn count(amount: u64, one: &str, many: &str) -> String {
+    let noun = if amount == 1 { one } else { many };
+    format!("{amount} {noun}")
+}
+
+pub(crate) fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
-/// A prompt's error: Ctrl+C or Esc becomes "cancelled".
-pub fn prompt_error(error: std::io::Error) -> anyhow::Error {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AskError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error("read the answer")]
+    Read(#[source] std::io::Error),
+    #[error("no terminal to ask {question}; pass {flag}")]
+    NoTerminal { question: String, flag: String },
+}
+
+pub(crate) fn prompt_error(error: std::io::Error) -> AskError {
     if error.kind() == std::io::ErrorKind::Interrupted {
-        cliclack::outro_cancel("Cancelled").ok();
-        anyhow::anyhow!("cancelled")
+        let _terminal_gone = cliclack::outro_cancel("Cancelled");
+        AskError::Cancelled
     } else {
-        anyhow::Error::new(error).context("read the answer")
+        AskError::Read(error)
     }
 }
 
-/// What to say when a choice can't be asked.
-pub fn needs_flag(question: &str, flag: &str) -> anyhow::Error {
-    anyhow::anyhow!("no terminal to ask {question}; pass {flag}")
-}
-
-pub fn intro(title: impl Display) {
-    if interactive() {
-        cliclack::intro(title).ok();
+pub(crate) fn needs_flag(question: &str, flag: &str) -> AskError {
+    AskError::NoTerminal {
+        question: question.to_owned(),
+        flag: flag.to_owned(),
     }
 }
 
-pub fn outro(message: impl Display) {
+pub(crate) fn intro(title: impl Display) {
     if interactive() {
-        cliclack::outro(message).ok();
+        let _terminal_gone = cliclack::intro(title);
+    }
+}
+
+pub(crate) fn outro(message: impl Display) {
+    if interactive() {
+        let _terminal_gone = cliclack::outro(message);
     } else {
-        eprintln!("{message}");
+        status(message);
     }
 }
 
-pub fn step(message: impl Display) {
+pub(crate) fn step(message: impl Display) {
     if interactive() {
-        cliclack::log::step(message).ok();
+        let _terminal_gone = cliclack::log::step(message);
     } else {
-        eprintln!("{message}");
+        status(message);
     }
 }
 
-pub fn success(message: impl Display) {
+pub(crate) fn success(message: impl Display) {
     if interactive() {
-        cliclack::log::success(message).ok();
+        let _terminal_gone = cliclack::log::success(message);
     } else {
-        eprintln!("{message}");
+        status(message);
     }
 }
 
-pub fn info(message: impl Display) {
+pub(crate) fn info(message: impl Display) {
     if interactive() {
-        cliclack::log::info(message).ok();
+        let _terminal_gone = cliclack::log::info(message);
     } else {
-        eprintln!("{message}");
+        status(message);
     }
 }
 
-pub fn warning(message: impl Display) {
+pub(crate) fn warning(message: impl Display) {
     if interactive() {
-        cliclack::log::warning(message).ok();
+        let _terminal_gone = cliclack::log::warning(message);
     } else {
-        eprintln!("warning: {message}");
+        status(format_args!("warning: {message}"));
     }
 }
 
-/// A titled block: the install summary, a pairing code.
-pub fn note(title: impl Display, body: impl Display) {
+pub(crate) fn note(title: impl Display, body: impl Display) {
     if interactive() {
-        cliclack::note(title, body).ok();
+        let _terminal_gone = cliclack::note(title, body);
     } else {
-        eprintln!("{title}\n{body}");
+        status(format_args!("{title}\n{body}"));
     }
 }
 
-/// A spinner, or a progress bar once its length is known. Without a
-/// terminal it prints where it starts and how it ends.
-pub struct Progress {
+pub(crate) struct Progress {
     bar: Option<cliclack::ProgressBar>,
 }
 
 impl Progress {
-    pub fn spinner(message: impl Display) -> Self {
+    pub(crate) fn spinner(message: impl Display) -> Self {
         if !interactive() {
-            eprintln!("{message}");
+            status(message);
             return Self { bar: None };
         }
         let bar = cliclack::spinner();
@@ -98,10 +113,9 @@ impl Progress {
         Self { bar: Some(bar) }
     }
 
-    /// A byte progress bar.
-    pub fn download(message: impl Display, length: u64) -> Self {
+    pub(crate) fn download(message: impl Display, length: u64) -> Self {
         if !interactive() {
-            eprintln!("{message}");
+            status(message);
             return Self { bar: None };
         }
         let bar = cliclack::progress_bar(length).with_download_template();
@@ -109,46 +123,44 @@ impl Progress {
         Self { bar: Some(bar) }
     }
 
-    pub fn advance(&self, bytes: u64) {
+    pub(crate) fn advance(&self, bytes: u64) {
         if let Some(bar) = &self.bar {
             bar.inc(bytes);
         }
     }
 
-    pub fn message(&self, message: impl Display) {
+    pub(crate) fn message(&self, message: impl Display) {
         if let Some(bar) = &self.bar {
             bar.set_message(message);
         }
     }
 
-    pub fn done(self, message: impl Display) {
+    pub(crate) fn done(self, message: impl Display) {
         match self.bar {
             Some(bar) => bar.stop(message),
-            None => eprintln!("{message}"),
+            None => status(message),
         }
     }
 
-    pub fn fail(self, message: impl Display) {
+    pub(crate) fn fail(self, message: impl Display) {
         match self.bar {
             Some(bar) => bar.error(message),
-            None => eprintln!("error: {message}"),
+            None => status(format_args!("error: {message}")),
         }
     }
 
-    /// Clears it, for a failure reported elsewhere.
-    pub fn clear(self) {
+    pub(crate) fn clear(self) {
         if let Some(bar) = self.bar {
             bar.clear();
         }
     }
 }
 
-/// Runs `work` under a spinner that ends with its outcome.
-pub fn task<T>(
+pub(crate) fn task<T, E: std::error::Error>(
     message: impl Display,
     done: impl Display,
-    work: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
+    work: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
     let progress = Progress::spinner(message);
     match work() {
         Ok(value) => {
@@ -156,14 +168,13 @@ pub fn task<T>(
             Ok(value)
         }
         Err(error) => {
-            progress.fail(format!("{error:#}"));
+            progress.fail(diagnostics::chain(&error));
             Err(error)
         }
     }
 }
 
-/// Fixed-width columns for stdout tables.
-pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
+pub(crate) fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     let mut widths: Vec<usize> = header.iter().map(|cell| cell.chars().count()).collect();
     for row in rows {
         for (index, cell) in row.iter().enumerate() {

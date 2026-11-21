@@ -1,20 +1,20 @@
 use super::fold::{self, Row, RowKey};
 use super::thread::ThreadView;
-use editor_ui::motion::MotionCurve;
 use artisan_api::ItemId;
-use std::collections::{HashMap, HashSet};
+use editor_ui::motion::MotionCurve;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DisclosureState {
-    pub disclosures: HashMap<RowKey, Flight>,
+    pub disclosures: BTreeMap<RowKey, Flight>,
     pub disclosure_clips: HashMap<RowKey, RowClip>,
     pub disclosure_hidden: HashSet<ItemId>,
     pub disclosure_fractions: HashMap<RowKey, f32>,
     pub disclosure_gaps: HashMap<RowKey, f32>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DisclosureFrame {
     pub active: bool,
     pub refold: bool,
@@ -28,8 +28,8 @@ const MAX_ROWS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowClip {
-    pub height: f32,
-    pub opacity: f32,
+    pub(crate) height: f32,
+    pub(crate) opacity: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -39,6 +39,7 @@ pub struct RowDisclosure {
     pub hidden: bool,
     pub gap: Option<f32>,
 }
+#[derive(Debug)]
 pub struct Flight {
     members: HashSet<ItemId>,
     retained: Vec<(Row, u64)>,
@@ -65,12 +66,12 @@ impl Flight {
         let eased = MotionCurve::SmoothOut.sample(run.max(0.0)) as f32;
         (target - self.from).mul_add(eased, self.from)
     }
-    pub(crate) fn includes(&self, row: &Row) -> bool {
+    fn includes(&self, row: &Row) -> bool {
         row.member().is_some_and(|id| self.members.contains(id))
     }
 }
 impl DisclosureState {
-    pub fn start_disclosure(
+    pub(crate) fn start_disclosure(
         &mut self,
         rows: &[(Row, u64)],
         row_heights: &HashMap<RowKey, f32>,
@@ -96,13 +97,18 @@ impl DisclosureState {
             return;
         };
         let members: HashSet<_> = match &rows[index].0 {
-            Row::Work {
-                entries, unloaded, ..
-            } => entries
+            Row::Work { members, .. } => members
+                .entries()
                 .iter()
                 .cloned()
-                .chain(unloaded.iter().map(|first| fold::span_member(*first)))
+                .chain(
+                    members
+                        .spans()
+                        .iter()
+                        .map(|first| fold::span_member(*first)),
+                )
                 .collect(),
+            Row::WorkHeader(_) => HashSet::new(),
             Row::Chain { ids, .. } => ids.iter().cloned().collect(),
             Row::Projected { .. }
             | Row::EarlierWork { .. }
@@ -153,7 +159,7 @@ impl DisclosureState {
             },
         );
     }
-    pub fn retain_disclosure_rows(&mut self, mut rows: Vec<(Row, u64)>) -> Vec<(Row, u64)> {
+    pub(crate) fn retain_disclosure_rows(&mut self, mut rows: Vec<(Row, u64)>) -> Vec<(Row, u64)> {
         for (header, flight) in &mut self.disclosures {
             let Some(index) = rows.iter().position(|(row, _)| row.key() == *header) else {
                 continue;
@@ -177,7 +183,7 @@ impl DisclosureState {
         }
         rows
     }
-    pub fn index_disclosure_rows(&mut self, rows: &[(Row, u64)]) {
+    pub(crate) fn index_disclosure_rows(&mut self, rows: &[(Row, u64)]) {
         for (header, flight) in &mut self.disclosures {
             let Some(index) = rows.iter().position(|(row, _)| row.key() == *header) else {
                 continue;
@@ -190,11 +196,11 @@ impl DisclosureState {
                 .collect();
         }
     }
-    pub fn advance_disclosures(
+    pub(crate) fn advance_disclosures(
         &mut self,
         rows: &[(Row, u64)],
         row_heights: &HashMap<RowKey, f32>,
-        view: Option<&ThreadView>,
+        view: Option<(&ThreadView, &fold::Turns)>,
         now: Instant,
         reduce_motion: bool,
     ) -> DisclosureFrame {
@@ -297,7 +303,7 @@ impl DisclosureState {
             released,
         }
     }
-    pub fn row_disclosure(&self, row: &Row) -> RowDisclosure {
+    pub(crate) fn row_disclosure(&self, row: &Row) -> RowDisclosure {
         let key = row.key();
         RowDisclosure {
             clip: self.disclosure_clips.get(&key).copied(),
@@ -315,13 +321,13 @@ impl DisclosureState {
     reason = "both gaps come from the same spacing table; only an exact match means no motion"
 )]
 fn trailing_gap(
-    view: Option<&ThreadView>,
+    view: Option<(&ThreadView, &fold::Turns)>,
     rows: &[(Row, u64)],
     header: &RowKey,
     flight: &Flight,
     fraction: f32,
 ) -> Option<(RowKey, f32)> {
-    let view = view?;
+    let (view, turns) = view?;
     let index = rows.iter().position(|(row, _)| row.key() == *header)?;
     let members = rows[index + 1..]
         .iter()
@@ -329,7 +335,7 @@ fn trailing_gap(
         .count();
     let after = index + 1 + members;
     let trailing = rows.get(after)?;
-    let closed = fold::gap(view, &[rows[index].clone(), trailing.clone()], 1);
-    let open = fold::gap(view, &rows[after - 1..=after], 1);
+    let closed = fold::gap(view, turns, &[rows[index].clone(), trailing.clone()], 1);
+    let open = fold::gap(view, turns, &rows[after - 1..=after], 1);
     (closed != open).then(|| (trailing.0.key(), (open - closed).mul_add(fraction, closed)))
 }

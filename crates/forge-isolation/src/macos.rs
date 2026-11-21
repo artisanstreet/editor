@@ -8,8 +8,11 @@ unsafe extern "C" {
     fn setiopolicy_np(iotype: c_int, scope: c_int, policy: c_int) -> c_int;
 }
 
-pub fn yield_disk() {
-    unsafe {
-        setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_UTILITY);
+pub(crate) fn yield_disk() -> std::io::Result<()> {
+    let status = unsafe { setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_PROCESS, IOPOL_UTILITY) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }

@@ -2,22 +2,50 @@
 set -eu
 
 feed="${ARTISAN_RELEASES:-https://github.com/artisanstreet/editor/releases/latest/download/release.json}"
-source="$feed"
-case "$feed" in
-    http://* | https://*) base="${feed%/*}" ;;
-    *) base="$feed" feed="$feed/release.json" ;;
-esac
+releases="https://github.com/artisanstreet/editor/releases/"
+signer='artisan-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEAKSzXP/foIgie5gkF2r/s3uAf7Jus8WbSK5W+/Xk2L'
+public_key='MCowBQYDK2VwAyEAQApLNc/9+giCJ7mCQXav+ze4B/sm6zxZtIrlb79eTYs='
 
 fail() {
     echo "install.sh: $*" >&2
     exit 1
 }
 
+source="$feed"
+case "$feed" in
+    https://*) base="${feed%/*}" ;;
+    http://*) fail "refusing the unencrypted release feed $feed" ;;
+    *) base="$feed" feed="$feed/release.json" ;;
+esac
+
+small_file=1048576
+small_seconds=120
+ae_file=268435456
+ae_seconds=3600
+
 fetch() {
     case "$1" in
-        http://* | https://*) curl -fsSL --proto '=https,http' "$1" -o "$2" || fail "could not download $1" ;;
+        https://*)
+            curl -fsSL --proto '=https' --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+                --max-filesize "$3" --max-time "$4" "$1" -o "$2" || fail "could not download $1"
+            ;;
         *) cp "$1" "$2" || fail "could not read $1" ;;
     esac
+}
+
+verify() {
+    if command -v ssh-keygen > /dev/null 2>&1; then
+        fetch "$base/release.json.sshsig" "$tmp/release.json.sshsig" "$small_file" "$small_seconds"
+        printf '%s\n' "$signer" > "$tmp/signers"
+        ssh-keygen -Y verify -f "$tmp/signers" -I artisan-release -n artisan-release -s "$tmp/release.json.sshsig" < "$tmp/release.json" > /dev/null 2>&1
+    elif command -v openssl > /dev/null 2>&1; then
+        fetch "$base/release.json.sig" "$tmp/release.json.sig" "$small_file" "$small_seconds"
+        printf -- '-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----\n' "$public_key" > "$tmp/release.pem"
+        openssl base64 -d -A -in "$tmp/release.json.sig" -out "$tmp/release.json.sig.raw" > /dev/null 2>&1 &&
+            openssl pkeyutl -verify -pubin -inkey "$tmp/release.pem" -rawin -in "$tmp/release.json" -sigfile "$tmp/release.json.sig.raw" > /dev/null 2>&1
+    else
+        fail "checking the release signature needs ssh-keygen (OpenSSH) or OpenSSL 3; install one and retry"
+    fi
 }
 
 case "$(uname -s)" in
@@ -33,7 +61,14 @@ esac
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
-fetch "$feed" "$tmp/release.json"
+fetch "$feed" "$tmp/release.json" "$small_file" "$small_seconds"
+
+version="$(sed -n '1s/^{"version":"\([0-9A-Za-z.+-]*\)".*/\1/p' "$tmp/release.json")"
+[ -n "$version" ] || fail "release.json names no usable version"
+case "$feed" in
+    "$releases"*) base="${releases}download/v${version%%+*}" ;;
+esac
+verify || fail "release.json is not signed by Artisan's release key"
 
 line="$(grep '"app":"ae"' "$tmp/release.json" | grep "\"os\":\"$os\"" | grep "\"arch\":\"$arch\"" | head -n1 || true)"
 [ -n "$line" ] || fail "this release has no build for $os $arch"
@@ -44,8 +79,8 @@ case "$file" in
 esac
 [ -n "$sha256" ] || fail "release.json has no SHA-256 for $file"
 
-echo "Downloading $file…"
-fetch "$base/$file" "$tmp/ae"
+echo "Downloading Artisan $version ($file)…"
+fetch "$base/$file" "$tmp/ae" "$ae_file" "$ae_seconds"
 if command -v sha256sum > /dev/null 2>&1; then
     actual="$(sha256sum "$tmp/ae" | cut -d' ' -f1)"
 else

@@ -46,8 +46,8 @@ struct Row {
 impl Compare {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<CompareData>()
+        size_of::<Self>()
+            + size_of::<CompareData>()
             + retained_strings(&self.0.options)
             + retained_vec(&self.0.rows)
             + self
@@ -59,10 +59,10 @@ impl Compare {
     }
 }
 
+type CompareEntry = (std::sync::Weak<CompareData>, Option<usize>);
+
 #[derive(Clone, Default)]
-pub(crate) struct CompareState(
-    Rc<RefCell<HashMap<String, (std::sync::Weak<CompareData>, Option<usize>)>>>,
-);
+pub(crate) struct CompareState(Rc<RefCell<HashMap<String, CompareEntry>>>);
 
 impl CompareState {
     pub(crate) fn remove(&self, id: &str) {
@@ -72,13 +72,17 @@ impl CompareState {
 
 pub(crate) type NavigationFrame = Rc<dyn Fn(Element, aqua_core::GpuiHsla) -> Element>;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a compare cell reads its content, column, count, selection, state and block id"
+)]
 fn cell(
     content: Element,
     id: String,
     column: usize,
     count: usize,
     selected: Option<usize>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     states: CompareState,
     block: String,
     invalidate: Rc<dyn Fn()>,
@@ -94,7 +98,7 @@ fn cell(
             .min_width(Length::Px(0.0)),
     );
     if selected == Some(column) {
-        cell = cell.style(Hover::Neutral.style(&theme));
+        cell = cell.style(Hover::Neutral.style(theme));
     }
     cell.child(content)
         .build()
@@ -122,18 +126,22 @@ fn criterion(theme: &ArtisanTheme, label: &str) -> Element {
 }
 
 impl Compare {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one comparison table view with headers, cells and selection"
+    )]
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: CompareState,
-        navigation_frame: NavigationFrame,
+        navigation_frame: &NavigationFrame,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let selected = {
             let mut state = states.0.borrow_mut();
             let entry = state
-                .entry(id.clone())
+                .entry(id.to_owned())
                 .or_insert_with(|| (Arc::downgrade(&self.0), None));
             if !std::sync::Weak::ptr_eq(&entry.0, &Arc::downgrade(&self.0)) {
                 *entry = (Arc::downgrade(&self.0), None);
@@ -146,7 +154,7 @@ impl Compare {
             clippy::cast_precision_loss,
             reason = "comparison is limited to sixteen options"
         )]
-        let minimum = count as f32 * 96.0 + 128.0;
+        let minimum = (count as f32).mul_add(96.0, 128.0);
         let mut header = ui::Box::new()
             .layout("row")
             .style(Style::new().align(aqua_ui::AlignItems::END))
@@ -169,16 +177,16 @@ impl Compare {
                 column,
                 count,
                 selected,
-                theme,
+                &theme,
                 states.clone(),
-                id.clone(),
-                invalidate.clone(),
+                id.to_owned(),
+                Rc::clone(&invalidate),
             ));
         }
-        let data = self.0.clone();
+        let data = Arc::clone(&self.0);
         let row_states = states.clone();
-        let row_id = id.clone();
-        let row_invalidate = invalidate.clone();
+        let row_id = id.to_owned();
+        let row_invalidate = Rc::clone(&invalidate);
         let rows = List::new()
             .items(0..data.rows.len())
             .key(|index| *index)
@@ -218,7 +226,7 @@ impl Compare {
                     })
                     .child(criterion(&theme, &row.criterion));
                 for column in 0..count {
-                    let value = row.values.get(column).map(String::as_str).unwrap_or("");
+                    let value = row.values.get(column).map_or("", String::as_str);
                     let (value, color) = if value.is_empty() {
                         ("–", theme.colors.text_muted)
                     } else {
@@ -230,10 +238,10 @@ impl Compare {
                         column,
                         count,
                         selected,
-                        theme,
+                        &theme,
                         row_states.clone(),
                         row_id.clone(),
-                        row_invalidate.clone(),
+                        Rc::clone(&row_invalidate),
                     ));
                 }
                 view.build()
@@ -261,8 +269,8 @@ impl Compare {
             label.push(' ');
             label.push_str(option);
         }
-        let state = states.clone();
-        let key = id.clone();
+        let state = states;
+        let key = id.to_owned();
         let mut root = ui::Box::new()
             .width(Length::Pct(100.0))
             .child(table)
@@ -295,7 +303,14 @@ impl Compare {
                         Some(selected.map_or(0, |index| (index + 1).min(count - 1)))
                     }
                     NamedKey::Enter => Some(selected.unwrap_or(0)),
-                    _ => return InputResponse::default(),
+                    NamedKey::Tab
+                    | NamedKey::Delete
+                    | NamedKey::Insert
+                    | NamedKey::ContextMenu
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
+                    | NamedKey::Function(_)
+                    | NamedKey::Unidentified => return InputResponse::default(),
                 };
                 *selected = next;
                 drop(values);
@@ -322,7 +337,7 @@ impl TryFrom<CompareSpec> for Compare {
                 .iter()
                 .position(|option| option.trim().eq_ignore_ascii_case(wanted.trim()))
         });
-        let text = |text: String| String::from(text.trim().to_owned());
+        let text = |text: String| text.trim().to_owned();
         Ok(Self(Arc::new(CompareData {
             options: spec.options.into_iter().map(text).collect(),
             rows: spec

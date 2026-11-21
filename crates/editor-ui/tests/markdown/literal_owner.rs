@@ -1,11 +1,12 @@
 use super::*;
+use std::sync::Arc;
 use std::sync::mpsc;
 
 #[test]
 fn weak_epochs_keep_evicted_live_leaf_until_explicit_release() {
     let mut epochs = Epochs::default();
     let cached = epochs.issue("a");
-    let mounted = cached.clone();
+    let mounted = Arc::clone(&cached);
     drop(cached);
     epochs.prune();
     assert!(mounted.load(Ordering::Relaxed));
@@ -29,15 +30,15 @@ fn weak_epochs_keep_evicted_live_leaf_until_explicit_release() {
 #[test]
 fn retained_raw_permit_follows_last_lease_and_wakes_capacity_waiters() {
     let pool = Arc::new(Semaphore::new(9));
-    let permit = pool.clone().try_acquire_many_owned(7).unwrap();
+    let permit = Arc::clone(&pool).try_acquire_many_owned(7).unwrap();
     let (wake, received) = mpsc::channel();
     let lease = Arc::new(Lease {
         permit: Some(permit),
-        wake: Arc::new(move || {
-            let _ = wake.send(());
+        wake: Arc::new(move || match wake.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
         }),
     });
-    let selection = lease.clone();
+    let selection = Arc::clone(&lease);
     drop(lease);
     assert_eq!(pool.available_permits(), 2);
     assert!(received.try_recv().is_err());
@@ -49,7 +50,7 @@ fn retained_raw_permit_follows_last_lease_and_wakes_capacity_waiters() {
 #[test]
 fn literal_selection_copies_exact_raw_text_while_display_removes_one_newline() {
     let text: Arc<str> = Arc::from("**literal** &amp; 界🙂\n\n");
-    let source = selection_source(text.clone(), SelectionSourceId(7), vec![4, 2], "\n\n");
+    let source = selection_source(Arc::clone(&text), SelectionSourceId(7), vec![4, 2], "\n\n");
     assert_eq!(visible_text(&text), "**literal** &amp; 界🙂\n");
     assert_eq!(source.text.as_ref(), text.as_ref());
     let range = 0..visible_text(&text).len();
@@ -57,7 +58,10 @@ fn literal_selection_copies_exact_raw_text_while_display_removes_one_newline() {
         source: source.id,
         range: range.clone(),
     };
-    assert_eq!(&source.text[range], "**literal** &amp; 界🙂\n");
+    assert_eq!(
+        crate::ui::text::slice::slice(&source.text, range),
+        "**literal** &amp; 界🙂\n"
+    );
     assert_eq!(slice.position(slice.range.end).offset, slice.range.end);
     assert_eq!(source.order, [4, 2]);
     assert_eq!(source.separator.as_ref(), "\n\n");

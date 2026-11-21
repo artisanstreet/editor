@@ -1,70 +1,72 @@
-//! The global prompt in each engine's own file (master's
-//! `extension_sync/prompt.rs`).
-//!
-//! Forge remembers what it last wrote to each engine home
-//! (`<home>/.artisan/global-prompt.sha256`). A file still holding that, or
-//! one Forge never wrote, is brought in line (the first takeover backs the
-//! old file up); anything else was edited outside Artisan and is reported,
-//! never overwritten until the user decides.
-
-use super::{paths, remove_file_if_present, write_if_changed};
+use super::{paths, write_if_changed};
 use artisan_api::EngineId;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// One engine's global prompt file as found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptFile {
-    /// The file relative to the engine's home, as the user would look for it.
     pub display: String,
-    /// What the engine reads (an override file wins); `None` without a file.
     pub text: Result<Option<String>, String>,
 }
 
-/// Where one engine's file stands after [`apply_prompt`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PromptApplied {
     Synced,
-    /// Edited outside Artisan: what it says now.
     Drifted(String),
-    /// Why it couldn't be read or written.
     Failed(String),
 }
 
-/// Line endings and surrounding blank space don't make two prompts differ.
 #[must_use]
 pub fn normalize_prompt(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_owned()
 }
 
-/// Lowercase hexadecimal SHA-256.
 #[must_use]
 pub fn prompt_digest(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
 }
 
+const PROMPT_MODE: u32 = 0o644;
+
+const RECORD: &str = "global-prompt.sha256";
+const LEGACY_RECORD: &str = ".artisan/global-prompt.sha256";
+const BACKUPS: &str = "backups";
+
 fn record_path(home: &Path) -> PathBuf {
-    home.join(".artisan").join("global-prompt.sha256")
+    crate::home::forge_records(home).join(RECORD)
 }
 
-fn read_text(path: &Path) -> io::Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
+fn in_home<'path>(home: &Path, path: &'path Path) -> &'path Path {
+    path.strip_prefix(home).unwrap_or_else(|_| {
+        unreachable!(
+            "invariant: the global prompt {} lies in the engine home {}",
+            path.display(),
+            home.display()
+        )
+    })
 }
 
-/// The file the engine reads: an override (Codex's `AGENTS.override.md`)
-/// when present, else its prompt file.
+fn read_text(home: &Path, path: &Path) -> io::Result<Option<String>> {
+    crate::home::read(home, in_home(home, path))?
+        .map(|bytes| {
+            String::from_utf8(bytes)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        })
+        .transpose()
+}
+
+fn present(home: &Path, path: &Path) -> bool {
+    !matches!(crate::home::read(home, in_home(home, path)), Ok(None))
+}
+
 fn source(engine: EngineId, home: &Path) -> Option<(PathBuf, Vec<PathBuf>, PathBuf)> {
     let paths = paths(engine, home)?;
     let overrides: Vec<PathBuf> = paths
         .shadows
         .iter()
-        .filter(|path| path.is_file())
+        .filter(|path| present(home, path))
         .cloned()
         .collect();
     let read = overrides
@@ -74,30 +76,33 @@ fn source(engine: EngineId, home: &Path) -> Option<(PathBuf, Vec<PathBuf>, PathB
     Some((read, overrides, paths.prompt))
 }
 
-/// Reads an engine's global prompt; `None` for an engine without one.
 #[must_use]
 pub fn read_prompt_file(engine: EngineId, home: &Path) -> Option<PromptFile> {
     let (read, _, _) = source(engine, home)?;
     Some(PromptFile {
         display: display(home, &read),
-        text: read_text(&read)
+        text: read_text(home, &read)
             .map_err(|error| format!("Couldn't read {}: {error}.", read.display())),
     })
 }
 
-/// Inspects the effective prompt without reconciling or writing any files.
 #[must_use]
 pub fn inspect_prompt(engine: EngineId, home: &Path, canonical: &str) -> Option<PromptApplied> {
     let (read, overrides, _) = source(engine, home)?;
-    Some(match read_text(&read).map(Option::unwrap_or_default) {
-        Ok(text)
-            if overrides.is_empty() && normalize_prompt(&text) == normalize_prompt(canonical) =>
-        {
-            PromptApplied::Synced
-        }
-        Ok(text) => PromptApplied::Drifted(text),
-        Err(error) => PromptApplied::Failed(format!("Couldn't read {}: {error}.", read.display())),
-    })
+    Some(
+        match read_text(home, &read).map(Option::unwrap_or_default) {
+            Ok(text)
+                if overrides.is_empty()
+                    && normalize_prompt(&text) == normalize_prompt(canonical) =>
+            {
+                PromptApplied::Synced
+            }
+            Ok(text) => PromptApplied::Drifted(text),
+            Err(error) => {
+                PromptApplied::Failed(format!("Couldn't read {}: {error}.", read.display()))
+            }
+        },
+    )
 }
 
 fn display(home: &Path, path: &Path) -> String {
@@ -107,9 +112,63 @@ fn display(home: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Brings an engine's file in line with `canonical` unless it was edited
-/// outside Artisan; `force` overwrites such an edit (backed up first).
-/// `None` for an engine without a prompt file.
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyPromptError {
+    #[error("reading the {engine} global prompt {}", path.display())]
+    Read {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("reading the {engine} global prompt record {}", path.display())]
+    ReadRecord {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("writing the {engine} global prompt {}", path.display())]
+    Write {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("writing the {engine} global prompt {}", path.display())]
+    Config {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: crate::home::ConfigError,
+    },
+}
+
+impl ApplyPromptError {
+    fn reason(&self, home: &Path) -> String {
+        match self {
+            Self::Read { path, source, .. } | Self::ReadRecord { path, source, .. } => {
+                format!("Couldn't read {}: {source}.", display(home, path))
+            }
+            Self::Write { path, source, .. } => {
+                format!("Couldn't write {}: {source}.", display(home, path))
+            }
+            Self::Config { path, source, .. } => {
+                format!(
+                    "Couldn't write {}: {}.",
+                    display(home, path),
+                    diagnostics::chain(source)
+                )
+            }
+        }
+    }
+}
+
+pub(super) enum Reconciled {
+    Synced,
+    Drifted,
+}
+
 #[must_use]
 pub fn apply_prompt(
     engine: EngineId,
@@ -117,62 +176,135 @@ pub fn apply_prompt(
     canonical: &str,
     force: bool,
 ) -> Option<PromptApplied> {
-    let (read, overrides, prompt) = source(engine, home)?;
-    let on_disk = match read_text(&read) {
-        Ok(text) => text.unwrap_or_default(),
-        Err(error) => {
-            return Some(PromptApplied::Failed(format!(
-                "Couldn't read {}: {error}.",
-                display(home, &read)
-            )));
-        }
-    };
-    let record_file = record_path(home);
-    if normalize_prompt(&on_disk) == normalize_prompt(canonical) && overrides.is_empty() {
-        if let Err(error) = write_if_changed(&record_file, prompt_digest(&on_disk).as_bytes()) {
-            tracing::warn!(%engine, file = %record_file.display(), "couldn't record the global prompt: {error}");
-        }
-        return Some(PromptApplied::Synced);
-    }
-    let record = fs::read_to_string(&record_file)
-        .ok()
-        .map(|digest| digest.trim().to_owned());
-    let first_takeover = record.is_none();
-    let unchanged = record.as_deref() == Some(prompt_digest(&on_disk).as_str());
-    if !(first_takeover || unchanged || force) {
-        return Some(PromptApplied::Drifted(on_disk));
-    }
-    let backups = home.join(".artisan").join("backups");
-    let stamp = artisan_api::now();
-    let written = (|| -> io::Result<()> {
-        if (first_takeover || force) && !normalize_prompt(&on_disk).is_empty() {
-            back_up(&read, &backups, stamp)?;
-        }
-        for path in &overrides {
-            if path != &read {
-                back_up(path, &backups, stamp)?;
-            }
-            remove_file_if_present(path)?;
-        }
-        if normalize_prompt(canonical).is_empty() {
-            remove_file_if_present(&prompt)?;
-            write_if_changed(&record_file, prompt_digest("").as_bytes())
-        } else {
-            write_if_changed(&prompt, canonical.as_bytes())?;
-            write_if_changed(&record_file, prompt_digest(canonical).as_bytes())
-        }
-    })();
-    Some(match written {
-        Ok(()) => PromptApplied::Synced,
-        Err(error) => PromptApplied::Failed(format!(
-            "Couldn't write {}: {error}.",
-            display(home, &prompt)
-        )),
+    Some(match reconcile(engine, home, canonical, force)? {
+        Ok((Reconciled::Synced, _)) => PromptApplied::Synced,
+        Ok((Reconciled::Drifted, on_disk)) => PromptApplied::Drifted(on_disk),
+        Err(error) => PromptApplied::Failed(error.reason(home)),
     })
 }
 
-fn back_up(path: &Path, backups: &Path, stamp: artisan_api::Timestamp) -> io::Result<()> {
-    if !path.is_file() {
+fn read_record(engine: EngineId, home: &Path) -> Result<Option<String>, ApplyPromptError> {
+    let path = record_path(home);
+    let recorded = match fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            crate::home::read(home, Path::new(LEGACY_RECORD)).map_err(|source| {
+                ApplyPromptError::ReadRecord {
+                    engine,
+                    path: home.join(LEGACY_RECORD),
+                    source,
+                }
+            })
+        }
+        Err(source) => Err(ApplyPromptError::ReadRecord {
+            engine,
+            path,
+            source,
+        }),
+    }?;
+    Ok(recorded.map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned()))
+}
+
+pub(super) fn reconcile(
+    engine: EngineId,
+    home: &Path,
+    canonical: &str,
+    force: bool,
+) -> Option<Result<(Reconciled, String), ApplyPromptError>> {
+    let (read, overrides, prompt) = source(engine, home)?;
+    Some((|| {
+        let on_disk = read_text(home, &read)
+            .map_err(|source| ApplyPromptError::Read {
+                engine,
+                path: read.clone(),
+                source,
+            })?
+            .unwrap_or_default();
+        let record_file = record_path(home);
+        if normalize_prompt(&on_disk) == normalize_prompt(canonical) && overrides.is_empty() {
+            if let Err(error) = write_if_changed(&record_file, prompt_digest(&on_disk).as_bytes()) {
+                tracing::warn!(%engine, file = %record_file.display(), "couldn't record the global prompt: {error}");
+            }
+            return Ok((Reconciled::Synced, on_disk));
+        }
+        let record = read_record(engine, home)?;
+        let first_takeover = record.is_none();
+        let unchanged = record.as_deref() == Some(prompt_digest(&on_disk).as_str());
+        if !(first_takeover || unchanged || force) {
+            return Ok((Reconciled::Drifted, on_disk));
+        }
+        let backups = crate::home::forge_records(home).join(BACKUPS);
+        let stamp = artisan_api::now();
+        if (first_takeover || force) && !normalize_prompt(&on_disk).is_empty() {
+            back_up(&read, on_disk.as_bytes(), &backups, stamp).map_err(|source| {
+                ApplyPromptError::Write {
+                    engine,
+                    path: read.clone(),
+                    source,
+                }
+            })?;
+        }
+        let configuring = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| ApplyPromptError::Config {
+                engine,
+                path,
+                source,
+            }
+        };
+        for path in &overrides {
+            if path != &read {
+                let shadowed = read_text(home, path)
+                    .map_err(|source| ApplyPromptError::Read {
+                        engine,
+                        path: path.clone(),
+                        source,
+                    })?
+                    .unwrap_or_default();
+                back_up(path, shadowed.as_bytes(), &backups, stamp).map_err(|source| {
+                    ApplyPromptError::Write {
+                        engine,
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+            }
+            crate::home::remove_config(engine, home, in_home(home, path))
+                .map_err(configuring(path))?;
+        }
+        let recorded = if normalize_prompt(canonical).is_empty() {
+            crate::home::remove_config(engine, home, in_home(home, &prompt))
+                .map_err(configuring(&prompt))?;
+            prompt_digest("")
+        } else {
+            crate::home::write_config(
+                engine,
+                home,
+                in_home(home, &prompt),
+                canonical.as_bytes(),
+                PROMPT_MODE,
+            )
+            .map_err(configuring(&prompt))?;
+            prompt_digest(canonical)
+        };
+        write_if_changed(&record_file, recorded.as_bytes()).map_err(|source| {
+            ApplyPromptError::Write {
+                engine,
+                path: record_file.clone(),
+                source,
+            }
+        })?;
+        Ok((Reconciled::Synced, on_disk))
+    })())
+}
+
+fn back_up(
+    path: &Path,
+    text: &[u8],
+    backups: &Path,
+    stamp: artisan_api::Timestamp,
+) -> io::Result<()> {
+    if text.is_empty() {
         return Ok(());
     }
     fs::create_dir_all(backups)?;
@@ -180,27 +312,13 @@ fn back_up(path: &Path, backups: &Path, stamp: artisan_api::Timestamp) -> io::Re
         || "prompt".to_owned(),
         |name| name.to_string_lossy().into_owned(),
     );
-    fs::copy(path, backups.join(format!("{name}.{stamp}"))).map(drop)
+    fs::write(backups.join(format!("{name}.{stamp}")), text)
 }
 
 #[cfg(test)]
-mod inspection_tests {
-    use super::*;
-    #[test]
-    fn readonly_inspection_never_creates_or_reconciles_prompt_files() {
-        let home = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            inspect_prompt(EngineId::Claude, home.path(), ""),
-            Some(PromptApplied::Synced)
-        ));
-        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
-        let file = home.path().join(".claude/CLAUDE.md");
-        fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(&file, "external prompt").unwrap();
-        assert!(
-            matches!(inspect_prompt(EngineId::Claude, home.path(), "canonical"), Some(PromptApplied::Drifted(text)) if text == "external prompt")
-        );
-        assert_eq!(fs::read_to_string(file).unwrap(), "external prompt");
-        assert!(!home.path().join(".artisan").exists());
-    }
-}
+#[path = "../../tests/customise/prompt/inspection.rs"]
+mod inspection_tests;
+
+#[cfg(test)]
+#[path = "../../tests/customise/prompt.rs"]
+mod ownership_tests;

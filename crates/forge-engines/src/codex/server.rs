@@ -1,59 +1,166 @@
-//! One `codex app-server` shared by every Codex thread.
-//!
-//! Codex keeps per-thread state in the process. The visible one: a thread
-//! whose Responses WebSocket keeps getting closed falls back to HTTPS and
-//! stays there. A process per turn forgot that and sat through five
-//! reconnects on every turn, so runs attach to one long-lived server instead,
-//! the way Codex's own desktop daemon serves its threads.
-//!
-//! The server's task owns the process. Each run keeps its own request ids
-//! (rewritten on the way through) and gets the frames of its threads: the
-//! root thread `thread/start` or `thread/resume` answered with, and every
-//! child thread its agents spawn (`parentThreadId`, `receiverThreadIds`).
-//! Frames for a thread no run has claimed wait for their owner. A thread no
-//! run has used for [`IDLE_UNLOAD`] is unsubscribed; the process ends once it
-//! has no runs and no loaded threads, or once it is retired and its runs are
-//! over.
-//!
-//! A server serves one launch: binary, home, arguments, environment and the
-//! managed `config.toml`. When any of them changes, the next run starts a new
-//! server and the old one retires. So does a thread whose context window
-//! changed, since Codex reads that only when it loads a thread. Before a
-//! replacement resumes a thread, its previous server must acknowledge that
-//! the thread is closed and its persistence writer has been released.
-
+use super::Reserved;
 use crate::Turn;
-use crate::process::{self, EngineProcess};
-use anyhow::{Context, Result, anyhow, bail};
+use crate::process::{
+    self, EngineProcess, ReadError, SendError, SpawnError, StderrWritten, StdinWriter,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-/// How long a thread stays loaded after its last run.
 const IDLE_UNLOAD: Duration = Duration::from_mins(30);
 const SWEEP: Duration = Duration::from_secs(60);
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Frames held for threads no run has claimed yet.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const UNCLAIMED_BYTES: usize = 16 * 1024 * 1024;
+const RUN_BACKLOG_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    #[error("the old Codex server didn't release thread {thread} in {}s", INITIALIZE_TIMEOUT.as_secs())]
+    ReleaseTimedOut { thread: String },
+    #[error("the old Codex server couldn't release thread {thread}")]
+    Release {
+        thread: String,
+        #[source]
+        source: ReleaseError,
+    },
+    #[error("start the Codex app-server")]
+    Start(#[source] StartError),
+    #[error("the Codex app-server ended while run {run} attached")]
+    Ended { run: u64 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReleaseError {
+    #[error("a run is still attached to the thread")]
+    StillAttached,
+    #[error("Codex refused thread/unsubscribe")]
+    Refused(#[source] crate::rpc::RpcError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error("create CODEX_HOME {}", path.display())]
+    Home {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("spawn the app-server")]
+    Spawn(#[source] SpawnError),
+    #[error("the app-server didn't answer initialize in {}s; {stderr}", INITIALIZE_TIMEOUT.as_secs())]
+    InitializeTimedOut { stderr: StderrWritten },
+    #[error("initialize the app-server; {stderr}")]
+    Initialize {
+        stderr: StderrWritten,
+        #[source]
+        source: InitializeError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InitializeError {
+    #[error("send initialize")]
+    Send(#[source] SendError),
+    #[error("read the answer to initialize")]
+    Read(#[source] ReadError),
+    #[error("Codex refused initialize")]
+    Refused(#[source] crate::rpc::RpcError),
+    #[error("Codex exited before answering initialize")]
+    Exited,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the Codex app-server has ended")]
+pub struct Ended;
+
+#[derive(Default)]
+struct Backlog {
+    bytes: AtomicUsize,
+    drained: Notify,
+}
+
+impl Backlog {
+    fn full(&self) -> bool {
+        self.bytes.load(Ordering::Acquire) > RUN_BACKLOG_BYTES
+    }
+
+    fn take(&self, line: &str) {
+        let before = self.bytes.fetch_sub(line.len(), Ordering::AcqRel);
+        if before > RUN_BACKLOG_BYTES && before - line.len() <= RUN_BACKLOG_BYTES {
+            self.drained.notify_one();
+        }
+    }
+
+    async fn until_drained(&self) {
+        loop {
+            let drained = self.drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            if !self.full() {
+                return;
+            }
+            drained.await;
+        }
+    }
+}
 
 static SERVERS: LazyLock<tokio::sync::Mutex<Vec<Arc<Server>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(Vec::new()));
+static STARTS: LazyLock<Mutex<HashMap<u64, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Attaches a run to the server for `turn`'s launch, starting one if needed.
-#[expect(
-    clippy::significant_drop_tightening,
-    reason = "the pool stays locked until the run is attached; see below"
-)]
-pub(super) async fn attach(turn: &Turn) -> Result<Attachment> {
+pub(super) async fn attach(turn: &Turn) -> Result<Attachment, AttachError> {
     let key = launch_key(turn);
     let window = turn.config.context_window_override();
+    let holders = retire_stale(turn, key, window).await;
+    if let Some(thread) = &turn.session_id {
+        for holder in holders {
+            release(&holder, thread).await?;
+        }
+    }
+    if let Some(attached) = attach_current(key, window).await {
+        return attached;
+    }
+    let gate = start_gate(key);
+    let starting = gate.lock().await;
+    let attached = if let Some(attached) = attach_current(key, window).await {
+        attached
+    } else {
+        let started = Server::start(turn, key).await.map_err(AttachError::Start)?;
+        let mut servers = SERVERS.lock().await;
+        servers.push(Arc::clone(&started));
+        let attached = started.take_run(window);
+        drop(servers);
+        attached
+    };
+    drop(starting);
+    STARTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|_, waiting| Arc::strong_count(waiting) > 1);
+    attached
+}
+
+fn start_gate(key: u64) -> Arc<tokio::sync::Mutex<()>> {
+    Arc::clone(
+        STARTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(key)
+            .or_default(),
+    )
+}
+
+async fn retire_stale(turn: &Turn, key: u64, window: Option<u64>) -> Vec<Arc<Server>> {
     let mut servers = SERVERS.lock().await;
     servers.retain(|server| !server.commands.is_closed());
     for server in servers.iter() {
@@ -67,64 +174,63 @@ pub(super) async fn attach(turn: &Turn) -> Result<Attachment> {
             server.retire();
         }
     }
-    // A retired process may still serve other runs and retain this thread's
-    // writer lock. Wait for its explicit close before loading it elsewhere.
-    if let Some(thread) = &turn.session_id {
-        for server in servers
-            .iter()
-            .filter(|server| server.home == turn.home && server.retired())
-        {
-            let (reply, released) = oneshot::channel();
-            server
-                .commands
-                .send(Command::Release {
-                    thread: thread.clone(),
-                    reply,
-                })
-                .map_err(|_unsent| anyhow!("the old Codex server ended during thread handoff"))?;
-            tokio::time::timeout(INITIALIZE_TIMEOUT, released)
-                .await
-                .context("waiting for the old Codex server to release the thread timed out")?
-                .context("the old Codex server ended before releasing the thread")??;
-        }
+    servers
+        .iter()
+        .filter(|server| server.home == turn.home && server.retired())
+        .cloned()
+        .collect()
+}
+
+async fn release(holder: &Server, thread: &str) -> Result<(), AttachError> {
+    let (reply, released) = oneshot::channel();
+    let asked = holder.commands.send(Command::Release {
+        thread: thread.to_owned(),
+        reply,
+    });
+    if let Err(_reaped) = asked {
+        return Ok(());
     }
+    match tokio::time::timeout(INITIALIZE_TIMEOUT, released).await {
+        Err(_elapsed) => Err(AttachError::ReleaseTimedOut {
+            thread: thread.to_owned(),
+        }),
+        Ok(Err(_reaped)) => Ok(()),
+        Ok(Ok(Err(source))) => Err(AttachError::Release {
+            thread: thread.to_owned(),
+            source,
+        }),
+        Ok(Ok(Ok(()))) => Ok(()),
+    }
+}
+
+async fn attach_current(key: u64, window: Option<u64>) -> Option<Result<Attachment, AttachError>> {
+    let mut servers = SERVERS.lock().await;
+    servers.retain(|server| !server.commands.is_closed());
     let current = servers
         .iter()
         .find(|server| server.key == key && !server.retired())
-        .cloned();
-    let server = if let Some(server) = current {
-        server
-    } else {
-        let server = Server::start(turn, key).await?;
-        servers.push(Arc::clone(&server));
-        server
-    };
-    let run = server.next_run.fetch_add(1, Ordering::Relaxed);
-    let (lines, receiver) = mpsc::unbounded_channel();
-    // Under the pool lock, so an idle server can't end between being picked
-    // and taking the run (it removes itself under the same lock).
-    server
-        .commands
-        .send(Command::Attach { run, lines, window })
-        .map_err(|_unsent| anyhow!("the Codex app-server ended while a run attached"))?;
-    Ok(Attachment {
-        server,
-        run,
-        lines: receiver,
-    })
+        .cloned()?;
+    let attached = current.take_run(window);
+    drop(servers);
+    Some(attached)
 }
 
-/// What a server is keyed by: everything that shapes the process.
 fn launch_key(turn: &Turn) -> u64 {
     let mut hasher = DefaultHasher::new();
+    (process::containment(turn) == forge_isolation::Containment::OwnCgroup).hash(&mut hasher);
     turn.binary.hash(&mut hasher);
     turn.home.hash(&mut hasher);
     turn.launch.args.hash(&mut hasher);
     turn.launch.env.hash(&mut hasher);
-    // Codex reads its config (MCP servers) when the process starts.
-    std::fs::read(super::codex_home(turn).join("config.toml"))
-        .ok()
-        .hash(&mut hasher);
+    let config = super::codex_home(turn).join("config.toml");
+    match std::fs::read(&config) {
+        Ok(bytes) => bytes.hash(&mut hasher),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent".hash(&mut hasher),
+        Err(error) => {
+            tracing::warn!(path = %config.display(), %error, "read the Codex config for the launch key; the key counts it as unreadable");
+            error.kind().to_string().hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -132,22 +238,16 @@ struct Server {
     key: u64,
     home: PathBuf,
     commands: mpsc::UnboundedSender<Command>,
-    /// Takes no new runs; ends once its runs have.
     retired: AtomicBool,
-    /// Loaded root threads and the context window each was loaded with.
     loaded: Mutex<HashMap<String, Option<u64>>>,
-    /// Why the process ended, with the tail of its stderr.
     ended: Mutex<String>,
     next_run: AtomicU64,
 }
 
 impl Server {
-    async fn start(turn: &Turn, key: u64) -> Result<Arc<Self>> {
-        std::fs::create_dir_all(super::codex_home(turn))
-            .context("creating CODEX_HOME for the Codex app-server")?;
-        // Artisan already retains idle threads for IDLE_UNLOAD. An explicit
-        // unsubscribe must release persistence immediately for server handoffs,
-        // rather than starting Codex's separate idle retention timer.
+    async fn start(turn: &Turn, key: u64) -> Result<Arc<Self>, StartError> {
+        let home = super::codex_home(turn);
+        std::fs::create_dir_all(&home).map_err(|source| StartError::Home { path: home, source })?;
         let mut process = process::spawn_in(
             turn,
             &[
@@ -157,14 +257,32 @@ impl Server {
             ],
             &turn.home,
             "codex-server",
-        )?;
-        tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process))
-            .await
-            .context("Codex app-server did not answer initialize")?
-            .with_context(|| {
-                let tail = process.stderr_tail();
-                format!("initializing the Codex app-server: {tail}")
+        )
+        .await
+        .map_err(StartError::Spawn)?
+        .with_line_limit(super::MAX_LINE_BYTES);
+        match tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process)).await {
+            Err(_elapsed) => {
+                return Err(StartError::InitializeTimedOut {
+                    stderr: process.stderr(),
+                });
+            }
+            Ok(Err(source)) => {
+                return Err(StartError::Initialize {
+                    stderr: process.stderr(),
+                    source,
+                });
+            }
+            Ok(Ok(())) => {}
+        }
+        let stdin = process
+            .take_stdin()
+            .map_err(|source| StartError::Initialize {
+                stderr: process.stderr(),
+                source: InitializeError::Send(source),
             })?;
+        let (outgoing, queue) = mpsc::unbounded_channel();
+        let writer = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(write(stdin, queue)));
         let (commands, receiver) = mpsc::unbounded_channel();
         let server = Arc::new(Self {
             key,
@@ -178,10 +296,12 @@ impl Server {
         let actor = Actor {
             server: Arc::clone(&server),
             process,
+            writes: outgoing,
+            writer,
             commands: receiver,
             runs: HashMap::new(),
             owners: HashMap::new(),
-            agent_paths: HashMap::new(),
+            agents: AgentPaths::default(),
             pending: HashMap::new(),
             releasing: HashMap::new(),
             next_id: 1,
@@ -190,9 +310,30 @@ impl Server {
             unclaimed_order: VecDeque::new(),
             unclaimed_bytes: 0,
             outbox: Vec::new(),
+            reading: Reading::Codex,
         };
         tokio::spawn(actor.run());
         Ok(server)
+    }
+
+    fn take_run(self: &Arc<Self>, window: Option<u64>) -> Result<Attachment, AttachError> {
+        let run = self.next_run.fetch_add(1, Ordering::Relaxed);
+        let (lines, receiver) = mpsc::unbounded_channel();
+        let backlog = Arc::new(Backlog::default());
+        self.commands
+            .send(Command::Attach {
+                run,
+                lines,
+                backlog: Arc::clone(&backlog),
+                window,
+            })
+            .map_err(|_unsent| AttachError::Ended { run })?;
+        Ok(Attachment {
+            server: Arc::clone(self),
+            run,
+            lines: receiver,
+            backlog,
+        })
     }
 
     fn retired(&self) -> bool {
@@ -202,8 +343,7 @@ impl Server {
     fn retire(&self) {
         if !self.retired.swap(true, Ordering::Relaxed) {
             tracing::info!("retiring a Codex app-server; it ends once its runs have");
-            // An ended server has nothing left to check.
-            self.commands.send(Command::Check).ok();
+            let _server_stopped = self.commands.send(Command::Check);
         }
     }
 
@@ -212,14 +352,35 @@ impl Server {
     }
 }
 
-async fn initialize(process: &mut EngineProcess) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+enum WriteError {
+    #[error("write to the Codex app-server")]
+    Send(#[source] SendError),
+    #[error("the Codex app-server took no input for {}s", WRITE_TIMEOUT.as_secs())]
+    Stalled,
+}
+
+async fn write(
+    mut stdin: StdinWriter,
+    mut queue: mpsc::UnboundedReceiver<Outgoing>,
+) -> Result<(), WriteError> {
+    while let Some(Outgoing { message, held }) = queue.recv().await {
+        tokio::time::timeout(WRITE_TIMEOUT, stdin.send(&message))
+            .await
+            .map_err(|_elapsed| WriteError::Stalled)?
+            .map_err(WriteError::Send)?;
+        drop(held);
+    }
+    Ok(())
+}
+
+async fn initialize(process: &mut EngineProcess) -> Result<(), InitializeError> {
     process
         .send(&json!({
             "id": 0,
             "method": "initialize",
             "params": {
                 "clientInfo": { "name": "artisan", "title": "Artisan", "version": env!("CARGO_PKG_VERSION") },
-                // Experimental: `item/tool/requestUserInput`, `turn/steer` fields.
                 "capabilities": {
                     "experimentalApi": true,
                     "optOutNotificationMethods": [
@@ -230,46 +391,56 @@ async fn initialize(process: &mut EngineProcess) -> Result<()> {
                 },
             },
         }))
-        .await?;
-    while let Some(line) = process.next_line().await? {
+        .await
+        .map_err(InitializeError::Send)?;
+    while let Some(line) = process.next_line().await.map_err(InitializeError::Read)? {
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         if frame.get("method").is_none() && frame["id"] == json!(0) {
             if let Some(error) = frame.get("error") {
-                bail!("{error}");
+                return Err(InitializeError::Refused(crate::rpc::RpcError::refusal(
+                    error,
+                )));
             }
-            return process.send(&json!({ "method": "initialized" })).await;
+            return process
+                .send(&json!({ "method": "initialized" }))
+                .await
+                .map_err(InitializeError::Send);
         }
     }
-    bail!("Codex exited before answering initialize")
+    Err(InitializeError::Exited)
 }
 
-/// One run's connection to its server. Dropping it detaches the run.
 pub(super) struct Attachment {
     server: Arc<Server>,
     run: u64,
     lines: mpsc::UnboundedReceiver<String>,
+    backlog: Arc<Backlog>,
 }
 
 impl Attachment {
-    /// The next line for this run, or `None` once the process has ended.
-    pub async fn next_line(&mut self) -> Option<String> {
-        self.lines.recv().await
+    pub(super) async fn next_line(&mut self) -> Option<String> {
+        let line = self.lines.recv().await?;
+        self.backlog.take(&line);
+        Some(line)
     }
 
-    pub fn send(&self, message: Value) -> Result<()> {
+    pub(super) fn send(&self, message: Value) -> Result<(), Ended> {
+        self.send_holding(message, Vec::new())
+    }
+
+    pub(super) fn send_holding(&self, message: Value, held: Vec<Reserved>) -> Result<(), Ended> {
         self.server
             .commands
             .send(Command::Send {
                 run: self.run,
-                message,
+                outgoing: Outgoing { message, held },
             })
-            .map_err(|_unsent| anyhow!("the Codex app-server has ended"))
+            .map_err(|_unsent| Ended)
     }
 
-    /// Why the process ended, with the tail of its stderr.
-    pub fn ended(&self) -> String {
+    pub(super) fn ended(&self) -> String {
         self.server
             .ended
             .lock()
@@ -277,19 +448,14 @@ impl Attachment {
             .clone()
     }
 
-    /// Sends later runs to a fresh process, for one that stopped answering.
-    pub fn retire(&self) {
+    pub(super) fn retire(&self) {
         self.server.retire();
     }
 }
 
 impl Drop for Attachment {
     fn drop(&mut self) {
-        // An ended server has no runs left to detach.
-        self.server
-            .commands
-            .send(Command::Detach { run: self.run })
-            .ok();
+        let _server_stopped = self.server.commands.send(Command::Detach { run: self.run });
     }
 }
 
@@ -297,59 +463,112 @@ enum Command {
     Attach {
         run: u64,
         lines: mpsc::UnboundedSender<String>,
+        backlog: Arc<Backlog>,
         window: Option<u64>,
     },
     Send {
         run: u64,
-        message: Value,
+        outgoing: Outgoing,
     },
     Detach {
         run: u64,
     },
     Release {
         thread: String,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), ReleaseError>>,
     },
-    /// Look again at whether the server should end.
     Check,
+}
+
+struct Outgoing {
+    message: Value,
+    held: Vec<Reserved>,
+}
+
+impl From<Value> for Outgoing {
+    fn from(message: Value) -> Self {
+        Self {
+            message,
+            held: Vec::new(),
+        }
+    }
 }
 
 struct Release {
     thread: String,
-    reply: oneshot::Sender<Result<()>>,
+    reply: oneshot::Sender<Result<(), ReleaseError>>,
 }
 
 struct AttachedRun {
     lines: mpsc::UnboundedSender<String>,
+    backlog: Arc<Backlog>,
     window: Option<u64>,
 }
 
-/// The server's own requests (`thread/unsubscribe`) belong to run 0.
 const SERVER_RUN: u64 = 0;
+
+struct AgentPath {
+    root: String,
+    path: String,
+}
+
+#[derive(Default)]
+struct AgentPaths(HashMap<String, AgentPath>);
+
+impl AgentPaths {
+    fn parent_path<'a>(&'a self, sender: &str, sender_is_root: bool) -> Option<&'a str> {
+        self.0
+            .get(sender)
+            .map(|agent| agent.path.as_str())
+            .or_else(|| sender_is_root.then_some("/root"))
+    }
+
+    fn adopt(&mut self, sender: &str, child: &str, path: &str) {
+        let root = self
+            .0
+            .get(sender)
+            .map_or_else(|| sender.to_owned(), |agent| agent.root.clone());
+        self.0.insert(
+            child.to_owned(),
+            AgentPath {
+                root,
+                path: path.to_owned(),
+            },
+        );
+    }
+
+    fn forget(&mut self, thread: &str) {
+        self.0
+            .retain(|child, agent| child != thread && agent.root != thread);
+    }
+}
 
 struct Actor {
     server: Arc<Server>,
     process: EngineProcess,
+    writes: mpsc::UnboundedSender<Outgoing>,
+    writer: tokio_util::task::AbortOnDropHandle<Result<(), WriteError>>,
     commands: mpsc::UnboundedReceiver<Command>,
     runs: HashMap<u64, AttachedRun>,
-    /// Thread → the run its frames go to.
     owners: HashMap<String, u64>,
-    agent_paths: HashMap<String, String>,
-    /// Requests in flight: the id Codex sees → the run and the id it used.
+    agents: AgentPaths,
     pending: HashMap<u64, (u64, Value)>,
     releasing: HashMap<u64, Release>,
     next_id: u64,
-    /// Loaded root threads no run is using, since when.
     idle: HashMap<String, Instant>,
-    /// Frames of threads no run has claimed yet, oldest thread first.
     unclaimed: HashMap<String, Vec<String>>,
     unclaimed_order: VecDeque<String>,
     unclaimed_bytes: usize,
-    /// Answers routing gives on the server's behalf, for [`Actor::flush`].
     outbox: Vec<Value>,
+    reading: Reading,
 }
 
-/// The parts of a frame routing needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    Codex,
+    PausedFor(u64),
+}
+
 #[derive(Deserialize)]
 struct Head {
     id: Option<Value>,
@@ -394,36 +613,32 @@ impl Actor {
         let mut sweep = tokio::time::interval(SWEEP);
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let ended = loop {
+            let behind = self.behind();
+            self.pace(behind.as_ref().map(|(run, _)| *run));
+            let behind = behind.map(|(_, backlog)| backlog);
             tokio::select! {
-                line = self.process.next_line() => match line {
+                () = until_drained(behind.as_deref()), if behind.is_some() => {}
+                line = self.process.next_line(), if behind.is_none() => match line {
                     Ok(Some(line)) => {
                         self.route(line);
-                        if let Err(error) = self.flush().await {
-                            break format!("writing to the Codex app-server: {error:#}");
-                        }
+                        self.flush();
                     }
                     Ok(None) => break "Codex app-server exited".to_owned(),
-                    Err(error) => break format!("reading the Codex app-server: {error:#}"),
+                    Err(error) => break format!("reading the Codex app-server: {}", diagnostics::chain(&error)),
+                },
+                written = &mut self.writer => break match written {
+                    Ok(Ok(())) => "the Codex app-server writer stopped".to_owned(),
+                    Ok(Err(error)) => diagnostics::chain(&error),
+                    Err(error) => format!("the Codex app-server writer ended: {}", diagnostics::chain(&error)),
                 },
                 command = self.commands.recv() => {
                     let Some(command) = command else { break "every handle is gone".to_owned() };
-                    if let Err(error) = self.command(command).await {
-                        break format!("writing to the Codex app-server: {error:#}");
-                    }
+                    self.command(command);
                 }
-                _ = sweep.tick() => {
-                    if let Err(error) = self.unload_idle().await {
-                        break format!("writing to the Codex app-server: {error:#}");
-                    }
-                }
+                _ = sweep.tick() => self.unload_idle(),
             }
             if self.runs.is_empty() && (self.server.retired() || self.idle.is_empty()) {
-                // Under the pool lock, so no run attaches meanwhile.
-                // An attaching run may hold the pool while waiting for us to
-                // release a thread. Keep servicing commands in that case.
-                let Ok(mut servers) = SERVERS.try_lock() else {
-                    continue;
-                };
+                let mut servers = SERVERS.lock().await;
                 if !self.commands.is_empty() {
                     continue;
                 }
@@ -432,8 +647,6 @@ impl Actor {
                 } else {
                     "no runs and no loaded threads"
                 };
-                // Keep the pool locked until the process is reaped: removing
-                // it first lets a replacement race its remaining writer locks.
                 self.end(why).await;
                 servers.retain(|server| !Arc::ptr_eq(server, &self.server));
                 return;
@@ -442,14 +655,38 @@ impl Actor {
         self.end(&ended).await;
     }
 
+    fn behind(&self) -> Option<(u64, Arc<Backlog>)> {
+        self.runs
+            .iter()
+            .find(|(_, attached)| attached.backlog.full())
+            .map(|(run, attached)| (*run, Arc::clone(&attached.backlog)))
+    }
+
+    fn pace(&mut self, behind: Option<u64>) {
+        let reading = behind.map_or(Reading::Codex, Reading::PausedFor);
+        if reading == self.reading {
+            return;
+        }
+        match reading {
+            Reading::PausedFor(run) => tracing::debug!(
+                run,
+                "Forge stopped reading Codex until run {run} catches up on its unread output"
+            ),
+            Reading::Codex => tracing::debug!("Forge reads Codex again"),
+        }
+        self.reading = reading;
+    }
+
+    fn write(&self, outgoing: impl Into<Outgoing>) {
+        if self.writes.send(outgoing.into()).is_err() {
+            tracing::debug!("the Codex app-server writer has ended; its failure ends the server");
+        }
+    }
+
     async fn end(&mut self, why: &str) {
-        let tail = self.process.stderr_tail();
-        let ended = if tail.is_empty() {
-            why.to_owned()
-        } else {
-            format!("{why}: {tail}")
-        };
-        tracing::info!(why, "Codex app-server ended");
+        let stderr = self.process.stderr();
+        let ended = format!("{why}; {stderr}");
+        tracing::info!(why, stderr_bytes = stderr.bytes(), "Codex app-server ended");
         *self
             .server
             .ended
@@ -458,26 +695,37 @@ impl Actor {
         self.server.retired.store(true, Ordering::Relaxed);
         self.process.note(&format!("ending: {why}"));
         self.process.kill().await;
-        // Dropping the senders ends every attached run's stream.
         self.runs.clear();
         self.commands.close();
     }
 
-    async fn command(&mut self, command: Command) -> Result<()> {
+    fn command(&mut self, command: Command) {
         match command {
-            Command::Attach { run, lines, window } => {
-                self.runs.insert(run, AttachedRun { lines, window });
+            Command::Attach {
+                run,
+                lines,
+                backlog,
+                window,
+            } => {
+                self.runs.insert(
+                    run,
+                    AttachedRun {
+                        lines,
+                        backlog,
+                        window,
+                    },
+                );
             }
-            Command::Send { run, mut message } => {
-                if message.get("method").is_some()
-                    && let Some(id) = message.get_mut("id")
+            Command::Send { run, mut outgoing } => {
+                if outgoing.message.get("method").is_some()
+                    && let Some(id) = outgoing.message.get_mut("id")
                 {
                     let ours = self.next_id;
                     self.next_id += 1;
                     let theirs = std::mem::replace(id, json!(ours));
                     self.pending.insert(ours, (run, theirs));
                 }
-                self.process.send(&message).await?;
+                self.write(outgoing);
             }
             Command::Detach { run } => {
                 self.runs.remove(&run);
@@ -495,11 +743,9 @@ impl Actor {
             }
             Command::Release { thread, reply } => {
                 if self.owners.contains_key(&thread) {
-                    reply
-                        .send(Err(anyhow!("the Codex thread still has an attached run")))
-                        .ok();
+                    let _requester_gone = reply.send(Err(ReleaseError::StillAttached));
                 } else if !self.server.loaded().contains_key(&thread) {
-                    reply.send(Ok(())).ok();
+                    let _requester_gone = reply.send(Ok(()));
                 } else {
                     let id = self.next_id;
                     self.releasing.insert(
@@ -509,16 +755,14 @@ impl Actor {
                             reply,
                         },
                     );
-                    self.unsubscribe(&thread).await?;
+                    self.unsubscribe(&thread);
                 }
             }
             Command::Check => {}
         }
-        Ok(())
     }
 
-    /// Unsubscribes threads no run has used for [`IDLE_UNLOAD`].
-    async fn unload_idle(&mut self) -> Result<()> {
+    fn unload_idle(&mut self) {
         let now = Instant::now();
         let stale: Vec<String> = self
             .idle
@@ -528,24 +772,22 @@ impl Actor {
             .collect();
         for thread in stale {
             self.idle.remove(&thread);
-            self.unsubscribe(&thread).await?;
+            self.unsubscribe(&thread);
         }
-        Ok(())
     }
 
-    async fn unsubscribe(&mut self, thread: &str) -> Result<()> {
+    fn unsubscribe(&mut self, thread: &str) {
         let id = self.next_id;
         self.next_id += 1;
         self.pending.insert(id, (SERVER_RUN, json!(id)));
-        self.process
-            .send(&json!({ "id": id, "method": "thread/unsubscribe",
-            "params": { "threadId": thread } }))
-            .await
+        self.write(json!({ "id": id, "method": "thread/unsubscribe",
+            "params": { "threadId": thread } }));
     }
 
     fn closed(&mut self, thread: &str) {
         self.server.loaded().remove(thread);
         self.idle.remove(thread);
+        self.agents.forget(thread);
         let ids: Vec<_> = self
             .releasing
             .iter()
@@ -554,7 +796,7 @@ impl Actor {
             .collect();
         for id in ids {
             if let Some(release) = self.releasing.remove(&id) {
-                release.reply.send(Ok(())).ok();
+                let _requester_gone = release.reply.send(Ok(()));
             }
         }
     }
@@ -563,12 +805,8 @@ impl Actor {
         let head = match serde_json::from_str::<Head>(&line) {
             Ok(head) => head,
             Err(error) => {
-                // Every run's decoder fails on it, as it would have alone.
                 tracing::warn!(%error, "Codex app-server wrote a frame Artisan can't read");
-                for run in self.runs.values() {
-                    // A run that stopped reading is detaching.
-                    run.lines.send(line.clone()).ok();
-                }
+                self.deliver_all(&line);
                 return;
             }
         };
@@ -578,12 +816,10 @@ impl Actor {
         }
     }
 
-    /// Writes what routing answered on the server's behalf.
-    async fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) {
         for message in std::mem::take(&mut self.outbox) {
-            self.process.send(&message).await?;
+            self.write(message);
         }
-        Ok(())
     }
 
     fn response(&mut self, id: Option<&Value>, result: Option<ResultHead>, line: &str) {
@@ -596,24 +832,23 @@ impl Actor {
         };
         if run == SERVER_RUN {
             if let Some(id) = id.and_then(Value::as_u64) {
-                let frame: Value = serde_json::from_str(line).unwrap_or_default();
+                let frame: Value = serde_json::from_str(line)
+                    .expect("invariant: a Codex frame that parsed as a head parses as JSON");
                 if frame["result"]["status"] == "notLoaded" {
                     if let Some(release) = self.releasing.get(&id) {
                         let thread = release.thread.clone();
                         self.closed(&thread);
                     }
-                } else if frame.get("error").is_some()
+                } else if let Some(error) = frame.get("error")
                     && let Some(release) = self.releasing.remove(&id)
                 {
-                    release
-                        .reply
-                        .send(Err(anyhow!("Codex could not release the thread: {line}")))
-                        .ok();
+                    let _requester_gone = release.reply.send(Err(ReleaseError::Refused(
+                        crate::rpc::RpcError::refusal(error),
+                    )));
                 }
             }
             return;
         }
-        // `thread/start` and `thread/resume` answer with the run's root thread.
         if let Some(thread) = result.and_then(|result| result.thread) {
             let window = self.runs.get(&run).and_then(|attached| attached.window);
             self.server.loaded().insert(thread.id.clone(), window);
@@ -621,15 +856,18 @@ impl Actor {
                 self.idle.remove(&thread.id);
                 self.claim(&thread.id, run);
             } else {
-                // Loaded for a run that has already gone.
                 self.idle.insert(thread.id, Instant::now());
             }
         }
         if !self.runs.contains_key(&run) {
             return;
         }
-        let Ok(mut frame) = serde_json::from_str::<Value>(line) else {
-            return;
+        let mut frame = match serde_json::from_str::<Value>(line) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(run, %error, "dropped a Codex answer that isn't JSON");
+                return;
+            }
         };
         frame["id"] = theirs;
         self.deliver(run, frame.to_string());
@@ -647,7 +885,6 @@ impl Actor {
         if method == "thread/closed" {
             self.closed(&thread);
         }
-        // A child thread belongs to the run of the thread that spawned it.
         if let Some(parent) = params
             .thread
             .as_ref()
@@ -659,7 +896,6 @@ impl Actor {
         }
         let Some(&run) = self.owners.get(&thread) else {
             if self.server.loaded().contains_key(&thread) {
-                // An idle thread winding down; nobody is listening.
                 tracing::debug!(method, thread, "dropping a frame of an idle Codex thread");
             } else {
                 self.hold(thread, line);
@@ -687,11 +923,8 @@ impl Actor {
         if child.trim().is_empty() || child == sender {
             return None;
         }
-        let parent_path = self
-            .agent_paths
-            .get(sender)
-            .map(String::as_str)
-            .or_else(|| self.server.loaded().contains_key(sender).then_some("/root"));
+        let sender_is_root = self.server.loaded().contains_key(sender);
+        let parent_path = self.agents.parent_path(sender, sender_is_root);
         let owns = match item.kind {
             Some(SubAgentActivityKind::Started) => true,
             Some(SubAgentActivityKind::Interacted) => parent_path.is_some_and(|parent| {
@@ -708,18 +941,13 @@ impl Actor {
         if !owns {
             return None;
         }
-        self.agent_paths.insert(child.clone(), path.clone());
+        self.agents.adopt(sender, child, path);
         Some(child.clone())
     }
 
-    /// A frame about no thread: notifications go to every run; a request
-    /// gets one answer, from the oldest run.
     fn unthreaded(&mut self, method: &str, id: Option<Value>, line: String) {
         let Some(id) = id else {
-            for run in self.runs.values() {
-                // A run that stopped reading is detaching.
-                run.lines.send(line.clone()).ok();
-            }
+            self.deliver_all(&line);
             return;
         };
         if let Some(run) = self.runs.keys().min().copied() {
@@ -766,10 +994,31 @@ impl Actor {
         }
     }
 
+    fn deliver_all(&self, line: &str) {
+        let runs: Vec<u64> = self.runs.keys().copied().collect();
+        for run in runs {
+            self.deliver(run, line.to_owned());
+        }
+    }
+
     fn deliver(&self, run: u64, line: String) {
-        if let Some(attached) = self.runs.get(&run) {
-            // A run that stopped reading is detaching.
-            attached.lines.send(line).ok();
+        let Some(attached) = self.runs.get(&run) else {
+            return;
+        };
+        let bytes = line.len();
+        attached.backlog.bytes.fetch_add(bytes, Ordering::AcqRel);
+        if attached.lines.send(line).is_err() {
+            attached.backlog.bytes.fetch_sub(bytes, Ordering::AcqRel);
         }
     }
 }
+
+async fn until_drained(behind: Option<&Backlog>) {
+    if let Some(backlog) = behind {
+        backlog.until_drained().await;
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/codex/server/agent_paths.rs"]
+mod agent_paths_tests;

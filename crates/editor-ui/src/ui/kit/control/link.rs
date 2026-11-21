@@ -21,7 +21,17 @@ pub struct Link {
     on_activate: Option<Box<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link").finish_non_exhaustive()
+    }
+}
+
 impl Link {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the link stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,

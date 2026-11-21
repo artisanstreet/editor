@@ -1,4 +1,4 @@
-use artisan_api::{Item, ItemKind, LiveTarget, Run, RunStatus, Status, ToolKind};
+use artisan_api::{Item, ItemKind, LiveTarget, Run, RunOutcome, RunState, Status, ToolKind};
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
@@ -10,17 +10,17 @@ pub enum Phase {
     Replying,
     Compacting,
     WaitingOnYou,
-    Settled(RunStatus),
+    Settled(RunOutcome),
 }
 
 #[must_use]
-pub fn turn_phase<S: BuildHasher>(
+pub(crate) fn turn_phase<S: BuildHasher>(
     run: &Run,
     items: &[&Item],
-    live: &HashMap<LiveTarget, std::sync::Arc<ropey::Rope>, S>,
+    live: &HashMap<LiveTarget, super::thread::LiveText, S>,
 ) -> Phase {
-    if !run.status.is_live() {
-        return Phase::Settled(run.status);
+    if let RunState::Finished { outcome, .. } = &run.state {
+        return Phase::Settled(*outcome);
     }
     if items.iter().any(|item| item.status == Status::AwaitingUser) {
         return Phase::WaitingOnYou;
@@ -82,7 +82,11 @@ pub fn turn_phase<S: BuildHasher>(
         .get(&LiveTarget::Reasoning {
             run_id: run.id.clone(),
         })
-        .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()));
+        .is_some_and(|live| {
+            live.text
+                .chars()
+                .any(|character| !character.is_whitespace())
+        });
     if reasoning {
         return Phase::Thinking;
     }
@@ -90,7 +94,7 @@ pub fn turn_phase<S: BuildHasher>(
 }
 
 #[must_use]
-pub const fn status_copy(phase: Phase) -> Option<&'static str> {
+pub(crate) const fn status_copy(phase: Phase) -> Option<&'static str> {
     match phase {
         Phase::Thinking => Some("Thinking"),
         Phase::Working => Some("Working"),
@@ -100,17 +104,17 @@ pub const fn status_copy(phase: Phase) -> Option<&'static str> {
 }
 
 #[must_use]
-pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
+pub(crate) fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
     let elapsed = format_elapsed(elapsed_ms);
     match phase {
         Phase::Unknown if worked => "Worked".to_owned(),
         Phase::Unknown => "Thought".to_owned(),
-        Phase::Settled(RunStatus::Done) if worked => format!("Worked for {elapsed}"),
-        Phase::Settled(RunStatus::Done) => format!("Thought for {elapsed}"),
-        Phase::Settled(RunStatus::Failed | RunStatus::Refused) => {
+        Phase::Settled(RunOutcome::Done) if worked => format!("Worked for {elapsed}"),
+        Phase::Settled(RunOutcome::Done) => format!("Thought for {elapsed}"),
+        Phase::Settled(RunOutcome::Failed | RunOutcome::Refused) => {
             format!("Failed after {elapsed}")
         }
-        Phase::Settled(RunStatus::Cancelled | RunStatus::Interrupted) => {
+        Phase::Settled(RunOutcome::Cancelled | RunOutcome::Interrupted) => {
             format!("Stopped after {elapsed}")
         }
         Phase::Thinking
@@ -118,7 +122,6 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
         | Phase::Replying
         | Phase::Compacting
         | Phase::WaitingOnYou
-        | Phase::Settled(RunStatus::Running)
             if worked =>
         {
             format!("Working for {elapsed}")
@@ -127,13 +130,12 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
         | Phase::Working
         | Phase::Replying
         | Phase::Compacting
-        | Phase::WaitingOnYou
-        | Phase::Settled(RunStatus::Running) => format!("Thinking for {elapsed}"),
+        | Phase::WaitingOnYou => format!("Thinking for {elapsed}"),
     }
 }
 
 #[must_use]
-pub fn format_elapsed(millis: u64) -> String {
+fn format_elapsed(millis: u64) -> String {
     let total = millis / 1_000;
     let (hours, minutes, seconds) = (total / 3_600, (total % 3_600) / 60, total % 60);
     if hours > 0 {

@@ -1,20 +1,22 @@
 use crate::conversation::controller::Conversation;
 use crate::conversation::fold::RowKey;
 use crate::conversation::presentation::{MarkdownOwners, PresentationScope, ProjectedProof};
+use aqua_core::NodeId;
+use aqua_ui::tree::{NodeKind, UiTree};
 use editor_core::Core;
 use editor_ui::markdown::presenter::{ProjectedGeometry, ProjectedRevealText};
 use editor_ui::markdown::reveal::PreparedReveal;
-use aqua_core::NodeId;
-use aqua_ui::tree::{NodeKind, UiTree};
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
 
-#[derive(Default)]
+pub(crate) type RevealHandle = (Rc<PreparedReveal>, bool, Rc<Cell<bool>>);
+
+#[derive(Debug, Default)]
 pub struct MountedReveals {
     scope: Option<PresentationScope>,
-    rows: HashMap<RowKey, Weak<RefCell<MountedReveal>>>,
+    rows: BTreeMap<RowKey, Weak<RefCell<MountedReveal>>>,
     proofs: HashMap<RowKey, ProjectedProof>,
 }
 
@@ -22,9 +24,14 @@ pub(crate) struct MountedReveal {
     reveal: Rc<PreparedReveal>,
     fresh: bool,
     ready: Rc<Cell<bool>>,
-    frame: Option<OwnedGeometry>,
-    stored_frame: Option<StoredGeometry>,
+    geometry: RevealGeometry,
     settled_at: Cell<Option<(u64, u64)>>,
+}
+
+enum RevealGeometry {
+    Static,
+    Inline(Box<OwnedGeometry>),
+    Stored(Box<StoredGeometry>),
 }
 
 struct StoredGeometry {
@@ -44,20 +51,85 @@ struct OwnedGeometry {
     live: Option<crate::conversation::live::LiveBinding>,
 }
 
+impl MountedReveal {
+    pub(crate) fn acquire(
+        owner: &super::row_cache::RowOwner,
+        fresh: impl FnOnce() -> bool,
+    ) -> RevealHandle {
+        let mut slot = owner.reveal.borrow_mut();
+        let row = slot.get_or_insert_with(|| {
+            Rc::new(RefCell::new(Self {
+                reveal: Rc::new(PreparedReveal::default()),
+                fresh: fresh(),
+                ready: Rc::new(Cell::new(false)),
+                geometry: RevealGeometry::Static,
+                settled_at: Cell::new(None),
+            }))
+        });
+        let row = row.borrow();
+        (Rc::clone(&row.reveal), row.fresh, Rc::clone(&row.ready))
+    }
+
+    pub(crate) fn record(
+        owner: &super::row_cache::RowOwner,
+        version: u64,
+        block: usize,
+        prepared: crate::conversation::presentation::PreparedProjectedRow,
+        live: Option<crate::conversation::live::LiveBinding>,
+    ) -> aqua_ui::collection::BatchedCollectionRow {
+        let slot = owner.reveal.borrow();
+        let row = slot
+            .as_ref()
+            .expect("invariant: the reveal row is acquired before it renders");
+        let mut row = row.borrow_mut();
+        row.ready.set(false);
+        row.settled_at.set(None);
+        row.geometry = RevealGeometry::Inline(Box::new(OwnedGeometry {
+            version,
+            block,
+            proof: prepared.proof,
+            geometry: prepared.geometry,
+            text: prepared.text,
+            live,
+        }));
+        prepared.row
+    }
+
+    pub(crate) fn record_stored(
+        owner: &super::row_cache::RowOwner,
+        version: u64,
+        block: usize,
+        proof: crate::conversation::stored::StoredProof,
+        prepared: editor_ui::markdown::presenter::StoredProjectedMarkdown,
+    ) -> aqua_ui::collection::BatchedCollectionRow {
+        let slot = owner.reveal.borrow();
+        let row = slot
+            .as_ref()
+            .expect("invariant: the reveal row is acquired before it renders");
+        let mut row = row.borrow_mut();
+        row.ready.set(false);
+        row.settled_at.set(None);
+        let text = prepared.reveal_text(&row.reveal);
+        row.geometry = RevealGeometry::Stored(Box::new(StoredGeometry {
+            version,
+            block,
+            proof,
+            geometry: prepared.geometry,
+            text,
+        }));
+        aqua_ui::collection::BatchedCollectionRow {
+            element: prepared.element,
+            batches: vec![prepared.selection_batch],
+        }
+    }
+}
+
 impl MountedReveals {
     pub fn ready(&self, key: &RowKey) -> Option<bool> {
         self.rows
             .get(key)?
             .upgrade()
             .map(|row| row.borrow().ready.get())
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn retained_for_tests(&self, key: &RowKey) -> Option<Rc<PreparedReveal>> {
-        self.rows
-            .get(key)?
-            .upgrade()
-            .map(|row| row.borrow().reveal.clone())
     }
 
     pub fn rebind(&mut self, scope: Option<PresentationScope>) {
@@ -71,95 +143,26 @@ impl MountedReveals {
         }
     }
 
-    pub(crate) fn acquire(
-        &mut self,
-        owner: &super::row_cache::RowOwner,
-        fresh: impl FnOnce() -> bool,
-    ) -> (Rc<PreparedReveal>, bool, Rc<Cell<bool>>) {
-        let mut slot = owner.reveal.borrow_mut();
-        let row = slot.get_or_insert_with(|| {
-            Rc::new(RefCell::new(MountedReveal {
-                reveal: Rc::new(PreparedReveal::default()),
-                fresh: fresh(),
-                ready: Rc::new(Cell::new(false)),
-                frame: None,
-                stored_frame: None,
-                settled_at: Cell::new(None),
-            }))
-        });
-        let row = row.borrow();
-        (row.reveal.clone(), row.fresh, row.ready.clone())
-    }
-
-    pub(crate) fn record(
-        &mut self,
-        owner: &super::row_cache::RowOwner,
-        version: u64,
-        block: usize,
-        prepared: crate::conversation::presentation::PreparedProjectedRow,
-        live: Option<crate::conversation::live::LiveBinding>,
-    ) -> aqua_ui::collection::BatchedCollectionRow {
-        let slot = owner.reveal.borrow();
-        let row = slot.as_ref().expect("reveal row acquired before rendering");
-        let mut row = row.borrow_mut();
-        row.ready.set(false);
-        row.settled_at.set(None);
-        row.stored_frame = None;
-        row.frame = Some(OwnedGeometry {
-            version,
-            block,
-            proof: prepared.proof,
-            geometry: prepared.geometry,
-            text: prepared.text,
-            live,
-        });
-        prepared.row
-    }
-
-    pub(crate) fn record_stored(
-        &mut self,
-        owner: &super::row_cache::RowOwner,
-        version: u64,
-        block: usize,
-        proof: crate::conversation::stored::StoredProof,
-        prepared: editor_ui::markdown::presenter::StoredProjectedMarkdown,
-    ) -> aqua_ui::collection::BatchedCollectionRow {
-        let slot = owner.reveal.borrow();
-        let row = slot.as_ref().expect("reveal row acquired before rendering");
-        let mut row = row.borrow_mut();
-        row.ready.set(false);
-        row.settled_at.set(None);
-        row.frame = None;
-        let text = prepared.reveal_text(&row.reveal);
-        row.stored_frame = Some(StoredGeometry {
-            version,
-            block,
-            proof,
-            geometry: prepared.geometry,
-            text,
-        });
-        aqua_ui::collection::BatchedCollectionRow {
-            element: prepared.element,
-            batches: vec![prepared.selection_batch],
-        }
-    }
-
     pub(crate) fn activate(&mut self, key: RowKey, owner: &super::row_cache::RowOwner) {
         let slot = owner.reveal.borrow();
         if let Some(row) = slot.as_ref() {
-            if let Some(frame) = &row.borrow().frame {
+            if let RevealGeometry::Inline(frame) = &row.borrow().geometry {
                 self.proofs.insert(key.clone(), frame.proof.clone());
             }
             self.rows.insert(key, Rc::downgrade(row));
         }
     }
 
-    pub fn sync(
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sync pass reconciling mounted reveals with live, Markdown and stored bodies"
+    )]
+    pub(crate) fn sync(
         &mut self,
         app: &mut aqua::UiApp,
         conversation: &Conversation,
         core: &Core,
-        markdown: &mut MarkdownOwners,
+        markdown: &MarkdownOwners,
         stored: Option<&crate::conversation::stored::StoredConversation>,
     ) -> RevealSync {
         let Some(scope) = self.scope.as_ref() else {
@@ -187,9 +190,7 @@ impl MountedReveals {
             let Some(row) = weak.upgrade() else { continue };
             let row = row.borrow_mut();
             let epochs = (app.tree().layout_version(), app.tree().structure_epoch());
-            if row.ready.get()
-                && row.settled_at.get() == Some(epochs)
-                && !row.reveal.is_animating()
+            if row.ready.get() && row.settled_at.get() == Some(epochs) && !row.reveal.is_animating()
             {
                 continue;
             }
@@ -205,49 +206,53 @@ impl MountedReveals {
                 row.ready.set(false);
                 continue;
             }
-            if let Some(frame) = &row.stored_frame {
-                let valid = stored.is_some_and(|stored| {
-                    conversation
-                        .row_position(key)
-                        .and_then(|index| conversation.rows.get(index))
-                        .filter(|(_, version)| *version == frame.version)
-                        .and_then(|(candidate, _)| {
-                            candidate
-                                .anchor()
-                                .and_then(|id| conversation.view.as_ref()?.item(id))
-                                .map(|item| frame.proof.accepts_row(stored, scope, candidate, item))
-                        })
-                        .unwrap_or(false)
-                });
-                if !valid {
+            let frame = match &row.geometry {
+                RevealGeometry::Static => {
                     row.ready.set(false);
-                    result.reason = "stored_invalid";
-                    result.pending = true;
                     continue;
                 }
-                let Some(changed) = sync_contents(
-                    app,
-                    key,
-                    frame.block,
-                    &frame.geometry,
-                    &frame.text,
-                    &row.reveal,
-                ) else {
-                    row.ready.set(false);
-                    result.reason = "stored_contents";
-                    result.pending = true;
+                RevealGeometry::Inline(frame) => frame,
+                RevealGeometry::Stored(frame) => {
+                    let valid = stored.is_some_and(|stored| {
+                        conversation
+                            .row_position(key)
+                            .and_then(|index| conversation.rows.get(index))
+                            .filter(|(_, version)| *version == frame.version)
+                            .and_then(|(candidate, _)| {
+                                candidate
+                                    .anchor()
+                                    .and_then(|id| conversation.view.as_ref()?.item(id))
+                                    .map(|item| {
+                                        frame.proof.accepts_row(stored, scope, candidate, item)
+                                    })
+                            })
+                            .unwrap_or(false)
+                    });
+                    if !valid {
+                        row.ready.set(false);
+                        result.reason = "stored_invalid";
+                        result.pending = true;
+                        continue;
+                    }
+                    let Some(changed) = sync_contents(
+                        app,
+                        key,
+                        frame.block,
+                        &frame.geometry,
+                        &frame.text,
+                        &row.reveal,
+                    ) else {
+                        row.ready.set(false);
+                        result.reason = "stored_contents";
+                        result.pending = true;
+                        continue;
+                    };
+                    result.changed |= changed;
+                    result.animating |= row.reveal.is_animating();
+                    row.ready.set(!row.reveal.is_animating());
+                    row.settled_at.set(row.ready.get().then_some(epochs));
                     continue;
-                };
-                result.changed |= changed;
-                result.animating |= row.reveal.is_animating();
-                row.ready.set(!row.reveal.is_animating());
-                row.settled_at.set(row.ready.get().then_some(epochs));
-                continue;
-            }
-            let Some(frame) = &row.frame else {
-                row.ready.set(false);
-                result.animating = true;
-                continue;
+                }
             };
             if frame
                 .live
@@ -294,7 +299,11 @@ impl MountedReveals {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent observation of one sync pass that the frame loop reads separately"
+)]
 pub struct RevealSync {
     pub reason: &'static str,
     pub frontier_changed: bool,
@@ -308,16 +317,15 @@ fn unique_key(tree: &UiTree, root: NodeId, key: &str) -> Option<NodeId> {
 }
 
 fn unique_hash(tree: &UiTree, root: NodeId, hash: aqua_ui::tree::KeyHash) -> Option<NodeId> {
-    match tree.sole_node_with_key(hash) {
-        Some(node) => is_within(tree, node, root).then_some(node),
-        None => {
-            let mut within = tree
-                .nodes_with_key(hash)
-                .into_iter()
-                .filter(|node| is_within(tree, *node, root));
-            let found = within.next()?;
-            within.next().is_none().then_some(found)
-        }
+    if let Some(node) = tree.sole_node_with_key(hash) {
+        is_within(tree, node, root).then_some(node)
+    } else {
+        let mut within = tree
+            .nodes_with_key(hash)
+            .into_iter()
+            .filter(|node| is_within(tree, *node, root));
+        let found = within.next()?;
+        within.next().is_none().then_some(found)
     }
 }
 
@@ -332,18 +340,19 @@ fn is_within(tree: &UiTree, node: NodeId, root: NodeId) -> bool {
     false
 }
 
-pub struct GeometryFrame<'a> {
-    pub scope: &'a PresentationScope,
-    pub row: &'a RowKey,
-    pub row_version: u64,
-    pub block: usize,
-    pub proof: &'a ProjectedProof,
-    pub geometry: &'a ProjectedGeometry,
-    pub text: &'a [ProjectedRevealText],
-    pub reveal: &'a PreparedReveal,
+#[derive(Clone, Copy)]
+struct GeometryFrame<'a> {
+    scope: &'a PresentationScope,
+    row: &'a RowKey,
+    row_version: u64,
+    block: usize,
+    proof: &'a ProjectedProof,
+    geometry: &'a ProjectedGeometry,
+    text: &'a [ProjectedRevealText],
+    reveal: &'a PreparedReveal,
 }
 
-pub fn sync_geometry(
+fn sync_geometry(
     app: &mut aqua::UiApp,
     conversation: &Conversation,
     core: &Core,

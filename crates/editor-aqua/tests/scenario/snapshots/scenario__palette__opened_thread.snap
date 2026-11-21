@@ -1,0 +1,41 @@
+---
+source: crates/editor-aqua/tests/scenario/palette.rs
+expression: "editor.settle(\"the chosen thread to open\", |view|\n{\n    view.find(Role::Dialog, \"Search threads and commands\").is_none() &&\n    view.shows(\"In the parser module.\")\n})"
+---
+Group "Artisan Editor" [focused]
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Parser rewrite" [selected]
+        Label "Parser rewrite"
+    ListItem
+      Button "Greeting"
+        Label "Greeting"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Parser rewrite"
+    Group "Project / Parser rewrite"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Parser rewrite"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  List
+    ListItem
+      Group "You"
+        Label "Where is the lexer?"
+    ListItem
+      Group "Assistant"
+        Label "In the parser module."
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message"
+  Button "Send message" [disabled]

@@ -1,15 +1,176 @@
+use crate::awareness::{AwarenessError, nullable, object, optional_record_schema, record_schema};
+use crate::forge::{self, ForgeError};
+use crate::server::Failure;
 use crate::{Tool, awareness};
-use anyhow::{Context, Result, ensure};
-use artisan_api::{ThreadId, now};
+use artisan_api::ThreadId;
 use forge_runs::Hub;
 use forge_store::coordination::{
-    ClaimState, Content, Intent, MessageState, Query, Record, Resource, Update, WatchState,
-    WorkState,
+    ClaimState, Content, CoordinationFailure, Intent, MessageState, Query, Record, Resource,
+    Update, WatchState, WorkState,
 };
 use serde_json::{Value, json};
 use std::time::Duration;
 
-pub fn resource_schema() -> Value {
+#[derive(Debug, thiserror::Error)]
+pub enum ListRecordsError {
+    #[error("list a page of coordination records")]
+    Forge(#[source] forge_store::coordination::CoordinationListError),
+    #[error("read the next page's cursor")]
+    Cursor(#[source] serde_json::Error),
+}
+
+impl ListRecordsError {
+    pub(crate) fn failure(&self) -> Failure<'_> {
+        match self {
+            Self::Forge(source) => forge::coordination(&source.cause, self),
+            Self::Cursor(_) => Failure::Broken,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CoordinationError {
+    #[error("read {field}")]
+    Arguments {
+        field: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{field} is required")]
+    Missing { field: &'static str },
+    #[error("{step}")]
+    Forge {
+        step: &'static str,
+        #[source]
+        source: Box<ForgeError>,
+    },
+    #[error("read the cursor")]
+    Cursor(#[source] serde_json::Error),
+    #[error("write the next cursor")]
+    NextCursor(#[source] serde_json::Error),
+    #[error("list the coordination records")]
+    Records(#[source] ListRecordsError),
+    #[error("resolve the scope or worker")]
+    Discovery(#[source] AwarenessError),
+    #[error("claim lifetime must be 1..86400 seconds, not {seconds}")]
+    Lifetime { seconds: u64 },
+    #[error("claim {claim} not found")]
+    ClaimMissing { claim: String },
+    #[error("record {record} is not a claim")]
+    NotAClaim { record: String },
+    #[error("thread {thread} must publish work first")]
+    NoWork { thread: ThreadId },
+    #[error("normalize a resource")]
+    Resource(#[source] CoordinationFailure),
+}
+
+impl CoordinationError {
+    pub(crate) fn failure(&self) -> Failure<'_> {
+        match self {
+            Self::Forge { source, .. } => source.failure(),
+            Self::Resource(source) => forge::coordination(source, self),
+            Self::Records(error) => error.failure(),
+            Self::Discovery(error) => error.failure(),
+            Self::Arguments { .. }
+            | Self::Missing { .. }
+            | Self::Cursor(_)
+            | Self::NextCursor(_)
+            | Self::Lifetime { .. }
+            | Self::ClaimMissing { .. }
+            | Self::NotAClaim { .. }
+            | Self::NoWork { .. } => Failure::Broken,
+        }
+    }
+}
+
+type Result<T, E = CoordinationError> = std::result::Result<T, E>;
+
+fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> CoordinationError {
+    move |source| CoordinationError::Forge {
+        step,
+        source: Box::new(source.into()),
+    }
+}
+
+fn field<T: serde::de::DeserializeOwned>(
+    args: &Value,
+    name: &'static str,
+    default: Option<Value>,
+) -> Result<T> {
+    let value = args
+        .get(name)
+        .cloned()
+        .or(default)
+        .ok_or(CoordinationError::Missing { field: name })?;
+    serde_json::from_value(value).map_err(|source| CoordinationError::Arguments {
+        field: name,
+        source,
+    })
+}
+
+fn record_output() -> Value {
+    object(&["record"], json!({"record":record_schema()}))
+}
+
+fn work_output() -> Value {
+    object(
+        &["thread", "published", "record", "dependencies"],
+        json!({"thread":{"type":"string"},"published":{"type":"boolean"},"record":optional_record_schema(),"dependencies":{"type":"array","items":object(&["thread","ready","revision","state"], json!({"thread":{"type":"string"},"ready":{"type":"boolean"},"revision":nullable("integer"),"state":nullable("string")}))}}),
+    )
+}
+
+fn claim_output() -> Value {
+    object(
+        &[
+            "advisory",
+            "record",
+            "overlaps_truncated",
+            "overlaps",
+            "next_action",
+        ],
+        json!({"advisory":{"const":true},"record":record_schema(),"overlaps_truncated":{"type":"boolean"},"overlaps":{"type":"array","maxItems":50,"items":record_schema()},"next_action":{"type":"string"}}),
+    )
+}
+
+fn records_output() -> Value {
+    object(
+        &[
+            "advisory",
+            "scope",
+            "records",
+            "next_cursor",
+            "event_cursor",
+        ],
+        json!({"advisory":{"const":true},"scope":object(&["project","host"], json!({"project":nullable("string"),"host":{"const":"current_forge"}})),"records":{"type":"array","items":object(&["active","record"], json!({"active":{"type":"boolean"},"record":record_schema()}))},"next_cursor":nullable("string"),"event_cursor":{"type":"integer","minimum":0}}),
+    )
+}
+
+fn found_record_output() -> Value {
+    object(&["record"], json!({"record":optional_record_schema()}))
+}
+
+fn message_output() -> Value {
+    object(
+        &["record", "delivery_is_not_agreement"],
+        json!({"record":record_schema(),"delivery_is_not_agreement":{"const":true}}),
+    )
+}
+
+fn wait_output() -> Value {
+    object(
+        &["terminal", "record", "timed_out"],
+        json!({"terminal":{"type":"boolean"},"record":record_schema(),"timed_out":{"type":"boolean"}}),
+    )
+}
+
+fn events_output() -> Value {
+    object(
+        &["next_cursor", "changes"],
+        json!({"next_cursor":{"type":"integer","minimum":0},"changes":{"type":"array","items":object(&["seq","record_id","owner","project","kind","revision","created_at"], json!({"seq":{"type":"integer","minimum":0},"record_id":{"type":"string"},"owner":{"type":"string"},"project":{"type":"string"},"kind":{"type":"string"},"revision":{"type":"integer"},"created_at":{"type":"integer"}}))}}),
+    )
+}
+
+pub(crate) fn resource_schema() -> Value {
     json!({"type":"array","maxItems":64,"items":{"oneOf":[{"type":"object","properties":{"kind":{"const":"path"},"worktree":{"type":"string","description":"Absolute checkout root on this Forge host."},"path":{"type":"string","description":"Absolute path or path relative to that worktree."},"recursive":{"type":"boolean","default":false}},"required":["kind","worktree","path"],"additionalProperties":false},{"type":"object","properties":{"kind":{"const":"named"},"namespace":{"type":"string","description":"For example build, deployment, browser, or port."},"key":{"type":"string","description":"Stable shared resource identity on this Forge."}},"required":["kind","namespace","key"],"additionalProperties":false}]}})
 }
 
@@ -24,13 +185,14 @@ fn list_properties() -> Value {
     clippy::too_many_lines,
     reason = "declarative coordination tool catalog"
 )]
-pub fn tools() -> Vec<Tool> {
+pub(crate) fn tools() -> Vec<Tool> {
     vec![
         awareness::tool(
             "publish_work",
             "Publish this worker's objective, exact worktree, intended resources, dependencies, state, validation evidence, and handoff summary. Use at task start and when scope or readiness changes. Advisory only; updates require the revision from get_work.",
             || json!({"objective":{"type":"string","maxLength":4096},"worktree":{"type":"string"},"state":{"type":"string","enum":["running","waiting","blocked","completed","failed","cancelled"]},"resources":resource_schema(),"dependencies":{"type":"array","items":{"type":"string"},"maxItems":64,"description":"Other thread IDs with published work; cycles are rejected."},"summary":{"type":"string","maxLength":8192},"evidence":{"type":"array","items":{"type":"string"},"maxItems":32},"revision":{"type":"integer","minimum":0}}),
             &["objective", "worktree", "state"],
+            record_output,
             false,
         ),
         awareness::tool(
@@ -38,6 +200,7 @@ pub fn tools() -> Vec<Tool> {
             "Inspect a worker's published scope, dependency readiness, validation evidence, and current revision. Missing published work is reported explicitly. Defaults to this thread.",
             || json!({"thread":{"type":"string"}}),
             &[],
+            work_output,
             true,
         ),
         awareness::tool(
@@ -45,6 +208,7 @@ pub fn tools() -> Vec<Tool> {
             "Declare advisory ownership of files, directories, builds, deployments, browser sessions, or other resources. Use before overlapping work. Overlaps are returned for negotiation; claims never block edits or reject competing declarations. Default lifetime is one hour.",
             || json!({"resources":resource_schema(),"purpose":{"type":"string","maxLength":4096},"lifetime_seconds":{"type":"integer","minimum":1,"maximum":86400,"default":3600}}),
             &["resources", "purpose"],
+            claim_output,
             false,
         ),
         awareness::tool(
@@ -56,6 +220,7 @@ pub fn tools() -> Vec<Tool> {
                 p
             },
             &[],
+            records_output,
             true,
         ),
         awareness::tool(
@@ -67,6 +232,7 @@ pub fn tools() -> Vec<Tool> {
                 p
             },
             &["id", "revision", "lifetime_seconds"],
+            record_output,
             false,
         ),
         awareness::tool(
@@ -74,6 +240,7 @@ pub fn tools() -> Vec<Tool> {
             "Release your advisory resource claim after work or an agreed handoff. Only the claimant may release it; other workers negotiate through request_resource_handoff.",
             record_properties,
             &["id", "revision"],
+            record_output,
             false,
         ),
         awareness::tool(
@@ -81,6 +248,7 @@ pub fn tools() -> Vec<Tool> {
             "Ask an advisory claimant to release or sequence work on their resources. Delivers an acknowledged coordination request to its owner; it never transfers or revokes a claim automatically.",
             || json!({"claim":{"type":"string"},"text":{"type":"string","maxLength":16384}}),
             &["claim", "text"],
+            record_output,
             false,
         ),
         awareness::tool(
@@ -88,6 +256,7 @@ pub fn tools() -> Vec<Tool> {
             "Send a peer worker a boundary, dependency, handoff, or information request and track its acknowledgment separately from delivery. Starts or steers the recipient's thread. Use id to retry an existing prepared request without duplicating delivery.",
             || json!({"recipient":{"type":"string"},"intent":{"type":"string","enum":["information","boundary","dependency","handoff"]},"text":{"type":"string","maxLength":16384},"id":{"type":"string","description":"Retry this existing request; omit to create one."}}),
             &[],
+            message_output,
             false,
         ),
         awareness::tool(
@@ -95,6 +264,7 @@ pub fn tools() -> Vec<Tool> {
             "Read incoming or sent coordination requests and their delivery, acknowledgment, and resolution states. Defaults to this worker's inbox; reading does not acknowledge an agreement.",
             || json!({"direction":{"type":"string","enum":["incoming","sent"],"default":"incoming"},"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}}),
             &[],
+            records_output,
             true,
         ),
         awareness::tool(
@@ -107,6 +277,7 @@ pub fn tools() -> Vec<Tool> {
                 p
             },
             &["id", "revision", "state"],
+            record_output,
             false,
         ),
         awareness::tool(
@@ -114,6 +285,7 @@ pub fn tools() -> Vec<Tool> {
             "Read a claim, work declaration, coordination request, or watch by stable ID, including its revision for safe updates.",
             || json!({"id":{"type":"string"}}),
             &["id"],
+            found_record_output,
             true,
         ),
         awareness::tool(
@@ -121,6 +293,7 @@ pub fn tools() -> Vec<Tool> {
             "Subscribe this thread to another worker's terminal work result. Completion, failure, or cancellation sends a notification even after this turn ends or Forge restarts. Published work is required; after_revision avoids stale completions.",
             || json!({"thread":{"type":"string"},"after_revision":{"type":"integer","minimum":0}}),
             &["thread"],
+            record_output,
             false,
         ),
         awareness::tool(
@@ -128,6 +301,7 @@ pub fn tools() -> Vec<Tool> {
             "Cancel your pending dependency notification without changing the watched worker's work.",
             record_properties,
             &["id", "revision"],
+            record_output,
             false,
         ),
         awareness::tool(
@@ -135,6 +309,7 @@ pub fn tools() -> Vec<Tool> {
             "Wait briefly for published work to complete, fail, or be cancelled. Returns current readiness on timeout; use watch_work for a durable background notification while doing independent work.",
             || json!({"thread":{"type":"string"},"after_revision":{"type":"integer","minimum":0},"timeout_seconds":{"type":"integer","minimum":0,"maximum":30,"default":20}}),
             &["thread"],
+            wait_output,
             true,
         ),
         awareness::tool(
@@ -142,37 +317,46 @@ pub fn tools() -> Vec<Tool> {
             "Read durable coordination changes after an event cursor. Use event_cursor from list_resource_claims or list_coordination_messages to avoid missing changes between observation and waiting.",
             || json!({"after":{"type":"integer","minimum":0},"scope":{"type":"string","enum":["project","host"]},"project":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}}),
             &["after"],
+            events_output,
             true,
         ),
     ]
 }
 
-pub async fn all_records(hub: &Hub, mut query: Query) -> Result<Vec<Record>> {
+pub(crate) async fn all_records(
+    hub: &Hub,
+    mut query: Query,
+) -> Result<Vec<Record>, ListRecordsError> {
     let mut records = Vec::new();
     loop {
         query.limit = 200;
-        let page = hub.store().coordination_list(query.clone()).await?;
+        let page = hub
+            .store()
+            .coordination_list(query.clone())
+            .await
+            .map_err(ListRecordsError::Forge)?;
         records.extend(page.records);
         match page.next_cursor {
-            Some(cursor) => query.cursor = Some(serde_json::from_str(&cursor)?),
+            Some(cursor) => {
+                query.cursor =
+                    Some(serde_json::from_str(&cursor).map_err(ListRecordsError::Cursor)?);
+            }
             None => break,
         }
     }
     Ok(records)
 }
 
-fn string(args: &Value, key: &str) -> Result<String> {
-    Ok(args
-        .get(key)
-        .and_then(Value::as_str)
-        .with_context(|| format!("{key} is required"))?
-        .to_owned())
+fn string(args: &Value, key: &'static str) -> Result<String> {
+    field(args, key, None)
 }
 
 fn revision(args: &Value) -> Result<u64> {
-    args.get("revision")
-        .and_then(Value::as_u64)
-        .context("current record revision is required")
+    field(args, "revision", None)
+}
+
+fn optional<T: serde::de::DeserializeOwned>(args: &Value, name: &'static str) -> Result<Option<T>> {
+    field(args, name, Some(Value::Null))
 }
 
 async fn send(
@@ -198,11 +382,19 @@ async fn send(
             },
             None,
         )
-        .await?;
-    hub.deliver_coordination_message(caller, record.id).await
+        .await
+        .map_err(forge("prepare the coordination message"))?;
+    hub.deliver_coordination_message(caller, record.id)
+        .await
+        .map_err(forge("deliver the coordination message"))
 }
 
-pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Result<Option<Value>> {
+pub(crate) async fn call(
+    hub: &Hub,
+    caller: &ThreadId,
+    name: &str,
+    args: Value,
+) -> Result<Option<Value>> {
     let value = match name {
         "publish_work" => publish_work(hub, caller, name, args).await?,
         "get_work" => get_work(hub, caller, name, args).await?,
@@ -231,25 +423,13 @@ async fn publish_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) ->
         let content = Content::Work {
             objective: string(&args, "objective")?,
             worktree: string(&args, "worktree")?,
-            state: serde_json::from_value(args.get("state").cloned().context("state required")?)?,
-            resources: serde_json::from_value(
-                args.get("resources").cloned().unwrap_or_else(|| json!([])),
-            )?,
-            dependencies: serde_json::from_value(
-                args.get("dependencies")
-                    .cloned()
-                    .unwrap_or_else(|| json!([])),
-            )?,
-            summary: args
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            evidence: serde_json::from_value(
-                args.get("evidence").cloned().unwrap_or_else(|| json!([])),
-            )?,
+            state: field(&args, "state", None)?,
+            resources: field(&args, "resources", Some(json!([])))?,
+            dependencies: field(&args, "dependencies", Some(json!([])))?,
+            summary: optional::<String>(&args, "summary")?.unwrap_or_default(),
+            evidence: field(&args, "evidence", Some(json!([])))?,
         };
-        json!({"record":store.coordination_put(caller.clone(),None,content,args.get("revision").and_then(Value::as_u64)).await?})
+        json!({"record":store.coordination_put(caller.clone(),None,content,optional::<u64>(&args, "revision")?).await.map_err(forge("publish the work"))?})
     };
     Ok(value)
 }
@@ -257,11 +437,12 @@ async fn publish_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) ->
 async fn get_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        let thread = args
-            .get("thread")
-            .and_then(Value::as_str)
-            .map_or_else(|| caller.clone(), ThreadId::from);
-        let record = store.coordination_get(format!("work:{thread}")).await?;
+        let thread =
+            optional::<String>(&args, "thread")?.map_or_else(|| caller.clone(), ThreadId::from);
+        let record = store
+            .coordination_get(format!("work:{thread}"))
+            .await
+            .map_err(forge("load the published work"))?;
         let mut dependencies = Vec::new();
         if let Some(Record {
             content:
@@ -273,7 +454,10 @@ async fn get_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Res
         }) = &record
         {
             for target in targets {
-                let work = store.coordination_get(format!("work:{target}")).await?;
+                let work = store
+                    .coordination_get(format!("work:{target}"))
+                    .await
+                    .map_err(forge("load a dependency's published work"))?;
                 let ready = work.as_ref().is_some_and(|r| {
                     matches!(
                         r.content,
@@ -294,19 +478,11 @@ async fn get_work(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Res
 async fn claim_resources(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        let seconds = args
-            .get("lifetime_seconds")
-            .and_then(Value::as_u64)
-            .unwrap_or(3600);
-        ensure!(
-            (1..=86400).contains(&seconds),
-            "claim lifetime must be 1..86400 seconds"
-        );
-        let resources: Vec<Resource> = serde_json::from_value(
-            args.get("resources")
-                .cloned()
-                .context("resources required")?,
-        )?;
+        let seconds = optional::<u64>(&args, "lifetime_seconds")?.unwrap_or(3600);
+        if !(1..=86400).contains(&seconds) {
+            return Err(CoordinationError::Lifetime { seconds });
+        }
+        let resources: Vec<Resource> = field(&args, "resources", None)?;
         let record = store
             .coordination_put(
                 caller.clone(),
@@ -315,15 +491,22 @@ async fn claim_resources(hub: &Hub, caller: &ThreadId, _name: &str, args: Value)
                     resources,
                     purpose: string(&args, "purpose")?,
                     state: ClaimState::Active,
-                    expires_at: now() + i64::try_from(seconds)? * 1000,
+                    expires_at: hub.store().now()
+                        + i64::try_from(seconds)
+                            .expect("invariant: a claim lifetime is at most 86400 seconds")
+                            * 1000,
                 },
                 None,
             )
-            .await?;
+            .await
+            .map_err(forge("record the claim"))?;
         let Content::Claim { resources, .. } = &record.content else {
-            anyhow::bail!("store returned a non-claim record");
+            unreachable!(
+                "invariant: the store answers a claim with claim {}",
+                record.id
+            );
         };
-        let mut conflicts:Vec<_>=all_records(hub,Query { kind:Some("claim".to_owned()),..Default::default() }).await?.into_iter().filter(|other| other.owner!=*caller && other.active_claim(now()) && matches!(&other.content,Content::Claim { resources:others,.. } if others.iter().any(|a|resources.iter().any(|b|a.overlaps(b))))).collect();
+        let mut conflicts:Vec<_>=all_records(hub,Query { kind:Some("claim".to_owned()),..Default::default() }).await.map_err(CoordinationError::Records)?.into_iter().filter(|other| other.owner!=*caller && other.active_claim(hub.store().now()) && matches!(&other.content,Content::Claim { resources:others,.. } if others.iter().any(|a|resources.iter().any(|b|a.overlaps(b))))).collect();
         let overlaps_truncated = conflicts.len() > 50;
         conflicts.truncate(50);
         json!({"advisory":true,"record":record,"overlaps_truncated":overlaps_truncated,"overlaps":conflicts,"next_action":"coordinate overlapping work; claims never block filesystem writes"})
@@ -335,24 +518,20 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
     let store = hub.store();
     let value = {
         let incoming = name == "list_coordination_messages"
-            && args
-                .get("direction")
-                .and_then(Value::as_str)
+            && optional::<String>(&args, "direction")?
+                .as_deref()
                 .unwrap_or("incoming")
                 == "incoming";
         let project = match name {
             "list_coordination_messages" => None,
-            _ => {
-                awareness::project_scope(
-                    hub,
-                    caller,
-                    args.get("scope").and_then(Value::as_str),
-                    args.get("project")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                )
-                .await?
-            }
+            _ => awareness::project_scope(
+                hub,
+                caller,
+                optional::<String>(&args, "scope")?.as_deref(),
+                optional::<String>(&args, "project")?,
+            )
+            .await
+            .map_err(CoordinationError::Discovery)?,
         };
         let query = Query {
             project: project.clone(),
@@ -365,32 +544,28 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
             ),
             owner: match name {
                 "list_coordination_messages" if !incoming => Some(caller.clone()),
-                _ => args
-                    .get("owner")
-                    .and_then(Value::as_str)
-                    .map(ThreadId::from),
+                _ => optional::<String>(&args, "owner")?.map(ThreadId::from),
             },
             recipient: incoming.then(|| caller.clone()),
-            cursor: args
-                .get("cursor")
-                .and_then(Value::as_str)
+            cursor: optional::<String>(&args, "cursor")?
+                .as_deref()
                 .map(serde_json::from_str)
-                .transpose()?,
-            limit: args
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(30)
-                .clamp(1, 200) as u32,
+                .transpose()
+                .map_err(CoordinationError::Cursor)?,
+            limit: optional::<u64>(&args, "limit")?.unwrap_or(30).clamp(1, 200) as u32,
         };
-        let resources: Vec<Resource> =
-            serde_json::from_value(args.get("resources").cloned().unwrap_or_else(|| json!([])))?;
+        let resources: Vec<Resource> = field(&args, "resources", Some(json!([])))?;
         let resources = resources
             .into_iter()
             .map(Resource::normalize)
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CoordinationError::Resource)?;
         if resources.is_empty() {
-            let page = store.coordination_list(query).await?;
-            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"records":page.records.into_iter().map(|record|json!({"active":record.active_claim(now()),"record":record})).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"event_cursor":page.event_cursor})
+            let page = store
+                .coordination_list(query)
+                .await
+                .map_err(forge("list the coordination records"))?;
+            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"records":page.records.into_iter().map(|record|json!({"active":record.active_claim(hub.store().now()),"record":record})).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"event_cursor":page.event_cursor})
         } else {
             let limit = query.limit as usize;
             let event_cursor = store
@@ -398,9 +573,10 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
                     limit: 1,
                     ..query.clone()
                 })
-                .await?
+                .await
+                .map_err(forge("read the event cursor"))?
                 .event_cursor;
-            let mut records=all_records(hub,query).await?.into_iter().filter(|r|matches!(&r.content,Content::Claim { resources:others,.. } if others.iter().any(|a|resources.iter().any(|b|a.overlaps(b))))).collect::<Vec<_>>();
+            let mut records=all_records(hub,query).await.map_err(CoordinationError::Records)?.into_iter().filter(|r|matches!(&r.content,Content::Claim { resources:others,.. } if others.iter().any(|a|resources.iter().any(|b|a.overlaps(b))))).collect::<Vec<_>>();
             let has_more = records.len() > limit;
             records.truncate(limit);
             let next_cursor = if has_more {
@@ -412,11 +588,12 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
                             id: record.id.clone(),
                         })
                     })
-                    .transpose()?
+                    .transpose()
+                    .map_err(CoordinationError::NextCursor)?
             } else {
                 None
             };
-            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"event_cursor":event_cursor,"records":records.into_iter().map(|record|json!({"active":record.active_claim(now()),"record":record})).collect::<Vec<_>>(),"next_cursor":next_cursor})
+            json!({"advisory":true,"scope":{"project":project,"host":"current_forge"},"event_cursor":event_cursor,"records":records.into_iter().map(|record|json!({"active":record.active_claim(hub.store().now()),"record":record})).collect::<Vec<_>>(),"next_cursor":next_cursor})
         }
     };
     Ok(value)
@@ -424,7 +601,11 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
 
 async fn get_record(hub: &Hub, _caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
-    let value = { json!({"record":store.coordination_get(string(&args,"id")?).await?}) };
+    let record = store
+        .coordination_get(string(&args, "id")?)
+        .await
+        .map_err(forge("load the coordination record"))?;
+    let value = json!({ "record": record });
     Ok(value)
 }
 
@@ -437,15 +618,18 @@ async fn transition(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Re
                 state: WatchState::Cancelled,
                 outcome: "cancelled by subscriber".to_owned(),
             },
-            _ => Update::RenewClaim {
-                seconds: u32::try_from(
-                    args.get("lifetime_seconds")
-                        .and_then(Value::as_u64)
-                        .context("lifetime_seconds required")?,
-                )?,
-            },
+            _ => {
+                let seconds: u64 = field(&args, "lifetime_seconds", None)?;
+                if !(1..=86400).contains(&seconds) {
+                    return Err(CoordinationError::Lifetime { seconds });
+                }
+                Update::RenewClaim {
+                    seconds: u32::try_from(seconds)
+                        .expect("invariant: a claim lifetime is at most 86400 seconds"),
+                }
+            }
         };
-        json!({"record":store.coordination_update(caller.clone(),string(&args,"id")?,revision(&args)?,update).await?})
+        json!({"record":store.coordination_update(caller.clone(),string(&args,"id")?,revision(&args)?,update).await.map_err(forge("update the coordination record"))?})
     };
     Ok(value)
 }
@@ -453,14 +637,15 @@ async fn transition(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> Re
 async fn request_handoff(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
+        let id = string(&args, "claim")?;
         let claim = store
-            .coordination_get(string(&args, "claim")?)
-            .await?
-            .context("claim not found")?;
-        ensure!(
-            matches!(claim.content, Content::Claim { .. }),
-            "record is not a claim"
-        );
+            .coordination_get(id.clone())
+            .await
+            .map_err(forge("load the claim"))?
+            .ok_or(CoordinationError::ClaimMissing { claim: id })?;
+        if !matches!(claim.content, Content::Claim { .. }) {
+            return Err(CoordinationError::NotAClaim { record: claim.id });
+        }
         json!({"record":send(hub,caller,claim.owner,Intent::Handoff,format!("Request handoff for advisory claim {} revision {}.\n\n{}",claim.id,claim.revision,string(&args,"text")?)).await?})
     };
     Ok(value)
@@ -468,21 +653,19 @@ async fn request_handoff(hub: &Hub, caller: &ThreadId, _name: &str, args: Value)
 
 async fn send_message(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let value = {
-        let record = match args.get("id").and_then(Value::as_str) {
-            Some(id) => {
-                hub.deliver_coordination_message(caller, id.to_owned())
-                    .await?
-            }
+        let record = match optional::<String>(&args, "id")? {
+            Some(id) => hub
+                .deliver_coordination_message(caller, id)
+                .await
+                .map_err(forge("deliver the coordination message"))?,
             None => {
                 send(
                     hub,
                     caller,
-                    awareness::resolve_agent(hub, &string(&args, "recipient")?).await?,
-                    serde_json::from_value(
-                        args.get("intent")
-                            .cloned()
-                            .unwrap_or_else(|| json!("information")),
-                    )?,
+                    awareness::resolve_agent(hub, &string(&args, "recipient")?)
+                        .await
+                        .map_err(CoordinationError::Discovery)?,
+                    field(&args, "intent", Some(json!("information")))?,
                     string(&args, "text")?,
                 )
                 .await?
@@ -495,7 +678,7 @@ async fn send_message(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) ->
 
 async fn acknowledge(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let value = {
-        json!({"record":hub.acknowledge_coordination(caller,string(&args,"id")?,revision(&args)?,serde_json::from_value(args.get("state").cloned().context("state required")?)?,args.get("reply").and_then(Value::as_str).map(str::to_owned)).await?})
+        json!({"record":hub.acknowledge_coordination(caller,string(&args,"id")?,revision(&args)?,field(&args, "state", None)?,optional::<String>(&args, "reply")?).await.map_err(forge("acknowledge the coordination message"))?})
     };
     Ok(value)
 }
@@ -503,7 +686,7 @@ async fn acknowledge(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> 
 async fn watch(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        json!({"record":store.coordination_put(caller.clone(),None,Content::Watch { target:ThreadId::from(string(&args,"thread")?),state:WatchState::Pending,after_revision:args.get("after_revision").and_then(Value::as_u64).unwrap_or(0),outcome:None },None).await?})
+        json!({"record":store.coordination_put(caller.clone(),None,Content::Watch { target:ThreadId::from(string(&args,"thread")?),state:WatchState::Pending,after_revision:optional::<u64>(&args, "after_revision")?.unwrap_or(0),outcome:None },None).await.map_err(forge("record the watch"))?})
     };
     Ok(value)
 }
@@ -512,21 +695,19 @@ async fn wait(hub: &Hub, _caller: &ThreadId, _name: &str, args: Value) -> Result
     let store = hub.store();
     let value = {
         let target = ThreadId::from(string(&args, "thread")?);
-        let after = args
-            .get("after_revision")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let timeout = args
-            .get("timeout_seconds")
-            .and_then(Value::as_u64)
+        let after = optional::<u64>(&args, "after_revision")?.unwrap_or(0);
+        let timeout = optional::<u64>(&args, "timeout_seconds")?
             .unwrap_or(20)
             .min(30);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
         loop {
             let work = store
                 .coordination_get(format!("work:{target}"))
-                .await?
-                .context("target must publish work first")?;
+                .await
+                .map_err(forge("load the watched work"))?
+                .ok_or_else(|| CoordinationError::NoWork {
+                    thread: target.clone(),
+                })?;
             let terminal = matches!(&work.content,Content::Work { state,.. } if state.terminal())
                 && work.revision > after;
             if terminal || tokio::time::Instant::now() >= deadline {
@@ -541,29 +722,25 @@ async fn wait(hub: &Hub, _caller: &ThreadId, _name: &str, args: Value) -> Result
 async fn events(hub: &Hub, caller: &ThreadId, _name: &str, args: Value) -> Result<Value> {
     let store = hub.store();
     let value = {
-        let after = args
-            .get("after")
-            .and_then(Value::as_u64)
-            .context("event cursor after is required")?;
+        let after: u64 = field(&args, "after", None)?;
         let project = awareness::project_scope(
             hub,
             caller,
-            args.get("scope").and_then(Value::as_str),
-            args.get("project")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            optional::<String>(&args, "scope")?.as_deref(),
+            optional::<String>(&args, "project")?,
         )
-        .await?;
+        .await
+        .map_err(CoordinationError::Discovery)?;
         let changes = store
             .coordination_changes(
                 after,
                 project,
-                args.get("limit")
-                    .and_then(Value::as_u64)
+                optional::<u64>(&args, "limit")?
                     .unwrap_or(100)
                     .clamp(1, 200) as u32,
             )
-            .await?;
+            .await
+            .map_err(forge("read the coordination events"))?;
         json!({"next_cursor":changes.last().map_or(after,|change|change.seq),"changes":changes})
     };
     Ok(value)

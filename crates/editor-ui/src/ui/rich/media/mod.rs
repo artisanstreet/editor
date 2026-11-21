@@ -3,9 +3,9 @@ use serde::Deserialize;
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
 pub(crate) struct SizeHint {
     #[serde(default)]
-    pub(crate) width: Option<f32>,
+    width: Option<f32>,
     #[serde(default)]
-    pub(crate) height: Option<f32>,
+    height: Option<f32>,
 }
 
 impl SizeHint {
@@ -17,6 +17,20 @@ impl SizeHint {
             _ => None,
         }
     }
+}
+
+pub(crate) fn opens_context_menu(key: &aqua_core::KeyEvent) -> bool {
+    match key.key {
+        aqua_core::Key::Named(aqua_core::NamedKey::ContextMenu) => key.modifiers.is_empty(),
+        aqua_core::Key::Named(aqua_core::NamedKey::Function(10)) => {
+            key.modifiers == aqua_core::Modifiers::SHIFT
+        }
+        aqua_core::Key::Char(_) | aqua_core::Key::Named(_) => false,
+    }
+}
+
+pub(crate) fn menu_anchor(bounds: aqua_core::Rect) -> aqua_core::Point {
+    aqua_core::Point::new(bounds.x, bounds.y)
 }
 
 pub(crate) mod audio;

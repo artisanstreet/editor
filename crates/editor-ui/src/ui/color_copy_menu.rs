@@ -68,11 +68,11 @@ impl Panel {
                 (CopyKind::Alternative, _) => icon,
             };
             let text = entry.text.clone();
-            let select_alive = self.alive.clone();
-            let select_pending = self.pending_close.clone();
-            let select_effect = self.effect.clone();
-            let hover_alive = self.alive.clone();
-            let hover_effect = self.effect.clone();
+            let select_alive = Rc::clone(&self.alive);
+            let select_pending = Rc::clone(&self.pending_close);
+            let select_effect = Rc::clone(&self.effect);
+            let hover_alive = Rc::clone(&self.alive);
+            let hover_effect = Rc::clone(&self.effect);
             let row = RowItem::new(
                 format!("copy-value-{index}"),
                 theme,
@@ -107,9 +107,9 @@ impl Panel {
     }
 
     fn popover(&self, viewport: aqua_core::Size) -> Popover {
-        let dismiss_pending = self.pending_close.clone();
-        let dismiss_alive = self.alive.clone();
-        let dismiss_effect = self.effect.clone();
+        let dismiss_pending = Rc::clone(&self.pending_close);
+        let dismiss_alive = Rc::clone(&self.alive);
+        let dismiss_effect = Rc::clone(&self.effect);
         Popover::new(
             "copy-menu",
             "Copy value",
@@ -134,7 +134,21 @@ pub struct ColorCopyMenuHost {
     now: f64,
 }
 
+impl std::fmt::Debug for ColorCopyMenuHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ColorCopyMenuHost").finish_non_exhaustive()
+    }
+}
+
 impl ColorCopyMenuHost {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "opening the menu needs its owner, colour, search icon, theme, motion and effect sink"
+    )]
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the open colour menu keeps this theme copy to rebuild its rows"
+    )]
     pub fn open(
         app: &mut aqua::UiApp,
         owner: NodeId,
@@ -157,8 +171,8 @@ impl ColorCopyMenuHost {
             pending_close: Rc::new(Cell::new(false)),
         };
         let (element, mut options) = panel.popover(app.viewport()).into_parts();
-        let closed_alive = panel.alive.clone();
-        let closed_effect = panel.effect.clone();
+        let closed_alive = Rc::clone(&panel.alive);
+        let closed_effect = Rc::clone(&panel.effect);
         options.on_close = Some(Rc::new(move |_| {
             if closed_alive.replace(false) {
                 closed_effect(ColorCopyEffect::Dismissed);
@@ -178,7 +192,7 @@ impl ColorCopyMenuHost {
         Ok(Some(host))
     }
 
-    pub fn root(&self, app: &aqua::UiApp) -> Option<NodeId> {
+    fn root(&self, app: &aqua::UiApp) -> Option<NodeId> {
         app.host().popup_root(self.overlay)
     }
 
@@ -191,30 +205,31 @@ impl ColorCopyMenuHost {
         self.panel.alive.set(false);
     }
 
-    pub fn sync(&mut self, app: &mut aqua::UiApp) {
+    pub fn sync(&mut self, app: &mut aqua::UiApp) -> Result<(), String> {
         if self.panel.pending_close.replace(false) && self.is_open(app) {
-            let _ = self.popup.begin_close(app, self.now);
+            self.popup.begin_close(app, self.now)?;
         }
+        Ok(())
     }
 
-    pub fn intercept(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> bool {
+    pub fn intercept(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> Result<bool, String> {
         if self.popup.is_closing() || app.host().service().topmost() != Some(self.overlay) {
-            return false;
+            return Ok(false);
         }
-        if self.popup.request_dismissal(app, event).unwrap_or(false) {
+        if self.popup.request_dismissal(app, event)? {
             (self.panel.effect)(ColorCopyEffect::RequestFrame);
-            return true;
+            return Ok(true);
         }
         let InputEvent::KeyDown(key) = event else {
-            return false;
+            return Ok(false);
         };
         let backwards = match key.key {
             InputKey::Named(NamedKey::Down) => false,
             InputKey::Named(NamedKey::Up) => true,
-            _ => return false,
+            InputKey::Char(_) | InputKey::Named(_) => return Ok(false),
         };
         let Some(root) = self.root(app) else {
-            return false;
+            return Ok(false);
         };
         let entries = self.panel.menu.entries.len();
         let mut stack = vec![root];
@@ -239,24 +254,28 @@ impl ColorCopyMenuHost {
             (Some(index), false) => (index + 1) % entries,
             (None, false) => 0,
         };
-        nodes[next].is_some_and(|node| app.tree_mut().set_focused(Some(node)))
+        Ok(nodes[next].is_some_and(|node| app.tree_mut().set_focused(Some(node))))
     }
 
-    pub fn handle_input(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> bool {
-        if self.intercept(app, event) {
-            return true;
+    pub fn handle_input(
+        &mut self,
+        app: &mut aqua::UiApp,
+        event: &InputEvent,
+    ) -> Result<bool, String> {
+        if self.intercept(app, event)? {
+            return Ok(true);
         }
         if app.host().service().topmost() != Some(self.overlay) {
-            return false;
+            return Ok(false);
         }
         let handled = app.handle_input(event);
-        self.sync(app);
-        handled
+        self.sync(app)?;
+        Ok(handled)
     }
 
     pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<bool, String> {
         self.now = now;
-        self.sync(app);
+        self.sync(app)?;
         if self.popup.is_open(app) {
             self.popup.advance(app, now)?;
         }

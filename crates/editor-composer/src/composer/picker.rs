@@ -1,5 +1,5 @@
-use artisan_api::{EngineConfig, EngineId, Model};
 pub use artisan_api::ModelAxis as Axis;
+use artisan_api::{EngineConfig, EngineId, Model};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TooltipPlacement {
@@ -15,7 +15,7 @@ pub struct TooltipContent {
     pub placement: TooltipPlacement,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct PickerTooltip {
     pending: Option<(TooltipContent, std::time::Instant)>,
     visible: bool,
@@ -29,7 +29,7 @@ impl PickerTooltip {
         self.revision = self.revision.wrapping_add(1);
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         if self.pending.take().is_some() {
             self.visible = false;
             self.revision = self.revision.wrapping_add(1);
@@ -74,11 +74,12 @@ impl PickerTooltip {
             .map(|(content, _)| content)
     }
 
-    pub fn revision(&self) -> u64 {
+    pub(crate) fn revision(&self) -> u64 {
         self.revision
     }
 }
 
+#[derive(Debug)]
 pub struct AxisOption {
     pub label: String,
     pub special: bool,
@@ -106,19 +107,73 @@ pub enum ModelRow {
 
 impl ModelRow {
     #[must_use]
-    pub const fn engine(&self) -> EngineId {
+    pub(crate) const fn engine(&self) -> EngineId {
         match self {
-            Self::Engine(engine) | Self::Gate(engine) => *engine,
-            Self::Group { engine, .. } | Self::Model { engine, .. } => *engine,
+            Self::Engine(engine)
+            | Self::Gate(engine)
+            | Self::Group { engine, .. }
+            | Self::Model { engine, .. } => *engine,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    NotInstalled,
+    Installing,
+    InstallFailed,
+    SignIn,
+    SigningIn,
+    Checking,
+    DiscoveringModels,
+    DiscoveryFailed,
+    NoModels,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateAction {
+    Install,
+    SignIn,
+    OpenSettings,
+}
+
+impl Gate {
+    #[must_use]
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not installed",
+            Self::Installing => "installing",
+            Self::InstallFailed => "the install failed",
+            Self::SignIn => "signed out",
+            Self::SigningIn => "signing in",
+            Self::Checking => "checking sign-in",
+            Self::DiscoveringModels => "discovering models",
+            Self::DiscoveryFailed => "model discovery failed",
+            Self::NoModels => "no models",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn action(self) -> Option<GateAction> {
+        match self {
+            Self::NotInstalled | Self::InstallFailed => Some(GateAction::Install),
+            Self::SignIn => Some(GateAction::SignIn),
+            Self::DiscoveryFailed | Self::NoModels => Some(GateAction::OpenSettings),
+            Self::Installing | Self::SigningIn | Self::Checking | Self::DiscoveringModels => None,
         }
     }
 }
 
 #[must_use]
-pub fn gate(status: &artisan_api::EngineStatus) -> Option<&'static str> {
-    use artisan_api::{InstallState, SignInState};
-    if !matches!(status.install, InstallState::Installed { .. }) {
-        return Some("Not installed");
+pub(crate) fn gate(status: &artisan_api::EngineStatus) -> Option<Gate> {
+    use artisan_api::{DiscoveryState, InstallState, SignInState};
+    match &status.install {
+        InstallState::Installed { .. } => {}
+        InstallState::Absent => return Some(Gate::NotInstalled),
+        InstallState::Downloading { .. } | InstallState::Verifying { .. } => {
+            return Some(Gate::Installing);
+        }
+        InstallState::Failed { .. } => return Some(Gate::InstallFailed),
     }
     match &status.sign_in {
         SignInState::SignedOut
@@ -126,27 +181,25 @@ pub fn gate(status: &artisan_api::EngineStatus) -> Option<&'static str> {
         {
             None
         }
-        SignInState::SignedOut | SignInState::Failed { .. } => Some("Sign in"),
-        SignInState::LoggingIn { .. } => Some("Signing in…"),
-        SignInState::Unknown if status.models.is_empty() => Some("Checking…"),
+        SignInState::SignedOut | SignInState::Failed { .. } => Some(Gate::SignIn),
+        SignInState::LoggingIn { .. } => Some(Gate::SigningIn),
+        SignInState::Unknown if status.models.is_empty() => Some(Gate::Checking),
         SignInState::SignedIn { .. } if status.models.is_empty() => match status.discovery {
-            artisan_api::DiscoveryState::Unknown | artisan_api::DiscoveryState::Refreshing { .. } => Some("Discovering models…"),
-            artisan_api::DiscoveryState::Unavailable { .. } | artisan_api::DiscoveryState::Stale { .. } => Some("Discovery failed"),
-            artisan_api::DiscoveryState::Fresh { .. } => Some("No models"),
+            DiscoveryState::Unknown | DiscoveryState::Refreshing { .. } => {
+                Some(Gate::DiscoveringModels)
+            }
+            DiscoveryState::Unavailable { .. } | DiscoveryState::Stale { .. } => {
+                Some(Gate::DiscoveryFailed)
+            }
+            DiscoveryState::Fresh { .. } => Some(Gate::NoModels),
         },
         SignInState::Unknown | SignInState::SignedIn { .. } => None,
     }
 }
 
 #[must_use]
-pub fn offered_engines(
-    host: &editor_core::HostData,
-    current: Option<EngineId>,
-) -> Vec<&artisan_api::EngineStatus> {
-    host.engines
-        .values()
-        .filter(|status| gate(status).is_none() || current == Some(status.engine))
-        .collect()
+pub(crate) fn offered_engines(host: &editor_core::HostData) -> Vec<&artisan_api::EngineStatus> {
+    host.engines.values().collect()
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
@@ -186,30 +239,44 @@ impl AxisCursor {
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct PickerState {
-    pub show_all_models: bool,
+    show_all_models: bool,
     pub hide_bad_model_options: bool,
-    pub customizations: Vec<artisan_api::ModelCustomization>,
+    pub(crate) customizations: Vec<artisan_api::ModelCustomization>,
     pub menu: Option<Menu>,
-    pub open_serial: u64,
-    pub axis: Option<Axis>,
+    pub(crate) open_serial: u64,
+    pub(crate) axis: Option<Axis>,
     pub axis_cursor: Option<AxisCursor>,
-    pub models: Vec<ModelRow>,
-    pub projects: Vec<artisan_api::ProjectId>,
-    pub project_edges: editor_ui::scroll_edge::ScrollEdges,
-    pub model_edges: editor_ui::scroll_edge::ScrollEdges,
+    pub(crate) models: Vec<ModelRow>,
+    pub(crate) projects: Vec<artisan_api::ProjectId>,
+    pub(crate) project_edges: editor_ui::scroll_edge::ScrollEdges,
+    pub(crate) model_edges: editor_ui::scroll_edge::ScrollEdges,
     groups: std::collections::HashMap<(EngineId, String), bool>,
 }
+
+impl std::fmt::Debug for PickerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PickerState")
+            .field("menu", &self.menu)
+            .field("open_serial", &self.open_serial)
+            .field("axis", &self.axis)
+            .field("models", &self.models.len())
+            .field("projects", &self.projects.len())
+            .finish_non_exhaustive()
+    }
+}
 impl PickerState {
-    pub fn refresh_settings(&mut self, core: &editor_core::Core, host: &editor_core::HostData) {
-        self.show_all_models = core.settings
-            .get(artisan_api::SHOW_ALL_MODELS_KEY).and_then(serde_json::Value::as_bool).unwrap_or(false);
-        self.hide_bad_model_options = core.settings
-            .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY).and_then(serde_json::Value::as_bool).unwrap_or(true);
-        self.customizations = host.setting(artisan_api::MODEL_CUSTOMIZATIONS_KEY)
-            .and_then(|value| artisan_api::model_customizations(value).ok()).unwrap_or_default();
+    pub(crate) fn refresh_settings(
+        &mut self,
+        core: &editor_core::Core,
+        host: &editor_core::HostData,
+    ) {
+        let preferences = core.settings().preferences();
+        self.show_all_models = preferences.show_all_models.on();
+        self.hide_bad_model_options = preferences.hide_bad_model_options.on();
+        self.customizations = host.settings.model_customizations().to_vec();
     }
 
-    pub fn for_target(core: &editor_core::Core, host: &editor_core::HostId) -> Self {
+    pub(crate) fn for_target(core: &editor_core::Core, host: &editor_core::HostId) -> Self {
         let mut picker = Self::default();
         if let Some(host) = core.host(host) {
             picker.refresh_settings(core, host);
@@ -245,12 +312,13 @@ impl PickerState {
                     || matches!(choice.binding, artisan_api::ConfigBinding::Context(_))
             })
             .map(|choice| {
-                let description = match choice.hidden {
-                    true => Some(format!(
+                let description = if choice.hidden {
+                    Some(format!(
                         "Selected option hidden by preference. {}",
                         choice.description.as_deref().unwrap_or_default()
-                    )),
-                    false => choice.description.clone(),
+                    ))
+                } else {
+                    choice.description.clone()
                 };
                 AxisOption {
                     label: choice.label.clone(),
@@ -291,14 +359,14 @@ impl PickerState {
         AxisKeyResult::Moved
     }
 
-    pub fn refresh(&mut self, host: &editor_core::HostData, current: Option<&EngineConfig>) {
+    pub(crate) fn refresh(&mut self, host: &editor_core::HostData, current: Option<&EngineConfig>) {
         if self.menu.is_none() {
             return;
         }
         let current_engine = current.map(|config| config.engine);
         let chosen = current.and_then(|config| config.model.as_deref());
         let mut rows = Vec::new();
-        for status in offered_engines(host, current_engine) {
+        for status in offered_engines(host) {
             self.push_engine_rows(host, status, chosen, current_engine, &mut rows);
         }
         self.models = rows;
@@ -307,14 +375,17 @@ impl PickerState {
             .values()
             .filter(|project| !project.removed && !project.id.is_scratch())
             .collect();
-        let mut activity = std::collections::HashMap::new();
-        for thread in host.threads.values() {
-            let at = thread.activity_at.max(thread.created_at);
-            activity
-                .entry(&thread.project_id)
-                .and_modify(|latest: &mut i64| *latest = (*latest).max(at))
-                .or_insert(at);
-        }
+        let activity =
+            host.threads
+                .values()
+                .fold(std::collections::HashMap::new(), |mut activity, thread| {
+                    let at = thread.activity_at.max(thread.created_at);
+                    activity
+                        .entry(&thread.project_id)
+                        .and_modify(|latest: &mut i64| *latest = (*latest).max(at))
+                        .or_insert(at);
+                    activity
+                });
         projects.sort_by(|a, b| {
             let recent = |project: &artisan_api::Project| {
                 activity
@@ -333,10 +404,10 @@ impl PickerState {
             .map(|project| project.id.clone())
             .collect();
     }
-    pub fn toggle_group(&mut self, engine: EngineId, name: String, open: bool) {
+    pub(crate) fn toggle_group(&mut self, engine: EngineId, name: String, open: bool) {
         self.groups.insert((engine, name), !open);
     }
-    pub fn model_config(
+    pub(crate) fn model_config(
         host: &editor_core::HostData,
         current: Option<EngineConfig>,
         engine: EngineId,
@@ -350,32 +421,30 @@ impl PickerState {
             .find(|model| model.id == id)?;
         let preference = current.clone();
         let current = current.filter(|config| config.engine == engine);
-        let saved = host.setting(artisan_api::MODEL_CONFIGS_KEY)
-            .and_then(|setting| artisan_api::saved_model_config(setting, engine, id));
-        let carry = saved.is_none() && preference.as_ref().is_some_and(|config| config.model.as_deref() != Some(id) || config.engine != engine);
+        let saved = host.settings.saved_model_config(engine, id).cloned();
+        let carry = saved.is_none()
+            && preference.as_ref().is_some_and(|config| {
+                config.model.as_deref() != Some(id) || config.engine != engine
+            });
         let mut config = match current {
             Some(config) if config.model.as_deref() == Some(id) => config,
-            current => host
-                .setting(artisan_api::MODEL_CONFIGS_KEY)
-                .and_then(|setting| artisan_api::saved_model_config(setting, engine, id))
-                .unwrap_or_else(|| {
-                    let mut config = current.unwrap_or_else(|| EngineConfig::new(engine));
-                    config.model = Some(id.to_owned());
-                    config.effort = None;
-                    config.speed = None;
-                    config.variant = None;
-                    config
-                }),
+            current => saved.unwrap_or_else(|| {
+                let mut config = current.unwrap_or_else(|| EngineConfig::new(engine));
+                config.model = Some(id.to_owned());
+                config.effort = None;
+                config.speed = None;
+                config.variant = None;
+                config
+            }),
         };
-        let customizations = host.setting(artisan_api::MODEL_CUSTOMIZATIONS_KEY)
-            .and_then(|value| artisan_api::model_customizations(value).ok()).unwrap_or_default();
+        let customizations = host.settings.model_customizations();
         if carry && let Some(preference) = &preference {
-            config = model.carry_thinking_preference(preference, &config, &customizations);
+            config = model.carry_thinking_preference(preference, &config, customizations);
         }
-        config = model.resolve_config(&config, &customizations).effective;
+        config = model.resolve_config(&config, customizations).effective;
         Some(config)
     }
-    pub fn pane_config(
+    pub(crate) fn pane_config(
         &self,
         host: &editor_core::HostData,
         current: Option<EngineConfig>,
@@ -392,7 +461,10 @@ impl PickerState {
                         id,
                         ..
                     } if *row_engine == engine => Some(id.clone()),
-                    _ => None,
+                    ModelRow::Engine(_)
+                    | ModelRow::Gate(_)
+                    | ModelRow::Group { .. }
+                    | ModelRow::Model { .. } => None,
                 })
             })?;
         Self::model_config(host, current, engine, &id)
@@ -408,7 +480,9 @@ impl PickerState {
     ) {
         let engine = status.engine;
         let gated = gate(status);
-        if matches!(gated, Some("Not installed" | "Sign in")) || (gated.is_some() && status.models.is_empty()) {
+        if gated.is_some_and(|gate| gate.action().is_some())
+            || (gated.is_some() && status.models.is_empty())
+        {
             rows.push(ModelRow::Engine(engine));
             rows.push(ModelRow::Gate(engine));
             return;
@@ -441,15 +515,12 @@ impl PickerState {
                 .iter()
                 .any(|(_, model)| chosen == Some(model.id.as_str()))
         });
-        let saved = host
-            .setting(artisan_api::MODEL_GROUPS_KEY)
-            .and_then(|groups| groups.get(engine.as_str()));
         for (position, (name, members)) in groups.into_iter().enumerate() {
             let open = self
                 .groups
                 .get(&(engine, name.to_owned()))
                 .copied()
-                .or_else(|| saved?.get(name)?.as_bool())
+                .or_else(|| host.settings.model_group_open(engine, name))
                 .unwrap_or_else(|| selected.unwrap_or(0) == position);
             rows.push(ModelRow::Group {
                 engine,

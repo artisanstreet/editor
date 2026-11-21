@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, num::NonZeroUsize, rc::Rc, sync::Arc};
 
 use aqua::images::{ImageAssets, ImageHandle, ImageStatus};
 use tokio::task::AbortHandle;
@@ -9,12 +9,41 @@ use super::{
 };
 use editor_core::{delivery::Delivery, media_http, runtime};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImageError {
+    NeedsConsent,
     Load(MediaLoadError),
     Decode,
 }
 
+impl ImageError {
+    #[must_use]
+    pub(crate) const fn summary(&self) -> &'static str {
+        match self {
+            Self::NeedsConsent => "Remote image",
+            Self::Load(MediaLoadError::Invalid) => "Not a valid image path",
+            Self::Load(MediaLoadError::TooLarge) => "Too large to preview",
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Missing)) => "File not found",
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ForgeUnreachable(_))) => {
+                "Forge didn't answer"
+            }
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::ServerUnreachable(_))) => {
+                "The image's server didn't answer"
+            }
+            Self::Load(MediaLoadError::Fetch(source::MediaFailure::Unreadable(_))) => {
+                "Couldn't read the file"
+            }
+            Self::Decode => "Not a supported image",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn retryable(&self) -> bool {
+        matches!(self, Self::Load(MediaLoadError::Fetch(_)) | Self::Decode)
+    }
+}
+
+#[derive(Debug)]
 pub struct ImageLoader;
 
 impl ResourceLoader for ImageLoader {
@@ -23,8 +52,11 @@ impl ResourceLoader for ImageLoader {
 }
 
 pub(crate) fn cache_key(fetcher: &MediaFetcher, source: &MediaSource, part: &str) -> Owned<Parsed> {
-    let immutable = matches!(source.parsed, Parsed::Data(_));
-    Owned::new(fetcher.asset_owner(part, immutable), source.parsed.clone())
+    let immutable = matches!(source.parsed(), Parsed::Data(_));
+    Owned::new(
+        fetcher.asset_owner(part, immutable),
+        source.parsed().clone(),
+    )
 }
 
 struct Completion {
@@ -48,7 +80,7 @@ struct Job {
 
 struct State {
     next: u64,
-    jobs: HashMap<u64, Job>,
+    jobs: BTreeMap<u64, Job>,
     delivery: Delivery<Completion>,
 }
 
@@ -67,6 +99,12 @@ pub struct Images {
     mailbox: Rc<aqua::mailbox::Mailbox<()>>,
 }
 
+impl std::fmt::Debug for Images {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Images").finish_non_exhaustive()
+    }
+}
+
 impl Default for Images {
     fn default() -> Self {
         Self::new()
@@ -79,8 +117,14 @@ impl Images {
         Self {
             state: Rc::new(RefCell::new(State {
                 next: 0,
-                jobs: HashMap::new(),
-                delivery: Delivery::with_wake(NonZeroUsize::new(16).unwrap(), mailbox.sender()),
+                jobs: BTreeMap::new(),
+                delivery: Delivery::with_wake(
+                    const {
+                        NonZeroUsize::new(16)
+                            .expect("invariant: the delivery capacity 16 is nonzero")
+                    },
+                    mailbox.sender(),
+                ),
             })),
             mailbox,
         }
@@ -99,10 +143,13 @@ impl Images {
         wake: aqua::mailbox::Wake,
     ) -> Option<Result<ImageHandle, ImageError>> {
         self.discard_stale();
+        if fetcher.waits_for_consent(source) {
+            return Some(Err(ImageError::NeedsConsent));
+        }
         let key = cache_key(fetcher, source, part);
-        let source_bytes = match &source.parsed {
+        let source_bytes = match source.parsed() {
             Parsed::Data(payload) => payload.bytes.len(),
-            _ => source.raw.len(),
+            Parsed::Url(_) | Parsed::File { .. } | Parsed::Invalid => source.raw().len(),
         };
         match fetcher.resources().load::<ImageLoader>(
             fetcher.owner(),
@@ -112,16 +159,16 @@ impl Images {
             wake,
         ) {
             Load::Ready(result) => Some(result),
+            Load::TooLarge => Some(Err(ImageError::Load(MediaLoadError::TooLarge))),
             Load::Pending => {
                 let mut state = self.state.borrow_mut();
                 if let Some(job) = state
                     .jobs
                     .values_mut()
                     .find(|job| job.cache_id == fetcher.resources().id() && job.key == key)
+                    && !job.owners.iter().any(|owner| owner == fetcher.owner())
                 {
-                    if !job.owners.iter().any(|owner| owner == fetcher.owner()) {
-                        job.owners.push(Arc::clone(fetcher.owner()));
-                    }
+                    job.owners.push(Arc::clone(fetcher.owner()));
                 }
                 None
             }
@@ -139,7 +186,7 @@ impl Images {
                     let result =
                         source::load_image_bytes(&source, Some(&transport), &media_http::client())
                             .await;
-                    let _ = sender.send(Completion { id, result }).await;
+                    sender.offer(Completion { id, result }).await;
                 });
                 let abort = task.abort_handle();
                 if ticket.attach(abort.clone()) {
@@ -194,20 +241,15 @@ impl Images {
         self.discard_stale();
         let jobs = {
             let mut state = self.state.borrow_mut();
-            let ready: Vec<_> = state
-                .jobs
-                .iter()
-                .filter_map(|(id, job)| match &job.phase {
-                    Phase::Decoding(image) if !matches!(image.status(), ImageStatus::Pending) => {
-                        Some(*id)
-                    }
-                    _ => None,
-                })
-                .collect();
-            ready
-                .into_iter()
-                .filter_map(|id| state.jobs.remove(&id))
-                .collect::<Vec<_>>()
+            let (ready, waiting): (BTreeMap<u64, Job>, BTreeMap<u64, Job>) =
+                std::mem::take(&mut state.jobs)
+                    .into_iter()
+                    .partition(|(_, job)| match &job.phase {
+                        Phase::Decoding(image) => !matches!(image.status(), ImageStatus::Pending),
+                        Phase::Fetching => false,
+                    });
+            state.jobs = waiting;
+            ready.into_values().collect::<Vec<_>>()
         };
         let changed = !jobs.is_empty();
         for job in jobs {
@@ -236,22 +278,9 @@ impl Images {
         });
     }
 
-    pub fn retain_owners(&self, owners: &[Vec<u64>]) {
-        self.state.borrow_mut().jobs.retain(|_, job| {
-            job.owners
-                .retain(|known| owners.iter().any(|owner| known.starts_with(owner)));
-            let keep = !job.owners.is_empty();
-            if !keep {
-                job.ticket.cancel();
-                job.abort.abort();
-            }
-            keep
-        });
-    }
-
     pub fn clear(&self) {
         let mut state = self.state.borrow_mut();
-        for (_, job) in state.jobs.drain() {
+        for job in std::mem::take(&mut state.jobs).into_values() {
             job.ticket.cancel();
             job.abort.abort();
         }

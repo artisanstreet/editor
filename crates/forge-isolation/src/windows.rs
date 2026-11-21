@@ -29,7 +29,7 @@ fn byte_length<T>() -> u32 {
     u32::try_from(size_of::<T>()).unwrap_or(u32::MAX)
 }
 
-pub fn protect_forge() -> Vec<Outcome> {
+pub(crate) fn protect_forge() -> Vec<Outcome> {
     let forge = unsafe { GetCurrentProcess() };
     vec![
         Outcome::of("Forge is scheduled ahead of engines", unsafe {
@@ -46,7 +46,7 @@ pub fn protect_forge() -> Vec<Outcome> {
     ]
 }
 
-pub fn demote(process_id: u32) {
+pub(crate) fn demote(process_id: u32) {
     let engine = match unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, process_id) } {
         Ok(engine) => engine,
         Err(error) => {
@@ -81,5 +81,7 @@ pub fn demote(process_id: u32) {
     if let Err(error) = disk_yields {
         tracing::debug!(process_id, %error, "engine keeps default disk priority");
     }
-    unsafe { CloseHandle(engine) }.ok();
+    if let Err(error) = unsafe { CloseHandle(engine) } {
+        tracing::debug!(process_id, %error, "the engine's process handle did not close");
+    }
 }

@@ -1,18 +1,17 @@
-use super::focus_ring;
+use super::{Activation, activatable, focus_ring, pressable};
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Radius, concentric};
-use crate::ui::motion::MotionPolicy;
-use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{CursorIcon, Role, Transform2D};
+use crate::ui::theme::ArtisanTheme;
+use aqua_core::CursorIcon;
 use aqua_ui::element::{Button, Element, Key};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::tree::ActionEvent;
 use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 
-pub const CORNER_INSET: f32 = 2.0;
+pub(crate) const CORNER_INSET: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum IconButtonSize {
@@ -32,7 +31,7 @@ impl IconButtonSize {
     }
 
     #[must_use]
-    pub const fn glyph(self) -> IconSize {
+    const fn glyph(self) -> IconSize {
         match self {
             Self::Sm => IconSize::Sm,
             Self::Md | Self::Lg => IconSize::Md,
@@ -58,11 +57,20 @@ pub struct IconButton {
     selected: bool,
     hover: Hover,
     disabled: bool,
-    motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
 }
 
+impl std::fmt::Debug for IconButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IconButton").finish_non_exhaustive()
+    }
+}
+
 impl IconButton {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the icon button stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,
@@ -83,12 +91,15 @@ impl IconButton {
             selected: false,
             hover: Hover::Neutral,
             disabled: false,
-            motion: MotionPolicy::Full,
             on_activate: None,
         }
     }
 
-    pub fn corner_close(
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the icon button stores this theme copy and paints from it when built"
+    )]
+    pub(crate) fn corner_close(
         key: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,
@@ -110,7 +121,7 @@ impl IconButton {
     pub fn within(mut self, surface: Surface) -> Self {
         self.radius = surface.child_radius().map_or_else(
             || concentric(surface.radius_px(), surface.padding_px()),
-            |radius| radius.px(),
+            Radius::px,
         );
         self
     }
@@ -128,12 +139,6 @@ impl IconButton {
     }
 
     #[must_use]
-    pub const fn destructive(mut self) -> Self {
-        self.hover = Hover::Destructive;
-        self
-    }
-
-    #[must_use]
     pub const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
@@ -142,12 +147,6 @@ impl IconButton {
     #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn motion_policy(mut self, motion: MotionPolicy) -> Self {
-        self.motion = motion;
         self
     }
 
@@ -195,35 +194,23 @@ impl IconButton {
             self.size.glyph().px(),
             rest.to_reference_paint(),
         ));
-        if self.disabled {
-            button = button.opacity(Opacity::Disabled.alpha());
-        } else if let Some(handler) = self.on_activate {
-            button = button.on_activate_event(handler);
-        }
-        let element = button
-            .build()
-            .with_key(self.key)
-            .role(Role::Button)
-            .aria_label(self.label)
-            .gpui_keyboard_activation()
-            .disabled(self.disabled)
-            .focusable(!self.disabled);
-        if self.disabled {
-            return element.aria_description("Unavailable");
-        }
-        let hover =
-            Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color());
-        let element = live::track(
-            element
-                .cursor(CursorIcon::Pointer)
-                .focus_visible_style(focus_ring(&theme))
-                .hover_style(hover),
-        );
-        match self.motion {
-            MotionPolicy::Full => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.0)))
-            }
-            MotionPolicy::Reduced => element,
-        }
+        let activation = Activation {
+            key: self.key,
+            label: self.label,
+            disabled: self.disabled,
+            on_activate: self.on_activate,
+            debug_selector: None,
+        };
+        activatable(button, activation, |element| {
+            let hover =
+                Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color());
+            let element = live::track(
+                element
+                    .cursor(CursorIcon::Pointer)
+                    .focus_visible_style(focus_ring(&theme))
+                    .hover_style(hover),
+            );
+            pressable(element, &theme, 1.0)
+        })
     }
 }

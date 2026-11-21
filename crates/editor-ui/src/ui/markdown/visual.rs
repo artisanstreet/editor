@@ -1,16 +1,15 @@
+use crate::ui::text::slice::slice;
 use std::sync::Arc;
 
 use aqua_text::document::{
     CopySubstitution, SelectionDocumentId, SelectionSource, SelectionSourceId, SourceSlice,
 };
-use aqua_text::{
-    FontFamily, FontSlant, FontWeight, StyledSpan, TextInteractionRange, TextLayout, TextStyle,
-};
+use aqua_text::{FontFamily, FontSlant, FontWeight, StyledSpan, TextInteractionRange, TextStyle};
 use aqua_ui::element::{Element, ui};
 
 use super::Span;
 use super::inline::{InlineLayer, file_link_path, flatten_inline_with_swatches};
-use crate::ui::media::color::{self, Color};
+use crate::ui::media::color;
 use crate::ui::rich::actions::{OpenReference, ResourceScope, ShowCopyMenu};
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, ProseTypography};
 use std::ops::Range;
@@ -36,6 +35,7 @@ pub struct InlineLink {
     pub destination: String,
 }
 
+#[derive(Debug)]
 pub struct PreparedInline {
     pub source: SelectionSource,
     pub runs: Vec<InlineRun>,
@@ -46,7 +46,7 @@ pub struct PreparedInline {
     pub colors: Vec<InlineSwatch>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineSwatch {
     pub range: Range<usize>,
     pub slot: Range<usize>,
@@ -54,79 +54,42 @@ pub struct InlineSwatch {
     pub alone: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkAction {
     OpenReference(OpenReference),
     OpenUrl(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SlotBounds {
-    pub x: f32,
-    pub y: f32,
-    pub side: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SwatchPaint {
-    pub bounds: SlotBounds,
-    pub color: Color,
-    pub edge: Oklch,
-    pub radius: f32,
-    pub border_width: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FileIconPaint {
-    pub bounds: SlotBounds,
-    pub asset: editor_assets::AssetId,
-}
-
-fn slot_bounds(layout: &TextLayout, offset: usize) -> Option<SlotBounds> {
-    let origin = layout.caret(offset)?;
-    let end = layout.caret(offset + '\u{2003}'.len_utf8())?;
-    let side = end.x - origin.x;
-    (side > 0.0).then_some(SlotBounds {
-        x: origin.x,
-        y: origin.y_top + (origin.height - side) / 2.0,
-        side,
-    })
-}
-
 impl PreparedInline {
     pub(super) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + self.source.text.len()
             + self.source.separator.len()
-            + self.source.order.capacity() * std::mem::size_of::<u64>()
-            + self.source.copies.capacity() * std::mem::size_of::<CopySubstitution>()
+            + self.source.order.capacity() * size_of::<u64>()
+            + self.source.copies.capacity() * size_of::<CopySubstitution>()
             + self
                 .source
                 .copies
                 .iter()
                 .map(|copy| copy.replacement.len())
                 .sum::<usize>()
-            + self.runs.capacity() * std::mem::size_of::<InlineRun>()
-            + self.links.capacity() * std::mem::size_of::<InlineLink>()
+            + self.runs.capacity() * size_of::<InlineRun>()
+            + self.links.capacity() * size_of::<InlineLink>()
             + self
                 .links
                 .iter()
                 .map(|link| link.destination.capacity())
                 .sum::<usize>()
-            + self.interactions.capacity() * std::mem::size_of::<TextInteractionRange>()
-            + self.code_ranges.capacity() * std::mem::size_of::<Range<usize>>()
+            + self.interactions.capacity() * size_of::<TextInteractionRange>()
+            + self.code_ranges.capacity() * size_of::<Range<usize>>()
             + self.file_icons.capacity()
-                * std::mem::size_of::<(usize, (editor_assets::AssetId, editor_assets::AssetId))>()
-            + self.colors.capacity() * std::mem::size_of::<InlineSwatch>()
+                * size_of::<(usize, (editor_assets::AssetId, editor_assets::AssetId))>()
+            + self.colors.capacity() * size_of::<InlineSwatch>()
             + self
                 .colors
                 .iter()
                 .map(|color| color.value.capacity())
                 .sum::<usize>()
-    }
-
-    pub fn styled_spans(&self, theme: &ArtisanTheme, tone: BodyTone) -> Vec<StyledSpan> {
-        self.styled_spans_for(theme, tone, None, None)
     }
 
     fn styled_spans_for(
@@ -138,34 +101,34 @@ impl PreparedInline {
     ) -> Vec<StyledSpan> {
         let mut base = TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: ProseTypography::BODY_SIZE_PX,
-            line_height_px: ProseTypography::BODY_LINE_PX,
+            size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+            line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
             weight: ProseTypography::BODY_WEIGHT,
             letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
         };
-        let mut base_color = match tone {
-            BodyTone::Muted => theme.colors.text_muted,
-            BodyTone::Foreground => theme.colors.text,
+        let base_color = match (heading, table_header, tone) {
+            (Some(_), _, _) | (None, Some(true), _) | (None, _, BodyTone::Foreground) => {
+                theme.colors.text
+            }
+            (None, None | Some(false), BodyTone::Muted) => theme.colors.text_muted,
         };
         if let Some(level) = heading {
             let spec = ProseTypography::heading(level);
             base.families = vec![FontFamily::Named(
                 theme.typography.heading.family.to_owned(),
             )];
-            base.size_px = spec.size_px;
-            base.line_height_px = spec.line_px;
+            base.size_px = theme.typography.size(spec.size_px);
+            base.line_height_px = theme.typography.size(spec.line_px);
             base.weight = ProseTypography::HEADING_WEIGHT;
             base.letter_spacing_em =
                 Some(theme.typography.heading_tracking_px(&spec) / spec.size_px);
-            base_color = theme.colors.text;
         }
         if let Some(header) = table_header {
-            base.size_px = ProseTypography::TABLE_SIZE_PX;
-            base.line_height_px = ProseTypography::TABLE_LINE_PX;
+            base.size_px = theme.typography.size(ProseTypography::TABLE_SIZE_PX);
+            base.line_height_px = theme.typography.size(ProseTypography::TABLE_LINE_PX);
             if header {
                 base.weight = ProseTypography::STRONG_WEIGHT;
-                base_color = theme.colors.text;
             }
         }
         let mut spans = Vec::new();
@@ -173,7 +136,7 @@ impl PreparedInline {
         for run in &self.runs {
             if cursor < run.range.start {
                 spans.push(styled_span(
-                    &self.source.text[cursor..run.range.start],
+                    slice(&self.source.text, cursor..run.range.start),
                     base.clone(),
                     base_color,
                 ));
@@ -190,73 +153,29 @@ impl PreparedInline {
                 style.letter_spacing_em = Some(0.0);
             }
             spans.push(styled_span(
-                &self.source.text[run.range.clone()],
+                slice(&self.source.text, run.range.clone()),
                 style,
                 run.style.color.unwrap_or(base_color),
             ));
             cursor = run.range.end;
         }
         if cursor < self.source.text.len() {
-            spans.push(styled_span(&self.source.text[cursor..], base, base_color));
+            spans.push(styled_span(
+                slice(&self.source.text, cursor..),
+                base,
+                base_color,
+            ));
         }
         spans
-    }
-
-    pub fn file_icon_paints(
-        &self,
-        layout: &TextLayout,
-        theme: &ArtisanTheme,
-    ) -> Vec<FileIconPaint> {
-        self.file_icons
-            .iter()
-            .filter_map(|(offset, (light, dark))| {
-                Some(FileIconPaint {
-                    bounds: slot_bounds(layout, *offset)?,
-                    asset: if theme.colors.mode.is_dark() {
-                        *dark
-                    } else {
-                        *light
-                    },
-                })
-            })
-            .collect()
-    }
-
-    pub fn swatch_paints(&self, layout: &TextLayout, theme: &ArtisanTheme) -> Vec<SwatchPaint> {
-        self.colors
-            .iter()
-            .filter_map(|swatch| {
-                let offset = swatch.slot.start + '\u{2060}'.len_utf8();
-                let slot = slot_bounds(layout, offset)?;
-                let line = layout.caret(offset)?;
-                let side = (slot.side * 0.78).min(line.height * 0.62);
-                Some(SwatchPaint {
-                    bounds: SlotBounds {
-                        x: slot.x
-                            + if swatch.alone {
-                                (slot.side - side) / 2.0
-                            } else {
-                                0.0
-                            },
-                        y: line.y_top + (line.height - side) / 2.0,
-                        side,
-                    },
-                    color: color::parse(&swatch.value)?.clipped(),
-                    edge: theme.colors.text.at(Opacity::SwatchEdge),
-                    radius: side * 0.22,
-                    border_width: 1.0,
-                })
-            })
-            .collect()
     }
 
     pub fn link_action(&self, id: u64, scope: Option<ResourceScope>) -> Option<LinkAction> {
         let destination = &self.links.get(usize::try_from(id).ok()?)?.destination;
         Some(if let Some(path) = file_link_path(destination) {
             LinkAction::OpenReference(OpenReference {
+                scope,
                 path: path.to_string_lossy().into_owned(),
                 line: file_link_line(destination),
-                scope,
             })
         } else {
             LinkAction::OpenUrl(destination.clone())
@@ -299,6 +218,10 @@ fn file_link_line(destination: &str) -> Option<u32> {
     )
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass flattening inline spans into styled runs, links and colour ranges"
+)]
 pub fn prepare_inline(
     spans: &[Span],
     theme: &ArtisanTheme,
@@ -372,8 +295,8 @@ pub fn prepare_inline(
         .runs
         .into_iter()
         .map(|(range, index)| InlineRun {
-            style: styles[index].clone(),
             range,
+            style: styles[index].clone(),
         })
         .collect();
     let links: Vec<_> = flat
@@ -431,12 +354,13 @@ pub enum LeafError {
     InlineDecorations,
 }
 
+#[derive(Debug)]
 pub struct ProseLeaf {
     pub element: Element,
     pub source: SelectionSource,
 }
 
-pub fn raw_leaf(
+pub(crate) fn raw_leaf(
     raw: &str,
     theme: &ArtisanTheme,
     tone: BodyTone,
@@ -451,8 +375,8 @@ pub fn raw_leaf(
     };
     let style = TextStyle {
         families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: ProseTypography::BODY_SIZE_PX,
-        line_height_px: ProseTypography::BODY_LINE_PX,
+        size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+        line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
         weight: ProseTypography::BODY_WEIGHT,
         letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
@@ -483,183 +407,102 @@ pub fn raw_leaf(
     }
 }
 
-pub fn interactive_prose_leaf(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf(
-        spans, theme, tone, document, source_id, order, separator, on_link, None, None, None,
-    )
+#[derive(Clone, Copy)]
+pub struct BodyContext<'a> {
+    pub theme: &'a ArtisanTheme,
+    pub tone: BodyTone,
+    pub on_link: Option<&'a Rc<dyn Fn(LinkAction)>>,
+    pub on_color: Option<&'a Rc<dyn Fn(ShowCopyMenu)>>,
+    pub scope: Option<&'a ResourceScope>,
 }
 
-pub fn interactive_heading_leaf(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    level: u8,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf(
-        spans,
-        theme,
-        BodyTone::Foreground,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        None,
-        None,
-        Some(level),
-    )
+impl std::fmt::Debug for BodyContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BodyContext")
+            .field("tone", &self.tone)
+            .field("links", &self.on_link.is_some())
+            .field("colors", &self.on_color.is_some())
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
 }
 
-pub fn interactive_leaf(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    heading: Option<u8>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        on_color,
-        reference_scope,
-        heading,
-        None,
-        Vec::new(),
-    )
+impl<'a> BodyContext<'a> {
+    #[must_use]
+    pub const fn plain(theme: &'a ArtisanTheme, tone: BodyTone) -> Self {
+        Self {
+            theme,
+            tone,
+            on_link: None,
+            on_color: None,
+            scope: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn with_tone(self, tone: BodyTone) -> Self {
+        Self { tone, ..self }
+    }
 }
 
-pub(super) fn interactive_leaf_with_opacity(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeafKind {
+    Prose,
+    Heading(u8),
+    TableCell { header: bool },
+}
+
+#[derive(Debug)]
+pub(crate) struct LeafSource {
+    pub(crate) document: SelectionDocumentId,
+    pub(crate) id: SelectionSourceId,
+    pub(crate) order: Vec<u64>,
+    pub(crate) separator: &'static str,
+}
+
+pub(crate) struct Sources<'a> {
+    pub(crate) document: SelectionDocumentId,
+    pub(crate) next_id: &'a mut dyn FnMut(usize) -> SelectionSourceId,
+    pub(crate) collected: &'a mut Vec<SelectionSource>,
+}
+
+impl Sources<'_> {
+    pub(crate) fn leaf(&mut self, order: Vec<u64>, separator: &'static str) -> LeafSource {
+        LeafSource {
+            document: self.document,
+            id: (self.next_id)(self.collected.len()),
+            order,
+            separator,
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one interactive leaf: styled text, link and colour hit-testing, and its selection source"
+)]
+pub(crate) fn interactive_leaf(
     spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    heading: Option<u8>,
+    body: BodyContext<'_>,
+    leaf: LeafSource,
+    kind: LeafKind,
     opacity: Vec<aqua_core::scene::GpuiTextOpacityRange>,
 ) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
+    let BodyContext { theme, tone, .. } = body;
+    let LeafSource {
         document,
-        source_id,
+        id: source_id,
         order,
         separator,
-        on_link,
-        on_color,
-        reference_scope,
-        heading,
-        None,
-        opacity,
-    )
-}
-
-pub fn interactive_table_leaf(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    header: bool,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        on_color,
-        reference_scope,
-        None,
-        Some(header),
-        Vec::new(),
-    )
-}
-
-pub(super) fn interactive_table_leaf_with_opacity(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    header: bool,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    opacity: Vec<aqua_core::scene::GpuiTextOpacityRange>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf_impl(
-        spans,
-        theme,
-        tone,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        on_color,
-        reference_scope,
-        None,
-        Some(header),
-        opacity,
-    )
-}
-
-fn interactive_leaf_impl(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    reference_scope: Option<ResourceScope>,
-    heading: Option<u8>,
-    table_header: Option<bool>,
-    opacity: Vec<aqua_core::scene::GpuiTextOpacityRange>,
-) -> Result<ProseLeaf, LeafError> {
+    } = leaf;
+    let on_link = body.on_link.cloned();
+    let on_color = body.on_color.cloned();
+    let reference_scope = body.scope.cloned();
+    let (heading, table_header) = match kind {
+        LeafKind::Prose => (None, None),
+        LeafKind::Heading(level) => (Some(level), None),
+        LeafKind::TableCell { header } => (None, Some(header)),
+    };
     let prepared = prepare_inline(spans, theme, source_id, order, separator);
     if !prepared.colors.is_empty() && on_color.is_none() {
         return Err(LeafError::InlineDecorations);
@@ -670,8 +513,8 @@ fn interactive_leaf_impl(
     let styled = prepared.styled_spans_for(theme, tone, heading, table_header);
     let mut base = TextStyle {
         families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: ProseTypography::BODY_SIZE_PX,
-        line_height_px: ProseTypography::BODY_LINE_PX,
+        size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+        line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
         weight: ProseTypography::BODY_WEIGHT,
         letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
@@ -681,14 +524,14 @@ fn interactive_leaf_impl(
         base.families = vec![FontFamily::Named(
             theme.typography.heading.family.to_owned(),
         )];
-        base.size_px = spec.size_px;
-        base.line_height_px = spec.line_px;
+        base.size_px = theme.typography.size(spec.size_px);
+        base.line_height_px = theme.typography.size(spec.line_px);
         base.weight = ProseTypography::HEADING_WEIGHT;
         base.letter_spacing_em = Some(theme.typography.heading_tracking_px(&spec) / spec.size_px);
     }
     if let Some(header) = table_header {
-        base.size_px = ProseTypography::TABLE_SIZE_PX;
-        base.line_height_px = ProseTypography::TABLE_LINE_PX;
+        base.size_px = theme.typography.size(ProseTypography::TABLE_SIZE_PX);
+        base.line_height_px = theme.typography.size(ProseTypography::TABLE_LINE_PX);
         if header {
             base.weight = ProseTypography::STRONG_WEIGHT;
         }
@@ -762,8 +605,24 @@ fn interactive_leaf_impl(
             },
         )
         .build();
+    if let Some(level) = heading {
+        element = element.role(aqua_core::Role::Heading(level));
+    }
+    if let Some(language) = super::language::detected(&source.text) {
+        element = element.aria_language(language);
+    }
+    if !source.copies.is_empty() {
+        element = element.aria_label(accessible_text(&source));
+    }
+    if !prepared.links.is_empty() {
+        let ring = aqua_ui::style::Style::new().focus_ring(
+            theme.interaction.focus_ring_width,
+            theme.colors.ring.to_paint(),
+        );
+        element = element.focusable(true).focus_visible_style(ring);
+    }
     if let Some(on_link) = on_link {
-        let prepared = prepared.clone();
+        let prepared = Rc::clone(&prepared);
         element = element.on_input(
             aqua_ui::input::InputKind::TextRangeActivated,
             aqua_ui::input::EventPhase::Bubble,
@@ -796,6 +655,22 @@ fn interactive_leaf_impl(
     Ok(ProseLeaf { element, source })
 }
 
+fn accessible_text(source: &SelectionSource) -> String {
+    let mut text = String::with_capacity(source.text.len());
+    let mut cursor = 0;
+    for copy in &source.copies {
+        if let Some(kept) = source.text.get(cursor..copy.range.start) {
+            text.push_str(kept);
+        }
+        text.push_str(&copy.replacement);
+        cursor = cursor.max(copy.range.end);
+    }
+    if let Some(rest) = source.text.get(cursor..) {
+        text.push_str(rest);
+    }
+    text
+}
+
 pub fn prose_leaf(
     spans: &[Span],
     theme: &ArtisanTheme,
@@ -821,15 +696,15 @@ pub fn prose_leaf(
     };
     let style = TextStyle {
         families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: ProseTypography::BODY_SIZE_PX,
-        line_height_px: ProseTypography::BODY_LINE_PX,
+        size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+        line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
         weight: ProseTypography::BODY_WEIGHT,
         letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
     };
     let text: Arc<str> = flat.source.into();
     let span = styled_span(&text, style.clone(), color);
-    let element = ui::Text::new(text.to_string())
+    let mut element = ui::Text::new(text.to_string())
         .text_style(style)
         .gpui_source_color(color.to_reference_text_color())
         .spans(vec![span])
@@ -842,6 +717,9 @@ pub fn prose_leaf(
             },
         )
         .build();
+    if let Some(language) = super::language::detected(&text) {
+        element = element.aria_language(language);
+    }
     Ok(ProseLeaf {
         element,
         source: SelectionSource {
@@ -853,3 +731,7 @@ pub fn prose_leaf(
         },
     })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/visual.rs"]
+mod tests;

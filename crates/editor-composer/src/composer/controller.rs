@@ -1,6 +1,7 @@
 use super::{
     attachment::{Attachments, Source},
-    draft_session::Submission,
+    draft_body::{DraftBody, DraftPath, SavedFile},
+    draft_session::{DraftSession, LostKey, Submission, Unrecovered},
     mentions::Mentions,
     persistence::{DraftLease, DraftSessions, SessionEvent},
     picker::{Menu, PickerState},
@@ -11,10 +12,28 @@ use artisan_api::{
 };
 use editor_core::{Core, HostData, HostId, HostInstance, delivery::Delivery, runtime::runtime};
 use editor_ui::text::editor::{Editor, ListKey, Mode};
-use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, num::NonZeroUsize, path::PathBuf, rc::Rc};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
+enum TurnCall {
+    Stop,
+    Continue,
+    ClearGoal,
+    Unpark,
+}
+
+impl TurnCall {
+    const fn action(self) -> TurnAction {
+        match self {
+            Self::Stop => TurnAction::Stop,
+            Self::Continue => TurnAction::Continue,
+            Self::ClearGoal => TurnAction::ClearGoal,
+            Self::Unpark => TurnAction::Unpark,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum TurnAction {
     Stop,
     Continue,
@@ -27,7 +46,7 @@ struct TurnCompletion {
     generation: u64,
     thread: ThreadId,
     action: TurnAction,
-    error: Option<String>,
+    error: Option<editor_core::client::CallError>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,81 +76,97 @@ impl ComposerTarget {
     }
 }
 
-enum Outbox {
-    Idle,
-    InFlight(DraftBody),
-    Restored,
+#[derive(Clone, Debug)]
+pub struct DraftFile {
+    pub key: u64,
+    pub path: DraftPath,
+    pub folder: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DraftBody {
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub images: Vec<BlobHash>,
-    #[serde(default)]
-    pub files: Vec<DraftFile>,
-    #[serde(default)]
-    pub config: Option<EngineConfig>,
-    #[serde(default)]
-    pub project: Option<ProjectId>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DraftFile {
-    #[serde(skip)]
-    pub key: u64,
-    pub path: PathBuf,
-    #[serde(default)]
-    pub folder: bool,
+fn open_draft(
+    core: &Core,
+    sessions: &mut DraftSessions,
+    target: &ComposerTarget,
+) -> (Option<DraftLease>, Option<editor_core::Problem>) {
+    let Some(host) = core.host(target.host()) else {
+        return (None, None);
+    };
+    match sessions.open(
+        host.id.clone(),
+        host.instance(),
+        target.scope(),
+        host.client.clone(),
+    ) {
+        Ok(lease) => (Some(lease), None),
+        Err(full) => {
+            tracing::warn!(host = %full.host, scope = %full.scope, "draft capacity reached; composer disabled");
+            (None, Some(editor_core::Problem::new(full.to_string())))
+        }
+    }
 }
 
 pub struct Composer {
     pub target: ComposerTarget,
     pub editor: Rc<RefCell<Editor>>,
     pub questionnaire: QuestionnairePanel,
-    pub strip: super::goal_strip::StripState,
+    pub(crate) strip: super::goal_strip::StripState,
     pub mentions: Mentions,
     pub picker: PickerState,
     pub config: Option<EngineConfig>,
-    pub project: Option<ProjectId>,
+    pub(crate) project: Option<ProjectId>,
     pub attachments: Option<Attachments>,
     pub files: Vec<DraftFile>,
     next_file_key: u64,
     placeholder_generation: u64,
     placeholder_was_visible: bool,
     pub file_shake: Option<(u64, std::time::Instant)>,
-    pub cleared: Option<std::time::Instant>,
-    outbox: Outbox,
-    pub notice: Option<String>,
+    pub(crate) cleared: Option<std::time::Instant>,
+    parked: Vec<DraftBody>,
+    pub notice: Option<editor_core::Problem>,
+    pub refused: Option<SendRefusal>,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
     target_generation: u64,
-    pub cancelling: bool,
+    pub(crate) cancelling: bool,
     failed_stops: Vec<ThreadId>,
-    pub continuing: bool,
+    pub(crate) continuing: bool,
     turn_completions: Delivery<TurnCompletion>,
     edit_revision: u64,
     restore_revision: Option<u64>,
+    shown_epoch: u64,
+    lost_chips: Vec<(u64, LostKey)>,
+}
+
+impl std::fmt::Debug for Composer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Composer")
+            .field("target", &self.target)
+            .field("host_instance", &self.host_instance)
+            .field("target_generation", &self.target_generation)
+            .field("session", &self.session)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Composer {
+    fn drop(&mut self) {
+        self.hand_off_attachments();
+    }
 }
 
 impl Composer {
     pub fn new(core: &Core, sessions: &mut DraftSessions, target: ComposerTarget) -> Self {
-        let session = core.host(target.host()).and_then(|host| {
-            sessions.open(
-                host.id.clone(),
-                host.instance(),
-                target.scope(),
-                host.client.clone(),
-            )
-        });
+        let (session, notice) = open_draft(core, sessions, &target);
         let mut editor = Editor::new("", Mode::Prompt);
         editor.set_disabled(session.is_none());
-        let notice = (session.is_none() && core.host(target.host()).is_some()).then(|| "There are 64 open or unsaved drafts. Finish saving a draft, then reopen this thread.".to_owned());
         let host_instance = core.host(target.host()).map(HostData::instance);
         let attachments = core
             .host(target.host())
             .map(|host| Attachments::new(host.client.clone()));
         let picker = PickerState::for_target(core, target.host());
+        let shown_epoch = session
+            .as_ref()
+            .map_or(0, |session| session.read(DraftSession::epoch));
         Self {
             target,
             editor: Rc::new(RefCell::new(editor)),
@@ -147,7 +182,10 @@ impl Composer {
             placeholder_generation: 0,
             placeholder_was_visible: false,
             file_shake: None,
+            cleared: None,
+            parked: Vec::new(),
             notice,
+            refused: None,
             session,
             host_instance,
             target_generation: 0,
@@ -157,8 +195,8 @@ impl Composer {
             turn_completions: Delivery::new(NonZeroUsize::MIN),
             edit_revision: 0,
             restore_revision: Some(0),
-            cleared: None,
-            outbox: Outbox::Idle,
+            shown_epoch,
+            lost_chips: Vec::new(),
         }
     }
 
@@ -173,9 +211,11 @@ impl Composer {
         {
             return;
         }
+        self.hand_off_attachments();
         if let Some(session) = &self.session {
             session.flush();
         }
+        self.parked.clear();
         self.questionnaire = QuestionnairePanel::default();
         self.strip = super::goal_strip::StripState::default();
         self.mentions = Mentions::default();
@@ -198,23 +238,42 @@ impl Composer {
         self.file_shake = None;
         self.restore_revision = Some(0);
         self.notice = None;
+        self.refused = None;
         self.config = None;
         self.project = None;
         self.host_instance = core.host(self.target.host()).map(HostData::instance);
         self.attachments = core
             .host(self.target.host())
             .map(|host| Attachments::new(host.client.clone()));
-        self.session = core.host(self.target.host()).and_then(|host| {
-            sessions.open(
-                host.id.clone(),
-                host.instance(),
+        let (session, notice) = open_draft(core, sessions, &self.target);
+        if notice.is_some() {
+            self.editor.borrow_mut().set_disabled(true);
+        }
+        self.shown_epoch = session
+            .as_ref()
+            .map_or(0, |session| session.read(DraftSession::epoch));
+        self.lost_chips.clear();
+        self.session = session;
+        self.notice = notice;
+    }
+
+    fn hand_off_attachments(&mut self) {
+        let uploads = self
+            .attachments
+            .as_mut()
+            .map_or_else(Vec::new, Attachments::take_unfinished);
+        if uploads.is_empty() {
+            return;
+        }
+        let session = self.session.as_ref().unwrap_or_else(|| {
+            panic!(
+                "invariant: composer for {} on Forge {} only accepts images while it has a draft session",
                 self.target.scope(),
-                host.client.clone(),
+                self.target.host()
             )
         });
-        if self.session.is_none() && self.host_instance.is_some() {
-            self.notice = Some("There are 64 open or unsaved drafts. Finish saving a draft, then reopen this thread.".into());
-            self.editor.borrow_mut().set_disabled(true);
+        for upload in uploads {
+            session.adopt_image(upload);
         }
     }
 
@@ -222,7 +281,7 @@ impl Composer {
         self.host_instance
     }
 
-    pub fn matches_host(&self, host: &HostData) -> bool {
+    pub(crate) fn matches_host(&self, host: &HostData) -> bool {
         self.host_instance == Some(host.instance())
     }
 
@@ -230,7 +289,7 @@ impl Composer {
         self.target_generation
     }
 
-    pub fn mount_editor(
+    pub(crate) fn mount_editor(
         &self,
         event: impl Fn(editor_ui::text::mount::EditorEvent) + 'static,
     ) -> editor_ui::text::mount::EditorController {
@@ -241,38 +300,38 @@ impl Composer {
         self.turn_completions.wake_mailbox()
     }
 
-    pub fn stop(&mut self, host: &HostData) -> Option<ThreadId> {
-        self.turn_action(host, TurnAction::Stop)
+    pub(crate) fn stop(&mut self, host: &HostData) -> Option<ThreadId> {
+        self.turn_action(host, TurnCall::Stop)
     }
 
-    pub fn take_failed_stops(&mut self) -> Vec<ThreadId> {
+    pub(crate) fn take_failed_stops(&mut self) -> Vec<ThreadId> {
         std::mem::take(&mut self.failed_stops)
     }
 
-    pub fn clear_goal(&mut self, host: &HostData) {
-        self.turn_action(host, TurnAction::ClearGoal);
+    pub(crate) fn clear_goal(&mut self, host: &HostData) {
+        self.turn_action(host, TurnCall::ClearGoal);
     }
-    pub fn unpark(&mut self, host: &HostData) {
-        self.turn_action(host, TurnAction::Unpark);
-    }
-
-    pub fn continue_turn(&mut self, host: &HostData) {
-        self.turn_action(host, TurnAction::Continue);
+    pub(crate) fn unpark(&mut self, host: &HostData) {
+        self.turn_action(host, TurnCall::Unpark);
     }
 
-    fn turn_action(&mut self, host: &HostData, action: TurnAction) -> Option<ThreadId> {
+    pub(crate) fn continue_turn(&mut self, host: &HostData) {
+        self.turn_action(host, TurnCall::Continue);
+    }
+
+    fn turn_action(&mut self, host: &HostData, call: TurnCall) -> Option<ThreadId> {
         let ComposerTarget::Thread { thread, .. } = &self.target else {
             return None;
         };
         if self.host_instance != Some(host.instance()) {
             return None;
         }
-        match action {
-            TurnAction::Stop if self.cancelling => return None,
-            TurnAction::Continue if self.continuing => return None,
-            TurnAction::Stop => self.cancelling = true,
-            TurnAction::Continue => self.continuing = true,
-            TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
+        match call {
+            TurnCall::Stop if self.cancelling => return None,
+            TurnCall::Continue if self.continuing => return None,
+            TurnCall::Stop => self.cancelling = true,
+            TurnCall::Continue => self.continuing = true,
+            TurnCall::ClearGoal | TurnCall::Unpark => {}
         }
         let thread = thread.clone();
         let client = host.client.clone();
@@ -281,28 +340,26 @@ impl Composer {
         let delivery = self.turn_completions.sender();
         let issued = thread.clone();
         runtime().spawn(async move {
-            let result = match action {
-                TurnAction::Stop => client.cancel(&thread).await,
-                TurnAction::Continue => client.continue_turn(&thread).await,
-                TurnAction::ClearGoal => client.clear_goal(&thread).await,
-                TurnAction::Unpark => client.cancel(&thread).await,
-                TurnAction::Permissions => unreachable!(),
+            let result = match call {
+                TurnCall::Stop | TurnCall::Unpark => client.cancel(&thread).await,
+                TurnCall::Continue => client.continue_turn(&thread).await,
+                TurnCall::ClearGoal => client.clear_goal(&thread).await,
             };
-            let error = result.err().map(|error| format!("{error:#}"));
-            let _ = delivery
-                .send(TurnCompletion {
+            let error = result.err();
+            delivery
+                .offer(TurnCompletion {
                     instance,
                     generation,
                     thread,
-                    action,
+                    action: call.action(),
                     error,
                 })
                 .await;
         });
-        matches!(action, TurnAction::Stop).then_some(issued)
+        matches!(call, TurnCall::Stop).then_some(issued)
     }
 
-    pub fn apply_permissions(&self, host: &HostData, permissions: artisan_api::Permissions) {
+    pub(crate) fn apply_permissions(&self, host: &HostData, permissions: artisan_api::Permissions) {
         let ComposerTarget::Thread { thread, .. } = &self.target else {
             return;
         };
@@ -326,13 +383,9 @@ impl Composer {
                 config: Some(config),
                 ..Default::default()
             };
-            let error = client
-                .update_thread(&thread, &update)
-                .await
-                .err()
-                .map(|error| format!("{error:#}"));
-            let _ = delivery
-                .send(TurnCompletion {
+            let error = client.update_thread(&thread, &update).await.err();
+            delivery
+                .offer(TurnCompletion {
                     instance,
                     generation,
                     thread,
@@ -343,7 +396,7 @@ impl Composer {
         });
     }
 
-    pub fn drain_turn_actions(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_turn_actions(&mut self, core: &Core) -> bool {
         let before = (self.cancelling, self.continuing, self.notice.clone());
         for completion in self.turn_completions.drain() {
             if matches!(completion.action, TurnAction::Stop) && completion.error.is_some() {
@@ -356,45 +409,27 @@ impl Composer {
                 continue;
             }
             match completion.action {
-                TurnAction::Stop => {
-                    self.cancelling = false;
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't stop the run: {error}"));
-                    }
-                }
-                TurnAction::Continue => {
-                    self.continuing = false;
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't continue: {error}"));
-                    }
-                }
-                TurnAction::ClearGoal => {
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't clear the goal: {error}"));
-                    }
-                }
-                TurnAction::Unpark => {
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't cancel the pickup: {error}"));
-                    }
-                }
-                TurnAction::Permissions => {
-                    if let Some(error) = completion.error {
-                        self.notice = Some(format!("Couldn't change access: {error}"));
-                    }
-                }
+                TurnAction::Stop => self.cancelling = false,
+                TurnAction::Continue => self.continuing = false,
+                TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
+            }
+            if let Some(error) = &completion.error
+                && let Some(problem) = turn_problem(completion.action, error)
+            {
+                tracing::warn!(thread = %completion.thread, action = ?completion.action, error = %diagnostics::chain(error), "turn action failed");
+                self.notice = Some(problem);
             }
         }
         before != (self.cancelling, self.continuing, self.notice.clone())
     }
 
-    pub fn draft_editable(&self) -> bool {
+    pub(crate) fn draft_editable(&self) -> bool {
         self.session
             .as_ref()
             .is_some_and(|session| session.read(|state| !state.sending()))
     }
 
-    pub fn metadata_ready(&self, host: &HostData) -> bool {
+    pub(crate) fn metadata_ready(&self, host: &HostData) -> bool {
         match &self.target {
             ComposerTarget::Thread { thread, .. } => host.threads.contains_key(thread),
             ComposerTarget::NewThread { .. } => true,
@@ -421,7 +456,7 @@ impl Composer {
         self.refresh_picker(host);
     }
 
-    pub fn refresh_picker(&mut self, host: &HostData) {
+    pub(crate) fn refresh_picker(&mut self, host: &HostData) {
         if self.host_instance != Some(host.instance()) {
             return;
         }
@@ -429,7 +464,7 @@ impl Composer {
         self.picker.refresh(host, config.as_ref());
     }
 
-    pub fn choose_model(
+    pub(crate) fn choose_model(
         &mut self,
         host: &HostData,
         engine: artisan_api::EngineId,
@@ -444,11 +479,11 @@ impl Composer {
         Some(config)
     }
 
-    pub fn choose_project(&mut self, id: ProjectId) {
+    pub(crate) fn choose_project(&mut self, id: ProjectId) {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
+            .is_none_or(|session| session.read(DraftSession::sending))
         {
             return;
         }
@@ -457,20 +492,20 @@ impl Composer {
         self.edited();
     }
 
-    pub fn refresh_mentions(&mut self, host: &HostData) {
+    pub(crate) fn refresh_mentions(&mut self, host: &HostData) {
         if self.host_instance != Some(host.instance()) {
             return;
         }
         let engine = self.effective_config(host).map(|config| config.engine);
         let own = match &self.target {
             ComposerTarget::Thread { thread, .. } => Some(thread),
-            _ => None,
+            ComposerTarget::NewThread { .. } => None,
         };
         self.mentions.refresh(host, engine, own);
         self.sync_mentions();
     }
 
-    pub fn sync_mentions(&mut self) {
+    pub(crate) fn sync_mentions(&mut self) {
         let caret = {
             let editor = self.editor.borrow();
             (!editor.is_disabled()).then(|| editor.caret()).flatten()
@@ -485,7 +520,7 @@ impl Composer {
             .set_list_open(!self.mentions.rows.is_empty());
     }
 
-    pub fn mention_key(&mut self, key: ListKey) {
+    pub(crate) fn mention_key(&mut self, key: ListKey) {
         if self.mentions.rows.is_empty() {
             return;
         }
@@ -512,7 +547,7 @@ impl Composer {
         if self
             .session
             .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
+            .is_none_or(|session| session.read(DraftSession::sending))
         {
             return;
         }
@@ -545,11 +580,25 @@ impl Composer {
                     |name| name.to_string_lossy().into_owned(),
                 );
                 self.add_image(Source::Path(path), name);
-            } else if let Some(existing) = self.files.iter().find(|file| file.path == path) {
-                self.file_shake = Some((existing.key, std::time::Instant::now()));
             } else {
+                let path = match DraftPath::try_from(path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.notice = Some(editor_core::Problem::caused_by(
+                            "This path can't be linked.",
+                            &error,
+                        ));
+                        continue;
+                    }
+                };
+                if let Some(existing) = self.files.iter().find(|file| file.path == path) {
+                    self.file_shake = Some((existing.key, std::time::Instant::now()));
+                    continue;
+                }
                 if self.files.len() >= 32 {
-                    self.notice = Some("A message can link at most 32 files.".into());
+                    self.notice = Some(editor_core::Problem::new(
+                        "A message can link at most 32 files.",
+                    ));
                     return;
                 }
                 let key = self.next_file_key;
@@ -560,13 +609,15 @@ impl Composer {
         }
     }
 
-    pub fn remove_image(&mut self, key: u64) {
-        if self
-            .session
-            .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
-        {
+    pub(crate) fn remove_image(&mut self, key: u64) {
+        if !self.accepts_attachments() {
             return;
+        }
+        if let Some(index) = self.lost_chips.iter().position(|(chip, _)| *chip == key) {
+            let (_, lost) = self.lost_chips.remove(index);
+            if let Some(session) = &self.session {
+                session.dismiss_lost(lost);
+            }
         }
         if let Some(attachments) = &mut self.attachments {
             attachments.remove(key);
@@ -585,12 +636,8 @@ impl Composer {
         self.edited();
     }
 
-    pub fn add_image(&mut self, source: Source, name: String) {
-        if self
-            .session
-            .as_ref()
-            .is_none_or(|session| session.read(|state| state.sending()))
-        {
+    pub(crate) fn add_image(&mut self, source: Source, name: String) {
+        if !self.accepts_attachments() {
             return;
         }
         if self
@@ -602,7 +649,11 @@ impl Composer {
         }
     }
 
-    pub fn drain_attachments(&mut self, core: &Core, assets: &aqua::images::ImageAssets) -> bool {
+    pub(crate) fn drain_attachments(
+        &mut self,
+        core: &Core,
+        assets: &aqua::images::ImageAssets,
+    ) -> bool {
         if core.host(self.target.host()).map(HostData::instance) != self.host_instance {
             return false;
         }
@@ -627,8 +678,7 @@ impl Composer {
             text: self
                 .questionnaire
                 .aside_text()
-                .map(str::to_owned)
-                .unwrap_or_else(|| self.editor.borrow().text().to_owned()),
+                .map_or_else(|| self.editor.borrow().text().to_owned(), str::to_owned),
             images: self
                 .attachments
                 .as_ref()
@@ -639,9 +689,17 @@ impl Composer {
                         .collect()
                 })
                 .unwrap_or_default(),
-            files: self.files.clone(),
+            files: self
+                .files
+                .iter()
+                .map(|file| SavedFile {
+                    path: file.path.clone(),
+                    folder: file.folder,
+                })
+                .collect(),
             config: self.config.clone(),
             project: self.project.clone(),
+            follow_ups: self.parked.clone(),
         }
     }
 
@@ -649,83 +707,160 @@ impl Composer {
         let Some(session) = &self.session else {
             return;
         };
-        let body = self.draft_body();
-        let value = if body.text.is_empty()
-            && body.images.is_empty()
-            && body.files.is_empty()
-            && body.config.is_none()
-            && body.project.is_none()
-        {
-            serde_json::Value::Null
-        } else {
-            serde_json::to_value(body).expect("DraftBody serializes")
-        };
-        session.queue(value);
+        let uploading = self
+            .attachments
+            .as_ref()
+            .is_some_and(Attachments::uploading);
+        session.queue(self.draft_body(), self.shown_epoch, uploading);
+    }
+
+    pub fn release_if_host_gone(&mut self, core: &Core) -> bool {
+        if core.host(self.target.host()).map(HostData::instance) == self.host_instance {
+            return false;
+        }
+        self.release();
+        true
+    }
+
+    pub fn release(&mut self) {
+        self.hand_off_attachments();
+        self.session = None;
+        self.editor.borrow_mut().set_disabled(true);
     }
 
     pub fn sync(&mut self, core: &Core) -> Vec<SessionEvent> {
-        if core.host(self.target.host()).map(HostData::instance) != self.host_instance {
-            self.session = None;
-            self.editor.borrow_mut().set_disabled(true);
+        if self.release_if_host_gone(core) {
             return Vec::new();
         }
         let Some(session) = &mut self.session else {
             return Vec::new();
         };
         let events = session.drain_events();
-        let (loaded, sending, failed, body) = session.read(|state| {
-            (
-                state.loaded,
-                state.sending(),
-                state.send_failed(),
-                state.body.clone(),
-            )
-        });
+        let lost = session.read(|state| state.lost().to_vec());
+        let unrecovered = session.take_unrecovered();
+        self.reconcile();
+        self.settle_refusal(core);
         for event in &events {
             match event {
-                SessionEvent::Accepted { .. } => {
-                    if matches!(self.outbox, Outbox::Restored) {
-                        self.clear_input();
-                        self.cleared = Some(std::time::Instant::now());
+                SessionEvent::Accepted { .. } | SessionEvent::Changed => {}
+                SessionEvent::ImageAdopted(hash) => {
+                    if self.restore_revision != Some(self.edit_revision)
+                        && let Some(attachments) = &mut self.attachments
+                        && !attachments.contains(hash)
+                    {
+                        attachments.restore(hash.clone());
                     }
-                    self.outbox = Outbox::Idle;
                 }
-                SessionEvent::Reloaded => {
-                    self.outbox = Outbox::Idle;
-                    self.editor.borrow_mut().set_text("");
-                    if let Some(attachments) = &mut self.attachments {
-                        attachments.clear();
-                    }
-                    self.files.clear();
-                    self.restore_revision = Some(self.edit_revision);
-                }
-                SessionEvent::Changed => {}
             }
         }
-        if failed && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored) {
-            self.restore_sent(sent);
-        }
-        let holding = sending && matches!(self.outbox, Outbox::Restored);
         self.editor
             .borrow_mut()
-            .set_disabled(holding || self.questionnaire.sending.is_some());
-        if loaded
-            && self.restore_revision.take() == Some(self.edit_revision)
-            && body != serde_json::Value::Null
-        {
-            match serde_json::from_value::<DraftBody>(body) {
-                Ok(body) if self.input_empty() => self.restore_body(body),
-                Ok(_) => {}
-                Err(error) => self.notice = Some(format!("Couldn't read this draft: {error}")),
-            }
+            .set_disabled(self.questionnaire.sending.is_some());
+        if !unrecovered.is_empty() {
+            self.notice = Some(editor_core::Problem::new(
+                unrecovered
+                    .iter()
+                    .map(|unrecovered| match unrecovered {
+                        Unrecovered::SetAside(path) => format!(
+                            "A draft kept on this device couldn't be read. It was moved to {}.",
+                            path.display()
+                        ),
+                        Unrecovered::Left(path) => format!(
+                            "A draft kept on this device couldn't be read. It stays at {}, and this draft is kept beside it.",
+                            path.display()
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ));
         }
+        self.show_lost(lost);
         events
     }
 
-    fn input_empty(&self) -> bool {
-        self.editor.borrow().text().trim().is_empty()
-            && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
-            && self.files.is_empty()
+    pub(crate) fn reconcile(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let (epoch, shown, parked, unreadable) = session.read(|state| {
+            (
+                state.epoch(),
+                state.shown().cloned(),
+                state.parked_beside_failed_send(),
+                state.unreadable().map(ToString::to_string),
+            )
+        });
+        if epoch != self.shown_epoch {
+            self.shown_epoch = epoch;
+            self.reset_input();
+        }
+        if self.restore_revision == Some(self.edit_revision)
+            && let Some(body) = shown
+        {
+            self.restore_revision = None;
+            if let Some(error) = unreadable {
+                self.notice = Some(editor_core::Problem::detailed(
+                    "Couldn't read this draft.",
+                    error,
+                ));
+            } else if parked {
+                self.notice = Some(editor_core::Problem::new(
+                    "What you typed while sending is kept and comes back once this message is sent.",
+                ));
+            }
+            self.restore_body(body);
+        }
+    }
+
+    fn accepts_attachments(&mut self) -> bool {
+        let Some((sending, epoch)) = self
+            .session
+            .as_ref()
+            .map(|session| session.read(|state| (state.sending(), state.epoch())))
+        else {
+            return false;
+        };
+        if sending {
+            return false;
+        }
+        if epoch != self.shown_epoch {
+            self.reconcile();
+        }
+        true
+    }
+
+    fn show_lost(&mut self, lost: Vec<super::draft_session::LostImage>) {
+        let Some(attachments) = &mut self.attachments else {
+            unreachable!(
+                "invariant: composer for {} on Forge {} has its Forge's attachments while it has a draft session",
+                self.target.scope(),
+                self.target.host()
+            );
+        };
+        self.lost_chips.retain(|(chip, key)| {
+            let kept = lost.iter().any(|lost| lost.key == *key);
+            if !kept {
+                attachments.remove(*chip);
+            }
+            kept
+        });
+        for image in lost {
+            if !self.lost_chips.iter().any(|(_, key)| *key == image.key) {
+                let chip = attachments.add_failed(image.name, image.reason);
+                self.lost_chips.push((chip, image.key));
+            }
+        }
+    }
+
+    fn reset_input(&mut self) {
+        self.parked.clear();
+        self.editor.borrow_mut().set_text("");
+        if let Some(attachments) = &mut self.attachments {
+            attachments.clear();
+        }
+        self.lost_chips.clear();
+        self.files.clear();
+        self.restore_revision = Some(self.edit_revision);
     }
 
     fn clear_input(&mut self) {
@@ -739,6 +874,7 @@ impl Composer {
     }
 
     fn restore_body(&mut self, body: DraftBody) {
+        self.parked = body.follow_ups;
         if !self.questionnaire.restore_aside_text(&body.text) {
             self.editor.borrow_mut().set_text(&body.text);
         }
@@ -752,30 +888,16 @@ impl Composer {
         self.files = body
             .files
             .into_iter()
-            .map(|mut file| {
-                file.key = self.next_file_key;
+            .map(|file| {
+                let key = self.next_file_key;
                 self.next_file_key = self.next_file_key.wrapping_add(1);
-                file
+                DraftFile {
+                    key,
+                    path: file.path,
+                    folder: file.folder,
+                }
             })
             .collect();
-    }
-
-    fn restore_sent(&mut self, sent: DraftBody) {
-        if self.input_empty() {
-            self.restore_body(sent);
-            return;
-        }
-        let typed = self.draft_body();
-        let body = DraftBody {
-            text: format!("{}\n\n{}", sent.text, typed.text),
-            images: sent.images.into_iter().chain(typed.images).collect(),
-            files: sent.files.into_iter().chain(typed.files).collect(),
-            config: sent.config.or(typed.config),
-            project: sent.project.or(typed.project),
-        };
-        self.clear_input();
-        self.restore_body(body);
-        self.edited();
     }
 
     pub fn project(&self, host: &HostData) -> Option<ProjectId> {
@@ -789,7 +911,7 @@ impl Composer {
         }
     }
 
-    pub fn effective_config(&self, host: &HostData) -> Option<EngineConfig> {
+    pub(crate) fn effective_config(&self, host: &HostData) -> Option<EngineConfig> {
         self.config.clone().or_else(|| match &self.target {
             ComposerTarget::Thread { thread, .. } => {
                 host.threads.get(thread).map(|thread| thread.config.clone())
@@ -807,17 +929,11 @@ impl Composer {
                 .attachments
                 .as_ref()
                 .is_none_or(|items| items.items.is_empty());
-        let answer = if self.questionnaire.writing_answer() {
-            Some(match question {
-                None => "Loading question…",
-                Some(question) if question.options.is_empty() => {
-                    "Type your answer, then press Enter"
-                }
-                Some(_) => "Pick an answer above, or type your own",
-            })
-        } else {
-            None
-        };
+        let answer = self.questionnaire.writing_answer().then(|| match question {
+            None => "Loading question…",
+            Some(question) if question.options.is_empty() => "Type your answer, then press Enter",
+            Some(_) => "Pick an answer above, or type your own",
+        });
         if answer.is_none() && visible && !self.placeholder_was_visible {
             self.placeholder_generation = self.placeholder_generation.wrapping_add(1);
         }
@@ -825,7 +941,7 @@ impl Composer {
         answer.unwrap_or_else(|| super::placeholder::phrase(self.placeholder_generation))
     }
 
-    pub fn blocked(&self, host: &HostData) -> Option<&'static str> {
+    fn blocked(&self, host: &HostData) -> Option<&'static str> {
         if matches!(&self.target, ComposerTarget::Thread { thread, .. } if !host.threads.contains_key(thread))
         {
             return Some("Loading thread settings…");
@@ -833,7 +949,10 @@ impl Composer {
         let Some(session) = &self.session else {
             return Some("Draft unavailable");
         };
-        if session.read(|state| state.sending()) {
+        if session.read(DraftSession::choosing_draft) {
+            return Some("Choose which draft to keep first.");
+        }
+        if session.read(DraftSession::sending) {
             return Some("Sending…");
         }
         let items = self
@@ -868,10 +987,10 @@ impl Composer {
         None
     }
 
-    pub fn primary(&self, host: &HostData) -> (super::view::Primary, bool) {
+    pub(crate) fn primary(&self, host: &HostData) -> (super::view::Primary, bool) {
         let working = match &self.target {
             ComposerTarget::Thread { thread, .. } => host.is_working(thread),
-            _ => false,
+            ComposerTarget::NewThread { .. } => false,
         };
         let ready = if self.questionnaire.writing_answer() {
             !self.editor.borrow().text().trim().is_empty()
@@ -881,8 +1000,9 @@ impl Composer {
         let sending = self
             .session
             .as_ref()
-            .is_some_and(|session| session.read(|state| state.sending()));
-        let can_continue = !sending && matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
+            .is_some_and(|session| session.read(DraftSession::sending));
+        let can_continue = !sending
+            && matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
         if working && !ready {
             (super::view::Primary::Stop, self.cancelling)
         } else if !working && !ready && can_continue {
@@ -892,45 +1012,98 @@ impl Composer {
         }
     }
 
-    pub fn send(&mut self, host: &HostData) -> bool {
+    fn settle_refusal(&mut self, core: &Core) {
+        let Some(refused) = self.refused else {
+            return;
+        };
+        let standing = core
+            .host(self.target.host())
+            .and_then(|host| self.readiness(host).err());
+        if standing != Some(refused) {
+            self.refused = None;
+        }
+    }
+
+    pub(crate) fn refuse(&mut self, refusal: SendRefusal) {
+        self.refused = match refusal {
+            SendRefusal::Empty => None,
+            refusal @ (SendRefusal::NoDraft
+            | SendRefusal::ForgeReconnected
+            | SendRefusal::DraftChanged
+            | SendRefusal::AnsweringQuestion
+            | SendRefusal::ThreadMissing
+            | SendRefusal::AlreadySending
+            | SendRefusal::ChoosingDraft
+            | SendRefusal::DraftLoading
+            | SendRefusal::ImageUploading
+            | SendRefusal::ImageFailed
+            | SendRefusal::NoModel
+            | SendRefusal::NoProject) => Some(refusal),
+        };
+    }
+
+    fn readiness(&self, host: &HostData) -> Result<(Vec<BlobHash>, EngineConfig), SendRefusal> {
         let Some(session) = &self.session else {
-            return false;
+            return Err(SendRefusal::NoDraft);
         };
-        if self.host_instance != Some(host.instance())
-            || self.questionnaire.writing_answer()
-            || matches!(&self.target, ComposerTarget::Thread { thread, .. } if !host.threads.contains_key(thread))
-        {
-            return false;
+        if self.host_instance != Some(host.instance()) {
+            return Err(SendRefusal::ForgeReconnected);
         }
-        if session.read(|state| state.sending())
-            || (self.editor.borrow().text().trim().is_empty()
-                && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
-                && self.files.is_empty())
-        {
-            return false;
+        if session.read(DraftSession::epoch) != self.shown_epoch {
+            return Err(SendRefusal::DraftChanged);
         }
-        let Some(images) = self
-            .attachments
-            .as_ref()
-            .and_then(Attachments::ready_hashes)
-        else {
-            return false;
+        if self.questionnaire.writing_answer() {
+            return Err(SendRefusal::AnsweringQuestion);
+        }
+        if matches!(&self.target, ComposerTarget::Thread { thread, .. } if !host.threads.contains_key(thread))
+        {
+            return Err(SendRefusal::ThreadMissing);
+        }
+        if session.read(DraftSession::choosing_draft) {
+            return Err(SendRefusal::ChoosingDraft);
+        }
+        if session.read(DraftSession::sending) {
+            return Err(SendRefusal::AlreadySending);
+        }
+        if !session.read(DraftSession::sendable) {
+            return Err(SendRefusal::DraftLoading);
+        }
+        if self.editor.borrow().text().trim().is_empty()
+            && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
+            && self.files.is_empty()
+        {
+            return Err(SendRefusal::Empty);
+        }
+        let images = match &self.attachments {
+            None => Vec::new(),
+            Some(attachments) => match attachments.ready_hashes() {
+                Some(images) => images,
+                None if attachments.uploading() => return Err(SendRefusal::ImageUploading),
+                None => return Err(SendRefusal::ImageFailed),
+            },
         };
-        let Some(config) = self.effective_config(host) else {
-            return false;
-        };
-        let (create, thread_config) = match &self.target {
+        let config = self.effective_config(host).ok_or(SendRefusal::NoModel)?;
+        if matches!(self.target, ComposerTarget::NewThread { .. }) && self.project(host).is_none() {
+            return Err(SendRefusal::NoProject);
+        }
+        Ok((images, config))
+    }
+
+    pub fn send(&mut self, host: &HostData) -> Result<(), SendRefusal> {
+        let (images, config) = self.readiness(host)?;
+        self.refused = None;
+        let (create, thread_config, thread) = match &self.target {
             ComposerTarget::Thread { thread, .. } => (
                 None,
                 host.threads.get(thread).map(|thread| thread.config.clone()),
+                thread.clone(),
             ),
             ComposerTarget::NewThread { .. } => {
-                let Some(project_id) = self.project(host) else {
-                    return false;
-                };
+                let project_id = self.project(host).ok_or(SendRefusal::NoProject)?;
+                let thread = ThreadId::new();
                 (
                     Some(CreateThread {
-                        id: ThreadId::new(),
+                        id: thread.clone(),
                         project_id,
                         config: config.clone(),
                         title: None,
@@ -938,13 +1111,9 @@ impl Composer {
                         spawned_by: None,
                     }),
                     Some(config.clone()),
+                    thread,
                 )
             }
-        };
-        let thread = match (&create, &self.target) {
-            (Some(create), _) => create.id.clone(),
-            (None, ComposerTarget::Thread { thread, .. }) => thread.clone(),
-            _ => return false,
         };
         let message = SendMessage {
             id: ItemId::new(),
@@ -959,13 +1128,42 @@ impl Composer {
                 message,
                 create,
                 thread,
-            });
+            })?;
         }
-        self.outbox = Outbox::InFlight(self.draft_body());
         self.clear_input();
         self.cleared = Some(std::time::Instant::now());
-        true
+        Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SendRefusal {
+    #[error("This message's draft isn't open. Open the thread again, then send it.")]
+    NoDraft,
+    #[error("This Forge reconnected since the message was written. Try again in a moment.")]
+    ForgeReconnected,
+    #[error("This draft changed since it was shown. Check it, then send it again.")]
+    DraftChanged,
+    #[error("A question is being answered. Send the answer first.")]
+    AnsweringQuestion,
+    #[error("This thread isn't on this Forge.")]
+    ThreadMissing,
+    #[error("This message is already being sent.")]
+    AlreadySending,
+    #[error("Choose which draft to keep first.")]
+    ChoosingDraft,
+    #[error("This draft is still loading. Try again once it has loaded.")]
+    DraftLoading,
+    #[error("This message has nothing to send. Type it again, then send it.")]
+    Empty,
+    #[error("This message can't be sent until its images finish uploading.")]
+    ImageUploading,
+    #[error("An image couldn't be uploaded. Remove it or try it again.")]
+    ImageFailed,
+    #[error("Choose a model, then send it again.")]
+    NoModel,
+    #[error("Choose a project, then send it again.")]
+    NoProject,
 }
 
 fn file_links(text: &str, files: &[DraftFile]) -> String {
@@ -976,15 +1174,12 @@ fn file_links(text: &str, files: &[DraftFile]) -> String {
         .iter()
         .map(|file| {
             let slash = if file.folder { "/" } else { "" };
-            let name = file
-                .path
-                .file_name()
-                .map_or_else(
-                    || file.path.display().to_string(),
-                    |name| name.to_string_lossy().into_owned(),
-                )
-                .replace(['[', ']'], "");
-            format!("[{name}{slash}](<{}>)", file.path.display())
+            let path = file.path.as_path();
+            let name = path.file_name().map_or_else(
+                || file.path.as_str().to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            markdown_link(&format!("{name}{slash}"), file.path.as_str())
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -993,6 +1188,38 @@ fn file_links(text: &str, files: &[DraftFile]) -> String {
     } else {
         format!("{text}\n\n{links}")
     }
+}
+
+fn markdown_link(label: &str, destination: &str) -> String {
+    let mut link = String::from("[");
+    for character in label.chars() {
+        match character {
+            '\n' | '\r' => link.push(' '),
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '~' | '|' | '&' | '!' => {
+                link.push('\\');
+                link.push(character);
+            }
+            other => link.push(other),
+        }
+    }
+    link.push_str("](<");
+    let mut characters = destination.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\n' => link.push_str("%0A"),
+            '\r' => link.push_str("%0D"),
+            '<' | '>' => {
+                link.push('\\');
+                link.push(character);
+            }
+            '\\' if characters.peek().is_some_and(char::is_ascii_punctuation) => {
+                link.push_str("\\\\");
+            }
+            other => link.push(other),
+        }
+    }
+    link.push_str(">)");
+    link
 }
 
 fn last_project(host: &HostData) -> Option<ProjectId> {
@@ -1008,34 +1235,13 @@ fn last_project(host: &HostData) -> Option<ProjectId> {
 }
 
 fn remembered_config(host: &HostData) -> Option<EngineConfig> {
-    let mut config: EngineConfig =
-        serde_json::from_value(host.setting("default_engine_config")?.clone()).ok()?;
-    if let Some(saved) = config.model.as_deref().and_then(|model| {
-        artisan_api::saved_model_config(
-            host.setting(artisan_api::MODEL_CONFIGS_KEY)?,
-            config.engine,
-            model,
-        )
-    }) {
-        config = saved;
-    }
-    fitted_remembered_config(host, config)
-}
-
-pub fn remembered_harness_config(
-    host: &HostData,
-    engine: artisan_api::EngineId,
-) -> Option<EngineConfig> {
-    if let Some(config) = host.pending_harness_config(engine) {
-        return fitted_remembered_config(host, config.clone());
-    }
-    let value = host
-        .setting(artisan_api::HARNESS_CONFIGS_KEY)
-        .and_then(|configs| configs.get(engine.as_str()))
-        .or_else(|| host.setting("default_engine_config"))?;
-    let config: EngineConfig = serde_json::from_value(value.clone()).ok()?;
-    if config.engine != engine {
-        return None;
+    let mut config = host.settings.default_engine_config()?.clone();
+    if let Some(saved) = config
+        .model
+        .as_deref()
+        .and_then(|model| host.settings.saved_model_config(config.engine, model))
+    {
+        config = saved.clone();
     }
     fitted_remembered_config(host, config)
 }
@@ -1084,3 +1290,29 @@ fn default_config(host: &HostData) -> Option<EngineConfig> {
     config.effort = None;
     Some(config)
 }
+
+fn turn_problem(
+    action: TurnAction,
+    error: &editor_core::client::CallError,
+) -> Option<editor_core::Problem> {
+    use artisan_api::{Failure, RunFailure};
+    let headline = match (action, error.refused()) {
+        (
+            TurnAction::Continue,
+            Some(Failure::Run(
+                RunFailure::AlreadyWorking { .. } | RunFailure::NothingToContinue { .. },
+            )),
+        )
+        | (TurnAction::ClearGoal, Some(Failure::Run(RunFailure::NoGoal { .. }))) => return None,
+        (TurnAction::Stop, _) => "Couldn't stop the run.",
+        (TurnAction::Continue, _) => "Couldn't continue.",
+        (TurnAction::ClearGoal, _) => "Couldn't clear the goal.",
+        (TurnAction::Unpark, _) => "Couldn't cancel the pickup.",
+        (TurnAction::Permissions, _) => "Couldn't change access.",
+    };
+    Some(editor_core::Problem::calling_forge(headline, error))
+}
+
+#[cfg(test)]
+#[path = "../../tests/composer/controller.rs"]
+mod tests;

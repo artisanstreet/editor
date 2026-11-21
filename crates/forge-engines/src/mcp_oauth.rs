@@ -1,100 +1,229 @@
-//! Signing in to HTTP MCP servers.
-//!
-//! As MCP's authorization spec lays out, the server answers 401 and points at its protected-resource metadata
-//! (RFC 9728), which names an authorization server whose metadata
-//! (RFC 8414) gives the endpoints. Artisan registers itself there (RFC 7591),
-//! runs an authorization-code flow with PKCE bound to the server with
-//! `resource` (RFC 8707), and refreshes the tokens it gets.
-//!
-//! Everything here is plain HTTP; Forge keeps the results and the Editor
-//! catches the browser's redirect.
-
-use anyhow::{Context, Result, anyhow, bail};
+use artisan_api::Secret;
 use base64::Engine as _;
 use reqwest::{StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
-/// The most a metadata document or token answer may be.
 const MAX_BODY: usize = 256 * 1024;
+const MAX_REDIRECTS: usize = 5;
+const MAX_EXPIRES_IN_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 
-/// What a server says when asked without a token.
+#[derive(Clone, Debug)]
+pub struct Http {
+    fetch: reqwest::Client,
+    post: reqwest::Client,
+}
+
+fn client(policy: reqwest::redirect::Policy) -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("artisan-forge/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(policy)
+        .build()
+        .expect("invariant: the OAuth HTTP client builds with the default TLS backend")
+}
+
+impl Http {
+    #[must_use]
+    pub fn new() -> Self {
+        let fetch = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS || !is_secure(attempt.url()) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        });
+        let post = reqwest::redirect::Policy::custom(|attempt| {
+            let same_origin = attempt
+                .previous()
+                .first()
+                .is_some_and(|first| first.origin() == attempt.url().origin());
+            if attempt.previous().len() >= MAX_REDIRECTS
+                || !is_secure(attempt.url())
+                || !same_origin
+            {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        });
+        Self {
+            fetch: client(fetch),
+            post: client(post),
+        }
+    }
+}
+
+impl Default for Http {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SecureUrl(Box<Url>);
+
+impl SecureUrl {
+    #[must_use]
+    const fn url(&self) -> &Url {
+        &self.0
+    }
+
+    #[must_use]
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Display for SecureUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InsecureUrl {
+    #[error("{value} isn't a URL")]
+    Invalid {
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("{url} isn't HTTPS")]
+    NotHttps { url: Box<Url> },
+}
+
+impl TryFrom<String> for SecureUrl {
+    type Error = InsecureUrl;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let url = Url::parse(&value).map_err(|source| InsecureUrl::Invalid { value, source })?;
+        Self::try_from(url)
+    }
+}
+
+impl TryFrom<Url> for SecureUrl {
+    type Error = InsecureUrl;
+
+    fn try_from(url: Url) -> Result<Self, Self::Error> {
+        if is_secure(&url) {
+            Ok(Self(Box::new(url)))
+        } else {
+            Err(InsecureUrl::NotHttps { url: Box::new(url) })
+        }
+    }
+}
+
+impl From<SecureUrl> for String {
+    fn from(url: SecureUrl) -> Self {
+        (*url.0).into()
+    }
+}
+
+fn is_secure(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Probe {
-    /// It answered; it needs no sign-in.
     Open,
-    /// 401, and it offers OAuth sign-in.
     SignIn(Box<Discovery>),
-    /// 401, without OAuth: it needs a token in a header.
     NeedsToken,
 }
 
-/// Where and how to sign in to one server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Discovery {
-    /// The `resource` the tokens are bound to.
-    pub resource: String,
-    pub authorization_endpoint: String,
-    pub token_endpoint: String,
-    #[serde(default)]
-    pub registration_endpoint: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
+    issuer: SecureUrl,
+    resource: SecureUrl,
+    authorization_endpoint: SecureUrl,
+    token_endpoint: SecureUrl,
+    registration_endpoint: Option<SecureUrl>,
+    scope: Option<String>,
 }
 
-/// The client Artisan registered as, for one redirect address.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Client {
-    pub client_id: String,
-    #[serde(default)]
-    pub client_secret: Option<String>,
-    pub redirect_uri: String,
+    #[serde(rename = "client_id")]
+    id: String,
+    #[serde(rename = "client_secret")]
+    secret: Option<Secret>,
+    redirect_uri: String,
+    issuer: SecureUrl,
+    resource: SecureUrl,
+}
+
+impl Client {
+    #[must_use]
+    pub fn serves(&self, discovery: &Discovery, redirect_uri: &str) -> bool {
+        self.redirect_uri == redirect_uri
+            && self.issuer == discovery.issuer
+            && self.resource == discovery.resource
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
-    pub access_token: String,
-    #[serde(default)]
-    pub refresh_token: Option<String>,
-    /// Milliseconds since the epoch, when the server said.
-    #[serde(default)]
-    pub expires_at: Option<i64>,
+    access_token: Secret,
+    refresh_token: Option<Secret>,
+    expires_at: Option<i64>,
 }
 
 impl Tokens {
-    /// Expired, or expiring within a minute.
     #[must_use]
     pub fn stale(&self, now: i64) -> bool {
-        self.expires_at.is_some_and(|at| at - 60_000 <= now)
+        self.expires_at
+            .is_some_and(|at| at.saturating_sub(60_000) <= now)
+    }
+
+    #[must_use]
+    pub const fn access_token(&self) -> &Secret {
+        &self.access_token
+    }
+
+    #[must_use]
+    pub const fn refresh_token(&self) -> Option<&Secret> {
+        self.refresh_token.as_ref()
     }
 }
 
-/// The PKCE secret, its challenge, and the `state` for one flow.
 #[derive(Clone, Debug)]
 pub struct Pkce {
-    pub verifier: String,
+    pub verifier: Secret,
     pub challenge: String,
     pub state: String,
 }
 
 impl Pkce {
-    pub fn new() -> Result<Self> {
-        let verifier = random(32)?;
-        let challenge = b64(&Sha256::digest(verifier.as_bytes()));
+    pub fn new() -> Result<Self, getrandom::Error> {
+        let verifier = Secret::new(random(32)?);
         Ok(Self {
-            verifier,
-            challenge,
+            verifier: verifier.clone(),
+            challenge: s256_challenge(verifier.expose()),
             state: random(24)?,
         })
     }
 }
 
-fn random(len: usize) -> Result<String> {
+fn s256_challenge(verifier: &str) -> String {
+    b64(&Sha256::digest(verifier.as_bytes()))
+}
+
+fn random(len: usize) -> Result<String, getrandom::Error> {
     let mut bytes = vec![0_u8; len];
-    getrandom::fill(&mut bytes).map_err(|error| anyhow!("random bytes: {error}"))?;
+    getrandom::fill(&mut bytes)?;
     Ok(b64(&bytes))
 }
 
@@ -102,15 +231,280 @@ fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Asks the server to initialize without a token, and finds out how to sign
-/// in when it refuses. `headers` are the ones the user configured.
+#[derive(Debug, thiserror::Error)]
+pub enum ResponseError {
+    #[error("couldn't reach {url}")]
+    Unreachable {
+        url: Box<Url>,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("{url} redirected to {location}, which isn't HTTPS")]
+    InsecureRedirect { url: Box<Url>, location: Box<Url> },
+    #[error("{url} redirected a request carrying credentials to {location}, another origin")]
+    CrossOriginRedirect { url: Box<Url>, location: Box<Url> },
+    #[error("reading the answer from {url}")]
+    Read {
+        url: Box<Url>,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("the answer from {url} is over {limit} bytes")]
+    TooLarge { url: Box<Url>, limit: usize },
+    #[error("{url} answered HTTP {status}{}", oauth_reason(.body))]
+    Status {
+        url: Box<Url>,
+        status: u16,
+        body: ErrorBody,
+    },
+    #[error("the answer from {url} isn't what OAuth expects")]
+    Malformed {
+        url: Box<Url>,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ErrorBody {
+    OAuth(OAuthCode),
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OAuthCode {
+    InvalidRequest,
+    InvalidClient,
+    InvalidGrant,
+    UnauthorizedClient,
+    UnsupportedGrantType,
+    InvalidScope,
+    InvalidRedirectUri,
+    InvalidClientMetadata,
+    InvalidSoftwareStatement,
+    UnapprovedSoftwareStatement,
+    InvalidToken,
+    InsufficientScope,
+    AccessDenied,
+    ServerError,
+    TemporarilyUnavailable,
+    Unrecognized(OtherCode),
+    Unshowable,
+}
+
+const MAX_OTHER_CODE: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OtherCode(String);
+
+impl OtherCode {
+    fn of(code: &str) -> Option<Self> {
+        let showable = !code.is_empty()
+            && code.len() <= MAX_OTHER_CODE
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'));
+        showable.then(|| Self(code.to_owned()))
+    }
+}
+
+impl OAuthCode {
+    fn of(code: &str) -> Self {
+        match code {
+            "invalid_request" => Self::InvalidRequest,
+            "invalid_client" => Self::InvalidClient,
+            "invalid_grant" => Self::InvalidGrant,
+            "unauthorized_client" => Self::UnauthorizedClient,
+            "unsupported_grant_type" => Self::UnsupportedGrantType,
+            "invalid_scope" => Self::InvalidScope,
+            "invalid_redirect_uri" => Self::InvalidRedirectUri,
+            "invalid_client_metadata" => Self::InvalidClientMetadata,
+            "invalid_software_statement" => Self::InvalidSoftwareStatement,
+            "unapproved_software_statement" => Self::UnapprovedSoftwareStatement,
+            "invalid_token" => Self::InvalidToken,
+            "insufficient_scope" => Self::InsufficientScope,
+            "access_denied" => Self::AccessDenied,
+            "server_error" => Self::ServerError,
+            "temporarily_unavailable" => Self::TemporarilyUnavailable,
+            other => OtherCode::of(other).map_or(Self::Unshowable, Self::Unrecognized),
+        }
+    }
+
+    fn code(&self) -> &str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::InvalidClient => "invalid_client",
+            Self::InvalidGrant => "invalid_grant",
+            Self::UnauthorizedClient => "unauthorized_client",
+            Self::UnsupportedGrantType => "unsupported_grant_type",
+            Self::InvalidScope => "invalid_scope",
+            Self::InvalidRedirectUri => "invalid_redirect_uri",
+            Self::InvalidClientMetadata => "invalid_client_metadata",
+            Self::InvalidSoftwareStatement => "invalid_software_statement",
+            Self::UnapprovedSoftwareStatement => "unapproved_software_statement",
+            Self::InvalidToken => "invalid_token",
+            Self::InsufficientScope => "insufficient_scope",
+            Self::AccessDenied => "access_denied",
+            Self::ServerError => "server_error",
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::Unrecognized(OtherCode(code)) => code,
+            Self::Unshowable => "an OAuth error code Artisan can't show",
+        }
+    }
+}
+
+fn oauth_reason(body: &ErrorBody) -> String {
+    match body {
+        ErrorBody::OAuth(code) => format!(" ({})", code.code()),
+        ErrorBody::Other => String::new(),
+    }
+}
+
+#[derive(Deserialize)]
+struct OAuthErrorAnswer {
+    error: String,
+}
+
+impl ErrorBody {
+    fn of(bytes: &[u8]) -> Self {
+        match serde_json::from_slice::<OAuthErrorAnswer>(bytes) {
+            Ok(answer) => Self::OAuth(OAuthCode::of(&answer.error)),
+            Err(not_oauth) => {
+                tracing::debug!(
+                    line = not_oauth.line(),
+                    column = not_oauth.column(),
+                    "an error answer without an OAuth error"
+                );
+                Self::Other
+            }
+        }
+    }
+}
+
+struct Answer {
+    url: Box<Url>,
+    status: StatusCode,
+    body: Vec<u8>,
+}
+
+impl Answer {
+    fn success<T: serde::de::DeserializeOwned>(self) -> Result<T, ResponseError> {
+        if !self.status.is_success() {
+            return Err(ResponseError::Status {
+                status: self.status.as_u16(),
+                body: ErrorBody::of(&self.body),
+                url: self.url,
+            });
+        }
+        serde_json::from_slice(&self.body).map_err(|source| ResponseError::Malformed {
+            url: self.url,
+            source,
+        })
+    }
+}
+
+async fn send(request: reqwest::RequestBuilder, url: &Url) -> Result<Answer, ResponseError> {
+    let mut response =
+        request
+            .timeout(TIMEOUT)
+            .send()
+            .await
+            .map_err(|source| ResponseError::Unreachable {
+                url: Box::new(url.clone()),
+                source,
+            })?;
+    if response.status().is_redirection() {
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|location| location.to_str().ok())
+            .and_then(|location| response.url().join(location).ok());
+        if let Some(location) = location {
+            if !is_secure(&location) {
+                return Err(ResponseError::InsecureRedirect {
+                    url: Box::new(url.clone()),
+                    location: Box::new(location),
+                });
+            }
+            if location.origin() != response.url().origin() {
+                return Err(ResponseError::CrossOriginRedirect {
+                    url: Box::new(url.clone()),
+                    location: Box::new(location),
+                });
+            }
+        }
+    }
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_BODY as u64)
+    {
+        return Err(ResponseError::TooLarge {
+            url: Box::new(url.clone()),
+            limit: MAX_BODY,
+        });
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|source| ResponseError::Read {
+            url: Box::new(url.clone()),
+            source,
+        })?
+    {
+        if body.len() + chunk.len() > MAX_BODY {
+            return Err(ResponseError::TooLarge {
+                url: Box::new(url.clone()),
+                limit: MAX_BODY,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Answer {
+        url: Box::new(url.clone()),
+        status,
+        body,
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    #[error("MCP server {server}'s address {url} isn't a URL")]
+    ServerUrl {
+        server: String,
+        url: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("couldn't reach MCP server {server}")]
+    Unreachable {
+        server: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error(
+        "MCP server {server} answered HTTP {status}, so it can't be told whether it needs a sign-in"
+    )]
+    Unavailable { server: String, status: u16 },
+    #[error(transparent)]
+    Discovery(#[from] DiscoveryError),
+}
+
 pub async fn probe(
-    http: &reqwest::Client,
+    http: &Http,
+    server: &str,
     server_url: &str,
     headers: &[(String, String)],
-) -> Result<Probe> {
+) -> Result<Probe, ProbeError> {
+    let url = Url::parse(server_url).map_err(|source| ProbeError::ServerUrl {
+        server: server.to_owned(),
+        url: server_url.to_owned(),
+        source,
+    })?;
     let mut request = http
-        .post(server_url)
+        .post
+        .post(url.clone())
         .timeout(TIMEOUT)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT, "application/json, text/event-stream")
@@ -130,9 +524,22 @@ pub async fn probe(
     for (name, value) in headers {
         request = request.header(name.as_str(), value.as_str());
     }
-    let response = request.send().await.context("reach the server")?;
-    if response.status() != StatusCode::UNAUTHORIZED {
+    let response = request
+        .send()
+        .await
+        .map_err(|source| ProbeError::Unreachable {
+            server: server.to_owned(),
+            source,
+        })?;
+    let status = response.status();
+    if status.is_success() {
         return Ok(Probe::Open);
+    }
+    if status != StatusCode::UNAUTHORIZED {
+        return Err(ProbeError::Unavailable {
+            server: server.to_owned(),
+            status: status.as_u16(),
+        });
     }
     let challenge = response
         .headers()
@@ -141,95 +548,190 @@ pub async fn probe(
         .filter_map(|value| value.to_str().ok())
         .collect::<Vec<_>>()
         .join(", ");
-    Ok(discover(http, server_url, &challenge)
+    Ok(discover(http, server, &url, &challenge)
         .await?
         .map_or(Probe::NeedsToken, |discovery| {
             Probe::SignIn(Box::new(discovery))
         }))
 }
 
-/// The sign-in endpoints of `server_url`, from its 401's `WWW-Authenticate`
-/// challenge and the metadata it leads to. `None` when it offers no OAuth.
-pub async fn discover(
-    http: &reqwest::Client,
-    server_url: &str,
+#[derive(Debug, thiserror::Error)]
+pub enum DiscoveryError {
+    #[error("MCP server {server} isn't served over HTTPS, so Artisan won't sign in to it")]
+    InsecureServer {
+        server: String,
+        #[source]
+        source: InsecureUrl,
+    },
+    #[error("fetching MCP server {server}'s sign-in metadata")]
+    Fetch {
+        server: String,
+        #[source]
+        source: ResponseError,
+    },
+    #[error("MCP server {server}'s metadata names an unusable {field}")]
+    Endpoint {
+        server: String,
+        field: &'static str,
+        #[source]
+        source: InsecureUrl,
+    },
+    #[error("MCP server {server}'s metadata is for {resource}, not {server_url}")]
+    ForeignResource {
+        server: String,
+        server_url: Box<Url>,
+        resource: Box<Url>,
+    },
+    #[error("authorization server {issuer} for MCP server {server} calls itself {claimed}")]
+    IssuerMismatch {
+        server: String,
+        issuer: SecureUrl,
+        claimed: String,
+    },
+    #[error(
+        "authorization server {issuer} for MCP server {server} doesn't support PKCE with S256, which MCP requires"
+    )]
+    NoPkce { server: String, issuer: SecureUrl },
+}
+
+#[derive(Deserialize)]
+struct ResourceMetadata {
+    resource: Option<String>,
+    #[serde(default)]
+    authorization_servers: Vec<String>,
+    scopes_supported: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct AuthorizationMetadata {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    registration_endpoint: Option<String>,
+    code_challenge_methods_supported: Option<Vec<String>>,
+}
+
+async fn discover(
+    http: &Http,
+    server: &str,
+    server_url: &Url,
     challenge: &str,
-) -> Result<Option<Discovery>> {
-    let server = Url::parse(server_url).context("the server's URL")?;
-    let origin = server.origin().ascii_serialization();
-    let path = server.path().trim_end_matches('/');
+) -> Result<Option<Discovery>, DiscoveryError> {
+    let secure_server = SecureUrl::try_from(server_url.clone()).map_err(|source| {
+        DiscoveryError::InsecureServer {
+            server: server.to_owned(),
+            source,
+        }
+    })?;
+    let origin = server_url.origin().ascii_serialization();
+    let path = server_url.path().trim_end_matches('/');
+    let endpoint = |field: &'static str, value: String| {
+        SecureUrl::try_from(value).map_err(|source| DiscoveryError::Endpoint {
+            server: server.to_owned(),
+            field,
+            source,
+        })
+    };
     let mut candidates = Vec::new();
     if let Some(url) = param(challenge, "resource_metadata") {
-        candidates.push(url);
+        candidates.push(endpoint("resource_metadata", url)?);
     }
     if !path.is_empty() {
-        candidates.push(format!(
-            "{origin}/.well-known/oauth-protected-resource{path}"
-        ));
+        candidates.push(endpoint(
+            "resource_metadata",
+            format!("{origin}/.well-known/oauth-protected-resource{path}"),
+        )?);
     }
-    candidates.push(format!("{origin}/.well-known/oauth-protected-resource"));
-    let mut resource_metadata = None;
-    for candidate in candidates {
-        if let Some(found) = fetch_json(http, &candidate).await {
-            resource_metadata = Some(found);
-            break;
-        }
+    candidates.push(endpoint(
+        "resource_metadata",
+        format!("{origin}/.well-known/oauth-protected-resource"),
+    )?);
+    let resource_metadata: Option<ResourceMetadata> =
+        first_document(http, server, &candidates).await?;
+    let (resource, issuer, scopes) = match resource_metadata {
+        Some(metadata) => (
+            match metadata.resource {
+                Some(resource) => endpoint("resource", resource)?,
+                None => secure_server.clone(),
+            },
+            match metadata.authorization_servers.into_iter().next() {
+                Some(issuer) => endpoint("authorization_servers", issuer)?,
+                None => endpoint("issuer", origin.clone())?,
+            },
+            metadata.scopes_supported.map(|scopes| scopes.join(" ")),
+        ),
+        None => (secure_server.clone(), endpoint("issuer", origin)?, None),
+    };
+    if !covers(resource.url(), server_url) {
+        return Err(DiscoveryError::ForeignResource {
+            server: server.to_owned(),
+            server_url: Box::new(server_url.clone()),
+            resource: Box::new(resource.url().clone()),
+        });
     }
-    // Servers of the 2025-03-26 spec serve the authorization server's
-    // metadata themselves.
-    let (resource, issuer, scopes) = resource_metadata.as_ref().map_or_else(
-        || (server_url.to_owned(), origin.clone(), None),
-        |metadata| {
-            (
-                metadata["resource"]
-                    .as_str()
-                    .map_or_else(|| server_url.to_owned(), str::to_owned),
-                metadata["authorization_servers"][0]
-                    .as_str()
-                    .map_or_else(|| origin.clone(), str::to_owned),
-                metadata["scopes_supported"].as_array().map(|scopes| {
-                    scopes
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                }),
-            )
-        },
-    );
-    let Some(metadata) = authorization_metadata(http, &issuer).await else {
+    let Some(metadata) = first_document::<AuthorizationMetadata>(
+        http,
+        server,
+        &authorization_metadata_urls(&issuer).map_err(|source| DiscoveryError::Endpoint {
+            server: server.to_owned(),
+            field: "issuer",
+            source,
+        })?,
+    )
+    .await?
+    else {
         return Ok(None);
     };
-    let endpoint = |key: &str| metadata[key].as_str().map(str::to_owned);
-    let (Some(authorization_endpoint), Some(token_endpoint)) = (
-        endpoint("authorization_endpoint"),
-        endpoint("token_endpoint"),
-    ) else {
-        return Ok(None);
-    };
-    if let Some(methods) = metadata["code_challenge_methods_supported"].as_array()
+    if !same_issuer(&metadata.issuer, &issuer) {
+        return Err(DiscoveryError::IssuerMismatch {
+            server: server.to_owned(),
+            issuer,
+            claimed: metadata.issuer,
+        });
+    }
+    if let Some(methods) = &metadata.code_challenge_methods_supported
         && !methods.iter().any(|method| method == "S256")
     {
-        bail!("its sign-in doesn't support PKCE with S256, which MCP requires");
+        return Err(DiscoveryError::NoPkce {
+            server: server.to_owned(),
+            issuer,
+        });
     }
     let scope = param(challenge, "scope")
         .or(scopes)
         .filter(|scope| !scope.trim().is_empty());
     Ok(Some(Discovery {
+        issuer,
         resource,
-        authorization_endpoint,
-        token_endpoint,
-        registration_endpoint: endpoint("registration_endpoint"),
+        authorization_endpoint: endpoint(
+            "authorization_endpoint",
+            metadata.authorization_endpoint,
+        )?,
+        token_endpoint: endpoint("token_endpoint", metadata.token_endpoint)?,
+        registration_endpoint: metadata
+            .registration_endpoint
+            .map(|registration| endpoint("registration_endpoint", registration))
+            .transpose()?,
         scope,
     }))
 }
 
-/// RFC 8414's and OpenID's metadata locations for `issuer`, in the order
-/// MCP's spec tries them.
-async fn authorization_metadata(http: &reqwest::Client, issuer: &str) -> Option<Value> {
-    let url = Url::parse(issuer).ok()?;
-    let origin = url.origin().ascii_serialization();
-    let path = url.path().trim_end_matches('/');
+fn covers(resource: &Url, server: &Url) -> bool {
+    let resource_path = resource.path().trim_end_matches('/');
+    let server_path = server.path().trim_end_matches('/');
+    resource.origin() == server.origin()
+        && server_path
+            .strip_prefix(resource_path)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+fn same_issuer(claimed: &str, issuer: &SecureUrl) -> bool {
+    claimed.trim_end_matches('/') == issuer.as_str().trim_end_matches('/')
+}
+
+fn authorization_metadata_urls(issuer: &SecureUrl) -> Result<Vec<SecureUrl>, InsecureUrl> {
+    let origin = issuer.url().origin().ascii_serialization();
+    let path = issuer.url().path().trim_end_matches('/');
     let candidates = if path.is_empty() {
         vec![
             format!("{origin}/.well-known/oauth-authorization-server"),
@@ -242,46 +744,70 @@ async fn authorization_metadata(http: &reqwest::Client, issuer: &str) -> Option<
             format!("{origin}{path}/.well-known/openid-configuration"),
         ]
     };
+    candidates.into_iter().map(SecureUrl::try_from).collect()
+}
+
+async fn first_document<T: serde::de::DeserializeOwned>(
+    http: &Http,
+    server: &str,
+    candidates: &[SecureUrl],
+) -> Result<Option<T>, DiscoveryError> {
     for candidate in candidates {
-        if let Some(found) = fetch_json(http, &candidate).await {
-            return Some(found);
+        let answer = send(
+            http.fetch
+                .get(candidate.url().clone())
+                .header(header::ACCEPT, "application/json"),
+            candidate.url(),
+        )
+        .await
+        .map_err(|source| DiscoveryError::Fetch {
+            server: server.to_owned(),
+            source,
+        })?;
+        if answer.status.is_server_error() {
+            return Err(DiscoveryError::Fetch {
+                server: server.to_owned(),
+                source: ResponseError::Status {
+                    status: answer.status.as_u16(),
+                    body: ErrorBody::of(&answer.body),
+                    url: answer.url,
+                },
+            });
+        }
+        if !answer.status.is_success() {
+            continue;
+        }
+        match serde_json::from_slice::<T>(&answer.body) {
+            Ok(document) => return Ok(Some(document)),
+            Err(not_metadata) => {
+                tracing::debug!(
+                    server,
+                    url = %candidate,
+                    category = ?not_metadata.classify(),
+                    line = not_metadata.line(),
+                    column = not_metadata.column(),
+                    "not sign-in metadata"
+                );
+            }
         }
     }
-    None
+    Ok(None)
 }
 
-async fn fetch_json(http: &reqwest::Client, url: &str) -> Option<Value> {
-    let response = http
-        .get(url)
-        .timeout(TIMEOUT)
-        .header(header::ACCEPT, "application/json")
-        .send()
-        .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let bytes = response.bytes().await.ok()?;
-    if bytes.len() > MAX_BODY {
-        return None;
-    }
-    serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .filter(Value::is_object)
-}
-
-/// One `key="value"` (or `key=value`) parameter of a `WWW-Authenticate`
-/// challenge.
 fn param(challenge: &str, key: &str) -> Option<String> {
     let mut rest = challenge;
     while let Some(at) = rest.find(key) {
-        let before = rest[..at].chars().next_back();
-        let after = rest[at + key.len()..].trim_start();
-        rest = &rest[at + key.len()..];
-        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+        let (before, after) = rest.split_at(at);
+        let after = after.get(key.len()..).unwrap_or_default();
+        rest = after;
+        if before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
             continue;
         }
-        let Some(value) = after.strip_prefix('=') else {
+        let Some(value) = after.trim_start().strip_prefix('=') else {
             continue;
         };
         let value = value.trim_start();
@@ -299,15 +825,45 @@ fn param(challenge: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Registers Artisan as a public client that comes back to `redirect_uri`.
+#[derive(Debug, thiserror::Error)]
+pub enum RegistrationError {
+    #[error(
+        "authorization server {issuer} for MCP server {server} doesn't let apps register themselves, so it needs a token in a header instead"
+    )]
+    Unsupported { server: String, issuer: SecureUrl },
+    #[error("registering Artisan with authorization server {issuer} for MCP server {server}")]
+    Request {
+        server: String,
+        issuer: SecureUrl,
+        #[source]
+        source: ResponseError,
+    },
+    #[error(
+        "authorization server {issuer} for MCP server {server} registered Artisan without a client_id"
+    )]
+    NoClientId { server: String, issuer: SecureUrl },
+}
+
+#[derive(Deserialize)]
+struct RegistrationAnswer {
+    client_id: String,
+    client_secret: Option<String>,
+}
+
 pub async fn register(
-    http: &reqwest::Client,
+    http: &Http,
+    server: &str,
     discovery: &Discovery,
     redirect_uri: &str,
-) -> Result<Client> {
-    let endpoint = discovery.registration_endpoint.as_deref().context(
-        "its sign-in doesn't let apps register themselves, so it needs a token in a header instead",
-    )?;
+) -> Result<Client, RegistrationError> {
+    let endpoint =
+        discovery
+            .registration_endpoint
+            .as_ref()
+            .ok_or_else(|| RegistrationError::Unsupported {
+                server: server.to_owned(),
+                issuer: discovery.issuer.clone(),
+            })?;
     let body = json!({
         "client_name": "Artisan",
         "redirect_uris": [redirect_uri],
@@ -315,227 +871,292 @@ pub async fn register(
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     });
-    let response = http
-        .post(endpoint)
-        .timeout(TIMEOUT)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json")
-        .body(body.to_string())
-        .send()
-        .await
-        .context("reach the sign-in server")?;
-    let answer = read(response, "registering Artisan").await?;
+    let answer: RegistrationAnswer = send(
+        http.post
+            .post(endpoint.url().clone())
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json")
+            .body(body.to_string()),
+        endpoint.url(),
+    )
+    .await
+    .and_then(Answer::success)
+    .map_err(|source| RegistrationError::Request {
+        server: server.to_owned(),
+        issuer: discovery.issuer.clone(),
+        source,
+    })?;
+    if answer.client_id.trim().is_empty() {
+        return Err(RegistrationError::NoClientId {
+            server: server.to_owned(),
+            issuer: discovery.issuer.clone(),
+        });
+    }
     Ok(Client {
-        client_id: answer["client_id"]
-            .as_str()
-            .context("registering Artisan: no client_id in the answer")?
-            .to_owned(),
-        client_secret: answer["client_secret"].as_str().map(str::to_owned),
+        id: answer.client_id,
+        secret: answer
+            .client_secret
+            .filter(|secret| !secret.is_empty())
+            .map(Secret::new),
         redirect_uri: redirect_uri.to_owned(),
+        issuer: discovery.issuer.clone(),
+        resource: discovery.resource.clone(),
     })
 }
 
-/// The page the user approves the sign-in on.
-pub fn authorize_url(discovery: &Discovery, client: &Client, pkce: &Pkce) -> Result<String> {
-    let mut url =
-        Url::parse(&discovery.authorization_endpoint).context("the authorization endpoint")?;
+#[must_use]
+pub fn authorize_url(discovery: &Discovery, client: &Client, pkce: &Pkce) -> String {
+    let mut url = discovery.authorization_endpoint.url().clone();
     {
         let mut query = url.query_pairs_mut();
         query
             .append_pair("response_type", "code")
-            .append_pair("client_id", &client.client_id)
+            .append_pair("client_id", &client.id)
             .append_pair("redirect_uri", &client.redirect_uri)
             .append_pair("code_challenge", &pkce.challenge)
             .append_pair("code_challenge_method", "S256")
             .append_pair("state", &pkce.state)
-            .append_pair("resource", &discovery.resource);
+            .append_pair("resource", discovery.resource.as_str());
         if let Some(scope) = &discovery.scope {
             query.append_pair("scope", scope);
         }
     }
-    Ok(url.into())
+    url.into()
 }
 
-/// Trades the code the redirect brought back for tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Revocation {
+    InvalidGrant,
+    InvalidClient,
+    UnauthorizedClient,
+}
+
+impl Revocation {
+    const fn of(code: &OAuthCode) -> Option<Self> {
+        match code {
+            OAuthCode::InvalidGrant => Some(Self::InvalidGrant),
+            OAuthCode::InvalidClient => Some(Self::InvalidClient),
+            OAuthCode::UnauthorizedClient => Some(Self::UnauthorizedClient),
+            OAuthCode::InvalidRequest
+            | OAuthCode::UnsupportedGrantType
+            | OAuthCode::InvalidScope
+            | OAuthCode::InvalidRedirectUri
+            | OAuthCode::InvalidClientMetadata
+            | OAuthCode::InvalidSoftwareStatement
+            | OAuthCode::UnapprovedSoftwareStatement
+            | OAuthCode::InvalidToken
+            | OAuthCode::InsufficientScope
+            | OAuthCode::AccessDenied
+            | OAuthCode::ServerError
+            | OAuthCode::TemporarilyUnavailable
+            | OAuthCode::Unrecognized(_)
+            | OAuthCode::Unshowable => None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TokenError {
+    #[error(
+        "authorization server {issuer} no longer accepts Artisan's sign-in to MCP server {server} ({revocation:?})"
+    )]
+    Revoked {
+        server: String,
+        issuer: SecureUrl,
+        revocation: Revocation,
+    },
+    #[error("getting a token for MCP server {server} from authorization server {issuer}")]
+    Request {
+        server: String,
+        issuer: SecureUrl,
+        #[source]
+        source: ResponseError,
+    },
+    #[error("authorization server {issuer} gave MCP server {server} an empty access token")]
+    EmptyAccessToken { server: String, issuer: SecureUrl },
+    #[error(
+        "authorization server {issuer} gave MCP server {server} a {token_type} token, which Artisan can't send"
+    )]
+    UnsupportedTokenType {
+        server: String,
+        issuer: SecureUrl,
+        token_type: String,
+    },
+    #[error(
+        "authorization server {issuer} gave MCP server {server} a token expiring in {expires_in}"
+    )]
+    InvalidExpiry {
+        server: String,
+        issuer: SecureUrl,
+        expires_in: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ExpiresIn {
+    Number(serde_json::Number),
+    Text(String),
+}
+
+impl ExpiresIn {
+    fn seconds(&self) -> Option<u64> {
+        match self {
+            Self::Number(number) => number.as_u64(),
+            Self::Text(text) => text.trim().parse().ok(),
+        }
+        .filter(|seconds| *seconds <= MAX_EXPIRES_IN_SECONDS)
+    }
+
+    fn text(&self) -> String {
+        match self {
+            Self::Number(number) => number.to_string(),
+            Self::Text(text) => text.clone(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct TokenAnswer {
+    access_token: String,
+    token_type: Option<String>,
+    refresh_token: Option<String>,
+    expires_in: Option<ExpiresIn>,
+}
+
 pub async fn exchange(
-    http: &reqwest::Client,
+    http: &Http,
+    server: &str,
     discovery: &Discovery,
     client: &Client,
     code: &str,
     verifier: &str,
     now: i64,
-) -> Result<Tokens> {
+) -> Result<Tokens, TokenError> {
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", client.redirect_uri.as_str()),
-        ("client_id", client.client_id.as_str()),
+        ("client_id", client.id.as_str()),
         ("code_verifier", verifier),
         ("resource", discovery.resource.as_str()),
     ];
-    if let Some(secret) = &client.client_secret {
-        form.push(("client_secret", secret));
+    if let Some(secret) = &client.secret {
+        form.push(("client_secret", secret.expose()));
     }
-    tokens(http, discovery, &form, None, now).await
+    tokens(http, server, discovery, &form, None, now).await
 }
 
-/// New tokens for a refresh token.
 pub async fn refresh(
-    http: &reqwest::Client,
+    http: &Http,
+    server: &str,
     discovery: &Discovery,
     client: &Client,
-    refresh_token: &str,
+    refresh_token: &Secret,
     now: i64,
-) -> Result<Tokens> {
+) -> Result<Tokens, TokenError> {
     let mut form = vec![
         ("grant_type", "refresh_token"),
-        ("refresh_token", refresh_token),
-        ("client_id", client.client_id.as_str()),
+        ("refresh_token", refresh_token.expose()),
+        ("client_id", client.id.as_str()),
         ("resource", discovery.resource.as_str()),
     ];
-    if let Some(secret) = &client.client_secret {
-        form.push(("client_secret", secret));
+    if let Some(secret) = &client.secret {
+        form.push(("client_secret", secret.expose()));
     }
-    tokens(http, discovery, &form, Some(refresh_token), now).await
+    tokens(http, server, discovery, &form, Some(refresh_token), now).await
 }
 
 async fn tokens(
-    http: &reqwest::Client,
+    http: &Http,
+    server: &str,
     discovery: &Discovery,
     form: &[(&str, &str)],
-    previous_refresh: Option<&str>,
+    previous_refresh: Option<&Secret>,
     now: i64,
-) -> Result<Tokens> {
-    let response = http
-        .post(&discovery.token_endpoint)
-        .timeout(TIMEOUT)
-        .header(header::ACCEPT, "application/json")
-        .form(form)
-        .send()
-        .await
-        .context("reach the sign-in server")?;
-    let answer = read(response, "getting a token").await?;
-    let access_token = answer["access_token"]
-        .as_str()
-        .context("getting a token: no access_token in the answer")?
-        .to_owned();
+) -> Result<Tokens, TokenError> {
+    let issuer = || discovery.issuer.clone();
+    let endpoint = discovery.token_endpoint.url();
+    let answer = send(
+        http.post
+            .post(endpoint.clone())
+            .header(header::ACCEPT, "application/json")
+            .form(form),
+        endpoint,
+    )
+    .await
+    .and_then(Answer::success::<TokenAnswer>)
+    .map_err(|source| match &source {
+        ResponseError::Status {
+            status: 400 | 401,
+            body: ErrorBody::OAuth(code),
+            ..
+        } => Revocation::of(code).map_or_else(
+            || TokenError::Request {
+                server: server.to_owned(),
+                issuer: issuer(),
+                source,
+            },
+            |revocation| TokenError::Revoked {
+                server: server.to_owned(),
+                issuer: issuer(),
+                revocation,
+            },
+        ),
+        ResponseError::Unreachable { .. }
+        | ResponseError::InsecureRedirect { .. }
+        | ResponseError::CrossOriginRedirect { .. }
+        | ResponseError::Read { .. }
+        | ResponseError::TooLarge { .. }
+        | ResponseError::Status { .. }
+        | ResponseError::Malformed { .. } => TokenError::Request {
+            server: server.to_owned(),
+            issuer: issuer(),
+            source,
+        },
+    })?;
+    if answer.access_token.trim().is_empty() {
+        return Err(TokenError::EmptyAccessToken {
+            server: server.to_owned(),
+            issuer: issuer(),
+        });
+    }
+    if let Some(token_type) = answer
+        .token_type
+        .filter(|token_type| !token_type.eq_ignore_ascii_case("bearer"))
+    {
+        return Err(TokenError::UnsupportedTokenType {
+            server: server.to_owned(),
+            issuer: issuer(),
+            token_type,
+        });
+    }
+    let expires_at = answer
+        .expires_in
+        .map(|expires_in| {
+            expires_in
+                .seconds()
+                .and_then(|seconds| i64::try_from(seconds).ok())
+                .and_then(|seconds| seconds.checked_mul(1000))
+                .and_then(|millis| now.checked_add(millis))
+                .ok_or_else(|| TokenError::InvalidExpiry {
+                    server: server.to_owned(),
+                    issuer: issuer(),
+                    expires_in: expires_in.text(),
+                })
+        })
+        .transpose()?;
     Ok(Tokens {
-        access_token,
-        refresh_token: answer["refresh_token"]
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| previous_refresh.map(str::to_owned)),
-        expires_at: answer["expires_in"]
-            .as_i64()
-            .map(|seconds| now + seconds * 1000),
+        access_token: Secret::new(answer.access_token),
+        refresh_token: answer
+            .refresh_token
+            .filter(|refresh| !refresh.is_empty())
+            .map(Secret::new)
+            .or_else(|| previous_refresh.cloned()),
+        expires_at,
     })
 }
 
-/// The sign-in server answered and refused (as opposed to being out of
-/// reach): a refresh refused this way means signing in again.
-#[derive(Debug)]
-pub struct Rejected(pub String);
-
-impl std::fmt::Display for Rejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Rejected {}
-
-/// A JSON answer, or the OAuth error it carries.
-async fn read(response: reqwest::Response, doing: &str) -> Result<Value> {
-    let status = response.status();
-    let bytes = response.bytes().await.context("read the answer")?;
-    if bytes.len() > MAX_BODY {
-        bail!("{doing}: the answer is too large");
-    }
-    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    if !status.is_success() {
-        let error = value["error_description"]
-            .as_str()
-            .or_else(|| value["error"].as_str())
-            .unwrap_or("no reason given");
-        return Err(Rejected(format!("{doing}: HTTP {} ({error})", status.as_u16())).into());
-    }
-    Ok(value)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn challenge_parameters() {
-        let challenge = r#"Bearer error="invalid_token", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="read write""#;
-        assert_eq!(
-            param(challenge, "resource_metadata").as_deref(),
-            Some("https://mcp.example.com/.well-known/oauth-protected-resource/mcp")
-        );
-        assert_eq!(param(challenge, "scope").as_deref(), Some("read write"));
-        assert_eq!(
-            param("Bearer realm=x, scope=a", "scope").as_deref(),
-            Some("a")
-        );
-        assert_eq!(param("Bearer xscope=a", "scope"), None);
-        assert_eq!(param("Bearer", "scope"), None);
-    }
-
-    #[test]
-    fn pkce_challenge_is_the_s256_of_the_verifier() {
-        let pkce = Pkce::new().unwrap();
-        assert_eq!(
-            pkce.challenge,
-            b64(&Sha256::digest(pkce.verifier.as_bytes()))
-        );
-        assert!(pkce.verifier.len() >= 43);
-        assert_ne!(pkce.state, Pkce::new().unwrap().state);
-    }
-
-    #[test]
-    fn authorize_url_carries_pkce_resource_and_scope() {
-        let discovery = Discovery {
-            resource: "https://mcp.example.com/mcp".into(),
-            authorization_endpoint: "https://auth.example.com/authorize?x=1".into(),
-            token_endpoint: "https://auth.example.com/token".into(),
-            registration_endpoint: None,
-            scope: Some("read".into()),
-        };
-        let client = Client {
-            client_id: "abc".into(),
-            client_secret: None,
-            redirect_uri: "http://127.0.0.1:33418/callback".into(),
-        };
-        let pkce = Pkce::new().unwrap();
-        let url = Url::parse(&authorize_url(&discovery, &client, &pkce).unwrap()).unwrap();
-        let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(pairs["x"], "1");
-        assert_eq!(pairs["response_type"], "code");
-        assert_eq!(pairs["client_id"], "abc");
-        assert_eq!(pairs["code_challenge_method"], "S256");
-        assert_eq!(pairs["code_challenge"], pkce.challenge);
-        assert_eq!(pairs["state"], pkce.state);
-        assert_eq!(pairs["resource"], "https://mcp.example.com/mcp");
-        assert_eq!(pairs["scope"], "read");
-        assert_eq!(pairs["redirect_uri"], "http://127.0.0.1:33418/callback");
-    }
-
-    #[test]
-    fn tokens_go_stale_a_minute_early() {
-        let tokens = Tokens {
-            access_token: "a".into(),
-            refresh_token: None,
-            expires_at: Some(100_000),
-        };
-        assert!(!tokens.stale(30_000));
-        assert!(tokens.stale(40_000));
-        assert!(
-            !Tokens {
-                expires_at: None,
-                ..tokens
-            }
-            .stale(i64::MAX)
-        );
-    }
-}
+#[path = "../tests/mcp_oauth/flows.rs"]
+mod tests;

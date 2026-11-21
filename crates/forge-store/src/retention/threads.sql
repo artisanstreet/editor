@@ -7,4 +7,5 @@ SELECT t.id,
        AND t.id NOT IN (SELECT thread_id FROM runs WHERE status = 'running')
        AND t.id NOT IN (SELECT thread_id FROM items WHERE status IN ('running', 'awaiting_user'))
        AND t.id NOT IN (SELECT thread_id FROM continues)
+       AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.scope = 'thread:' || t.id AND d.body <> 'null')
 FROM threads t

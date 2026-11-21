@@ -2,6 +2,7 @@
 name = "ae"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Installs and manages Artisan's apps (Forge, the Editor) and Forge's devices and engines."
 
@@ -12,20 +13,20 @@ path = "src/main.rs"
 test = true
 
 [dependencies]
-anyhow.workspace = true
-artisan-account = { path = "../artisan-account" }
-artisan-api = { path = "../artisan-api" }
-artisan-paths = { path = "../artisan-paths" }
-artisan-payload = { path = "../artisan-payload" }
+artisan-account.workspace = true
+artisan-api.workspace = true
+artisan-paths.workspace = true
+artisan-payload.workspace = true
 base64.workspace = true
 clap.workspace = true
 cliclack = "=0.5.6"
+diagnostics.workspace = true
 ed25519-dalek.workspace = true
-forge-engines = { path = "../forge-engines" }
-forge-runs = { path = "../forge-runs" }
-claude-ai-browser = { path = "../claude-ai-browser" }
-forge-http = { path = "../forge-http" }
-forge-store = { path = "../forge-store" }
+forge-engines.workspace = true
+forge-runs.workspace = true
+claude-ai-browser.workspace = true
+forge-http.workspace = true
+forge-store.workspace = true
 gethostname.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
@@ -33,24 +34,31 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
-semver = "=1.0.28"
+semver.workspace = true
 sysinfo = "=0.31.4"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
+thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [build-dependencies]
-artisan-payload = { path = "../artisan-payload" }
+artisan-payload.workspace = true
+build-info.workspace = true
 
 [dev-dependencies]
-artisan-api = { path = "../artisan-api", features = ["tls"] }
+artisan-api = { workspace = true, features = ["tls"] }
+flate2.workspace = true
+axum.workspace = true
+futures.workspace = true
 base64.workspace = true
 ed25519-dalek.workspace = true
-forge-http = { path = "../forge-http" }
+forge-http.workspace = true
+forge-runs.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tempfile.workspace = true
+test-support = { workspace = true, features = ["net", "http"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]

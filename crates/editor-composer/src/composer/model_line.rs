@@ -70,12 +70,12 @@ fn latest_of_each_class<Class: Copy + Ord>(
 }
 
 #[must_use]
-pub fn claude_lineup(models: &[Model]) -> Vec<usize> {
+fn claude_lineup(models: &[Model]) -> Vec<usize> {
     latest_of_each_class(models, claude_model)
 }
 
 #[must_use]
-pub fn codex_lineup(models: &[Model]) -> Vec<usize> {
+fn codex_lineup(models: &[Model]) -> Vec<usize> {
     latest_of_each_class(models, codex_model)
 }
 

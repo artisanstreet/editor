@@ -1,5 +1,6 @@
 pub mod attachment;
 pub mod controller;
+pub mod draft_body;
 pub mod draft_session;
 pub mod encode;
 pub mod engine_light;
@@ -9,8 +10,9 @@ pub mod model_line;
 pub mod model_list;
 pub mod persistence;
 pub mod picker;
-pub mod placeholder;
+mod placeholder;
 pub mod questionnaire;
 pub mod sliding_tab;
+pub mod spool;
 pub mod swap;
 pub mod view;

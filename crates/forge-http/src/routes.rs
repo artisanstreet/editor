@@ -1,12 +1,10 @@
-//! JSON routes. See `artisan_api::request` for the list.
-
 use crate::events;
 use crate::repository::{Icon, IconSource};
-use anyhow::Context as _;
 use artisan_api::{
-    Answer, ApiError, BlobHash, BlobRef, CreateProject, CreateThread, DirEntry, DirListing,
-    EngineId, EngineStatus, ErrorCode, Item, ItemId, ItemsPage, ItemsQuery, PairRequest,
-    PairResponse, Project, ProjectId, SendMessage, State, Thread, ThreadId, UpdateThread,
+    Answer, ApiError, BlobHash, BlobRef, ContentId, CreateProject, CreateThread, DirEntry,
+    DirListing, EngineId, EngineStatus, ErrorCode, Item, ItemId, ItemsPage, ItemsQuery,
+    PairRequest, PairResponse, Project, ProjectId, SendMessage, State, Thread, ThreadId,
+    UpdateThread,
 };
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State as AppState};
@@ -16,40 +14,42 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use forge_runs::Hub;
+use forge_runs::failure as wire;
 use serde::Deserialize;
 use sha2::Digest as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::CompressionLevel;
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
+use tracing::Instrument as _;
 
 #[derive(Clone)]
-pub struct App {
+pub(crate) struct App {
     pub hub: Hub,
     pub forge_version: String,
     pub shutdown: tokio_util::sync::CancellationToken,
     pub tasks: tokio_util::task::TaskTracker,
-    pub repositories: std::sync::Arc<crate::repository::Repositories>,
-    pub icons: std::sync::Arc<crate::repository::Icons>,
+    pub repositories: Arc<crate::repository::Repositories>,
+    pub icons: Arc<crate::repository::Icons>,
 }
 
-/// The connection's client certificate (base64 DER).
 #[derive(Clone)]
-pub struct Client {
-    pub certificate: String,
+pub(crate) struct Client {
+    pub certificate: forge_store::DeviceCertificate,
 }
 
-/// A Core-verified grant authorizing one tunneled channel. Inserted only
-/// by the Relay connector after independent JWT verification at channel
-/// confirmation; never accepted from the network directly.
 #[derive(Clone)]
-pub struct TunnelAuth {
+pub(crate) struct TunnelAuth {
     pub claims: artisan_account::GrantClaims,
 }
 
-pub fn router(app: App) -> Router {
+const PAIR_BODY_BYTES: usize = 4 * 1024;
+
+pub(crate) fn router(app: App) -> Router {
     let authorized = Router::new()
         .route("/state", get(state))
+        .route("/database-rollback", delete(dismiss_database_rollback))
         .route("/events", get(events::stream))
         .route("/projects", post(create_project))
         .route("/projects/{id}", delete(remove_project))
@@ -121,7 +121,10 @@ pub fn router(app: App) -> Router {
         .route("/fs/list", get(list_dir))
         .layer(middleware::from_fn_with_state(app.clone(), authorize));
     Router::new()
-        .route("/pair", post(pair))
+        .route(
+            "/pair",
+            post(pair).layer(DefaultBodyLimit::max(PAIR_BODY_BYTES)),
+        )
         .merge(authorized)
         .layer(DefaultBodyLimit::max(forge_store::MAX_BLOB_BYTES + 1024))
         .layer(compression())
@@ -129,9 +132,6 @@ pub fn router(app: App) -> Router {
         .with_state(app)
 }
 
-/// zstd for clients that ask for it: the Editor does on remote hosts, where
-/// item pages and content ranges shrink 3-9x. Small bodies, images and the
-/// event stream stay as they are.
 fn compression() -> CompressionLayer<impl Predicate> {
     CompressionLayer::new()
         .quality(CompressionLevel::Fastest)
@@ -143,9 +143,6 @@ fn compression() -> CompressionLayer<impl Predicate> {
         )
 }
 
-/// Devices pair with certificates; tunneled Relay calls instead carry a
-/// Core-verified grant (checked at channel confirmation). Both identify
-/// the caller; neither path weakens the other.
 async fn authorize(
     AppState(app): AppState<App>,
     client: Option<Extension<Client>>,
@@ -154,9 +151,6 @@ async fn authorize(
     next: Next,
 ) -> Response {
     if let Some(Extension(tunnel)) = tunnel {
-        // Verified at channel confirmation (signature, iss/aud, binding);
-        // re-check scope and expiry on every call. Core times are seconds;
-        // artisan_api::now() is millis.
         let now_sec = artisan_api::now().div_euclid(1000);
         let live = tunnel.claims.exp > now_sec
             && tunnel
@@ -172,108 +166,528 @@ async fn authorize(
                 )));
             return next.run(request).await;
         }
-        return error(
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Unauthorized,
-            "this tunneled call is not authorized",
-        );
+        return Failure::from(Unauthorized::Tunnel).into_response();
     }
     let Some(Extension(client)) = client else {
-        return internal(anyhow::anyhow!("missing client certificate"));
+        return Failure::from(Unauthorized::NoCertificate).into_response();
     };
-    match app.hub.store().is_authorized(&client.certificate) {
+    match app.hub.store().is_authorized(&client.certificate).await {
         Ok(Some(device)) => {
             request.extensions_mut().insert(device);
             next.run(request).await
         }
-        Ok(None) => error(
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Unauthorized,
-            "this device is not paired with Forge",
-        ),
-        Err(failure) => internal(failure.context("authorize the client certificate")),
+        Ok(None) => Failure::from(Unauthorized::NotPaired).into_response(),
+        Err(failure) => Failure::from(failure).into_response(),
     }
 }
 
-pub struct Failure(anyhow::Error, StatusCode, ErrorCode);
+const fn status(code: ErrorCode) -> StatusCode {
+    match code {
+        ErrorCode::NotFound => StatusCode::NOT_FOUND,
+        ErrorCode::BadRequest => StatusCode::BAD_REQUEST,
+        ErrorCode::Conflict | ErrorCode::VersionMismatch => StatusCode::CONFLICT,
+        ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorCode::EngineUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
 
-impl From<anyhow::Error> for Failure {
-    fn from(error: anyhow::Error) -> Self {
-        let (status, code) = if error
-            .downcast_ref::<forge_store::ProjectNotFound>()
-            .is_some()
-            || error.downcast_ref::<forge_store::ItemNotFound>().is_some()
-        {
-            (StatusCode::NOT_FOUND, ErrorCode::NotFound)
-        } else if error.downcast_ref::<forge_runs::Refused>().is_some() {
-            (StatusCode::CONFLICT, ErrorCode::Conflict)
-        } else {
-            (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Missing {
+    #[error("thread {0} not found")]
+    Thread(ThreadId),
+    #[error("project {0} not found")]
+    Project(ProjectId),
+    #[error("item {0} not found")]
+    Item(ItemId),
+    #[error("agent {0} not found")]
+    Agent(ItemId),
+    #[error("agent {agent} in thread {thread} not found")]
+    AgentInThread { thread: ThreadId, agent: ItemId },
+    #[error("text source {0} not found")]
+    TextSource(ContentId),
+    #[error("canonical collection {0} not found")]
+    Collection(ContentId),
+    #[error("blob {0} not found")]
+    Blob(BlobHash),
+}
+
+impl Missing {
+    fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{AgentFailure, Failure, ProjectFailure, ResourceFailure, ThreadFailure};
+        match self {
+            Self::Thread(thread) => Failure::Thread(ThreadFailure::NotFound {
+                thread: thread.clone(),
+            }),
+            Self::Project(project) => Failure::Project(ProjectFailure::NotFound {
+                project: project.clone(),
+            }),
+            Self::Item(item) => Failure::Thread(ThreadFailure::ItemNotFound { item: item.clone() }),
+            Self::Agent(agent) => Failure::Agent(AgentFailure::NotFound {
+                agent: agent.clone(),
+            }),
+            Self::AgentInThread { thread, agent } => Failure::Agent(AgentFailure::NotInThread {
+                thread: thread.clone(),
+                agent: agent.clone(),
+            }),
+            Self::TextSource(content) | Self::Collection(content) => {
+                Failure::Resource(ResourceFailure::ContentNotFound {
+                    content: content.clone(),
+                })
+            }
+            Self::Blob(blob) => {
+                Failure::Resource(ResourceFailure::BlobNotFound { blob: blob.clone() })
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Rejected {
+    #[error("{path} is not a directory on this host")]
+    NotADirectory { path: String },
+    #[error("invalid source identity or range limit for {content}")]
+    ContentQuery { content: ContentId },
+    #[error("invalid collection identity or range limit for {content}")]
+    CollectionQuery { content: ContentId },
+    #[error(
+        "setting {key} is {} or {}",
+        artisan_api::CLAUDE_CODE,
+        artisan_api::CLAUDE_AI
+    )]
+    Transport { key: String },
+    #[error(transparent)]
+    SettingValue(#[from] artisan_api::SettingValueError),
+    #[error("setting {key} is not one clients can change")]
+    UnknownSetting { key: String },
+    #[error("setting {key} is saved through {route}")]
+    OwnRoute { key: String, route: &'static str },
+    #[error("{engine} model {model} is unavailable")]
+    ModelUnavailable { engine: EngineId, model: String },
+    #[error("config for {sent} sent to {engine}")]
+    ConfigEngine { engine: EngineId, sent: EngineId },
+    #[error("the {engine} config names no model")]
+    ConfigWithoutModel { engine: EngineId },
+    #[error("only Claude signs in to claude.ai, not {engine}")]
+    ClaudeAiEngine { engine: EngineId },
+    #[error("host home directory unavailable; provide a path")]
+    NoHome,
+}
+
+impl Rejected {
+    fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{
+            EngineFailure, Failure, ProjectFailure, ResourceFailure, SettingFailure,
+            SettingValueError as Value,
         };
-        Self(error, status, code)
+        match self {
+            Self::NotADirectory { path } => {
+                Failure::Project(ProjectFailure::NotADirectory { path: path.clone() })
+            }
+            Self::ContentQuery { content } | Self::CollectionQuery { content } => {
+                Failure::Resource(ResourceFailure::InvalidContent {
+                    content: content.clone(),
+                })
+            }
+            Self::Transport { key } => Failure::Setting(SettingFailure::InvalidValue {
+                key: key.clone(),
+                detail: self.to_string(),
+            }),
+            Self::SettingValue(
+                error @ (Value::NotBool { key }
+                | Value::NotSystemSwitch { key }
+                | Value::NotText { key, .. }
+                | Value::NotAChoice { key, .. }
+                | Value::NotAnOption { key, .. }
+                | Value::ModelCustomizations { key, .. }),
+            ) => Failure::Setting(SettingFailure::InvalidValue {
+                key: (*key).to_owned(),
+                detail: diagnostics::chain(error),
+            }),
+            Self::UnknownSetting { key } => {
+                Failure::Setting(SettingFailure::Unknown { key: key.clone() })
+            }
+            Self::OwnRoute { key, route } => Failure::Setting(SettingFailure::OwnRoute {
+                key: key.clone(),
+                route: (*route).to_owned(),
+            }),
+            Self::ModelUnavailable { engine, model } => {
+                Failure::Setting(SettingFailure::ModelUnavailable {
+                    engine: *engine,
+                    model: model.clone(),
+                })
+            }
+            Self::ConfigEngine { engine, sent } => Failure::Setting(SettingFailure::ConfigEngine {
+                engine: *engine,
+                sent: *sent,
+            }),
+            Self::ConfigWithoutModel { engine } => {
+                Failure::Setting(SettingFailure::ConfigWithoutModel { engine: *engine })
+            }
+            Self::ClaudeAiEngine { engine } => {
+                Failure::Engine(EngineFailure::ClaudeAiEngine { engine: *engine })
+            }
+            Self::NoHome => Failure::Resource(ResourceFailure::NoHome),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Unauthorized {
+    #[error("the connection carries no client certificate")]
+    NoCertificate,
+    #[error("this device is not paired with Forge")]
+    NotPaired,
+    #[error("that pairing code is wrong or expired")]
+    PairCode,
+    #[error("this tunneled call is not authorized")]
+    Tunnel,
+}
+
+impl Unauthorized {
+    const fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{AuthFailure, Failure};
+        Failure::Auth(match self {
+            Self::NoCertificate => AuthFailure::NoCertificate,
+            Self::NotPaired => AuthFailure::NotPaired,
+            Self::PairCode => AuthFailure::PairCode,
+            Self::Tunnel => AuthFailure::Tunnel,
+        })
+    }
+}
+
+const LISTING_ENTRIES: usize = 32_768;
+const LISTING_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ListDirectoryError {
+    #[error("wait for a directory listing slot")]
+    Slot(#[source] tokio::sync::AcquireError),
+    #[error("run the listing of {}", path.display())]
+    Task {
+        path: PathBuf,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("list {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read an entry in {}", path.display())]
+    Entry {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("inspect {entry}")]
+    Inspect {
+        entry: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the listing of {} exceeds {LISTING_ENTRIES} entries or {LISTING_BYTES} bytes", path.display())]
+    TooLarge { path: PathBuf },
+}
+
+impl ListDirectoryError {
+    fn wire(&self) -> artisan_api::Failure {
+        use artisan_api::{Failure, Limited, ResourceFailure};
+        match self {
+            Self::Slot(_) | Self::Task { .. } => Failure::Internal,
+            Self::Read { path, .. } | Self::Entry { path, .. } => {
+                Failure::Resource(ResourceFailure::Unlistable {
+                    path: path.display().to_string(),
+                })
+            }
+            Self::Inspect { entry, .. } => Failure::Resource(ResourceFailure::Unlistable {
+                path: entry.clone(),
+            }),
+            Self::TooLarge { .. } => Failure::Resource(ResourceFailure::TooLarge {
+                subject: Limited::Listing,
+                actual: None,
+                limit: u64::try_from(LISTING_ENTRIES)
+                    .expect("invariant: the listing entry limit fits in u64"),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("receive an uploaded blob")]
+pub(crate) struct ReceiveBlobError(#[source] axum::Error);
+
+#[derive(Debug, thiserror::Error)]
+#[error("read blob {hash} at {}", path.display())]
+pub(crate) struct ReadBlobError {
+    hash: BlobHash,
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("read resource {path}")]
+pub(crate) struct ReadResourceError {
+    path: String,
+    #[source]
+    source: forge_runs::resources::ResourceError,
+}
+
+fn engines_failure(engine: EngineId, kind: EngineKind<'_>) -> artisan_api::Failure {
+    use artisan_api::{EngineFailure, Failure};
+    Failure::Engine(match kind {
+        EngineKind::NotInstalled => EngineFailure::NotInstalled { engine },
+        EngineKind::NoBuild => EngineFailure::NoBuild { engine },
+        EngineKind::Versions(detail) => EngineFailure::Versions { engine, detail },
+        EngineKind::NoSignIn => EngineFailure::NoSignIn { engine },
+        EngineKind::SignInClosed => EngineFailure::SignInClosed { engine },
+        EngineKind::Unusable(version) => EngineFailure::UnusableVersion {
+            engine,
+            version: version.to_owned(),
+        },
+    })
+}
+
+enum EngineKind<'a> {
+    NotInstalled,
+    NoBuild,
+    Versions(String),
+    NoSignIn,
+    SignInClosed,
+    Unusable(&'a str),
+}
+
+fn validate_version(
+    error: &forge_engines::ValidateVersionError,
+    engine: EngineId,
+) -> artisan_api::Failure {
+    use forge_engines::ValidateVersionError as Validate;
+    match error {
+        Validate::Unusable(unusable) => {
+            engines_failure(engine, EngineKind::Unusable(&unusable.version))
+        }
+        Validate::TooOld {
+            engine,
+            version,
+            minimum,
+        } => artisan_api::Failure::Engine(artisan_api::EngineFailure::VersionTooOld {
+            engine: *engine,
+            version: version.clone(),
+            minimum: (*minimum).to_owned(),
+        }),
+    }
+}
+
+fn submit_code(error: &forge_engines::SubmitCodeError) -> artisan_api::Failure {
+    use forge_engines::SubmitCodeError as Submit;
+    match error {
+        Submit::NoSignIn { engine } => engines_failure(*engine, EngineKind::NoSignIn),
+        Submit::Closed { engine } => engines_failure(*engine, EngineKind::SignInClosed),
+        Submit::Write { .. } => artisan_api::Failure::Internal,
+    }
+}
+
+fn claude_ai_sign_in(error: &forge_engines::ClaudeAiSignInError) -> artisan_api::Failure {
+    use artisan_api::{EngineFailure, Failure};
+    use forge_engines::ClaudeAiSignInError as SignIn;
+    match error {
+        SignIn::NotSignedIn | SignIn::SignedOutMeanwhile => {
+            Failure::Engine(EngineFailure::ClaudeAiSignedOut)
+        }
+        SignIn::NoUserAgent => Failure::Engine(EngineFailure::ClaudeAiNoUserAgent),
+        SignIn::Bootstrap(source) => Failure::Engine(EngineFailure::ClaudeAiRefused {
+            detail: diagnostics::chain(source),
+        }),
+        SignIn::NoOrganization => Failure::Engine(EngineFailure::ClaudeAiNoOrganization),
+        SignIn::Client(_) | SignIn::Save(_) => Failure::Internal,
+    }
+}
+
+fn list_versions(error: &forge_engines::ListVersionsError) -> artisan_api::Failure {
+    use forge_engines::ListVersionsError as List;
+    match error {
+        List::NoBuild(no_build) => engines_failure(no_build.engine, EngineKind::NoBuild),
+        List::Get { engine, source } => {
+            engines_failure(*engine, EngineKind::Versions(diagnostics::chain(source)))
+        }
+        List::Pointer { engine, source } => {
+            engines_failure(*engine, EngineKind::Versions(diagnostics::chain(source)))
+        }
+        List::Task { .. } => artisan_api::Failure::Internal,
+    }
+}
+
+const fn internal<E>(_: &E) -> artisan_api::Failure {
+    artisan_api::Failure::Internal
+}
+
+macro_rules! route_errors {
+    ($($variant:ident($error:ty) => $wire:expr,)*) => {
+        #[derive(Debug, thiserror::Error)]
+        pub(crate) enum RouteError {
+            $(
+                #[error(transparent)]
+                $variant(#[from] $error),
+            )*
+        }
+
+        impl RouteError {
+            fn wire(&self) -> artisan_api::Failure {
+                match self {
+                    $(Self::$variant(error) => {
+                        let wire: fn(&$error) -> artisan_api::Failure = $wire;
+                        wire(error)
+                    })*
+                }
+            }
+        }
+
+        $(
+            impl From<$error> for Failure {
+                fn from(error: $error) -> Self {
+                    Self::new(RouteError::$variant(error))
+                }
+            }
+        )*
+    };
+}
+
+route_errors! {
+    Missing(Missing) => Missing::wire,
+    Rejected(Rejected) => Rejected::wire,
+    Unauthorized(Unauthorized) => Unauthorized::wire,
+    ListDirectory(ListDirectoryError) => ListDirectoryError::wire,
+    ReadBlob(ReadBlobError) => internal,
+    ReceiveBlob(ReceiveBlobError) => |_| artisan_api::Failure::Resource(artisan_api::ResourceFailure::UploadInterrupted),
+    ReadResource(ReadResourceError) => |error| error.source.wire(&error.path),
+    Authorize(forge_store::AuthorizeError) => internal,
+    AwaitingItems(forge_store::AwaitingItemsError) => internal,
+    DismissRollback(forge_store::DismissRollbackError) => internal,
+    CreateProject(forge_store::CreateProjectError) => |error| wire::create_project(&error.cause),
+    CreateThread(forge_store::CreateThreadError) => wire::create_thread,
+    Inspector(forge_store::InspectorError) => |error| wire::content(&error.cause),
+    MarkUnread(forge_store::MarkUnreadError) => |error| wire::write(&error.cause),
+    PairDevice(forge_store::PairDeviceError) => internal,
+    PutBlob(forge_store::PutBlobError) => |error| wire::blob(&error.cause),
+    ReadDraft(forge_store::ReadDraftError) => internal,
+    ReadItem(forge_store::ReadItemError) => internal,
+    ReadProject(forge_store::ReadProjectError) => internal,
+    ReadThread(forge_store::ReadThreadError) => internal,
+    RemoveProject(forge_store::RemoveProjectError) => internal,
+    SetDefaultModel(forge_store::SetDefaultModelError) => |error| wire::setting(&error.cause),
+    SetDraft(forge_store::SetDraftError) => |error| wire::draft(&error.scope, &error.cause),
+    SetModelConfig(forge_store::SetModelConfigError) => |error| wire::setting(&error.cause),
+    SetModelGroup(forge_store::SetModelGroupError) => |error| wire::write(&error.cause),
+    SetSetting(forge_store::SetSettingError) => |error| wire::setting(&error.cause),
+    SettleThread(forge_store::SettleThreadError) => |error| wire::write(&error.cause),
+    State(forge_store::StateError) => internal,
+    TextSearch(forge_store::TextSearchError) => internal,
+    TranscriptPage(forge_store::TranscriptPageError) => internal,
+    TranscriptRows(forge_store::TranscriptRowsError) => internal,
+    WorkPage(forge_store::WorkPageError) => internal,
+    ThreadsPage(forge_store::ThreadsPageError) => |error| wire::threads_page(&error.cause),
+    ContentRange(forge_store::ContentRangeError) => |error| wire::content(&error.cause),
+    CollectionRange(forge_store::CollectionRangeError) => |error| wire::content(&error.cause),
+    SourceIndex(forge_store::SourceIndexPageError) => |error| wire::source_index(&error.cause),
+    MutateMcp(forge_store::MutateMcpError) => |error| wire::setting(&error.cause),
+    AdoptSkill(forge_runs::AdoptSkillError) => forge_runs::AdoptSkillError::wire,
+    DiscardSkill(forge_runs::DiscardSkillError) => forge_runs::DiscardSkillError::wire,
+    EnabledSkills(forge_runs::EnabledSkillsError) => forge_runs::EnabledSkillsError::wire,
+    GlobalPrompt(forge_runs::GlobalPromptError) => forge_runs::GlobalPromptError::wire,
+    MarketplaceInstall(forge_runs::MarketplaceInstallError) => forge_runs::MarketplaceInstallError::wire,
+    MarketplaceSearch(forge_runs::MarketplaceSearchError) => forge_runs::MarketplaceSearchError::wire,
+    ResolveGlobalPrompt(forge_runs::ResolveGlobalPromptError) => forge_runs::ResolveGlobalPromptError::wire,
+    SaveGlobalPrompt(forge_runs::SaveGlobalPromptError) => forge_runs::SaveGlobalPromptError::wire,
+    SetSkillEnabled(forge_runs::SetSkillEnabledError) => forge_runs::SetSkillEnabledError::wire,
+    SkillCatalog(forge_runs::SkillCatalogError) => forge_runs::SkillCatalogError::wire,
+    McpStore(forge_runs::McpStoreError) => forge_runs::McpStoreError::wire,
+    McpSignInStart(forge_runs::McpSignInStartError) => forge_runs::McpSignInStartError::wire,
+    McpSignInFinish(forge_runs::McpSignInFinishError) => forge_runs::McpSignInFinishError::wire,
+    Send(forge_runs::SendError) => forge_runs::SendError::wire,
+    Answer(forge_runs::AnswerError) => forge_runs::AnswerError::wire,
+    Continue(forge_runs::ContinueError) => forge_runs::ContinueError::wire,
+    Update(forge_runs::UpdateError) => forge_runs::UpdateError::wire,
+    ClearGoal(forge_runs::ClearGoalError) => forge_runs::ClearGoalError::wire,
+    Cancel(forge_runs::CancelError) => forge_runs::CancelError::wire,
+    EditorReply(forge_runs::runtime::EditorReplyError) => forge_runs::runtime::EditorReplyError::wire,
+    ValidateVersion(VersionError) => |error| validate_version(&error.source, error.engine),
+    NotInstalled(forge_engines::NotInstalled) => |error| engines_failure(error.engine, EngineKind::NotInstalled),
+    SubmitCode(forge_engines::SubmitCodeError) => submit_code,
+    ClaudeAiSignIn(forge_engines::ClaudeAiSignInError) => claude_ai_sign_in,
+    ClaudeAiSignOut(forge_engines::claudeai::RemoveSessionError) => internal,
+    ListVersions(forge_engines::ListVersionsError) => list_versions,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("use {engine} version")]
+pub(crate) struct VersionError {
+    engine: EngineId,
+    #[source]
+    source: forge_engines::ValidateVersionError,
+}
+
+pub(crate) struct Failure {
+    wire: artisan_api::Failure,
+    error: Box<RouteError>,
+    spans: diagnostics::Spans,
+}
+
+impl Failure {
+    fn new(error: RouteError) -> Self {
+        Self {
+            wire: error.wire(),
+            error: Box::new(error),
+            spans: diagnostics::Spans::capture(),
+        }
     }
 }
 
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
-        if self.1 == StatusCode::INTERNAL_SERVER_ERROR {
-            internal(self.0)
-        } else {
-            error(self.1, self.2, &format!("{:#}", self.0))
-        }
+        let message = forge_runs::failure::message(&*self.error, &self.wire);
+        let mut response = refusal(ApiError::new(self.wire, message));
+        response.extensions_mut().insert(Refusal {
+            error: Arc::from(self.error),
+            spans: self.spans,
+        });
+        response
     }
 }
 
-fn not_found(what: impl std::fmt::Display) -> Failure {
-    Failure(
-        anyhow::anyhow!("{what} not found"),
-        StatusCode::NOT_FOUND,
-        ErrorCode::NotFound,
-    )
-}
-
-const fn bad_request(error: anyhow::Error) -> Failure {
-    Failure(error, StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
-}
-
-fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
-    (
-        status,
-        Json(ApiError {
-            code,
-            message: message.to_owned(),
-        }),
-    )
-        .into_response()
-}
-
-/// A 500 carries its error to [`log_internal`], which knows the route.
-fn internal(failure: anyhow::Error) -> Response {
-    let mut response = error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        ErrorCode::Internal,
-        &format!("{failure:#}"),
-    );
-    response
-        .extensions_mut()
-        .insert(InternalError(Arc::new(failure)));
-    response
+fn refusal(error: ApiError) -> Response {
+    (status(error.code), Json(error)).into_response()
 }
 
 #[derive(Clone)]
-struct InternalError(Arc<anyhow::Error>);
-
-/// Logs every internal failure with the request that met it; ids are in the path.
-async fn log_internal(request: Request, next: Next) -> Response {
-    let (method, path) = (request.method().clone(), request.uri().path().to_owned());
-    let response = next.run(request).await;
-    if let Some(InternalError(failure)) = response.extensions().get::<InternalError>() {
-        tracing::error!(%method, %path, "request failed: {failure:#}");
-    }
-    response
+struct Refusal {
+    error: Arc<RouteError>,
+    spans: diagnostics::Spans,
 }
 
-pub type Result<T> = std::result::Result<T, Failure>;
+async fn log_internal(request: Request, next: Next) -> Response {
+    let span = tracing::info_span!(
+        "request",
+        method = %request.method(),
+        path = request.uri().path()
+    );
+    async move {
+        let response = next.run(request).await;
+        if let Some(Refusal { error, spans }) = response.extensions().get::<Refusal>() {
+            if response.status().is_server_error() {
+                tracing::error!(error = diagnostics::chain(&**error), %spans, "request failed");
+            } else {
+                tracing::info!(error = diagnostics::chain(&**error), "request refused");
+            }
+        }
+        response
+    }
+    .instrument(span)
+    .await
+}
+
+pub(crate) type Result<T> = std::result::Result<T, Failure>;
 
 async fn state(AppState(app): AppState<App>) -> Result<Json<State>> {
     let snapshot = app.hub.store().state().await?;
@@ -294,10 +708,15 @@ async fn state(AppState(app): AppState<App>) -> Result<Json<State>> {
         runs: snapshot.runs,
         settings: snapshot.settings,
         engines,
+        database_rollback: snapshot.database_rollback,
     }))
 }
 
-/// The user Forge runs as and its host's name, read once.
+async fn dismiss_database_rollback(AppState(app): AppState<App>) -> Result<StatusCode> {
+    app.hub.store().dismiss_rollback().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 fn account() -> artisan_api::Account {
     static ACCOUNT: std::sync::OnceLock<artisan_api::Account> = std::sync::OnceLock::new();
     ACCOUNT
@@ -317,9 +736,6 @@ fn account() -> artisan_api::Account {
             } else {
                 host
             };
-            // WSL sets this in every session's environment, so a Forge
-            // started from a shell has it; a systemd unit doesn't, and the
-            // Editor falls back to the default distribution.
             let wsl_distro = std::env::var("WSL_DISTRO_NAME")
                 .ok()
                 .map(|name| name.trim().to_owned())
@@ -339,10 +755,7 @@ async fn create_project(
 ) -> Result<Json<Project>> {
     let path = std::path::Path::new(&request.path);
     if !path.is_dir() {
-        return Err(bad_request(anyhow::anyhow!(
-            "{} is not a directory on this host",
-            request.path
-        )));
+        return Err(Rejected::NotADirectory { path: request.path }.into());
     }
     Ok(Json(app.hub.store().create_project(request).await?))
 }
@@ -356,11 +769,10 @@ async fn remove_project(
         .store()
         .remove_project(&id)
         .await?
-        .ok_or_else(|| not_found(format!("project {id}")))?;
+        .ok_or(Missing::Project(id))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The project's own icon file, stored as a blob; `null` when it has none.
 async fn project_icon(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
@@ -378,12 +790,17 @@ async fn project_icon(
         .store()
         .project(&id)
         .await?
-        .ok_or_else(|| not_found(format!("project {id}")))?;
+        .ok_or_else(|| Missing::Project(id.clone()))?;
     let store = app.hub.store();
     for candidate in CANDIDATES {
         let path = std::path::Path::new(&project.path).join(candidate);
-        let Ok(metadata) = tokio::fs::metadata(&path).await else {
-            continue;
+        let metadata = match tokio::fs::metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::info!(project = %id, path = %path.display(), %error, "unreadable project icon");
+                continue;
+            }
         };
         let source = metadata.modified().ok().map(|modified| IconSource::File {
             path: path.clone(),
@@ -398,13 +815,18 @@ async fn project_icon(
             Some(Icon::Unusable) => continue,
             None => {}
         }
-        let Some(bytes) = crate::repository::icon_file(&path).await else {
-            continue;
+        let bytes = match crate::repository::icon_file(&path).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::info!(project = %id, error = diagnostics::chain(&error), "unreadable project icon");
+                continue;
+            }
         };
         let icon = match store.put_image(bytes).await {
             Ok(blob) => Icon::Blob(blob),
             Err(error) => {
-                tracing::info!(project = %id, path = %path.display(), "unusable project icon: {error:#}");
+                tracing::info!(project = %id, path = %path.display(), error = diagnostics::chain(&error), "unusable project icon");
                 Icon::Unusable
             }
         };
@@ -415,8 +837,7 @@ async fn project_icon(
             return Ok(Json(Some(blob)));
         }
     }
-    // Else the repository owner's avatar, as its host shows it.
-    let root = std::path::PathBuf::from(&project.path);
+    let root = PathBuf::from(&project.path);
     let Some(bytes) = app.repositories.avatar(&root).await else {
         return Ok(Json(None));
     };
@@ -427,7 +848,7 @@ async fn project_icon(
         let icon = match store.put_image(bytes).await {
             Ok(blob) => Icon::Blob(blob),
             Err(error) => {
-                tracing::info!(project = %id, "unusable repository avatar: {error:#}");
+                tracing::info!(project = %id, error = diagnostics::chain(&error), "unusable repository avatar");
                 Icon::Unusable
             }
         };
@@ -440,7 +861,6 @@ async fn project_icon(
     }))
 }
 
-/// The project's git branch and remote page; `null` outside a repository.
 async fn project_repository(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
@@ -451,13 +871,12 @@ async fn project_repository(
         .store()
         .project(&id)
         .await?
-        .ok_or_else(|| not_found(format!("project {id}")))?;
-    let path = std::path::PathBuf::from(project.path);
+        .ok_or(Missing::Project(id))?;
+    let path = PathBuf::from(project.path);
     let repository = app.repositories.read(&path).await;
     Ok(Json(repository))
 }
 
-/// A thread the user starts names the project the next one starts in.
 async fn create_thread(
     AppState(app): AppState<App>,
     Json(request): Json<CreateThread>,
@@ -480,22 +899,17 @@ async fn threads_page(
     AppState(app): AppState<App>,
     Query(query): Query<artisan_api::ThreadsQuery>,
 ) -> Result<Json<artisan_api::ThreadsPage>> {
-    Ok(Json(
-        app.hub
-            .store()
-            .threads_page(query)
-            .await
-            .map_err(bad_request)?,
-    ))
+    Ok(Json(app.hub.store().threads_page(query).await?))
 }
 
 async fn thread(AppState(app): AppState<App>, Path(id): Path<ThreadId>) -> Result<Json<Thread>> {
+    app.hub.mcp().warm_servers();
     app.hub
         .store()
         .thread(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("thread {id}")))
+        .ok_or_else(|| Missing::Thread(id).into())
 }
 
 async fn update_thread(
@@ -505,9 +919,7 @@ async fn update_thread(
 ) -> Result<Json<Thread>> {
     let id = ThreadId(id);
     let thread = app.hub.update_thread(&id, update).await?;
-    Ok(Json(
-        thread.ok_or_else(|| not_found(format!("thread {id}")))?,
-    ))
+    Ok(Json(thread.ok_or(Missing::Thread(id))?))
 }
 
 async fn settle_thread(
@@ -520,7 +932,7 @@ async fn settle_thread(
         .settle_thread(&id, request.observed_seq)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("thread {id}")))
+        .ok_or_else(|| Missing::Thread(id).into())
 }
 
 async fn mark_unread(
@@ -532,7 +944,7 @@ async fn mark_unread(
         .mark_unread(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("thread {id}")))
+        .ok_or_else(|| Missing::Thread(id).into())
 }
 
 async fn items(
@@ -586,9 +998,9 @@ async fn agent_items(
         .store()
         .item(&agent)
         .await?
-        .ok_or_else(|| not_found(format!("agent {agent}")))?;
+        .ok_or_else(|| Missing::Agent(agent.clone()))?;
     if owner.thread_id != thread || !matches!(owner.kind, artisan_api::ItemKind::Agent { .. }) {
-        return Err(not_found(format!("agent {agent} in thread {thread}")));
+        return Err(Missing::AgentInThread { thread, agent }.into());
     }
     Ok(Json(
         app.hub
@@ -601,27 +1013,29 @@ async fn agent_items(
 async fn inspector(
     AppState(app): AppState<App>,
     Path(id): Path<ThreadId>,
+    Query(query): Query<artisan_api::InspectorQuery>,
 ) -> Result<Json<artisan_api::InspectorSummary>> {
-    Ok(Json(app.hub.store().inspector(&id).await?))
+    Ok(Json(
+        app.hub.store().inspector_since(&id, query.outline).await?,
+    ))
 }
 
 async fn source_index(
     AppState(app): AppState<App>,
-    Path(id): Path<artisan_api::ContentId>,
+    Path(id): Path<ContentId>,
     Query(query): Query<artisan_api::SourceIndexQuery>,
 ) -> Result<Json<artisan_api::SourceIndexRange>> {
     app.hub
         .store()
         .source_index(&id, query)
-        .await
-        .map_err(bad_request)?
+        .await?
         .map(Json)
-        .ok_or_else(|| not_found("text source"))
+        .ok_or_else(|| Missing::TextSource(id).into())
 }
 
 async fn content_range(
     AppState(app): AppState<App>,
-    Path(id): Path<artisan_api::ContentId>,
+    Path(id): Path<ContentId>,
     Query(query): Query<artisan_api::ContentQuery>,
 ) -> Result<Json<artisan_api::ContentRange>> {
     if !id.is_valid()
@@ -629,22 +1043,19 @@ async fn content_range(
             .limit
             .is_none_or(|limit| (4..=artisan_api::CONTENT_RANGE_BYTES).contains(&limit))
     {
-        return Err(bad_request(anyhow::anyhow!(
-            "invalid source identity or range limit"
-        )));
+        return Err(Rejected::ContentQuery { content: id }.into());
     }
     app.hub
         .store()
         .content_range(&id, query)
-        .await
-        .map_err(bad_request)?
+        .await?
         .map(Json)
-        .ok_or_else(|| not_found("text source"))
+        .ok_or_else(|| Missing::TextSource(id).into())
 }
 
 async fn collection_range(
     AppState(app): AppState<App>,
-    Path(id): Path<artisan_api::ContentId>,
+    Path(id): Path<ContentId>,
     Query(query): Query<artisan_api::CollectionQuery>,
 ) -> Result<Json<artisan_api::CollectionRange<serde_json::Value>>> {
     if !id.is_valid()
@@ -652,17 +1063,14 @@ async fn collection_range(
             .limit
             .is_none_or(|limit| (1..=artisan_api::COLLECTION_RANGE_ENTRIES).contains(&limit))
     {
-        return Err(bad_request(anyhow::anyhow!(
-            "invalid collection identity or range limit"
-        )));
+        return Err(Rejected::CollectionQuery { content: id }.into());
     }
     app.hub
         .store()
         .collection_range(&id, query)
-        .await
-        .map_err(bad_request)?
+        .await?
         .map(Json)
-        .ok_or_else(|| not_found("canonical collection"))
+        .ok_or_else(|| Missing::Collection(id).into())
 }
 
 async fn item(AppState(app): AppState<App>, Path(id): Path<ItemId>) -> Result<Json<Item>> {
@@ -671,7 +1079,7 @@ async fn item(AppState(app): AppState<App>, Path(id): Path<ItemId>) -> Result<Js
         .item(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found(format!("item {id}")))
+        .ok_or_else(|| Missing::Item(id).into())
 }
 
 #[derive(Deserialize)]
@@ -687,13 +1095,13 @@ async fn resource(
     Path(id): Path<String>,
     Query(query): Query<ResourceQuery>,
 ) -> Result<Bytes> {
-    use forge_runs::resources::{ResourceError, Written};
+    use forge_runs::resources::Written;
     let thread = app
         .hub
         .store()
         .thread(&ThreadId(id.clone()))
         .await?
-        .ok_or_else(|| not_found(format!("thread {id}")))?;
+        .ok_or(Missing::Thread(ThreadId(id)))?;
     let written = Written {
         path: query.path,
         from_home: query.from_home,
@@ -702,10 +1110,12 @@ async fn resource(
         .read_resource(&thread, query.item.as_ref(), &written)
         .await
         .map(Bytes::from)
-        .map_err(|error| match error {
-            ResourceError::Missing => not_found(written.path),
-            ResourceError::Refused(reason) => bad_request(anyhow::anyhow!(reason)),
-            ResourceError::Failed(error) => Failure::from(error),
+        .map_err(|source| {
+            ReadResourceError {
+                path: written.path,
+                source,
+            }
+            .into()
         })
 }
 
@@ -714,21 +1124,7 @@ async fn send_message(
     Path(id): Path<String>,
     Json(message): Json<SendMessage>,
 ) -> Result<Json<Item>> {
-    let id = ThreadId(id);
-    match app.hub.send_message(&id, message).await {
-        Ok(item) => Ok(Json(item)),
-        Err(error) => match error.downcast_ref::<forge_store::SendRejected>() {
-            Some(forge_store::SendRejected::ThreadNotFound(_)) => {
-                Err(not_found(format!("thread {id}")))
-            }
-            Some(
-                forge_store::SendRejected::IdConflict(_)
-                | forge_store::SendRejected::Payload(_)
-                | forge_store::SendRejected::MissingBlob(_),
-            ) => Err(bad_request(error)),
-            None => Err(error.into()),
-        },
-    }
+    Ok(Json(app.hub.send_message(&ThreadId(id), message).await?))
 }
 
 async fn cancel(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
@@ -736,35 +1132,27 @@ async fn cancel(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Carries on the thread's stopped turn with no new message.
 async fn continue_turn(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
     app.hub.continue_turn(&ThreadId(id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Clears the thread's goal.
 async fn clear_goal(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
     app.hub.clear_goal(&ThreadId(id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// An Editor answers a call Forge made for an agent.
 async fn editor_reply(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
     Json(reply): Json<artisan_api::EditorReply>,
-) -> StatusCode {
-    if app
-        .hub
-        .answer_distributed_editor_call(&id, reply)
-        .await
-        .unwrap_or(false)
-    {
-        StatusCode::NO_CONTENT
-    } else {
-        // Another Editor answered first, or the call gave up waiting.
-        StatusCode::GONE
-    }
+) -> Result<StatusCode> {
+    Ok(
+        match app.hub.answer_distributed_editor_call(&id, reply).await? {
+            forge_runs::runtime::EditorCall::Answered => StatusCode::NO_CONTENT,
+            forge_runs::runtime::EditorCall::NotWaiting => StatusCode::GONE,
+        },
+    )
 }
 
 async fn answer(
@@ -776,9 +1164,6 @@ async fn answer(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Forge settings with structure are saved through their own validated
-/// routes; plain switches are saved here. An Editor keeps its own
-/// preferences on the device.
 async fn set_setting(
     AppState(app): AppState<App>,
     Path(key): Path<String>,
@@ -788,11 +1173,7 @@ async fn set_setting(
         let Some(transport) = value.as_str().filter(|transport| {
             [artisan_api::CLAUDE_CODE, artisan_api::CLAUDE_AI].contains(transport)
         }) else {
-            return Err(bad_request(anyhow::anyhow!(
-                "setting {key} is {} or {}",
-                artisan_api::CLAUDE_CODE,
-                artisan_api::CLAUDE_AI
-            )));
+            return Err(Rejected::Transport { key }.into());
         };
         app.hub
             .store()
@@ -802,36 +1183,27 @@ async fn set_setting(
     }
     if key == artisan_api::THREAD_RETENTION_DAYS_KEY {
         artisan_api::setting_decl(&key)
-            .context("thread retention is declared")?
+            .expect("invariant: thread retention is a declared setting")
             .check(&value)
-            .map_err(|reason| bad_request(anyhow::anyhow!(reason)))?;
+            .map_err(Rejected::from)?;
         app.hub.store().set_setting(key, value).await?;
         let hub = app.hub.clone();
         app.tasks.spawn(async move {
             if let Err(error) = hub.remove_inactive_threads().await {
-                tracing::warn!("remove inactive threads: {error:#}");
+                tracing::warn!(
+                    error = diagnostics::chain(&error),
+                    "remove inactive threads"
+                );
             }
         });
         return Ok(StatusCode::NO_CONTENT);
     }
-    let switches = [
-        forge_runs::SUGGESTIONS_KEY,
-        forge_runs::YOU_SHOULD_KNOW_KEY,
-        forge_runs::SUMMARY_TITLES_KEY,
-        forge_store::CONTINUE_AFTER_RESTART_KEY,
-        forge_store::RETRY_WHEN_OVERLOADED_KEY,
-        forge_store::CONTINUE_AFTER_USAGE_LIMIT_KEY,
-    ];
-    if switches.contains(&key.as_str()) {
-        let Some(enabled) = value.as_bool() else {
-            return Err(bad_request(anyhow::anyhow!(
-                "setting {key} is true or false"
-            )));
-        };
-        app.hub
-            .store()
-            .set_setting(key, serde_json::Value::Bool(enabled))
-            .await?;
+    if let Some(switch) = artisan_api::setting_decl(&key).filter(|decl| {
+        decl.owner == artisan_api::SettingOwner::Forge
+            && matches!(decl.kind, artisan_api::SettingKind::Bool)
+    }) {
+        switch.check(&value).map_err(Rejected::from)?;
+        app.hub.store().set_setting(key, value).await?;
         return Ok(StatusCode::NO_CONTENT);
     }
     let route = match key.as_str() {
@@ -842,30 +1214,18 @@ async fn set_setting(
         artisan_api::MODEL_GROUPS_KEY => "PUT /engines/{engine}/model-groups",
         artisan_api::LAST_PROJECT_KEY => "POST /threads",
         "disabled_skills" => "POST /skills/{id}/{action}",
-        _ => {
-            return Err(bad_request(anyhow::anyhow!(
-                "setting {key} is not one clients can change"
-            )));
-        }
+        _ => return Err(Rejected::UnknownSetting { key }.into()),
     };
-    Err(bad_request(anyhow::anyhow!(
-        "setting {key} is saved through {route}"
-    )))
+    Err(Rejected::OwnRoute { key, route }.into())
 }
 
 async fn mutate_mcp(
     AppState(app): AppState<App>,
     Json(mutation): Json<artisan_api::McpMutation>,
 ) -> Result<Json<Vec<artisan_api::McpServer>>> {
-    let servers = app
-        .hub
-        .store()
-        .mutate_mcp(mutation)
-        .await
-        .map_err(bad_request)?;
-    // The card shows whether a new or changed server needs a sign-in.
+    let servers = app.hub.mcp().mutate(mutation).await?;
     let hub = app.hub.clone();
-    app.tasks.spawn(async move { hub.check_mcp_auth().await });
+    app.tasks.spawn(async move { hub.mcp().check_auth().await });
     Ok(Json(servers))
 }
 
@@ -874,45 +1234,44 @@ async fn set_default_model(
     Path(engine): Path<EngineId>,
     Json(id): Json<String>,
 ) -> Result<Json<artisan_api::EngineConfig>> {
-    let model = app
-        .hub
+    let model = available_model(&app, engine, id)?;
+    Ok(Json(
+        app.hub.store().set_default_model(engine, model).await?,
+    ))
+}
+
+fn available_model(
+    app: &App,
+    engine: EngineId,
+    id: String,
+) -> std::result::Result<artisan_api::Model, Rejected> {
+    app.hub
         .engines()
         .status(engine)
         .models
         .iter()
         .find(|model| model.id == id)
         .cloned()
-        .ok_or_else(|| bad_request(anyhow::anyhow!("model {id} is unavailable")))?;
-    Ok(Json(
-        app.hub.store().set_default_model(engine, model).await?,
-    ))
+        .ok_or(Rejected::ModelUnavailable { engine, model: id })
 }
 
-/// Remembers the config chosen for one of the engine's models.
 async fn set_model_config(
     AppState(app): AppState<App>,
     Path(engine): Path<EngineId>,
     Json(config): Json<artisan_api::EngineConfig>,
 ) -> Result<Json<artisan_api::EngineConfig>> {
     if config.engine != engine {
-        return Err(bad_request(anyhow::anyhow!(
-            "config for {} sent to {engine}",
-            config.engine
-        )));
+        return Err(Rejected::ConfigEngine {
+            engine,
+            sent: config.engine,
+        }
+        .into());
     }
     let id = config
         .model
         .clone()
-        .ok_or_else(|| bad_request(anyhow::anyhow!("config names no model")))?;
-    let model = app
-        .hub
-        .engines()
-        .status(engine)
-        .models
-        .iter()
-        .find(|model| model.id == id)
-        .cloned()
-        .ok_or_else(|| bad_request(anyhow::anyhow!("model {id} is unavailable")))?;
+        .ok_or(Rejected::ConfigWithoutModel { engine })?;
+    let model = available_model(&app, engine, id)?;
     Ok(Json(
         app.hub.store().set_model_config(config, &model).await?,
     ))
@@ -939,38 +1298,31 @@ async fn set_draft(
     Path(scope): Path<String>,
     Json(request): Json<artisan_api::WriteDraft>,
 ) -> Result<Json<artisan_api::DraftWriteResult>> {
+    app.hub.mcp().warm_servers();
     Ok(Json(app.hub.store().set_draft(scope, request).await?))
 }
 
-async fn put_blob(AppState(app): AppState<App>, body: Bytes) -> Result<Json<artisan_api::BlobRef>> {
-    app.hub
-        .store()
-        .put_blob(body.to_vec())
+async fn put_blob(AppState(app): AppState<App>, body: axum::body::Body) -> Result<Json<BlobRef>> {
+    let upload = app.hub.store().admit_blob().await;
+    let bytes = axum::body::to_bytes(body, forge_store::MAX_BLOB_BYTES + 1024)
         .await
-        .map(Json)
-        .map_err(|error| {
-            if error.downcast_ref::<forge_store::BlobRejected>().is_some() {
-                bad_request(error)
-            } else {
-                Failure::from(error)
-            }
-        })
+        .map_err(ReceiveBlobError)?;
+    Ok(Json(upload.put(bytes.to_vec()).await?))
 }
 
 async fn get_blob(AppState(app): AppState<App>, Path(hash): Path<String>) -> Result<Response> {
     let hash = BlobHash(hash);
-    let path = app
-        .hub
-        .store()
-        .blob_path(&hash)
-        .ok_or_else(|| not_found(format!("blob {hash}")))?;
-    let bytes = tokio::fs::read(&path)
-        .await
-        .with_context(|| format!("read {}", path.display()))?;
+    let Some(path) = app.hub.store().blob_path(&hash) else {
+        return Err(Missing::Blob(hash).into());
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(source) => return Err(ReadBlobError { hash, path, source }.into()),
+    };
     Ok((
         [
             (header::CONTENT_TYPE, "image/webp"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            (header::CACHE_CONTROL, "private, no-store"),
         ],
         bytes,
     )
@@ -986,7 +1338,6 @@ async fn engines(AppState(app): AppState<App>) -> Json<Vec<EngineStatus>> {
     )
 }
 
-/// Executes a typed engine command; required arguments belong to its variant.
 async fn engine_action(
     AppState(app): AppState<App>,
     Path(engine): Path<EngineId>,
@@ -995,7 +1346,8 @@ async fn engine_action(
     use artisan_api::EngineCommand as Command;
     let engines = app.hub.engines().clone();
     if let Command::Use { version } = &command {
-        forge_engines::Engines::validate_version(engine, version).map_err(bad_request)?;
+        forge_engines::Engines::validate_version(engine, version)
+            .map_err(|source| VersionError { engine, source })?;
     }
     match command {
         Command::Install {} | Command::Update {} | Command::Rollback {} | Command::Use { .. } => {
@@ -1024,49 +1376,39 @@ async fn engine_action(
                 };
                 match result {
                     Ok(()) => {
-                        if let Err(error) = hub.reconcile_global_prompt().await {
-                            tracing::warn!(%engine, "reconcile prompt: {error:#}");
+                        if let Err(error) = hub.extensions().reconcile_global_prompt().await {
+                            tracing::warn!(%engine, error = diagnostics::chain(&error), "reconcile prompt");
                         }
-                        if let Err(error) = hub.reconcile_skills().await {
-                            tracing::warn!(%engine, "reconcile skills: {error:#}");
+                        if let Err(error) = hub.extensions().reconcile_skills().await {
+                            tracing::warn!(%engine, error = diagnostics::chain(&error), "reconcile skills");
                         }
                         engines.refresh(engine).await;
                     }
                     Err(error) => {
-                        tracing::warn!(%engine, action = label, "engine command failed: {error:#}");
+                        tracing::warn!(%engine, action = label, error = diagnostics::chain(&error), "engine command failed");
                     }
                 }
             });
         }
-        Command::Login {} => engines.login(engine).map_err(bad_request)?,
-        Command::LoginCode { code } => engines
-            .submit_login_code(engine, &code)
-            .await
-            .map_err(bad_request)?,
+        Command::Login {} => engines.login(engine)?,
+        Command::LoginCode { code } => engines.submit_login_code(engine, &code).await?,
         Command::CancelLogin {} => engines.cancel_login(engine),
-        Command::Logout {} => engines.logout(engine).map_err(bad_request)?,
+        Command::Logout {} => engines.logout(engine)?,
         Command::ClaudeAiSignIn { session } => {
             if engine != EngineId::Claude {
-                return Err(bad_request(anyhow::anyhow!(
-                    "only Claude signs in to claude.ai"
-                )));
+                return Err(Rejected::ClaudeAiEngine { engine }.into());
             }
-            engines
-                .claude_ai_sign_in(session)
-                .await
-                .map_err(bad_request)?;
+            engines.claude_ai_sign_in(session).await?;
         }
         Command::ClaudeAiSignOut {} => {
             if engine != EngineId::Claude {
-                return Err(bad_request(anyhow::anyhow!(
-                    "only Claude signs in to claude.ai"
-                )));
+                return Err(Rejected::ClaudeAiEngine { engine }.into());
             }
-            engines.claude_ai_sign_out().map_err(bad_request)?;
+            engines.claude_ai_sign_out()?;
         }
         Command::Refresh {} => engines.refresh(engine).await,
         Command::Versions {} => {
-            engines.list_versions(engine).await.map_err(bad_request)?;
+            engines.list_versions(engine).await?;
         }
     }
     Ok(Json(app.hub.engines().status(engine)))
@@ -1077,57 +1419,51 @@ struct ListQuery {
     path: Option<String>,
 }
 
-/// Directory listing for picking a project folder on this host.
 async fn list_dir(Query(query): Query<ListQuery>) -> Result<Json<DirListing>> {
     static READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
     let path = match query.path {
-        Some(path) if !path.is_empty() => std::path::PathBuf::from(path),
-        _ => dirs::home_dir().ok_or_else(|| {
-            bad_request(anyhow::anyhow!(
-                "host home directory unavailable; provide a path"
-            ))
-        })?,
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => dirs::home_dir().ok_or(Rejected::NoHome)?,
     };
-    let permit = READS.acquire().await.map_err(|error| {
-        Failure(
-            error.into(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-        )
-    })?;
-    tokio::task::spawn_blocking(move || {
-        // Keep admission until the blocking job actually exits, including client cancellation.
+    let permit = READS.acquire().await.map_err(ListDirectoryError::Slot)?;
+    let listed = path.clone();
+    let listing = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        read_directory(&path).map(Json).map_err(bad_request)
+        read_directory(&listed)
     })
     .await
-    .map_err(|error| {
-        Failure(
-            error.into(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorCode::Internal,
-        )
-    })?
+    .map_err(|source| ListDirectoryError::Task { path, source })??;
+    Ok(Json(listing))
 }
 
-fn read_directory(path: &std::path::Path) -> anyhow::Result<DirListing> {
-    let reader = std::fs::read_dir(path).with_context(|| format!("list {}", path.display()))?;
+fn read_directory(path: &std::path::Path) -> std::result::Result<DirListing, ListDirectoryError> {
+    let reader = std::fs::read_dir(path).map_err(|source| ListDirectoryError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
     let mut entries = Vec::new();
     let mut bytes = 0usize;
     for entry in reader {
-        let entry = entry.with_context(|| format!("read entry in {}", path.display()))?;
+        let entry = entry.map_err(|source| ListDirectoryError::Entry {
+            path: path.to_owned(),
+            source,
+        })?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let entry_path = entry.path().to_string_lossy().into_owned();
         bytes = bytes
             .saturating_add(name.len())
             .saturating_add(entry_path.len());
-        anyhow::ensure!(
-            entries.len() < 32_768 && bytes <= 4 * 1024 * 1024,
-            "directory listing exceeds 32768 entries or 4 MiB"
-        );
+        if entries.len() >= LISTING_ENTRIES || bytes > LISTING_BYTES {
+            return Err(ListDirectoryError::TooLarge {
+                path: path.to_owned(),
+            });
+        }
         let is_dir = entry
             .file_type()
-            .with_context(|| format!("inspect {entry_path}"))?
+            .map_err(|source| ListDirectoryError::Inspect {
+                entry: entry_path.clone(),
+                source,
+            })?
             .is_dir();
         let sort_key = name.to_lowercase();
         entries.push((
@@ -1152,7 +1488,6 @@ fn read_directory(path: &std::path::Path) -> anyhow::Result<DirListing> {
     })
 }
 
-/// Authorizes the connection's certificate when the code is right.
 async fn pair(
     AppState(app): AppState<App>,
     Extension(client): Extension<Client>,
@@ -1161,17 +1496,13 @@ async fn pair(
     let store = app.hub.store();
     let Some(device_id) = store
         .pair_device(
-            crate::hash_code(&request.code),
+            forge_store::PairCodeHash::of(&request.code),
             request.device_name,
             client.certificate,
         )
         .await?
     else {
-        return Err(Failure(
-            anyhow::anyhow!("that pairing code is wrong or expired"),
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Unauthorized,
-        ));
+        return Err(Unauthorized::PairCode.into());
     };
     Ok(Json(PairResponse { device_id }))
 }

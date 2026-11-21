@@ -3,34 +3,41 @@ use super::presentation::{BodyKey, PresentationScope};
 use super::projection::BodyProjection;
 use editor_core::{Core, host::ScopedSourceProvider};
 use editor_ui::markdown::literal::{LiteralOwner, LiteralPreparation};
-use editor_ui::markdown::presenter::{HeatmapServices, MarkdownPresenter, StoredProjectedMarkdown};
-use editor_ui::markdown::stored::{LeafPreparation, StoredOwner, StoredPreparation, StoredSource};
-use editor_ui::markdown::visual::{BodyTone, LinkAction};
-use editor_ui::theme::ArtisanTheme;
+use editor_ui::markdown::presenter::{
+    BodyServices, HeatmapServices, MarkdownPresenter, RevealSlot, SelectionPlace,
+    StoredProjectedMarkdown,
+};
+use editor_ui::markdown::stored::{
+    LeafPreparation, PAGE_LEAVES, PagePreparation, StoredOwner, StoredPreparation, StoredSource,
+};
+use editor_ui::markdown::visual::BodyContext;
 
-pub fn edge_offset(
-    loaded: std::ops::Range<usize>,
+pub const ROW_WINDOW: usize = 16 * PAGE_LEAVES;
+const WINDOW_EDGE: usize = 4 * PAGE_LEAVES;
+const WINDOW_SHIFT: usize = 8 * PAGE_LEAVES;
+
+pub fn row_window(
+    current: Option<&std::ops::Range<usize>>,
     count: usize,
-    ordinal: usize,
-    top: bool,
-    following_tail: bool,
-    following_viewport: bool,
-) -> Option<usize> {
-    if !loaded.contains(&ordinal) {
-        return None;
-    }
-    if loaded.start > 0
-        && !following_tail
-        && !following_viewport
-        && ordinal.saturating_sub(loaded.start) < 4
-        && top
-    {
-        Some(loaded.start.saturating_sub(32))
-    } else if loaded.end < count && loaded.end.saturating_sub(ordinal) <= 4 {
-        Some(loaded.start.saturating_add(32))
-    } else {
-        None
-    }
+    reached: Option<usize>,
+) -> std::ops::Range<usize> {
+    let len = ROW_WINDOW.min(count);
+    let start = match (current, reached) {
+        (None, _) => count - len,
+        (Some(window), Some(reached))
+            if window.start > 0 && reached < window.start + WINDOW_EDGE =>
+        {
+            window.start.saturating_sub(WINDOW_SHIFT)
+        }
+        (Some(window), Some(reached))
+            if window.end < count && reached + WINDOW_EDGE >= window.end =>
+        {
+            window.start + WINDOW_SHIFT
+        }
+        (Some(window), _) => window.start,
+    };
+    let start = start.min(count - len);
+    start..start + len
 }
 
 pub fn retired_leaves(
@@ -47,27 +54,32 @@ pub fn retired_leaves(
     retired
 }
 
-pub fn reverses_in_place(
-    previous_moves: u64,
-    previous_top: Option<&super::fold::RowKey>,
-    previous_newer: bool,
-    moves: u64,
-    top: Option<&super::fold::RowKey>,
-    toward_end: Option<bool>,
-    newer: bool,
-) -> bool {
-    previous_newer != newer
-        && (previous_moves == moves || previous_top == top || toward_end != Some(newer))
-}
-use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
+use aqua_text::document::SelectionSourceId;
 use aqua_ui::collection::SelectionSourceBatch;
 use artisan_api::{ContentRef, SourceIndexFormat, TextContent};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
-#[derive(Clone)]
+#[derive(Debug, thiserror::Error)]
+pub enum StoredBodyError {
+    #[error("the stored conversation belongs to another thread or host")]
+    StaleScope,
+    #[error("stored body {key:?} changed under leaf {ordinal}")]
+    StaleLeaf { key: BodyKey, ordinal: usize },
+    #[error("stored body {key:?} has not been prepared")]
+    Unprepared { key: BodyKey },
+    #[error("present leaf {ordinal} of stored body {key:?}")]
+    Present {
+        key: BodyKey,
+        ordinal: usize,
+        #[source]
+        source: editor_ui::markdown::presenter::PresenterError,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct StoredProof {
     scope: PresentationScope,
     key: BodyKey,
@@ -78,7 +90,7 @@ pub struct StoredProof {
 }
 
 impl StoredProof {
-    pub fn accepts(
+    pub(crate) fn accepts(
         &self,
         owner: &StoredConversation,
         scope: &PresentationScope,
@@ -88,7 +100,7 @@ impl StoredProof {
         self.ordinal + 1 == self.source.block_count() && self.accepts_row(owner, scope, row, item)
     }
 
-    pub fn accepts_row(
+    pub(crate) fn accepts_row(
         &self,
         owner: &StoredConversation,
         scope: &PresentationScope,
@@ -103,7 +115,7 @@ impl StoredProof {
             && row.visual().is_none()
             && matches!(self.key.slot.text(item), Some(TextContent::Stored(reference)) if reference == self.source.source_ref())
             && self.source.format() == SourceIndexFormat::Markdown
-            && self.source.descriptor(self.ordinal).is_some()
+            && owner.owner.descriptor(&self.source, self.ordinal).is_some()
             && owner.owner.source_is_current(&self.source)
             && owner.owner.leaf_is_current(&self.leaf)
     }
@@ -113,6 +125,7 @@ struct Body {
     owner: String,
     source: ContentRef,
     version: u64,
+    window: Option<std::ops::Range<usize>>,
     presenter: MarkdownPresenter,
     ids: HashMap<usize, Vec<SelectionSourceId>>,
     batches: HashMap<usize, Arc<SelectionSourceBatch>>,
@@ -121,13 +134,29 @@ struct Body {
 
 struct PendingRelease {
     batch: Arc<SelectionSourceBatch>,
-    _leaf: Arc<editor_ui::markdown::stored::StoredLeaf>,
+    _leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
     key: BodyKey,
     ordinal: usize,
 }
 
+pub(crate) struct StoredLeafTarget<'a> {
+    pub(crate) key: &'a BodyKey,
+    pub(crate) source: &'a StoredSource,
+    pub(crate) ordinal: usize,
+    pub(crate) leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
+}
+
+pub(crate) struct StoredLeafServices<'a> {
+    pub(crate) invalidate: &'a Rc<dyn Fn()>,
+    pub(crate) reveal: Option<Rc<editor_ui::markdown::reveal::PreparedReveal>>,
+    pub(crate) media: Option<editor_ui::markdown::presenter::MediaServices>,
+    pub(crate) code_emit: Rc<dyn Fn(super::presentation::CodeAction)>,
+    pub(crate) instance: editor_core::HostInstance,
+    pub(crate) reduced_motion: bool,
+}
+
 pub(crate) struct StoredLeafLease {
-    leaf: Arc<editor_ui::markdown::stored::StoredLeaf>,
+    leaf: Rc<editor_ui::markdown::stored::StoredLeaf>,
     batch: Arc<SelectionSourceBatch>,
     cleanup: Rc<RefCell<Vec<PendingRelease>>>,
     key: BodyKey,
@@ -137,8 +166,8 @@ pub(crate) struct StoredLeafLease {
 impl Drop for StoredLeafLease {
     fn drop(&mut self) {
         self.cleanup.borrow_mut().push(PendingRelease {
-            batch: self.batch.clone(),
-            _leaf: self.leaf.clone(),
+            batch: Arc::clone(&self.batch),
+            _leaf: Rc::clone(&self.leaf),
             key: self.key.clone(),
             ordinal: self.ordinal,
         });
@@ -156,11 +185,16 @@ pub struct StoredConversation {
     scope: Option<PresentationScope>,
     owner: StoredOwner,
     literal: LiteralOwner,
-    bodies: HashMap<BodyKey, Body>,
+    bodies: BTreeMap<BodyKey, Body>,
     cleanup: Rc<RefCell<Vec<PendingRelease>>>,
     live: Vec<Weak<StoredLeafLease>>,
     order: VecDeque<(BodyKey, usize)>,
-    frontiers: HashMap<BodyKey, (ContentRef, u64, Option<super::fold::RowKey>, bool)>,
+}
+
+impl std::fmt::Debug for StoredConversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredConversation").finish_non_exhaustive()
+    }
 }
 
 impl StoredConversation {
@@ -168,15 +202,15 @@ impl StoredConversation {
         if self.scope != scope {
             self.owner.clear();
             self.literal.clear();
-            self.frontiers.clear();
             self.order.clear();
-            for (_, body) in self.bodies.drain() {
+            for body in std::mem::take(&mut self.bodies).into_values() {
                 body.release();
             }
             self.scope = scope;
         }
     }
 
+    #[cfg(feature = "qualification")]
     pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
         self.owner.wake_mailbox()
     }
@@ -188,14 +222,14 @@ impl StoredConversation {
         key: BodyKey,
         source: ContentRef,
         version: u64,
-    ) -> anyhow::Result<StoredPreparation> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope)
-                && provider.is_available()
-                && provider.host() == &scope.host
-                && provider.instance() == scope.instance,
-            "stale stored conversation scope"
-        );
+    ) -> Result<StoredPreparation, StoredBodyError> {
+        if self.scope.as_ref() != Some(scope)
+            || !provider.is_available()
+            || provider.host() != &scope.host
+            || provider.instance() != scope.instance
+        {
+            return Err(StoredBodyError::StaleScope);
+        }
         let format = if key.slot.literal() {
             SourceIndexFormat::Literal
         } else {
@@ -219,6 +253,7 @@ impl StoredConversation {
             owner: name,
             source,
             version,
+            window: None,
             presenter: MarkdownPresenter::default(),
             ids: HashMap::new(),
             batches: HashMap::new(),
@@ -274,7 +309,8 @@ impl StoredConversation {
             })
             .collect();
         let active: Vec<_> = self.live.iter().filter_map(Weak::upgrade).collect();
-        for release in std::mem::take(&mut *self.cleanup.borrow_mut()) {
+        let released = std::mem::take(&mut *self.cleanup.borrow_mut());
+        for release in released {
             let batch = &release.batch;
             if !active.iter().any(|lease| {
                 lease.batch.document() == batch.document() && lease.batch.owner() == batch.owner()
@@ -313,37 +349,36 @@ impl StoredConversation {
         }
     }
 
-    pub fn sync_after_layout(&self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_after_layout(&self, app: &mut aqua::UiApp) -> bool {
         let mut changed = false;
         for body in self.bodies.values() {
             {
                 let id = &body.owner;
-                for (block, key, row) in body.presenter.heatmap_reveals(&id) {
+                for (block, key, row) in body.presenter.heatmap_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.heatmap_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, key, row) in body.presenter.funnel_reveals(&id) {
+                for (block, key, row) in body.presenter.funnel_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.funnel_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, key, row) in body.presenter.distribution_reveals(&id) {
+                for (block, key, row) in body.presenter.distribution_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.distribution_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, key, row) in body.presenter.spans_reveals(&id) {
+                for (block, key, row) in body.presenter.spans_reveals(id) {
                     if app.reveal_collection_item(key.as_str(), row) {
                         body.presenter.spans_revealed(&block, &key, row);
                         changed = true;
                     }
                 }
-                for (block, collection, row, index) in body.presenter.file_tree_focus_requests(&id)
-                {
+                for (block, collection, row, index) in body.presenter.file_tree_focus_requests(id) {
                     changed |= app.reveal_collection_item(collection.as_str(), index);
                     if app.focus_key(row.as_str()) {
                         body.presenter
@@ -356,39 +391,52 @@ impl StoredConversation {
         changed
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one stored leaf render: lease reuse, media, preparation, code services and the 128-leaf eviction"
+    )]
     pub(crate) fn render_leaf(
         &mut self,
-        key: &BodyKey,
-        source: &StoredSource,
-        ordinal: usize,
-        leaf: Arc<editor_ui::markdown::stored::StoredLeaf>,
-        document: SelectionDocumentId,
-        order: &[u64],
-        theme: &ArtisanTheme,
-        tone: BodyTone,
+        target: StoredLeafTarget<'_>,
+        context: BodyContext<'_>,
+        place: SelectionPlace<'_>,
         allocate: &dyn Fn() -> SelectionSourceId,
-        invalidate: Rc<dyn Fn()>,
-        link: Rc<dyn Fn(LinkAction)>,
-        color: Rc<dyn Fn(editor_ui::rich::actions::ShowCopyMenu)>,
-        resource_scope: editor_ui::rich::actions::ResourceScope,
-        reveal: Option<Rc<editor_ui::markdown::reveal::PreparedReveal>>,
-        media: Option<editor_ui::markdown::presenter::MediaServices>,
-        code_emit: Rc<dyn Fn(super::presentation::CodeAction)>,
-        instance: editor_core::HostInstance,
-        reduced_motion: bool,
-    ) -> anyhow::Result<(StoredProjectedMarkdown, Rc<StoredLeafLease>)> {
-        anyhow::ensure!(
-            self.owner.source_is_current(source) && self.owner.leaf_is_current(leaf.proof()),
-            "stale stored Markdown leaf"
-        );
+        services: StoredLeafServices<'_>,
+    ) -> Result<(StoredProjectedMarkdown, Rc<StoredLeafLease>), StoredBodyError> {
+        let StoredLeafTarget {
+            key,
+            source,
+            ordinal,
+            leaf,
+        } = target;
+        let StoredLeafServices {
+            invalidate,
+            reveal,
+            media,
+            code_emit,
+            instance,
+            reduced_motion,
+        } = services;
+        let theme = context.theme;
+        if !self.owner.source_is_current(source) || !self.owner.leaf_is_current(leaf.proof()) {
+            return Err(StoredBodyError::StaleLeaf {
+                key: key.clone(),
+                ordinal,
+            });
+        }
+        let failed = |source| StoredBodyError::Present {
+            key: key.clone(),
+            ordinal,
+            source,
+        };
         let body = self
             .bodies
             .get_mut(key)
-            .ok_or_else(|| anyhow::anyhow!("stored Markdown body is unavailable"))?;
+            .ok_or_else(|| StoredBodyError::Unprepared { key: key.clone() })?;
         if body
             .leases
             .get(&ordinal)
-            .is_some_and(|old| !Arc::ptr_eq(&old.leaf, &leaf))
+            .is_some_and(|old| !Rc::ptr_eq(&old.leaf, &leaf))
         {
             body.presenter.release_stored_leaf(&body.owner, ordinal);
             body.leases.remove(&ordinal);
@@ -397,32 +445,36 @@ impl StoredConversation {
         }
         let leaf_owner = &body.owner;
         if let Some(media) = media {
-            body.presenter.set_media_services(&leaf_owner, media)?;
+            body.presenter
+                .set_media_services(leaf_owner, media)
+                .map_err(failed)?;
         }
         let ids = body.ids.entry(ordinal).or_default();
         body.presenter
-            .set_projected_reveal(&leaf_owner, ordinal, reveal);
-        body.presenter.prepare_stored_leaf(
-            &self.owner,
-            &leaf_owner,
-            ordinal,
-            leaf.clone(),
-            theme,
-            document,
-            order,
-            |index| {
-                while ids.len() <= index {
-                    ids.push(allocate());
-                }
-                ids[index]
-            },
-        )?;
+            .set_projected_reveal(leaf_owner, ordinal, reveal);
+        body.presenter
+            .prepare_stored_leaf(
+                &self.owner,
+                leaf_owner,
+                ordinal,
+                Rc::clone(&leaf),
+                theme,
+                place.document,
+                place.order,
+                |index| {
+                    while ids.len() <= index {
+                        ids.push(allocate());
+                    }
+                    ids[index]
+                },
+            )
+            .map_err(failed)?;
         let charts = HeatmapServices::new(*theme);
-        let copy = code_emit.clone();
+        let copy = Rc::clone(&code_emit);
         let reference = code_emit;
         let code = body.presenter.code_services(
-            &leaf_owner,
-            *theme,
+            leaf_owner,
+            theme,
             reduced_motion,
             Rc::new(move |effect| copy(super::presentation::CodeAction::Copy(effect))),
             true,
@@ -435,41 +487,44 @@ impl StoredConversation {
                 }),
             }),
         );
-        let rendered = body.presenter.render_stored_leaf(
-            &self.owner,
-            &leaf_owner,
-            ordinal,
-            0,
-            ordinal + 1 == source.block_count(),
-            theme,
-            tone,
-            editor_ui::markdown::glyph_painter(),
-            invalidate,
-            Some(link),
-            Some(color),
-            Some(resource_scope),
-            Some(&charts),
-            Some(&code),
-        )?;
+        let rendered = body
+            .presenter
+            .render_stored_leaf(
+                &self.owner,
+                leaf_owner,
+                ordinal,
+                RevealSlot {
+                    start: 0,
+                    last: ordinal + 1 == source.block_count(),
+                },
+                context,
+                BodyServices {
+                    glyph: &editor_ui::markdown::glyph_painter(),
+                    invalidate,
+                    charts: Some(&charts),
+                    code: Some(&code),
+                },
+            )
+            .map_err(failed)?;
         let lease = match body.leases.get(&ordinal) {
             Some(existing) if Arc::ptr_eq(&existing.batch, &rendered.selection_batch) => {
-                existing.clone()
+                Rc::clone(existing)
             }
             _ => {
                 let lease = Rc::new(StoredLeafLease {
                     leaf,
-                    batch: rendered.selection_batch.clone(),
-                    cleanup: self.cleanup.clone(),
+                    batch: Arc::clone(&rendered.selection_batch),
+                    cleanup: Rc::clone(&self.cleanup),
                     key: key.clone(),
                     ordinal,
                 });
                 self.live.push(Rc::downgrade(&lease));
-                body.leases.insert(ordinal, lease.clone());
+                body.leases.insert(ordinal, Rc::clone(&lease));
                 lease
             }
         };
         body.batches
-            .insert(ordinal, rendered.selection_batch.clone());
+            .insert(ordinal, Arc::clone(&rendered.selection_batch));
         self.order
             .retain(|(other, row)| other != key || *row != ordinal);
         self.order.push_back((key.clone(), ordinal));
@@ -504,7 +559,7 @@ impl StoredConversation {
         self.owner.leaf(&leaf_key, source, ordinal)
     }
 
-    pub fn literal_leaf(
+    pub(crate) fn literal_leaf(
         &mut self,
         key: &BodyKey,
         source: &StoredSource,
@@ -515,78 +570,41 @@ impl StoredConversation {
             .prepare(&self.owner, &leaf_key, source, ordinal)
     }
 
-    pub fn owner(&self) -> &StoredOwner {
-        &self.owner
-    }
-
-    pub(crate) fn prefetch(
-        &mut self,
-        proof: &StoredProof,
-        scope: &PresentationScope,
-        row: &super::fold::Row,
-        item: &artisan_api::Item,
-        top: Option<super::fold::RowKey>,
-        reader_moves: u64,
-        toward_end: Option<bool>,
-        following_tail: bool,
-        following_viewport: bool,
-    ) -> bool {
-        if !proof.accepts_row(self, scope, row, item) {
-            return false;
-        }
-        let loaded = proof.source.loaded_range();
-        let Some(offset) = edge_offset(
-            loaded.clone(),
-            proof.source.block_count(),
-            proof.ordinal,
-            top.as_ref() == Some(&row.key()),
-            following_tail,
-            following_viewport,
-        ) else {
-            return false;
-        };
-        let newer = offset > loaded.start;
-        if self.frontiers.get(&proof.key).is_some_and(
-            |(source, moves, previous_top, previous_newer)| {
-                source == proof.source.source_ref()
-                    && reverses_in_place(
-                        *moves,
-                        previous_top.as_ref(),
-                        *previous_newer,
-                        reader_moves,
-                        top.as_ref(),
-                        toward_end,
-                        newer,
-                    )
-            },
-        ) {
-            return false;
-        }
-        let Some(body) = self.bodies.get(&proof.key) else {
-            return false;
-        };
-        self.frontiers.insert(
-            proof.key.clone(),
-            (proof.source.source_ref().clone(), reader_moves, top, newer),
-        );
-        matches!(
-            self.owner
-                .move_window(&body.owner, &proof.source, offset as u64),
-            StoredPreparation::Ready(_)
-        )
-    }
-
-    pub fn current_range(&self, key: &BodyKey) -> Option<std::ops::Range<usize>> {
+    pub fn block_count(&self, key: &BodyKey) -> Option<usize> {
         let body = self.bodies.get(key)?;
         match self.owner.current(&body.owner) {
             StoredPreparation::Ready(source) if self.owner.source_is_current(&source) => {
-                Some(source.loaded_range())
+                Some(source.block_count())
             }
-            _ => None,
+            StoredPreparation::Pending
+            | StoredPreparation::Ready(_)
+            | StoredPreparation::Failed(_) => None,
         }
     }
 
-    pub fn proof(
+    pub(crate) fn page(
+        &mut self,
+        key: &BodyKey,
+        source: &StoredSource,
+        ordinal: usize,
+    ) -> (PagePreparation, Option<std::ops::Range<usize>>) {
+        let moved = self.bodies.get_mut(key).and_then(|body| {
+            let window = row_window(body.window.as_ref(), source.block_count(), Some(ordinal));
+            (body.window.as_ref() != Some(&window)).then(|| {
+                body.window = Some(window.clone());
+                window
+            })
+        });
+        (self.owner.page(source, ordinal), moved)
+    }
+
+    pub(crate) fn retry_page(&mut self, key: &BodyKey, offset: u64) -> bool {
+        self.bodies
+            .get(key)
+            .is_some_and(|body| self.owner.retry_page(&body.owner, offset))
+    }
+
+    pub(crate) fn proof(
         &self,
         scope: &PresentationScope,
         key: &BodyKey,
@@ -641,13 +659,15 @@ impl StoredConversation {
                 && self.owner.source_is_current(&source)
                 && conversation.body_version(key) == Some(body.version)
             {
-                windows.push((key.clone(), source.loaded_range()));
+                let window = row_window(body.window.as_ref(), source.block_count(), None);
+                body.window = Some(window.clone());
+                windows.push((key.clone(), window.clone()));
                 projections.push((
                     key.clone(),
                     BodyProjection {
                         version: body.version,
                         revision: source.revision(),
-                        leaves: source.loaded_range(),
+                        leaves: window,
                     },
                 ));
             }
@@ -656,8 +676,6 @@ impl StoredConversation {
         for (key, window) in windows {
             self.retire_outside(&key, &window);
         }
-        self.frontiers
-            .retain(|key, _| self.bodies.contains_key(key));
         self.order.retain(|(key, _)| self.bodies.contains_key(key));
         let mut changed = !updates.is_empty() || media_changed || literal_changed;
         changed |= conversation.publish_projections(core, &scope, projections);

@@ -41,6 +41,12 @@ pub struct EditorController {
     native_follow_caret: Rc<std::cell::Cell<bool>>,
 }
 
+impl std::fmt::Debug for EditorController {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditorController").finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Framing {
     mode: Mode,
@@ -74,21 +80,34 @@ impl aqua_ui::tree::NativeTextModel for NativeEditorModel {
     }
 
     fn replace_utf16(&self, text: &str, selected: Option<std::ops::Range<usize>>) {
+        self.edit(|state| input_change(state.replace_utf16_range(None, text, selected)));
+    }
+
+    fn replace_all(&self, text: &str) {
+        self.edit(|state| {
+            let everything = 0..state.text().len();
+            state.replace(everything, text)
+        });
+    }
+}
+
+impl NativeEditorModel {
+    fn edit(&self, apply: impl FnOnce(&mut Editor) -> EditOutcome) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
         let mut state = state.borrow_mut();
         let previous_selection = (state.selection(), state.selection_reversed(), state.caret());
         let previous_limit = state.limit_notice();
-        let outcome = state.replace_utf16_range(None, text, selected);
+        let outcome = apply(&mut state);
         self.follow_caret.set(true);
         let next_selection = (state.selection(), state.selection_reversed(), state.caret());
         let next_limit = state.limit_notice();
         drop(state);
-        if outcome == InputChange::Changed {
+        if outcome == EditOutcome::Changed {
             (self.event)(EditorEvent::Changed);
         }
-        if previous_limit != next_limit || outcome == InputChange::Unchanged {
+        if previous_limit != next_limit || outcome == EditOutcome::Unchanged {
             (self.event)(EditorEvent::PresentationChanged);
         }
         if previous_selection != next_selection {
@@ -137,7 +156,11 @@ impl EditorController {
         };
         let style = tree.get(node).and_then(|record| match &record.kind {
             aqua_ui::tree::NodeKind::Text(text) => Some(text.effective_text_style()),
-            _ => None,
+            aqua_ui::tree::NodeKind::Box(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
         });
         let presentation = self
             .theme
@@ -231,6 +254,10 @@ impl EditorController {
         Rc::clone(&self.state)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match handling every routed text input event against the mounted state"
+    )]
     fn handle(
         &self,
         event: &RoutedEvent,
@@ -248,8 +275,9 @@ impl EditorController {
             RoutedInput::Native(InputEvent::Ime(ime)) => match ime {
                 ImeEvent::Start => Some(CommandOutcome::Ignored),
                 ImeEvent::Update { marked, cursor } => {
-                    let selected =
-                        cursor.and_then(|(start, end)| utf8_range_to_utf16(marked, start..end));
+                    let selected = cursor
+                        .and_then(|(start, end)| utf8_range_to_utf16(marked, start..end))
+                        .or_else(|| utf8_range_to_utf16(marked, marked.len()..marked.len()));
                     Some(CommandOutcome::Edit(input_change(
                         state.replace_utf16_range(None, marked, selected),
                     )))
@@ -257,11 +285,27 @@ impl EditorController {
                 ImeEvent::Commit { text } => Some(CommandOutcome::Edit(input_change(
                     state.replace_utf16_range(None, text, None),
                 ))),
-                ImeEvent::Cancel => {
-                    state.unmark_text();
-                    Some(CommandOutcome::Ignored)
-                }
+                ImeEvent::Cancel => Some(CommandOutcome::Edit(state.cancel_composition())),
             },
+            RoutedInput::Native(InputEvent::ImeReplace { start, end, text }) => {
+                Some(CommandOutcome::Edit(state.replace_utf16(
+                    usize::try_from(*start).unwrap_or(usize::MAX)
+                        ..usize::try_from(*end).unwrap_or(usize::MAX),
+                    text,
+                )))
+            }
+            RoutedInput::Native(InputEvent::ImeSelect {
+                start,
+                end,
+                reversed,
+            }) => {
+                state.select_utf16(
+                    usize::try_from(*start).unwrap_or(usize::MAX)
+                        ..usize::try_from(*end).unwrap_or(usize::MAX),
+                    *reversed,
+                );
+                Some(CommandOutcome::Ignored)
+            }
             RoutedInput::Native(InputEvent::KeyDown(key)) => {
                 let shift = key.modifiers.contains(Modifiers::SHIFT);
                 let word = key.modifiers.contains(Modifiers::CONTROL)
@@ -272,12 +316,14 @@ impl EditorController {
                     Key::Named(NamedKey::Enter) => Some(state.enter(shift)),
                     Key::Named(NamedKey::Tab) if !shift => Some(state.tab()),
                     Key::Named(NamedKey::Escape) => Some(state.dismiss()),
-                    Key::Named(NamedKey::Left) => {
-                        state.move_horizontal(false, word, shift);
-                        Some(CommandOutcome::Ignored)
-                    }
-                    Key::Named(NamedKey::Right) => {
-                        state.move_horizontal(true, word, shift);
+                    Key::Named(NamedKey::Left | NamedKey::Right)
+                        if word || (!shift && !state.selection().is_empty()) =>
+                    {
+                        state.move_horizontal(
+                            matches!(key.key, Key::Named(NamedKey::Right)),
+                            word,
+                            shift,
+                        );
                         Some(CommandOutcome::Ignored)
                     }
                     Key::Named(NamedKey::Backspace) => {
@@ -289,9 +335,8 @@ impl EditorController {
                     Key::Named(NamedKey::Up | NamedKey::Down)
                         if key.modifiers.contains(Modifiers::LOGO) =>
                     {
-                        state.move_line_edge(
+                        state.move_document_edge(
                             matches!(key.key, Key::Named(NamedKey::Down)),
-                            true,
                             shift,
                         );
                         Some(CommandOutcome::Ignored)
@@ -299,12 +344,12 @@ impl EditorController {
                     Key::Named(NamedKey::Up | NamedKey::Down) if !shift && !word => state
                         .list_vertical(matches!(key.key, Key::Named(NamedKey::Up)))
                         .map(CommandOutcome::List),
-                    Key::Named(NamedKey::Home) => {
-                        state.move_line_edge(false, command, shift);
+                    Key::Named(NamedKey::Home) if command => {
+                        state.move_document_edge(false, shift);
                         Some(CommandOutcome::Ignored)
                     }
-                    Key::Named(NamedKey::End) => {
-                        state.move_line_edge(true, command, shift);
+                    Key::Named(NamedKey::End) if command => {
+                        state.move_document_edge(true, shift);
                         Some(CommandOutcome::Ignored)
                     }
                     Key::Char('a' | 'A') if command => {
@@ -327,17 +372,21 @@ impl EditorController {
                             EditOutcome::Unchanged
                         }))
                     }
-                    _ => None,
+                    Key::Char(_) | Key::Named(_) => None,
                 }
             }
             RoutedInput::TextVertical { up, extend, target } => {
                 state.move_vertical(*up, *extend, Some(*target));
                 Some(CommandOutcome::Ignored)
             }
+            RoutedInput::TextMotion { extend, target, .. } => {
+                state.move_caret(*target, *extend);
+                Some(CommandOutcome::Ignored)
+            }
             RoutedInput::TextPointer { byte, phase, .. } => {
                 match phase {
                     TextPointerPhase::Down { click_count, shift } => {
-                        state.pointer_down(*byte, *shift, *click_count)
+                        state.pointer_down(*byte, *shift, *click_count);
                     }
                     TextPointerPhase::Drag => state.pointer_drag(*byte),
                     TextPointerPhase::Up => state.pointer_up(),
@@ -359,7 +408,17 @@ impl EditorController {
                     Some(CommandOutcome::Ignored)
                 }
             },
-            _ => None,
+            RoutedInput::Native(_)
+            | RoutedInput::PointerEnter(_)
+            | RoutedInput::PointerLeave(_)
+            | RoutedInput::TextContext { .. }
+            | RoutedInput::TextRangeActivated { .. }
+            | RoutedInput::FilesDropped { .. }
+            | RoutedInput::DragEnter { .. }
+            | RoutedInput::DragOver { .. }
+            | RoutedInput::DragLeave { .. }
+            | RoutedInput::Drop { .. }
+            | RoutedInput::DragEnd { .. } => None,
         };
         let Some(outcome) = outcome else {
             return InputResponse::default();
@@ -369,11 +428,11 @@ impl EditorController {
         }
         let follow = matches!(
             &outcome,
-            CommandOutcome::Edit(EditOutcome::Changed)
-                | CommandOutcome::Edit(EditOutcome::Unchanged)
+            CommandOutcome::Edit(EditOutcome::Changed | EditOutcome::Unchanged)
         ) || matches!(
             &event.input,
             RoutedInput::TextVertical { .. }
+                | RoutedInput::TextMotion { .. }
                 | RoutedInput::Native(InputEvent::KeyDown(aqua_core::KeyEvent {
                     key: Key::Named(
                         NamedKey::Left | NamedKey::Right | NamedKey::Home | NamedKey::End
@@ -386,7 +445,9 @@ impl EditorController {
                 CommandOutcome::Edit(EditOutcome::Changed) => Some(EditorEvent::Changed),
                 CommandOutcome::Submitted => Some(EditorEvent::Submitted),
                 CommandOutcome::List(key) => Some(EditorEvent::List(key)),
-                _ => None,
+                CommandOutcome::Edit(_) | CommandOutcome::Propagate | CommandOutcome::Ignored => {
+                    None
+                }
             };
         }
         let next_limit = state.limit_notice();
@@ -469,13 +530,14 @@ impl EditorController {
         inset: bool,
     ) -> Element {
         let framing = Framing { mode, bare, inset };
-        self.keyed(key.into(), theme, placeholder, framing, None)
+        self.keyed(key.into(), theme, placeholder, placeholder, framing, None)
     }
 
     pub fn prompt_with_scroll_edges(
         &self,
         key: impl Into<aqua_ui::element::Key>,
         theme: &ArtisanTheme,
+        name: &str,
         placeholder: &str,
         edges: &EdgeBands,
     ) -> Element {
@@ -484,13 +546,14 @@ impl EditorController {
             bare: false,
             inset: false,
         };
-        self.keyed(key.into(), theme, placeholder, framing, Some(edges))
+        self.keyed(key.into(), theme, name, placeholder, framing, Some(edges))
     }
 
     fn keyed(
         &self,
         key: aqua_ui::element::Key,
         theme: &ArtisanTheme,
+        name: &str,
         placeholder: &str,
         Framing { mode, bare, inset }: Framing,
         edges: Option<&EdgeBands>,
@@ -498,7 +561,7 @@ impl EditorController {
         *self.text_key.borrow_mut() = Some(key.clone());
         let show_notice = self.state.borrow().limit_notice();
         let leaf = self
-            .element_with_chrome(mode, theme, placeholder, bare, inset)
+            .named_leaf(mode, theme, name, placeholder, bare, inset)
             .with_key(key);
         let mut root = UiBox::new()
             .style(Style::new().axis(Axis::Column).min_width(px(0.0)))
@@ -513,43 +576,14 @@ impl EditorController {
             ));
         if show_notice {
             root = root.child(
-                Text::new("Text is limited to 64 KiB. Attach a file for larger content.")
-                    .font_size(12.0)
-                    .color(theme.colors.destructive_text.to_paint())
-                    .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                    .build(),
-            );
-        }
-        root.build()
-    }
-
-    pub fn element_with_notice(
-        &self,
-        mode: Mode,
-        theme: &ArtisanTheme,
-        placeholder: &str,
-        bare: bool,
-        inset: bool,
-    ) -> Element {
-        let show_notice = self.state.borrow().limit_notice();
-        let mut root = UiBox::new()
-            .style(Style::new().axis(Axis::Column).min_width(px(0.0)))
-            .child(wrap_prompt_scroll(
-                self.element_with_chrome(mode, theme, placeholder, bare, inset),
-                mode,
-                theme,
-                bare,
-                inset,
-                self.state.borrow().shown_suggestion().map(str::to_owned),
-                None,
-            ));
-        if show_notice {
-            root = root.child(
-                Text::new("Text is limited to 64 KiB. Attach a file for larger content.")
-                    .font_size(12.0)
-                    .color(theme.colors.destructive_text.to_paint())
-                    .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                    .build(),
+                crate::ui::kit::ProblemNotice::new(
+                    "prompt-limit-problem",
+                    *theme,
+                    &editor_core::Problem::new(
+                        "Text is limited to 64 KiB. Attach a file for larger content.",
+                    ),
+                )
+                .build(),
             );
         }
         root.build()
@@ -559,6 +593,22 @@ impl EditorController {
         &self,
         mode: Mode,
         theme: &ArtisanTheme,
+        placeholder: &str,
+        bare: bool,
+        inset: bool,
+    ) -> Element {
+        self.named_leaf(mode, theme, placeholder, placeholder, bare, inset)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one named text leaf: mode, placeholder, bare and inset styling"
+    )]
+    fn named_leaf(
+        &self,
+        mode: Mode,
+        theme: &ArtisanTheme,
+        name: &str,
         placeholder: &str,
         bare: bool,
         inset: bool,
@@ -635,8 +685,8 @@ impl EditorController {
             .external_text_input(true)
             .native_text_model(Rc::new(NativeEditorModel {
                 state: Rc::downgrade(&self.state),
-                event: self.event.clone(),
-                follow_caret: self.native_follow_caret.clone(),
+                event: Rc::clone(&self.event),
+                follow_caret: Rc::clone(&self.native_follow_caret),
             }))
             .initial_external_selection(selection, marked)
             .multiline(mode != Mode::SingleLine)
@@ -657,6 +707,12 @@ impl EditorController {
             .build()
             .focusable(!disabled)
             .disabled(disabled);
+        if !name.is_empty() {
+            element = element.aria_label(name);
+        }
+        if name != placeholder && !placeholder.is_empty() && !has_suggestion {
+            element = element.aria_description(placeholder);
+        }
         for kind in [
             InputKind::KeyDown,
             InputKind::TextInput,
@@ -665,6 +721,7 @@ impl EditorController {
             InputKind::ClipboardCut,
             InputKind::TextPointer,
             InputKind::TextVertical,
+            InputKind::TextMotion,
         ] {
             let controller = self.clone();
             let theme = *theme;
@@ -695,8 +752,15 @@ fn token_presentation(
 )> {
     let tokens = state.styled_tokens();
     let compiled =
-        super::tokens::compile_tokens(state.text(), style, theme.colors.text, &tokens, |_| 20.0)
-            .ok()?;
+        match super::tokens::compile_tokens(state.text(), style, theme.colors.text, &tokens, |_| {
+            20.0
+        }) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                tracing::warn!(?error, "style editor tokens; showing plain text");
+                return None;
+            }
+        };
     let glyphs = compiled
         .glyphs
         .into_iter()

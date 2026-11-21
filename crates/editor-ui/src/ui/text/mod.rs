@@ -1,8 +1,9 @@
+mod bidi;
 pub mod editor;
-pub mod metrics;
+pub(crate) mod metrics;
 pub mod mount;
+pub mod slice;
 pub mod tokens;
-pub mod truncated;
 pub mod wheel_glide;
 
 pub use aqua_text::navigation::{

@@ -14,9 +14,19 @@ pub(in crate::core) enum Preference {
     ModelGroup { engine: EngineId, group: ModelGroup },
 }
 #[derive(Default)]
+enum Writer {
+    #[default]
+    Idle,
+    Writing {
+        _task: AbortOnDropHandle<()>,
+    },
+    Failed(crate::core::Problem),
+}
+
+#[derive(Default)]
 pub(super) struct Preferences {
     pending: VecDeque<(Choice, Preference)>,
-    writer: Option<AbortOnDropHandle<()>>,
+    writer: Writer,
     generation: u64,
 }
 
@@ -38,7 +48,7 @@ impl HostData {
             .rev()
             .find_map(|(_, preference)| match preference {
                 Preference::ModelConfig(config) if config.engine == engine => Some(config),
-                _ => None,
+                Preference::ModelConfig(_) | Preference::ModelGroup { .. } => None,
             })
     }
     pub fn remember_model_group(&mut self, engine: EngineId, name: String, open: bool) {
@@ -54,13 +64,26 @@ impl HostData {
             },
         );
     }
+    pub const fn preference_failure(&self) -> Option<&crate::core::Problem> {
+        match &self.preferences.writer {
+            Writer::Failed(error) => Some(error),
+            Writer::Idle | Writer::Writing { .. } => None,
+        }
+    }
+    pub fn retry_preferences(&mut self) {
+        if matches!(self.preferences.writer, Writer::Failed(_)) {
+            self.preferences.writer = Writer::Idle;
+            self.pending_events.push(super::HostEvent::Changed);
+        }
+        self.pump_preferences();
+    }
     fn remember_preference(&mut self, choice: Choice, preference: Preference) {
         self.preferences.pending.retain(|(key, _)| key != &choice);
         self.preferences.pending.push_back((choice, preference));
-        self.pump_preferences();
+        self.retry_preferences();
     }
     fn pump_preferences(&mut self) {
-        if self.preferences.writer.is_some() {
+        if !matches!(self.preferences.writer, Writer::Idle) {
             return;
         }
         let Some((choice, preference)) = self.preferences.pending.front().cloned() else {
@@ -69,7 +92,7 @@ impl HostData {
         self.preferences.generation = self.preferences.generation.wrapping_add(1);
         let generation = self.preferences.generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let task = crate::core::runtime::runtime().spawn(async move {
             let result = match &preference {
                 Preference::ModelConfig(config) => client.set_model_config(config).await.map(drop),
@@ -77,31 +100,39 @@ impl HostData {
                     client.set_model_group(*engine, group).await
                 }
             };
-            let _ = sender
-                .send(HostCompletion::Preference(
+            sender
+                .offer(HostCompletion::Preference(
                     generation, choice, preference, result,
                 ))
                 .await;
         });
-        self.preferences.writer = Some(AbortOnDropHandle::new(task));
+        self.preferences.writer = Writer::Writing {
+            _task: AbortOnDropHandle::new(task),
+        };
     }
     pub(super) fn finish_preference(
         &mut self,
         generation: u64,
         choice: Choice,
         preference: Preference,
-        result: anyhow::Result<()>,
-    ) {
+        result: Result<(), crate::core::client::CallError>,
+    ) -> bool {
         if self.preferences.generation != generation {
-            return;
+            return false;
         }
-        self.preferences.writer = None;
         if let Err(error) = result {
-            tracing::warn!(host = %self.id, ?choice, "Forge didn't remember the picker choice: {error:#}");
+            tracing::warn!(host = %self.id, ?choice, "Forge didn't remember the picker choice: {}", ::diagnostics::chain(&error));
+            self.preferences.writer = Writer::Failed(crate::core::Problem::calling_forge(
+                "Couldn't save the model choice.",
+                &error,
+            ));
+            return true;
         }
+        self.preferences.writer = Writer::Idle;
         if self.preferences.pending.front() == Some(&(choice, preference)) {
             self.preferences.pending.pop_front();
         }
         self.pump_preferences();
+        false
     }
 }

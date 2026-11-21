@@ -10,8 +10,6 @@ mod motion;
 mod parked;
 #[path = "conversation/presentation.rs"]
 mod presentation;
-#[path = "conversation/projection.rs"]
-mod projection;
 #[path = "conversation/questions.rs"]
 mod questions;
 #[path = "conversation/read.rs"]
@@ -35,7 +33,7 @@ mod viewport;
 
 #[path = "conversation/row_cache.rs"]
 mod row_cache;
-#[path = "conversation/view/drawer.rs"]
-mod view_drawer;
 #[path = "conversation/view/transcript.rs"]
 mod transcript;
+#[path = "conversation/view/drawer.rs"]
+mod view_drawer;

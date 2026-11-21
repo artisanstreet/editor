@@ -62,6 +62,12 @@ pub struct TooltipHost {
     surface: Rc<dyn Fn(f32, bool) -> Element>,
 }
 
+impl std::fmt::Debug for TooltipHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TooltipHost").finish_non_exhaustive()
+    }
+}
+
 impl TooltipHost {
     pub fn open(
         app: &mut aqua::UiApp,
@@ -131,10 +137,6 @@ impl TooltipHost {
         }
         self.plan = next;
         Ok(true)
-    }
-
-    pub fn root(&self, app: &aqua::UiApp) -> Option<NodeId> {
-        app.host().popup_root(self.popup.overlay())
     }
 
     pub fn is_open(&self, app: &aqua::UiApp) -> bool {

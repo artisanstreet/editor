@@ -2,27 +2,37 @@
 name = "artisan-account"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "AST account grants, enrollment, Noise XX E2E, and Relay transports for Forge/Editor."
+
+[lib]
+doctest = false
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["json"] }
-anyhow.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "time", "net", "io-util"] }
 tokio-tungstenite.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
-artisan-api = { path = "../artisan-api" }
+artisan-api.workspace = true
 ed25519-dalek.workspace = true
 base64.workspace = true
 sha2.workspace = true
 hex.workspace = true
 getrandom.workspace = true
+tracing.workspace = true
 thiserror.workspace = true
+zeroize.workspace = true
 snow = "=0.10.0"
 x25519-dalek = { version = "=3.0.0", features = ["static_secrets"] }
+
+[dev-dependencies]
+axum.workspace = true
+test-support = { workspace = true, features = ["http"] }
+tokio = { workspace = true, features = ["test-util", "rt", "macros"] }
 
 [lints]
 workspace = true

@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::cell::RefCell;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -62,14 +63,33 @@ pub struct StyledToken {
     pub glyph: Option<editor_assets::AssetId>,
 }
 
+pub type Tokenizer = Rc<dyn Fn(&str) -> Vec<TokenRange>>;
 pub type StyledTokenizer = Rc<dyn Fn(&str) -> Vec<StyledToken>>;
 
 #[derive(Clone, Debug)]
 struct Snapshot {
     text: String,
     selection: Range<usize>,
+    reversed: bool,
 }
 
+#[derive(Clone, Debug)]
+struct Composition {
+    marked: Range<usize>,
+    replaced: Range<usize>,
+    before: Snapshot,
+}
+
+#[derive(Clone, Copy)]
+enum Side {
+    Before,
+    After,
+}
+
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "reversed selection, disabled, the limit notice and an open list are independent editor states"
+)]
 pub struct Editor {
     text: String,
     paint_revision: u64,
@@ -77,7 +97,7 @@ pub struct Editor {
     selection: Range<usize>,
     reversed: bool,
     anchor: Option<usize>,
-    marked: Option<Range<usize>>,
+    composition: Option<Composition>,
     disabled: bool,
     limit_notice: bool,
     undo: Vec<Snapshot>,
@@ -91,10 +111,16 @@ pub struct Editor {
     vertical_goal_column: Option<usize>,
 }
 
+impl std::fmt::Debug for Editor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Editor").finish_non_exhaustive()
+    }
+}
+
 impl Editor {
     pub fn new(text: &str, mode: Mode) -> Self {
         let limit_notice = text.len() > MAX_BYTES;
-        let mut text = truncate(text, MAX_BYTES).to_owned();
+        let mut text = grapheme_prefix(text, MAX_BYTES).to_owned();
         if mode == Mode::SingleLine {
             text = text.replace(['\r', '\n', '\t'], " ");
         }
@@ -106,7 +132,7 @@ impl Editor {
             selection: end..end,
             reversed: false,
             anchor: None,
-            marked: None,
+            composition: None,
             disabled: false,
             limit_notice,
             undo: Vec::new(),
@@ -121,6 +147,10 @@ impl Editor {
         }
     }
 
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -130,20 +160,30 @@ impl Editor {
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn selection(&self) -> Range<usize> {
         self.selection.clone()
     }
     pub fn selection_reversed(&self) -> bool {
         self.reversed
     }
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn marked_range(&self) -> Option<Range<usize>> {
-        self.marked.clone()
+        self.composition
+            .as_ref()
+            .map(|composition| composition.marked.clone())
     }
     pub fn limit_notice(&self) -> bool {
         self.limit_notice
     }
     pub fn caret(&self) -> Option<usize> {
-        (self.selection.is_empty() && self.marked.is_none()).then_some(self.selection.end)
+        (self.selection.is_empty() && self.composition.is_none()).then_some(self.selection.end)
     }
     pub fn set_list_open(&mut self, open: bool) {
         self.list_open = open;
@@ -158,16 +198,16 @@ impl Editor {
     }
     pub fn set_disabled(&mut self, disabled: bool) {
         if self.disabled != disabled {
+            self.finish_composition();
             self.disabled = disabled;
             self.drag_origin = None;
-            self.marked = None;
             self.typing_group_end = None;
             self.vertical_goal_column = None;
         }
     }
-    pub fn set_tokenizer(&mut self, tokenizer: Option<Rc<dyn Fn(&str) -> Vec<TokenRange>>>) {
+    pub fn set_tokenizer(&mut self, tokenizer: Option<Tokenizer>) {
         *self.token_cache.get_mut() = None;
-        self.tokenizer = tokenizer.map(|tokenize| {
+        self.tokenizer = tokenizer.map(|tokenize| -> StyledTokenizer {
             Rc::new(move |text: &str| {
                 tokenize(text)
                     .into_iter()
@@ -178,7 +218,7 @@ impl Editor {
                         glyph: None,
                     })
                     .collect()
-            }) as StyledTokenizer
+            })
         });
     }
     pub fn set_styled_tokenizer(&mut self, tokenizer: Option<StyledTokenizer>) {
@@ -227,14 +267,14 @@ impl Editor {
             text
         };
         self.limit_notice = text.len() > MAX_BYTES;
-        self.text = truncate(text, MAX_BYTES).to_owned();
+        grapheme_prefix(text, MAX_BYTES).clone_into(&mut self.text);
         self.paint_revision = self.paint_revision.wrapping_add(1);
         *self.token_cache.get_mut() = None;
         let end = self.text.len();
         self.selection = end..end;
         self.reversed = false;
         self.anchor = None;
-        self.marked = None;
+        self.composition = None;
         self.typing_group_end = None;
         self.vertical_goal_column = None;
         self.undo.clear();
@@ -245,11 +285,11 @@ impl Editor {
         if range.start > range.end || self.text.get(range.clone()).is_none() {
             return false;
         }
+        self.finish_composition();
         self.selection = range;
         self.reversed = reversed;
         self.drag_origin = None;
         self.anchor = None;
-        self.marked = None;
         self.typing_group_end = None;
         self.vertical_goal_column = None;
         true
@@ -258,7 +298,7 @@ impl Editor {
         if self.disabled {
             return;
         }
-        self.marked = None;
+        self.finish_composition();
         self.drag_origin = None;
         self.selection = 0..self.text.len();
         self.reversed = false;
@@ -266,12 +306,11 @@ impl Editor {
         self.typing_group_end = None;
         self.vertical_goal_column = None;
     }
-    pub fn replacement_range(&self, range: Option<Range<usize>>) -> Option<Range<usize>> {
+    fn replacement_range(&self, range: Option<Range<usize>>) -> Option<Range<usize>> {
         let range = match range {
             Some(range) => utf16_range_to_utf8(&self.text, range)?,
             None => self
-                .marked
-                .clone()
+                .marked_range()
                 .unwrap_or_else(|| self.selection.clone()),
         };
         (range.start <= range.end && self.text.get(range.clone()).is_some()).then_some(range)
@@ -336,16 +375,35 @@ impl Editor {
             && selected.is_none()
             && single
             && !replacement.contains(char::is_whitespace);
-        if changed
-            && self.marked.is_none()
-            && !(typing && self.typing_group_end == Some(range.start))
-        {
-            self.undo.push(self.snapshot());
-            self.bound_history();
-        }
-        if changed {
-            self.redo.clear();
-        }
+        let composition = self.composition.take();
+        let committed = match (&selected, composition) {
+            (Some(_), Some(composition)) => {
+                self.composition = Some(Composition {
+                    marked: range.start..replacement_end,
+                    ..composition
+                });
+                None
+            }
+            (Some(_), None) => {
+                self.composition = Some(Composition {
+                    marked: range.start..replacement_end,
+                    replaced: range.clone(),
+                    before: self.snapshot(),
+                });
+                None
+            }
+            (None, Some(composition)) => Some(composition.before),
+            (None, None) => {
+                if changed && !(typing && self.typing_group_end == Some(range.start)) {
+                    self.undo.push(self.snapshot());
+                    self.redo.clear();
+                    self.bound_history();
+                } else if changed {
+                    self.redo.clear();
+                }
+                None
+            }
+        };
         self.text.replace_range(range.clone(), replacement);
         self.paint_revision = self.paint_revision.wrapping_add(1);
         *self.token_cache.get_mut() = None;
@@ -355,31 +413,163 @@ impl Editor {
         self.vertical_goal_column = None;
         if let Some(selected) = selected {
             self.selection = range.start + selected.start..range.start + selected.end;
-            self.marked = Some(range.start..replacement_end);
         } else {
             self.selection = replacement_end..replacement_end;
-            self.marked = None;
             if range.is_empty() && single && replacement != "\n" {
                 self.typing_group_end = Some(replacement_end);
             }
         }
         self.reversed = false;
+        if let Some(before) = committed {
+            self.record_composition(before);
+        }
         if changed {
             EditOutcome::Changed
         } else {
             EditOutcome::Unchanged
         }
     }
+    fn record_composition(&mut self, before: Snapshot) {
+        if before.text != self.text {
+            self.undo.push(before);
+            self.redo.clear();
+            self.bound_history();
+        }
+    }
+    fn finish_composition(&mut self) {
+        if let Some(composition) = self.composition.take() {
+            self.record_composition(composition.before);
+        }
+    }
+    pub fn cancel_composition(&mut self) -> EditOutcome {
+        let Some(composition) = self.composition.take() else {
+            return EditOutcome::Unchanged;
+        };
+        let changed = composition.before.text != self.text;
+        self.text = composition.before.text;
+        self.selection = composition.before.selection;
+        self.reversed = composition.before.reversed;
+        self.paint_revision = self.paint_revision.wrapping_add(1);
+        *self.token_cache.get_mut() = None;
+        self.anchor = None;
+        self.drag_origin = None;
+        self.typing_group_end = None;
+        self.vertical_goal_column = None;
+        if changed {
+            EditOutcome::Changed
+        } else {
+            EditOutcome::Unchanged
+        }
+    }
+    pub fn replace_utf16(&mut self, range: Range<usize>, text: &str) -> EditOutcome {
+        if self.disabled {
+            return EditOutcome::Unchanged;
+        }
+        let Some(range) = utf16_range_to_utf8(&self.text, range) else {
+            return EditOutcome::Unchanged;
+        };
+        let Some(composition) = self.composition.clone() else {
+            self.typing_group_end = None;
+            self.vertical_goal_column = None;
+            return self.replace_range(range, text, None);
+        };
+        if range.end > composition.marked.start && range.start < composition.marked.end {
+            self.finish_composition();
+            self.typing_group_end = None;
+            self.vertical_goal_column = None;
+            return self.replace_range(range, text, None);
+        }
+        self.replace_beside_composition(composition, range, text)
+    }
+    fn replace_beside_composition(
+        &mut self,
+        composition: Composition,
+        range: Range<usize>,
+        text: &str,
+    ) -> EditOutcome {
+        let normalized;
+        let text = if self.mode == Mode::SingleLine && text.contains(['\r', '\n', '\t']) {
+            normalized = text.replace(['\r', '\n', '\t'], " ");
+            &normalized
+        } else {
+            text
+        };
+        if text.len() > MAX_BYTES.saturating_sub(self.text.len().saturating_sub(range.len())) {
+            self.limit_notice = true;
+            return EditOutcome::LimitReached;
+        }
+        let Composition {
+            marked,
+            replaced,
+            mut before,
+        } = composition;
+        let side = if range.end <= marked.start {
+            Side::Before
+        } else {
+            Side::After
+        };
+        let before_range = match side {
+            Side::Before => range.clone(),
+            Side::After => {
+                range.start - marked.end + replaced.end..range.end - marked.end + replaced.end
+            }
+        };
+        let delta = |at: usize, edited: &Range<usize>| {
+            if at >= edited.end {
+                at - edited.len() + text.len()
+            } else {
+                at
+            }
+        };
+        let shifted = |span: Range<usize>, edited: &Range<usize>| match side {
+            Side::Before => delta(span.start, edited)..delta(span.end, edited),
+            Side::After => span,
+        };
+        before.text.replace_range(before_range.clone(), text);
+        before.selection = delta(before.selection.start, &before_range)
+            ..delta(before.selection.end, &before_range);
+        let replaced = shifted(replaced, &before_range);
+        let changed = self.text.get(range.clone()) != Some(text);
+        self.text.replace_range(range.clone(), text);
+        self.selection = delta(self.selection.start, &range)..delta(self.selection.end, &range);
+        self.composition = Some(Composition {
+            marked: shifted(marked, &range),
+            replaced,
+            before,
+        });
+        self.paint_revision = self.paint_revision.wrapping_add(1);
+        *self.token_cache.get_mut() = None;
+        if changed {
+            EditOutcome::Changed
+        } else {
+            EditOutcome::Unchanged
+        }
+    }
+    pub(crate) fn select_utf16(&mut self, range: Range<usize>, reversed: bool) -> bool {
+        if self.disabled || self.composition.is_some() {
+            return false;
+        }
+        utf16_range_to_utf8(&self.text, range)
+            .is_some_and(|range| self.set_selection(range, reversed))
+    }
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
     pub fn unmark_text(&mut self) {
-        self.marked = None;
+        self.finish_composition();
     }
     pub fn selected_utf16(&self) -> Option<Range<usize>> {
         utf8_range_to_utf16(&self.text, self.selection.clone())
     }
     pub fn marked_utf16(&self) -> Option<Range<usize>> {
-        utf8_range_to_utf16(&self.text, self.marked.clone()?)
+        utf8_range_to_utf16(&self.text, self.marked_range()?)
     }
-    pub fn text_for_utf16_range(&self, range: Range<usize>) -> Option<&str> {
+    #[expect(
+        clippy::same_name_method,
+        reason = "the inherent method is the editor's API; TextInputService adapts it for Aqua's IME"
+    )]
+    fn text_for_utf16_range(&self, range: Range<usize>) -> Option<&str> {
         self.text.get(utf16_range_to_utf8(&self.text, range)?)
     }
     pub fn paste(&mut self, item: &ClipboardPaste) -> PasteOutcome {
@@ -396,13 +586,15 @@ impl Editor {
             .text
             .as_deref()
             .filter(|text| !text.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                item.paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect()
-            });
+            .map_or_else(
+                || {
+                    item.paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect()
+                },
+                str::to_owned,
+            );
         if text.is_empty() {
             return PasteOutcome::Edit(EditOutcome::Unchanged);
         }
@@ -411,12 +603,12 @@ impl Editor {
         self.vertical_goal_column = None;
         PasteOutcome::Edit(self.replace_input(None, &text, None))
     }
-    pub fn copy(&self) -> Option<&str> {
+    fn copy(&self) -> Option<&str> {
         (!self.selection.is_empty())
             .then(|| self.text.get(self.selection.clone()))
             .flatten()
     }
-    pub fn cut(&mut self) -> Option<String> {
+    pub(crate) fn cut(&mut self) -> Option<String> {
         if self.disabled {
             return None;
         }
@@ -424,7 +616,7 @@ impl Editor {
         self.replace_range(self.selection.clone(), "", None);
         Some(text)
     }
-    pub fn token_target(&self, target: usize, forward: bool) -> usize {
+    fn token_target(&self, target: usize, forward: bool) -> usize {
         self.tokens()
             .into_iter()
             .find(|token| token.range.start < target && target < token.range.end)
@@ -436,7 +628,7 @@ impl Editor {
                 }
             })
     }
-    pub fn token_deletion(&self, cursor: usize, forward: bool) -> Option<Range<usize>> {
+    fn token_deletion(&self, cursor: usize, forward: bool) -> Option<Range<usize>> {
         self.tokens()
             .into_iter()
             .find(|token| {
@@ -449,7 +641,7 @@ impl Editor {
             .map(|token| token.range)
     }
     pub fn enter(&mut self, shift: bool) -> CommandOutcome {
-        if self.disabled {
+        if self.disabled || self.composition.is_some() {
             return CommandOutcome::Ignored;
         }
         if shift {
@@ -457,9 +649,6 @@ impl Editor {
                 return CommandOutcome::Submitted;
             }
             return CommandOutcome::Edit(self.replace_input(None, "\n", None));
-        }
-        if self.mode == Mode::Prompt && self.marked.is_some() {
-            return CommandOutcome::Ignored;
         }
         if self.list_open {
             return CommandOutcome::List(ListKey::Accept);
@@ -481,15 +670,14 @@ impl Editor {
         }
         match self.mode {
             Mode::Document => CommandOutcome::Edit(self.replace_input(None, "  ", None)),
-            Mode::SingleLine => CommandOutcome::Ignored,
-            Mode::Prompt => CommandOutcome::Propagate,
+            Mode::SingleLine | Mode::Prompt => CommandOutcome::Propagate,
         }
     }
-    pub fn list_vertical(&self, up: bool) -> Option<ListKey> {
+    pub(crate) fn list_vertical(&self, up: bool) -> Option<ListKey> {
         self.list_open
             .then_some(if up { ListKey::Up } else { ListKey::Down })
     }
-    pub fn dismiss(&self) -> CommandOutcome {
+    pub(crate) fn dismiss(&self) -> CommandOutcome {
         if self.disabled {
             CommandOutcome::Ignored
         } else if self.list_open {
@@ -498,7 +686,7 @@ impl Editor {
             CommandOutcome::Propagate
         }
     }
-    pub fn move_horizontal(&mut self, forward: bool, word: bool, extend: bool) {
+    pub fn move_horizontal(&mut self, right: bool, word: bool, extend: bool) {
         if self.disabled {
             return;
         }
@@ -506,6 +694,11 @@ impl Editor {
             self.selection.start
         } else {
             self.selection.end
+        };
+        let forward = if word {
+            right != super::bidi::paragraph_is_rtl(&self.text, cursor)
+        } else {
+            right
         };
         let target = if word {
             let boundaries = aqua_text::navigation::WordBoundaries::new(&self.text);
@@ -528,10 +721,11 @@ impl Editor {
             self.token_target(target, forward)
         };
         let target = if !word && !extend && !self.selection.is_empty() {
-            if forward {
-                self.selection.end
-            } else {
+            let rtl = super::bidi::selection_is_rtl(&self.text, self.selection.clone(), cursor);
+            if right == rtl {
                 self.selection.start
+            } else {
+                self.selection.end
             }
         } else {
             target
@@ -552,7 +746,30 @@ impl Editor {
             self.reversed = false;
             self.anchor = None;
         }
-        self.marked = None;
+        self.finish_composition();
+        self.typing_group_end = None;
+        self.vertical_goal_column = None;
+    }
+    pub(crate) fn move_caret(&mut self, target: usize, extend: bool) {
+        if self.disabled {
+            return;
+        }
+        let cursor = if self.reversed {
+            self.selection.start
+        } else {
+            self.selection.end
+        };
+        let target = self.text.floor_char_boundary(target.min(self.text.len()));
+        let target = self.token_target(target, target > cursor);
+        self.finish_composition();
+        if extend {
+            self.select_to(target);
+        } else {
+            self.selection = target..target;
+            self.reversed = false;
+            self.anchor = None;
+        }
+        self.drag_origin = None;
         self.typing_group_end = None;
         self.vertical_goal_column = None;
     }
@@ -575,7 +792,7 @@ impl Editor {
             return;
         }
         let index = self.text.floor_char_boundary(index.min(self.text.len()));
-        self.marked = None;
+        self.finish_composition();
         self.typing_group_end = None;
         self.vertical_goal_column = None;
         let unit = aqua_text::navigation::SelectionUnit::from_click_count(click_count);
@@ -615,34 +832,9 @@ impl Editor {
     pub fn pointer_up(&mut self) {
         self.drag_origin = None;
     }
-    pub fn move_line_edge(&mut self, end: bool, document: bool, extend: bool) {
-        if self.disabled {
-            return;
-        }
-        let cursor = if self.reversed {
-            self.selection.start
-        } else {
-            self.selection.end
-        };
-        let target = match (document, end) {
-            (true, false) => 0,
-            (true, true) => self.text.len(),
-            (false, false) => self.text[..cursor].rfind('\n').map_or(0, |index| index + 1),
-            (false, true) => self.text[cursor..]
-                .find('\n')
-                .map_or(self.text.len(), |index| cursor + index),
-        };
-        if extend {
-            self.select_to(target);
-        } else {
-            self.selection = target..target;
-            self.reversed = false;
-            self.anchor = None;
-        }
-        self.marked = None;
-        self.drag_origin = None;
-        self.typing_group_end = None;
-        self.vertical_goal_column = None;
+    pub(crate) fn move_document_edge(&mut self, end: bool, extend: bool) {
+        let target = if end { self.text.len() } else { 0 };
+        self.move_caret(target, extend);
     }
     pub fn move_vertical(&mut self, up: bool, extend: bool, visual_target: Option<usize>) {
         if self.disabled {
@@ -653,13 +845,16 @@ impl Editor {
         } else {
             self.selection.end
         };
-        let start = self.text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+        let start = slice(&self.text, ..cursor)
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
         let column = *self
             .vertical_goal_column
-            .get_or_insert_with(|| self.text[start..cursor].encode_utf16().count());
-        let mut target = visual_target
-            .map(|index| self.text.floor_char_boundary(index.min(self.text.len())))
-            .unwrap_or_else(|| logical_vertical_target(&self.text, cursor, up, column));
+            .get_or_insert_with(|| slice(&self.text, start..cursor).encode_utf16().count());
+        let mut target = visual_target.map_or_else(
+            || logical_vertical_target(&self.text, cursor, up, column),
+            |index| self.text.floor_char_boundary(index.min(self.text.len())),
+        );
         if target == cursor {
             target = if up { 0 } else { self.text.len() };
         }
@@ -672,7 +867,7 @@ impl Editor {
         }
         self.vertical_goal_column = Some(column);
         self.typing_group_end = None;
-        self.marked = None;
+        self.finish_composition();
         self.drag_origin = None;
     }
     pub fn delete_toward(&mut self, forward: bool, word: bool) -> EditOutcome {
@@ -685,8 +880,7 @@ impl Editor {
             self.selection.end
         };
         let range = self
-            .marked
-            .clone()
+            .marked_range()
             .filter(|range| !range.is_empty())
             .or_else(|| (!self.selection.is_empty()).then(|| self.selection.clone()))
             .or_else(|| self.token_deletion(cursor, forward))
@@ -719,7 +913,7 @@ impl Editor {
         }
     }
     pub fn undo(&mut self) -> bool {
-        if self.disabled || self.marked.is_some() {
+        if self.disabled || self.composition.is_some() {
             return false;
         }
         let Some(snapshot) = self.undo.pop() else {
@@ -731,7 +925,7 @@ impl Editor {
         true
     }
     pub fn redo(&mut self) -> bool {
-        if self.disabled || self.marked.is_some() {
+        if self.disabled || self.composition.is_some() {
             return false;
         }
         let Some(snapshot) = self.redo.pop() else {
@@ -746,6 +940,7 @@ impl Editor {
         Snapshot {
             text: self.text.clone(),
             selection: self.selection.clone(),
+            reversed: self.reversed,
         }
     }
     fn restore(&mut self, snapshot: Snapshot) {
@@ -753,9 +948,8 @@ impl Editor {
         self.paint_revision = self.paint_revision.wrapping_add(1);
         *self.token_cache.get_mut() = None;
         self.selection = snapshot.selection;
-        self.reversed = false;
+        self.reversed = snapshot.reversed;
         self.anchor = None;
-        self.marked = None;
         self.drag_origin = None;
         self.typing_group_end = None;
         self.vertical_goal_column = None;
@@ -780,11 +974,20 @@ impl Editor {
     }
 }
 
-fn truncate(text: &str, max: usize) -> &str {
-    &text[..text.floor_char_boundary(max.min(text.len()))]
+pub(crate) fn grapheme_prefix(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let model = aqua_text::TextModel::new(text);
+    let end = if model.is_grapheme_boundary(max) {
+        max
+    } else {
+        model.prev_grapheme(max)
+    };
+    slice(text, ..end)
 }
 
-pub fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {
+fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {
     let mut offset = 0usize;
     for (byte, character) in text.char_indices() {
         if offset == target {
@@ -797,13 +1000,13 @@ pub fn utf16_offset_to_utf8(text: &str, target: usize) -> Option<usize> {
     }
     (offset == target).then_some(text.len())
 }
-pub fn utf16_range_to_utf8(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+fn utf16_range_to_utf8(text: &str, range: Range<usize>) -> Option<Range<usize>> {
     if range.start > range.end {
         return None;
     }
     Some(utf16_offset_to_utf8(text, range.start)?..utf16_offset_to_utf8(text, range.end)?)
 }
-pub fn utf8_range_to_utf16(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+pub(crate) fn utf8_range_to_utf16(text: &str, range: Range<usize>) -> Option<Range<usize>> {
     if range.start > range.end {
         return None;
     }
@@ -831,7 +1034,7 @@ impl aqua_text::input_service::TextInputService for Editor {
     }
 
     fn text_for_utf16_range(&self, range: Range<usize>) -> Option<&str> {
-        Editor::text_for_utf16_range(self, range)
+        Self::text_for_utf16_range(self, range)
     }
 
     fn selected_utf16_range(&self, ignore_disabled: bool) -> Option<(Range<usize>, bool)> {
@@ -859,14 +1062,16 @@ impl aqua_text::input_service::TextInputService for Editor {
     }
 
     fn unmark_text(&mut self) {
-        Editor::unmark_text(self);
+        Self::unmark_text(self);
     }
 }
 
 fn logical_vertical_target(text: &str, cursor: usize, up: bool, goal_column: usize) -> usize {
     let cursor = text.floor_char_boundary(cursor.min(text.len()));
-    let line_start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
-    let line_end = text[cursor..]
+    let line_start = slice(text, ..cursor)
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_end = slice(text, cursor..)
         .find('\n')
         .map_or(text.len(), |index| cursor + index);
     let (target_start, target_end) = if up {
@@ -875,7 +1080,7 @@ fn logical_vertical_target(text: &str, cursor: usize, up: bool, goal_column: usi
         }
         let previous_end = line_start - 1;
         (
-            text[..previous_end]
+            slice(text, ..previous_end)
                 .rfind('\n')
                 .map_or(0, |index| index + 1),
             previous_end,
@@ -887,14 +1092,14 @@ fn logical_vertical_target(text: &str, cursor: usize, up: bool, goal_column: usi
         let next_start = line_end + 1;
         (
             next_start,
-            text[next_start..]
+            slice(text, next_start..)
                 .find('\n')
                 .map_or(text.len(), |index| next_start + index),
         )
     };
     let mut column = 0usize;
     let mut target_offset = 0usize;
-    for (byte_offset, character) in text[target_start..target_end].char_indices() {
+    for (byte_offset, character) in slice(text, target_start..target_end).char_indices() {
         let next = column + character.len_utf16();
         if next > goal_column {
             break;

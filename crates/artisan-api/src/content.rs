@@ -1,11 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-/// Authored text larger than this travels as a [`ContentRef`].
 pub const INLINE_TEXT_BYTES: usize = 16 * 1024;
-/// The most bytes one content range carries.
 pub const CONTENT_RANGE_BYTES: u32 = 64 * 1024;
 
-/// SHA-256 of the exact UTF-8 bytes. Stored sources are immutable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContentId(pub String);
@@ -32,13 +29,10 @@ impl std::fmt::Display for ContentId {
 pub struct ContentRef {
     pub id: ContentId,
     pub bytes: u64,
-    /// Number of logical lines, including an empty final line after a newline.
     pub lines: u64,
 }
 
 impl ContentRef {
-    /// Pure canonical identity shared by adapter retention and the Store boundary.
-    /// Creating a descriptor does not persist it; Forge rejects unknown references.
     pub fn from_text(text: &str) -> Self {
         use sha2::{Digest as _, Sha256};
         Self {
@@ -49,8 +43,6 @@ impl ContentRef {
     }
 }
 
-/// Inline producer text or a compact immutable stored source. Clients must
-/// explicitly load Stored sources; there is deliberately no empty-string fallback.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TextContent {
@@ -94,8 +86,6 @@ pub struct ContentQuery {
     pub offset: u64,
     pub limit: Option<u32>,
 }
-/// Actual UTF-8 boundaries can expand the requested offset backwards by up to
-/// three bytes. Requests always progress through `end`, never guessed byte counts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentRange {
     pub id: ContentId,
@@ -106,23 +96,5 @@ pub struct ContentRange {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn legacy_inline_text_round_trips_and_refs_are_never_text() {
-        let inline: TextContent = serde_json::from_str("\"a β\"").unwrap();
-        assert_eq!(inline.inline(), Some("a β"));
-        let reference = TextContent::Stored(ContentRef {
-            id: ContentId("a".repeat(64)),
-            bytes: 9_000_000,
-            lines: 1,
-        });
-        assert_eq!(reference.inline(), None);
-        assert_eq!(reference.byte_len(), 9_000_000);
-        assert_eq!(
-            serde_json::from_str::<TextContent>(&serde_json::to_string(&reference).unwrap())
-                .unwrap(),
-            reference
-        );
-    }
-}
+#[path = "../tests/content/unit.rs"]
+mod tests;

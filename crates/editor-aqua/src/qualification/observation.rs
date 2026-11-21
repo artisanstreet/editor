@@ -5,24 +5,27 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct NativeState {
-    pub completed_frame: u64,
-    pub page_loaded: bool,
-    pub page_in_flight: bool,
-    pub load_error: Option<String>,
-    pub row_count: usize,
-    pub measured_row_count: usize,
-    pub landing: bool,
+    completed_frame: u64,
+    page_loaded: bool,
+    page_in_flight: bool,
+    load_error: Option<String>,
+    row_count: usize,
+    measured_row_count: usize,
+    landing: bool,
 }
 
 impl NativeState {
-    pub fn observe(shell: &crate::shell::host::Shell, completed_frame: u64) -> Option<Self> {
+    fn observe(shell: &crate::shell::host::Shell, completed_frame: u64) -> Option<Self> {
         let conversation = &shell.entry.workspace()?.conversation;
         let view = conversation.view.as_ref();
         Some(Self {
             completed_frame,
             page_loaded: view.is_some_and(|view| view.viewport.loaded()),
             page_in_flight: view.is_some_and(|view| view.viewport.in_flight),
-            load_error: conversation.load_error.clone(),
+            load_error: conversation
+                .load_error
+                .as_ref()
+                .map(|failure| failure.problem().headline().to_owned()),
             row_count: conversation.rows.len(),
             measured_row_count: conversation.row_heights.len(),
             landing: conversation.landing.is_some(),
@@ -30,19 +33,47 @@ impl NativeState {
     }
 }
 
-pub fn record_native_state(
+#[derive(Debug, thiserror::Error)]
+pub enum RecordStateError {
+    #[error("encode the state of frame {frame}")]
+    Encode {
+        frame: u64,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("write the state of frame {frame} to {}", path.display())]
+    Write {
+        frame: u64,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub(crate) fn record_native_state(
     shell: &crate::shell::host::Shell,
     completed_frame: u64,
-) -> anyhow::Result<()> {
+) -> Result<(), RecordStateError> {
     let Some(path) = std::env::var_os("ARTISAN_AQUA_QUALIFICATION_STATE") else {
         return Ok(());
     };
     let state = NativeState::observe(shell, completed_frame);
-    std::fs::write(path, serde_json::to_vec(&state)?)?;
-    Ok(())
+    let bytes = serde_json::to_vec(&state).map_err(|source| RecordStateError::Encode {
+        frame: completed_frame,
+        source,
+    })?;
+    std::fs::write(&path, bytes).map_err(|source| RecordStateError::Write {
+        frame: completed_frame,
+        path: path.into(),
+        source,
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "a serialized record of independent view flags the qualification report compares field by field"
+)]
 pub struct Observation {
     pub account: String,
     pub host: String,
@@ -87,7 +118,7 @@ pub struct Paint {
     pub rows: Vec<PaintedRow>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct PaintCollector {
     armed: Option<(PresentationScope, u64, Paint)>,
 }
@@ -140,7 +171,7 @@ impl PaintCollector {
     }
 }
 
-pub fn rect_bits(bounds: Rect) -> [u32; 4] {
+pub(crate) fn rect_bits(bounds: Rect) -> [u32; 4] {
     [
         bounds.x.to_bits(),
         bounds.y.to_bits(),

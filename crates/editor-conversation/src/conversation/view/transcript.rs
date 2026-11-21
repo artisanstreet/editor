@@ -12,7 +12,11 @@ use artisan_api::Seq;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[derive(Clone)]
+pub type BoundsCallback = Rc<dyn Fn(aqua_core::Rect)>;
+
+pub type InitialHeight = Rc<dyn Fn(usize, &RowKey) -> f32>;
+
+#[derive(Debug, Clone)]
 pub struct RowSnapshot {
     pub row: Row,
     pub version: u64,
@@ -28,6 +32,7 @@ pub struct RowSnapshot {
     )>,
 }
 
+#[derive(Debug)]
 pub struct HeightObservation {
     pub key: RowKey,
     pub version: u64,
@@ -35,12 +40,13 @@ pub struct HeightObservation {
     pub active: Rc<std::cell::Cell<bool>>,
 }
 
+#[derive(Debug)]
 pub struct ViewportObservation {
     pub viewport: CollectionViewport,
     pub active: Rc<std::cell::Cell<bool>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PaintedRow {
     pub snapshot: Rc<RowSnapshot>,
     pub bounds: aqua_core::Rect,
@@ -49,7 +55,7 @@ pub struct PaintedRow {
     pub serial: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ObservationEvents {
     pub viewports: Vec<ViewportObservation>,
     pub heights: Vec<HeightObservation>,
@@ -87,8 +93,19 @@ impl ObservationState {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("the transcript viewport belongs to another thread or host")]
+pub struct StaleViewportError;
+
 #[derive(Clone, Default)]
 pub struct TranscriptObservations(Rc<RefCell<ObservationState>>);
+
+impl std::fmt::Debug for TranscriptObservations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptObservations")
+            .finish_non_exhaustive()
+    }
+}
 
 impl TranscriptObservations {
     #[cfg(feature = "qualification")]
@@ -114,79 +131,7 @@ impl TranscriptObservations {
         self.0.borrow_mut().reader_toward_end = Some(toward_end);
     }
 
-    pub fn prefetch_stored(
-        &self,
-        conversation: &Conversation,
-        core: &editor_core::Core,
-        scope: &PresentationScope,
-        viewport: CollectionViewport,
-        clip: aqua_core::Rect,
-        painted: &[Rc<PaintedRow>],
-        following_tail: bool,
-    ) -> bool {
-        if !scope.current(conversation, core) {
-            return false;
-        }
-        let state = self.0.borrow();
-        let top = conversation
-            .rows
-            .get(viewport.visible.start)
-            .map(|(row, _)| row.key());
-        let following = conversation
-            .view
-            .as_ref()
-            .is_some_and(|view| view.viewport.state().is_following());
-        let mut changed = false;
-        for observation in painted {
-            let snapshot = &observation.snapshot;
-            if !snapshot.active.get()
-                || !snapshot.revealed
-                || snapshot
-                    .reveal_ready
-                    .as_ref()
-                    .is_some_and(|ready| !ready.get())
-                || observation.bounds.h <= 0.0
-                || observation.bounds.intersect(clip).is_empty()
-            {
-                continue;
-            }
-            let Some((weak, proof)) = &snapshot.stored else {
-                continue;
-            };
-            let Some(owner) = weak.upgrade() else {
-                continue;
-            };
-            let Some((row, _)) = conversation
-                .row_position(&snapshot.row.key())
-                .and_then(|index| conversation.rows.get(index))
-                .filter(|(_, version)| *version == snapshot.version)
-            else {
-                continue;
-            };
-            let Some(item) = row
-                .anchor()
-                .and_then(|id| conversation.view.as_ref()?.item(id))
-            else {
-                continue;
-            };
-            if snapshot.item_seq != Some(item.seq) {
-                continue;
-            }
-            changed |= owner.borrow_mut().prefetch(
-                proof,
-                scope,
-                row,
-                item,
-                top.clone(),
-                state.reader_moves,
-                state.reader_toward_end,
-                following_tail,
-                following,
-            );
-        }
-        changed
-    }
-    pub fn viewport_callback(
+    pub(crate) fn viewport_callback(
         &self,
         active: Rc<std::cell::Cell<bool>>,
     ) -> Rc<dyn Fn(CollectionViewport)> {
@@ -200,7 +145,7 @@ impl TranscriptObservations {
                     .viewports
                     .push(ViewportObservation {
                         viewport,
-                        active: active.clone(),
+                        active: Rc::clone(&active),
                     });
             }
         })
@@ -210,12 +155,12 @@ impl TranscriptObservations {
         &self,
         snapshot: RowSnapshot,
         markdown: Rc<RefCell<MarkdownOwners>>,
-    ) -> (Rc<dyn Fn(aqua_core::Rect)>, Rc<dyn Fn(aqua_core::Rect)>) {
+    ) -> (BoundsCallback, BoundsCallback) {
         let snapshot = Rc::new(snapshot);
         let height_events = self.clone();
         let height_key = snapshot.row.key();
         let version = snapshot.version;
-        let height_active = snapshot.active.clone();
+        let height_active = Rc::clone(&snapshot.active);
         let height = Rc::new(move |bounds: aqua_core::Rect| {
             height_events
                 .0
@@ -226,7 +171,7 @@ impl TranscriptObservations {
                     key: height_key.clone(),
                     version,
                     height: bounds.h,
-                    active: height_active.clone(),
+                    active: Rc::clone(&height_active),
                 });
         });
         let paint_events = self.clone();
@@ -245,7 +190,20 @@ impl TranscriptObservations {
                     },
                     *block,
                 ),
-                _ => None,
+                Row::Projected { .. }
+                | Row::Work { .. }
+                | Row::WorkHeader(_)
+                | Row::EarlierWork { .. }
+                | Row::WorkEntry { .. }
+                | Row::Chain { .. }
+                | Row::Text { .. }
+                | Row::Prompt(_)
+                | Row::Compaction(_)
+                | Row::Image(_)
+                | Row::Gap
+                | Row::Status(_)
+                | Row::AgentResult(_)
+                | Row::AgentStatus(..) => None,
             };
             let mut state = paint_events.0.borrow_mut();
             #[cfg(feature = "qualification")]
@@ -294,6 +252,11 @@ impl TranscriptObservations {
             .collect()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one viewport observation feeding paging, follow, preparation and reveal from the same clip"
+    )]
     pub fn observe_viewport(
         &self,
         conversation: &mut Conversation,
@@ -303,11 +266,10 @@ impl TranscriptObservations {
         scope: &PresentationScope,
         viewport: CollectionViewport,
         clip: aqua_core::Rect,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            scope.current(conversation, core),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<(), StaleViewportError> {
+        if !scope.current(conversation, core) {
+            return Err(StaleViewportError);
+        }
         conversation.observe_visible_rows(
             viewport.visible.start..viewport.visible.end,
             viewport.mounted.start..viewport.mounted.end,
@@ -399,16 +361,13 @@ impl TranscriptObservations {
         let mut bounds = std::collections::HashMap::new();
         for index in mounted.clone() {
             let key = &state.row_keys[index];
-            let hash = match state.key_hashes.get(key) {
-                Some(hash) => *hash,
-                None => {
-                    let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(format!(
-                        "{key:?}"
-                    )));
-                    let key = key.clone();
-                    state.key_hashes.insert(key, hash);
-                    hash
-                }
+            let hash = if let Some(hash) = state.key_hashes.get(key) {
+                *hash
+            } else {
+                let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(format!("{key:?}")));
+                let key = key.clone();
+                state.key_hashes.insert(key, hash);
+                hash
             };
             if let Some(rect) = app
                 .tree()
@@ -471,11 +430,17 @@ pub struct ObservedRead {
     proof: ReadProof,
 }
 
+impl std::fmt::Debug for ObservedRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObservedRead").finish_non_exhaustive()
+    }
+}
+
 enum ReadProof {
     Inline(ProjectedProof),
     Stored(
         std::rc::Weak<RefCell<crate::conversation::stored::StoredConversation>>,
-        crate::conversation::stored::StoredProof,
+        Box<crate::conversation::stored::StoredProof>,
     ),
 }
 
@@ -544,8 +509,10 @@ impl PaintedRow {
         {
             return None;
         }
-        let proof = match (self.snapshot.stored.clone(), self.proof.clone()) {
-            (Some((owner, proof)), _) => ReadProof::Stored(owner, proof),
+        let stored = self.snapshot.stored.clone();
+        let inline = self.proof.clone();
+        let proof = match (stored, inline) {
+            (Some((owner, proof)), _) => ReadProof::Stored(owner, Box::new(proof)),
             (None, Some(proof)) => ReadProof::Inline(proof),
             (None, None) => return None,
         };
@@ -582,7 +549,7 @@ impl PaintedRow {
 
 impl ObservedRead {
     #[cfg(feature = "qualification")]
-    pub fn observed_seq(&self) -> artisan_api::Seq {
+    pub fn observed_seq(&self) -> Seq {
         self.candidate.observed_seq()
     }
 
@@ -594,10 +561,10 @@ impl ObservedRead {
     ) -> bool {
         if !self.snapshot.active.get()
             || !self.scope.current(conversation, core)
-            || !conversation
+            || conversation
                 .row_position(&self.snapshot.row.key())
                 .and_then(|index| conversation.rows.get(index))
-                .is_some_and(|(_, version)| *version == self.snapshot.version)
+                .is_none_or(|(_, version)| *version != self.snapshot.version)
         {
             return false;
         }
@@ -676,52 +643,6 @@ struct TranscriptRow {
     key: RowKey,
 }
 
-pub fn list(
-    conversation: &Conversation,
-    estimated_height: f32,
-    row: Rc<dyn Fn(usize, &RowKey) -> Element>,
-    viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
-) -> Element {
-    let rows: Vec<_> = conversation
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, (row, _))| TranscriptRow {
-            index,
-            key: row.key(),
-        })
-        .collect();
-    let heights = rows.clone();
-    List::new()
-        .items(rows)
-        .key(|row: &TranscriptRow| format!("{:?}", row.key))
-        .row(move |entry: &TranscriptRow| row(entry.index, &entry.key))
-        .virtualize()
-        .estimated_row_height(Length::Px(estimated_height))
-        .overscan(0)
-        .overscan_pixels(transcript_overscan_pixels(conversation))
-        .initial_height(move |index| initial_height(index, &heights[index].key))
-        .on_viewport(move |event| viewport(event))
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .height(Length::Pct(100.0)),
-        )
-        .build()
-        .with_key("conversation-transcript")
-}
-
-pub type PreparedRowFactory = Rc<
-    dyn Fn(
-        usize,
-        &RowKey,
-    ) -> Result<
-        aqua_ui::collection_runtime::PreparedCollectionRow,
-        aqua_ui::collection_runtime::CollectionError,
-    >,
->;
-
 pub type BatchedRowFactory = Rc<
     dyn Fn(
         usize,
@@ -753,7 +674,7 @@ pub fn layout_batched_list(
     row: LayoutBatchedRowFactory,
     revision: RowRevision,
     viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
+    initial_height: InitialHeight,
 ) -> Element {
     let rows: Vec<_> = conversation
         .rows
@@ -774,7 +695,7 @@ pub fn layout_batched_list(
         rows.last().map(|row| &row.key).hash(&mut hasher);
         hasher.finish()
     };
-    List::new()
+    let list = List::new()
         .items(rows)
         .shape_epoch(epoch)
         .key(|row: &TranscriptRow| format!("{:?}", row.key))
@@ -795,82 +716,14 @@ pub fn layout_batched_list(
                 .height(Length::Pct(100.0)),
         )
         .build()
-        .with_key("conversation-transcript")
+        .with_key("conversation-transcript");
+    crate::conversation::announce::announced(
+        list,
+        &crate::conversation::announce::current(conversation),
+    )
 }
 
-pub fn batched_list(
-    conversation: &Conversation,
-    estimated_height: f32,
-    row: BatchedRowFactory,
-    viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
-) -> Element {
-    let rows: Vec<_> = conversation
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, (row, _))| TranscriptRow {
-            index,
-            key: row.key(),
-        })
-        .collect();
-    let heights = rows.clone();
-    List::new()
-        .items(rows)
-        .key(|row: &TranscriptRow| format!("{:?}", row.key))
-        .try_batched_row(move |entry: &TranscriptRow| row(entry.index, &entry.key))
-        .virtualize()
-        .estimated_row_height(Length::Px(estimated_height))
-        .overscan(0)
-        .overscan_pixels(transcript_overscan_pixels(conversation))
-        .initial_height(move |index| initial_height(index, &heights[index].key))
-        .on_viewport(move |event| viewport(event))
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .height(Length::Pct(100.0)),
-        )
-        .build()
-        .with_key("conversation-transcript")
-}
-
-pub fn try_list(
-    conversation: &Conversation,
-    estimated_height: f32,
-    row: PreparedRowFactory,
-    viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
-) -> Element {
-    let rows: Vec<_> = conversation
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, (row, _))| TranscriptRow {
-            index,
-            key: row.key(),
-        })
-        .collect();
-    let heights = rows.clone();
-    List::new()
-        .items(rows)
-        .key(|row: &TranscriptRow| format!("{:?}", row.key))
-        .try_row(move |entry: &TranscriptRow| row(entry.index, &entry.key))
-        .virtualize()
-        .estimated_row_height(Length::Px(estimated_height))
-        .overscan(0)
-        .overscan_pixels(transcript_overscan_pixels(conversation))
-        .initial_height(move |index| initial_height(index, &heights[index].key))
-        .on_viewport(move |event| viewport(event))
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .height(Length::Pct(100.0)),
-        )
-        .build()
-        .with_key("conversation-transcript")
-}
-
-pub fn reader_scrolled(
+fn reader_scrolled(
     conversation: &mut Conversation,
     core: &editor_core::Core,
     viewport: CollectionViewport,
@@ -908,6 +761,10 @@ pub fn reader_scrolled(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the observer reads the viewport with follow, readiness and prefix flags and two row probes"
+)]
 pub fn observer(
     conversation: &mut Conversation,
     core: &editor_core::Core,
@@ -938,13 +795,26 @@ pub fn observer(
         .enumerate()
         .rev()
         .find_map(|(index, (row, _))| match row {
-            crate::conversation::fold::Row::EarlierWork { first, .. }
+            Row::EarlierWork { first, .. }
                 if (index < viewport.visible.start && viewport.visible.start - index <= 8)
                     || near(index, 1200.0) =>
             {
                 Some(*first)
             }
-            _ => None,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::WorkHeader(_)
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Chain { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => None,
         });
     let work_idle = conversation.work_idle() && conversation.load_error.is_none();
     let settled = view.viewport.loaded();
@@ -970,17 +840,24 @@ const LANDING_OVERSCAN_PIXELS: f32 = 320.0;
 const SETTLED_OVERSCAN_PIXELS: f32 = 800.0;
 
 fn overscan_from_environment(name: &str, fallback: f32) -> f32 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(fallback)
+    match std::env::var(name) {
+        Ok(value) => value.parse().unwrap_or_else(|error| {
+            tracing::warn!(name, value, %error, fallback, "read overscan override; using the default");
+            fallback
+        }),
+        Err(std::env::VarError::NotPresent) => fallback,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(name, %error, fallback, "read overscan override; using the default");
+            fallback
+        }
+    }
 }
 
 fn transcript_overscan_pixels(conversation: &Conversation) -> f32 {
     let settled = overscan_from_environment("AQUA_OVERSCAN_PX", SETTLED_OVERSCAN_PIXELS);
-    match conversation.landing.is_some() {
-        true => overscan_from_environment("AQUA_LANDING_OVERSCAN_PX", LANDING_OVERSCAN_PIXELS)
-            .min(settled),
-        false => settled,
+    if conversation.landing.is_some() {
+        overscan_from_environment("AQUA_LANDING_OVERSCAN_PX", LANDING_OVERSCAN_PIXELS).min(settled)
+    } else {
+        settled
     }
 }

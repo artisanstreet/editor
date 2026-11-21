@@ -1,0 +1,79 @@
+[package]
+name = "test-support"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Shared test helpers: bounded waits, a paused clock, stub servers, SSE reading, engine transcripts and Editor fixtures."
+publish = false
+
+[lib]
+test = false
+doctest = false
+
+[features]
+tokio = ["dep:tokio"]
+sse = ["tokio", "dep:sse-core", "dep:futures", "dep:bytes", "dep:serde", "dep:serde_json"]
+http = ["tokio", "dep:axum", "dep:serde_json", "dep:futures"]
+net = ["dep:socket2"]
+items = ["dep:artisan-api"]
+clock = ["dep:artisan-api", "dep:editor-core"]
+editor-core = ["clock", "http", "dep:artisan-account", "dep:futures", "dep:serde", "dep:serde_json", "dep:tokio-rustls", "dep:tempfile", "dep:image", "dep:url", "artisan-api/tls"]
+editor = ["editor-core", "items", "dep:tempfile", "dep:aqua", "dep:aqua-core", "dep:aqua-text", "dep:aqua-ui", "dep:editor-core", "dep:editor-ui", "dep:editor-conversation"]
+shell = ["editor", "dep:editor-aqua"]
+transcript = ["dep:serde", "dep:serde_json", "dep:thiserror"]
+logs = ["dep:tracing", "dep:tracing-error", "dep:tracing-subscriber"]
+replay = ["transcript", "items", "dep:forge-engines"]
+scenario = ["shell", "replay", "net", "editor-aqua/qualification", "dep:accesskit_consumer", "dep:aqua-a11y-uia", "dep:aqua-protocol", "dep:aqua-runtime", "dep:forge-runs", "dep:windows"]
+
+[dependencies]
+accesskit_consumer = { workspace = true, optional = true }
+aqua-a11y-uia = { workspace = true, optional = true }
+aqua-protocol = { workspace = true, optional = true }
+aqua-runtime = { workspace = true, optional = true }
+aqua = { workspace = true, optional = true }
+aqua-core = { workspace = true, optional = true }
+aqua-text = { workspace = true, optional = true }
+aqua-ui = { workspace = true, optional = true }
+artisan-account = { workspace = true, optional = true }
+artisan-api = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+editor-aqua = { workspace = true, optional = true, features = ["test-support"] }
+editor-conversation = { workspace = true, optional = true, features = ["test-support"] }
+editor-core = { workspace = true, optional = true }
+editor-ui = { workspace = true, optional = true, features = ["test-support"] }
+forge-engines = { workspace = true, optional = true }
+forge-runs = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+image = { workspace = true, optional = true, features = ["png"] }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
+sse-core = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "time", "net", "test-util"] }
+tokio-rustls = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-error = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, optional = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Variant", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
+
+[[bin]]
+name = "record"
+path = "src/bin/record.rs"
+required-features = ["transcript"]
+test = false
+
+[dev-dependencies]
+futures.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+test-support = { path = ".", features = ["sse", "net", "tokio", "transcript", "replay"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

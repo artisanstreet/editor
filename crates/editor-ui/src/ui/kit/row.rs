@@ -1,3 +1,4 @@
+use crate::ui::kit::control::focus_ring;
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Space, TextRole, concentric};
@@ -23,8 +24,19 @@ pub enum Row {
     ListItem(Density),
     Heading,
     ListHeading,
-    FormRow,
-    KeyRow,
+    Key,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RowKind {
+    Fixed(Row),
+    Form,
+}
+
+impl From<Row> for RowKind {
+    fn from(row: Row) -> Self {
+        Self::Fixed(row)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -36,69 +48,41 @@ pub struct Pad {
 impl Row {
     #[must_use]
     pub const fn pad(self) -> Pad {
-        let (x, y) = match self {
-            Self::MenuItem | Self::KeyRow => (Space::S12, Space::S8),
-            Self::ListItem(Density::Regular | Density::Tall) => (Space::S8, Space::S8),
-            Self::ListItem(Density::Dense) => (Space::S4, Space::S4),
-            Self::Heading => (Space::S12, Space::S6),
-            Self::ListHeading => (Space::S8, Space::S6),
-            Self::FormRow => (Space::S12, Space::S12),
-        };
-        Pad { x, y }
+        RowKind::Fixed(self).pad()
     }
 
     #[must_use]
-    pub const fn title(self) -> TextRole {
-        match self {
-            Self::Heading | Self::ListHeading => TextRole::Caption,
-            _ => TextRole::Label,
-        }
-    }
-
-    #[must_use]
-    pub const fn lines(self) -> f32 {
+    pub fn lines(self, theme: &ArtisanTheme) -> f32 {
         match self {
             Self::ListItem(Density::Tall) => {
-                TextRole::Label.spec().line + TextRole::Caption.spec().line
+                TextRole::Label.line_px(theme) + TextRole::Caption.line_px(theme)
             }
-            _ => self.title().spec().line,
+            Self::MenuItem | Self::ListItem(_) | Self::Heading | Self::ListHeading | Self::Key => {
+                RowKind::Fixed(self).title().line_px(theme)
+            }
         }
     }
 
     #[must_use]
     pub const fn interactive(self) -> bool {
-        !matches!(
-            self,
-            Self::Heading | Self::ListHeading | Self::FormRow | Self::KeyRow
-        )
-    }
-
-    #[must_use]
-    pub const fn wraps(self) -> bool {
-        matches!(self, Self::FormRow)
+        RowKind::Fixed(self).interactive()
     }
 
     #[must_use]
     pub const fn gap(self) -> Space {
-        match self {
-            Self::FormRow => Space::S16,
-            _ => Space::S8,
-        }
+        RowKind::Fixed(self).gap()
     }
 
     #[must_use]
-    pub const fn height(self) -> Option<f32> {
-        match self {
-            Self::FormRow => None,
-            _ => Some(self.lines() + 2.0 * self.pad().y.px()),
-        }
+    pub fn height(self, theme: &ArtisanTheme) -> f32 {
+        2.0f32.mul_add(self.pad().y.px(), self.lines(theme))
     }
 
     #[must_use]
-    pub fn radius_in(self, surface: Surface) -> f32 {
+    pub fn radius_in(surface: Surface) -> f32 {
         surface.child_radius().map_or_else(
             || concentric(surface.radius_px(), surface.padding_px()),
-            |radius| radius.px(),
+            super::tokens::radius::Radius::px,
         )
     }
 
@@ -108,10 +92,53 @@ impl Row {
     }
 }
 
+impl RowKind {
+    #[must_use]
+    pub const fn pad(self) -> Pad {
+        let (x, y) = match self {
+            Self::Fixed(Row::MenuItem | Row::Key) => (Space::S12, Space::S8),
+            Self::Fixed(Row::ListItem(Density::Regular | Density::Tall)) => (Space::S8, Space::S8),
+            Self::Fixed(Row::ListItem(Density::Dense)) => (Space::S4, Space::S4),
+            Self::Fixed(Row::Heading) => (Space::S12, Space::S6),
+            Self::Fixed(Row::ListHeading) => (Space::S8, Space::S6),
+            Self::Form => (Space::S12, Space::S12),
+        };
+        Pad { x, y }
+    }
+
+    #[must_use]
+    const fn title(self) -> TextRole {
+        match self {
+            Self::Fixed(Row::Heading | Row::ListHeading) => TextRole::Caption,
+            Self::Fixed(Row::MenuItem | Row::ListItem(_) | Row::Key) | Self::Form => {
+                TextRole::Label
+            }
+        }
+    }
+
+    #[must_use]
+    const fn interactive(self) -> bool {
+        matches!(self, Self::Fixed(Row::MenuItem | Row::ListItem(_)))
+    }
+
+    #[must_use]
+    const fn wraps(self) -> bool {
+        matches!(self, Self::Form)
+    }
+
+    #[must_use]
+    const fn gap(self) -> Space {
+        match self {
+            Self::Form => Space::S16,
+            Self::Fixed(_) => Space::S8,
+        }
+    }
+}
+
 pub struct RowItem {
     key: Key,
     theme: ArtisanTheme,
-    row: Row,
+    row: RowKind,
     radius: f32,
     hover: Hover,
     face: Option<Element>,
@@ -129,19 +156,30 @@ pub struct RowItem {
     hint: Option<std::rc::Rc<dyn Fn() -> Element>>,
 }
 
+impl std::fmt::Debug for RowItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowItem").finish_non_exhaustive()
+    }
+}
+
 impl RowItem {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the row stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,
-        row: Row,
+        row: impl Into<RowKind>,
         surface: Surface,
         title: impl Into<String>,
     ) -> Self {
+        let row = row.into();
         Self {
             key: key.into(),
             theme,
             row,
-            radius: row.radius_in(surface),
+            radius: Row::radius_in(surface),
             hover: Hover::Neutral,
             face: None,
             leading: None,
@@ -153,8 +191,9 @@ impl RowItem {
             hoverable: true,
             disabled: false,
             role: match row {
-                Row::MenuItem => Role::MenuItem,
-                _ => Role::Button,
+                RowKind::Fixed(Row::MenuItem) => Role::MenuItem,
+                RowKind::Fixed(Row::ListItem(_) | Row::Heading | Row::ListHeading | Row::Key)
+                | RowKind::Form => Role::Button,
             },
             on_activate: None,
             on_hover: None,
@@ -246,16 +285,22 @@ impl RowItem {
         self
     }
 
-    fn text(theme: &ArtisanTheme, words: String, role: TextRole, color: Oklch, wraps: bool) -> Element {
+    fn text(
+        theme: &ArtisanTheme,
+        words: String,
+        role: TextRole,
+        color: Oklch,
+        wraps: bool,
+    ) -> Element {
         let text = Text::new(words)
             .text_style(role.style(theme))
             .gpui_source_color(color.to_reference_text_color());
-        match wraps {
-            true => text.wrap(true).build(),
-            false => text
-                .overflow(OverflowMode::EndEllipsis)
+        if wraps {
+            text.wrap(true).build()
+        } else {
+            text.overflow(OverflowMode::EndEllipsis)
                 .style(Style::new().min_width(Length::Px(0.0)).text_wrap(false))
-                .build(),
+                .build()
         }
     }
 
@@ -271,9 +316,9 @@ impl RowItem {
                 bottom: pad.y.px(),
             })
             .radius(Length::Px(self.radius));
-        match self.row.height() {
-            Some(height) => style.height(Length::Px(height)),
-            None => style,
+        match self.row {
+            RowKind::Fixed(row) => style.height(Length::Px(row.height(&self.theme))),
+            RowKind::Form => style,
         }
     }
 
@@ -289,7 +334,7 @@ impl RowItem {
 
     fn ink(&self) -> Oklch {
         match (self.row, self.hover) {
-            (Row::Heading | Row::ListHeading, _) => self.theme.colors.text_muted,
+            (RowKind::Fixed(Row::Heading | Row::ListHeading), _) => self.theme.colors.text_muted,
             (_, Hover::Destructive) => self.theme.colors.destructive_text,
             (_, Hover::Neutral) => self.theme.colors.text,
         }
@@ -405,8 +450,14 @@ impl RowItem {
             .focusable(!self.disabled);
         let element = match (self.disabled, lit) {
             (true, _) => element,
-            (false, false) => element.cursor(CursorIcon::Pointer),
-            (false, true) => live::track(element.cursor(CursorIcon::Pointer)),
+            (false, false) => element
+                .cursor(CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(&self.theme)),
+            (false, true) => live::track(
+                element
+                    .cursor(CursorIcon::Pointer)
+                    .focus_visible_style(focus_ring(&self.theme)),
+            ),
         };
         match self.on_hover {
             Some(handler) => element.on_hover_change(handler),

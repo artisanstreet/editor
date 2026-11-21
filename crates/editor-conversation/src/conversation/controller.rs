@@ -1,24 +1,20 @@
 use super::disclosure::DisclosureState;
 use super::fold::{self, Row, RowKey, RunSummary};
-use super::thread::{self, ThreadView};
+use super::shared::Shared;
+use super::thread::{self, AnswerRequest, ItemAnswer, ThreadView};
 use super::viewport::{Effect, Fetch, Input, Jump};
-use editor_core::{
-    Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime,
-};
 use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
+use editor_core::{
+    Core, CoreEvent, HostEvent, HostId, HostInstance, Problem, Screen, client::CallError,
+    delivery::Delivery, runtime::runtime,
+};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
-
-pub enum ConversationEvent {
-    ItemsChanged,
-    AgentChanged,
-    NewProject,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Origin {
@@ -27,7 +23,7 @@ struct Origin {
     generation: u64,
 }
 
-pub fn completion_is_current<I: Copy + Eq>(
+fn completion_is_current<I: Copy + Eq>(
     captured: (&HostId, I, u64),
     open: Option<(&HostId, I, u64)>,
     current: Option<I>,
@@ -35,6 +31,42 @@ pub fn completion_is_current<I: Copy + Eq>(
     let (host, instance, generation) = captured;
     matches!(open, Some((open_host, open_instance, open_generation)) if host == open_host && instance == open_instance && generation == open_generation)
         && current.as_ref() == Some(&instance)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadFailure {
+    Page { fetch: Fetch, problem: Problem },
+    Work { first: Seq, problem: Problem },
+    Agent { agent: ItemId, problem: Problem },
+    Ancestry { problem: Problem },
+}
+
+impl LoadFailure {
+    #[must_use]
+    pub const fn problem(&self) -> &Problem {
+        match self {
+            Self::Page { problem, .. }
+            | Self::Work { problem, .. }
+            | Self::Agent { problem, .. }
+            | Self::Ancestry { problem } => problem,
+        }
+    }
+
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        match self {
+            Self::Page { .. } | Self::Work { .. } | Self::Agent { .. } => true,
+            Self::Ancestry { .. } => false,
+        }
+    }
+
+    const fn page_headline(fetch: Fetch) -> &'static str {
+        match fetch {
+            Fetch::Older { .. } => "Couldn't load earlier messages.",
+            Fetch::Newer { .. } => "Couldn't load newer messages.",
+            Fetch::Tail | Fetch::Refresh | Fetch::At { .. } => "Couldn't load this thread.",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +89,14 @@ struct ParkedThread {
     row_heights: HashMap<RowKey, f32>,
 }
 
+impl ParkedThread {
+    fn bytes(&self) -> usize {
+        self.view.parked_bytes()
+            + self.projections.resident_bytes()
+            + self.row_heights.capacity() * size_of::<(RowKey, f32)>()
+    }
+}
+
 struct Pending {
     origin: Origin,
     thread: ThreadId,
@@ -74,32 +114,38 @@ enum Completion {
         origin: Origin,
         fetch: Fetch,
         asked: Instant,
-        result: anyhow::Result<ItemsPage>,
+        result: Result<ItemsPage, CallError>,
     },
     Work {
         origin: Origin,
         first: Seq,
-        result: anyhow::Result<ItemsPage>,
+        result: Result<ItemsPage, CallError>,
     },
     Agent {
         origin: Origin,
-        context: HashMap<ItemId, Arc<Item>>,
-        error: Option<String>,
+        context: BTreeMap<ItemId, Arc<Item>>,
+        error: Option<LoadFailure>,
         effects: Vec<Effect>,
     },
     Answer {
         origin: Origin,
         item: ItemId,
-        result: anyhow::Result<()>,
+        request: AnswerRequest,
+        result: Result<(), CallError>,
+    },
+    ReplyTail {
+        origin: Origin,
+        reply: super::announce::StoredReply,
+        read: super::announce::TailRead,
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScrollAction {
     End,
     Tail,
     To(Seq),
-    Row(usize),
+    Row(RowKey),
 }
 
 pub struct Conversation {
@@ -107,39 +153,47 @@ pub struct Conversation {
     host_instance: Option<HostInstance>,
     pub agent: Option<ItemId>,
     pub view: Option<ThreadView>,
-    pub rows: Vec<(Row, u64)>,
+    pub rows: Shared<Vec<(Row, u64)>>,
     rows_epoch: u64,
     row_positions: RefCell<(u64, usize, HashMap<RowKey, usize>)>,
-    pub runs: HashMap<RunId, RunSummary>,
+    pub(crate) runs: Shared<BTreeMap<RunId, RunSummary>>,
+    pub(crate) turns: Shared<fold::Turns>,
     pub disclosures: DisclosureState,
     pub question_pages: super::questions::QuestionPages,
-    pub question_collection: super::questions::QuestionCollection,
+    question_collection: super::questions::QuestionCollection,
     pub sources: super::content::SourceOwners,
     projections: super::projection::Projections,
     body_versions: HashMap<super::presentation::BodyKey, u64>,
     pub reveal: Rc<RefCell<super::admission::RevealQueue>>,
-    pub reveal_frontier: Option<RowKey>,
-    pub arrivals: Rc<RefCell<HashMap<ItemId, super::admission::LiveBlockArrivals>>>,
+    pub(crate) reveal_frontier: Option<RowKey>,
+    pub(crate) arrivals: Rc<RefCell<HashMap<ItemId, super::admission::LiveBlockArrivals>>>,
     visible_items: HashSet<ItemId>,
     mounted_rows: HashSet<RowKey>,
     mounted_for: Option<(u64, usize, usize)>,
     pub row_heights: HashMap<RowKey, f32>,
-    pub load_error: Option<String>,
+    pub load_error: Option<LoadFailure>,
     pub landing: Option<Landing>,
     landed_at: Option<Instant>,
     away: bool,
-    pub scroll_frame: Option<Instant>,
+    scroll_frame: Option<Instant>,
     generation: u64,
     work_reading: Option<Seq>,
     page_task: Option<AbortOnDropHandle<()>>,
     work_task: Option<AbortOnDropHandle<()>>,
     agent_task: Option<AbortOnDropHandle<()>>,
-    answer_tasks: HashMap<ItemId, AbortOnDropHandle<()>>,
+    next_answer: u64,
     delivery: Delivery<Completion>,
-    events: Vec<ConversationEvent>,
     scroll: Vec<ScrollAction>,
     parked: super::parked::Shelf<ParkedKey, ParkedThread>,
     pending: Option<Pending>,
+    pub(crate) reply_tail: Option<super::announce::ReplyTail>,
+    clock: editor_core::Clock,
+}
+
+impl std::fmt::Debug for Conversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Conversation").finish_non_exhaustive()
+    }
 }
 
 fn next_rows_epoch() -> u64 {
@@ -148,11 +202,15 @@ fn next_rows_epoch() -> u64 {
 }
 
 impl Conversation {
+    pub const fn clock(&self) -> &editor_core::Clock {
+        &self.clock
+    }
+
     pub fn rows_epoch(&self) -> u64 {
         self.rows_epoch
     }
 
-    pub fn row_position(&self, key: &RowKey) -> Option<usize> {
+    pub(crate) fn row_position(&self, key: &RowKey) -> Option<usize> {
         let mut positions = self.row_positions.borrow_mut();
         if positions.0 != self.rows_epoch || positions.1 != self.rows.len() {
             positions.0 = self.rows_epoch;
@@ -178,10 +236,11 @@ impl Conversation {
             host_instance: None,
             agent: None,
             view: None,
-            rows: Vec::new(),
+            rows: Shared::default(),
             rows_epoch: next_rows_epoch(),
             row_positions: RefCell::new((0, 0, HashMap::new())),
-            runs: HashMap::new(),
+            runs: Shared::default(),
+            turns: Shared::default(),
             disclosures: DisclosureState::default(),
             question_pages: super::questions::QuestionPages::default(),
             question_collection: super::questions::QuestionCollection::default(),
@@ -205,22 +264,22 @@ impl Conversation {
             page_task: None,
             work_task: None,
             agent_task: None,
-            answer_tasks: HashMap::new(),
-            delivery: Delivery::with_wake(
-                NonZeroUsize::new(64).unwrap(),
-                core.wake_mailbox().sender(),
+            next_answer: 0,
+            delivery: Delivery::new(
+                const { NonZeroUsize::new(64).expect("invariant: the delivery capacity 64 is nonzero") },
             ),
-            events: Vec::new(),
             scroll: Vec::new(),
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,
+            reply_tail: None,
+            clock: core.clock().clone(),
         }
     }
 
     pub fn sync_screen(&mut self, core: &mut Core) {
         match core.workspace_screen().clone() {
             Screen::Thread { host, thread } => {
-                let current = core.host(&host).map(|host| host.instance());
+                let current = core.host(&host).map(editor_core::HostData::instance);
                 if current.is_none() {
                     if self.open.is_some() {
                         self.close(core);
@@ -249,8 +308,9 @@ impl Conversation {
     }
 
     pub fn open_thread(&mut self, core: &mut Core, host: HostId, thread: ThreadId) {
+        let _span = tracing::info_span!("open_thread", %host, %thread).entered();
         self.away = false;
-        let Some(instance) = core.host(&host).map(|host| host.instance()) else {
+        let Some(instance) = core.host(&host).map(editor_core::HostData::instance) else {
             self.close(core);
             return;
         };
@@ -296,7 +356,6 @@ impl Conversation {
         self.load_error = None;
         self.landing = landing;
         self.rebuild(core);
-        self.events.push(ConversationEvent::ItemsChanged);
     }
 
     fn resume(
@@ -331,12 +390,14 @@ impl Conversation {
             self.landing = Some(Landing::Loading);
         }
         if self.landing.is_none() {
-            self.landed_at = Some(Instant::now());
+            self.landed_at = Some(self.clock.now());
         }
         for effect in effects.into_iter().chain(jump) {
             match effect {
                 Effect::ScrollToEnd => self.scroll.push(ScrollAction::Tail),
-                effect => self.perform(core, vec![effect]),
+                effect @ (Effect::Fetch(_) | Effect::ScrollTo(_)) => {
+                    self.perform(core, vec![effect]);
+                }
             }
         }
     }
@@ -365,7 +426,7 @@ impl Conversation {
         let held = origin.clone();
         let timeout = AbortOnDropHandle::new(runtime().spawn(async move {
             tokio::time::sleep(HOLD).await;
-            let _ = sender.send(Completion::Held { origin: held }).await;
+            sender.offer(Completion::Held { origin: held }).await;
         }));
         self.pending = Some(Pending {
             origin,
@@ -408,29 +469,29 @@ impl Conversation {
         let (Some((host, thread)), Some(instance)) = (&self.open, self.host_instance) else {
             return;
         };
-        let Some(view) = self.view.take().filter(|_| parkable) else {
+        let Some(mut view) = self.view.take().filter(|_| parkable) else {
             return;
         };
-        let bytes = view.resident_bytes();
-        self.parked.put(
-            (host.clone(), instance, thread.clone()),
-            ParkedThread {
-                view,
-                projections: std::mem::take(&mut self.projections),
-                row_heights: std::mem::take(&mut self.row_heights),
-            },
-            bytes,
-        );
+        view.abandon_answers();
+        let parked = ParkedThread {
+            view,
+            projections: std::mem::take(&mut self.projections),
+            row_heights: std::mem::take(&mut self.row_heights),
+        };
+        let bytes = parked.bytes();
+        self.parked
+            .put((host.clone(), instance, thread.clone()), parked, bytes);
     }
 
-    pub fn close(&mut self, core: &mut Core) {
+    fn close(&mut self, core: &mut Core) {
         self.pending = None;
         self.park();
         self.generation = self.generation.wrapping_add(1);
         self.page_task = None;
+        self.reply_tail = None;
         self.work_task = None;
         self.agent_task = None;
-        self.answer_tasks.clear();
+        self.abandon_answers();
         self.work_reading = None;
         self.landing = None;
         self.landed_at = None;
@@ -451,9 +512,7 @@ impl Conversation {
         self.mounted_for = None;
         self.row_heights.clear();
         self.load_error = None;
-        if self.agent.take().is_some() {
-            self.events.push(ConversationEvent::AgentChanged);
-        }
+        self.agent = None;
         if let Some((host, _)) = self.open.take() {
             if let Some(instance) = self.host_instance.take()
                 && let Some(host) = core.host_mut_if_instance(&host, instance)
@@ -461,9 +520,8 @@ impl Conversation {
                 host.observe_thread(None);
             }
             self.view = None;
-            self.rows.clear();
-            self.runs.clear();
-            self.events.push(ConversationEvent::ItemsChanged);
+            self.rows = Shared::default();
+            self.runs = Shared::default();
         }
     }
 
@@ -480,6 +538,7 @@ impl Conversation {
         );
     }
 
+    #[cfg(feature = "qualification")]
     pub fn items(&self) -> impl Iterator<Item = &Item> {
         self.view
             .iter()
@@ -494,13 +553,13 @@ impl Conversation {
         ))
     }
 
-    pub fn work_idle(&self) -> bool {
+    pub(crate) fn work_idle(&self) -> bool {
         self.work_reading.is_none()
     }
 
-    pub fn landed(&mut self) {
+    pub(crate) fn landed(&mut self) {
         if self.landing.take().is_some() {
-            self.landed_at = Some(Instant::now());
+            self.landed_at = Some(self.clock.now());
         }
     }
 
@@ -508,7 +567,7 @@ impl Conversation {
         self.landed_at = None;
         if self
             .landing_deadline()
-            .is_some_and(|until| Instant::now() >= until)
+            .is_some_and(|until| self.clock.now() >= until)
         {
             self.landing = None;
         }
@@ -523,9 +582,8 @@ impl Conversation {
             Some(Landing::Loading) | None => self.landed_at,
         };
         since.map_or(1.0, |at| {
-            editor_ui::motion::MotionCurve::EaseOut.sample_f32(
-                now.saturating_duration_since(at).as_secs_f64() / REVEAL.as_secs_f64(),
-            )
+            editor_ui::motion::MotionCurve::EaseOut
+                .sample_f32(now.saturating_duration_since(at).as_secs_f64() / REVEAL.as_secs_f64())
         })
     }
 
@@ -536,7 +594,13 @@ impl Conversation {
         }
     }
 
-    pub fn expire_landing(&mut self, now: Instant) -> bool {
+    pub fn landing_wait(&self) -> Option<std::time::Duration> {
+        self.landing_deadline()
+            .map(|deadline| deadline.saturating_duration_since(self.clock.now()))
+    }
+
+    pub fn expire_landing(&mut self) -> bool {
+        let now = self.clock.now();
         if self
             .landing_deadline()
             .is_some_and(|deadline| now >= deadline)
@@ -554,14 +618,11 @@ impl Conversation {
             && self.view.is_some()
             && match self.landing {
                 Some(Landing::Loading) => true,
-                Some(Landing::Settling { until }) => Instant::now() < until,
+                Some(Landing::Settling { until }) => self.clock.now() < until,
                 None => false,
             }
     }
 
-    pub fn events(&mut self) -> Vec<ConversationEvent> {
-        std::mem::take(&mut self.events)
-    }
     pub fn scroll_actions(&mut self) -> Vec<ScrollAction> {
         std::mem::take(&mut self.scroll)
     }
@@ -581,10 +642,12 @@ impl Conversation {
     }
 
     pub fn reveal_row(&mut self, index: usize) {
-        self.scroll.push(ScrollAction::Row(index));
+        if let Some((row, _)) = self.rows.get(index) {
+            self.scroll.push(ScrollAction::Row(row.key()));
+        }
     }
 
-    pub fn jump_row(&self, position: Seq) -> Option<usize> {
+    pub(crate) fn jump_row(&self, position: Seq) -> Option<usize> {
         let view = self.view.as_ref()?;
         let starts: Vec<_> = self
             .rows
@@ -651,12 +714,14 @@ impl Conversation {
                 |id, slot| shape_source(view, id, slot),
             );
             let rows = self.disclosures.retain_disclosure_rows(projected);
-            if rows != self.rows {
-                self.rows = rows;
+            if self.rows != rows {
+                self.rows = Shared::new(rows);
                 self.rows_epoch = next_rows_epoch();
+                self.retain_row_heights();
             }
             self.disclosures.index_disclosure_rows(&self.rows);
-            self.runs = folded.runs;
+            self.runs = Shared::new(folded.runs);
+            self.turns = Shared::new(folded.turns);
             super::open_timing::rebuilt(
                 caller_line,
                 fold_time,
@@ -666,14 +731,83 @@ impl Conversation {
             );
         } else {
             if !self.rows.is_empty() {
-                self.rows.clear();
+                self.rows = Shared::default();
                 self.rows_epoch = next_rows_epoch();
             }
-            self.runs.clear();
+            self.runs = Shared::default();
+            self.turns = Shared::default();
         }
+        self.follow_reply_tail(core);
     }
 
-    pub fn observe_visible_rows(
+    fn follow_reply_tail(&mut self, core: &Core) {
+        let now = self.clock.timestamp();
+        let wanted = self
+            .view
+            .as_ref()
+            .and_then(|view| super::announce::finished_stored_reply(view, now));
+        let Some(reply) = wanted else {
+            self.reply_tail = None;
+            return;
+        };
+        if self
+            .reply_tail
+            .as_ref()
+            .is_some_and(|tail| *tail.reply() == reply)
+        {
+            return;
+        }
+        let (Some((host, _)), Some(instance)) = (&self.open, self.host_instance) else {
+            unreachable!(
+                "invariant: a conversation showing a thread view has that thread open on a Forge instance"
+            );
+        };
+        let (offset, limit) = reply.tail_query();
+        let Some(read) = core
+            .source_provider(host, instance)
+            .and_then(|provider| provider.content_range(reply.source().clone(), offset, limit))
+        else {
+            let (_, thread) = self
+                .open
+                .as_ref()
+                .expect("invariant: a conversation showing a thread view has that thread open");
+            self.reply_tail = Some(super::announce::ReplyTail::settle(
+                thread,
+                reply,
+                super::announce::TailRead::Unavailable,
+            ));
+            return;
+        };
+        let origin = Origin {
+            host: host.clone(),
+            instance,
+            generation: self.generation,
+        };
+        let sender = self.delivery.sender();
+        let reading = reply.clone();
+        let task = AbortOnDropHandle::new(runtime().spawn(async move {
+            let read = super::announce::TailRead::Fetched(read.await);
+            sender
+                .offer(Completion::ReplyTail {
+                    origin,
+                    reply: reading,
+                    read,
+                })
+                .await;
+        }));
+        self.reply_tail = Some(super::announce::ReplyTail::Reading { reply, _task: task });
+    }
+
+    fn retain_row_heights(&mut self) {
+        let current: HashSet<RowKey> = self.rows.iter().map(|(row, _)| row.key()).collect();
+        self.row_heights.retain(|key, _| {
+            current.contains(key)
+                || self.mounted_rows.contains(key)
+                || self.disclosures.disclosure_clips.contains_key(key)
+        });
+    }
+
+    pub(crate) fn observe_visible_rows(
         &mut self,
         range: std::ops::Range<usize>,
         mounted: std::ops::Range<usize>,
@@ -711,7 +845,7 @@ impl Conversation {
         let frame = self.disclosures.advance_disclosures(
             &self.rows,
             &self.row_heights,
-            self.view.as_ref(),
+            self.view.as_ref().map(|view| (view, &*self.turns)),
             now,
             reduce_motion,
         );
@@ -720,7 +854,7 @@ impl Conversation {
         }
         if !frame.changed.is_empty() {
             let changed: HashSet<_> = frame.changed.iter().collect();
-            for (row, version) in &mut self.rows {
+            for (row, version) in self.rows.make_mut() {
                 if changed.contains(&row.key()) {
                     *version = version.wrapping_add(1);
                 }
@@ -737,8 +871,8 @@ impl Conversation {
         frame
     }
 
-    pub fn observe_live_preparation(
-        &mut self,
+    pub(crate) fn observe_live_preparation(
+        &self,
         core: &Core,
         binding: &super::live::LiveBinding,
         blocks: usize,
@@ -752,10 +886,8 @@ impl Conversation {
         if view.item(&binding.item).is_none() {
             return false;
         }
-        let fresh = view
-            .ui
-            .get(&binding.item)
-            .is_some_and(thread::ItemUi::fresh);
+        let now = self.clock.now();
+        let fresh = view.ui.get(&binding.item).is_some_and(|ui| ui.fresh(now));
         let caught_up = binding.current(self, core);
         let mut arrivals = self.arrivals.borrow_mut();
         if !arrivals.contains_key(&binding.item) && arrivals.len() >= 128 {
@@ -763,9 +895,9 @@ impl Conversation {
         }
         let arrival = arrivals
             .entry(binding.item.clone())
-            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(0));
-        arrival.prepared(blocks.max(1), caught_up, fresh);
-        for (row, _) in &self.rows {
+            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(0, now));
+        arrival.prepared(blocks.max(1), caught_up, fresh, now);
+        for (row, _) in self.rows.iter() {
             if self.mounted_rows.contains(&row.key())
                 && let Row::Text {
                     id,
@@ -781,19 +913,7 @@ impl Conversation {
         true
     }
 
-    pub fn claim_prose_arrival(&mut self, id: &ItemId, block: usize) -> bool {
-        self.arrivals.borrow_mut().get_mut(id).map_or_else(
-            || {
-                self.view
-                    .as_ref()
-                    .and_then(|view| view.ui.get(id))
-                    .is_some_and(thread::ItemUi::fresh)
-            },
-            |arrival| arrival.claim(block),
-        )
-    }
-
-    fn observe_live_prose_arrival(&mut self, id: &ItemId) {
+    fn observe_live_prose_arrival(&self, id: &ItemId) {
         if !self.visible_items.contains(id) {
             return;
         }
@@ -802,43 +922,24 @@ impl Conversation {
             slot: fold::Slot::Prose,
         };
         let blocks = self.projections.leaf_count(&key).unwrap_or(0);
+        let now = self.clock.now();
         let mut arrivals = self.arrivals.borrow_mut();
         if !arrivals.contains_key(id)
             && arrivals.len() >= 128
             && let Some(oldest) = arrivals
                 .iter()
-                .min_by_key(|(_, arrival)| arrival.seen)
+                .min_by_key(|(id, arrival)| (arrival.seen, (*id).clone()))
                 .map(|(id, _)| id.clone())
         {
             arrivals.remove(&oldest);
         }
         arrivals
             .entry(id.clone())
-            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(blocks))
-            .observed();
+            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(blocks, now))
+            .observed(now);
     }
 
-    pub fn publish_projection(
-        &mut self,
-        core: &Core,
-        scope: &super::presentation::PresentationScope,
-        key: super::presentation::BodyKey,
-        projection: super::projection::BodyProjection,
-    ) -> bool {
-        if !scope.current(self, core)
-            || self.body_versions.get(&key) != Some(&projection.version)
-            || projection.leaves.end < projection.leaves.start
-        {
-            return false;
-        }
-        if !self.projections.publish(key, projection) {
-            return false;
-        }
-        self.rebuild(core);
-        true
-    }
-
-    pub fn publish_projections(
+    pub(crate) fn publish_projections(
         &mut self,
         core: &Core,
         scope: &super::presentation::PresentationScope,
@@ -869,7 +970,7 @@ impl Conversation {
         published
     }
 
-    pub fn body_shape_count(&self, key: &super::presentation::BodyKey) -> Option<usize> {
+    pub(crate) fn body_shape_count(&self, key: &super::presentation::BodyKey) -> Option<usize> {
         self.projections
             .shaped(key)
             .then(|| self.projections.leaf_count(key))
@@ -922,31 +1023,37 @@ impl Conversation {
         let origin = origin.clone();
         let sender = self.delivery.sender();
         let asked = Instant::now();
-        Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let result = match agent {
-                Some(agent) => {
-                    client
-                        .agent_items(&thread, &agent, &thread::query(fetch, thread::PAGE))
-                        .await
-                }
-                None => {
-                    client
-                        .transcript(&thread, &thread::query(fetch, thread::ROWS_PAGE))
-                        .await
-                }
-            };
-            let _ = sender
-                .send(Completion::Page {
-                    origin,
-                    fetch,
-                    asked,
-                    result,
-                })
-                .await;
-        })))
+        let span = tracing::info_span!("thread_page", host = %origin.host, %thread);
+        Some(AbortOnDropHandle::new(runtime().spawn(
+            tracing::Instrument::instrument(
+                async move {
+                    let result = match agent {
+                        Some(agent) => {
+                            client
+                                .agent_items(&thread, &agent, &thread::query(fetch, thread::PAGE))
+                                .await
+                        }
+                        None => {
+                            client
+                                .transcript(&thread, &thread::query(fetch, thread::ROWS_PAGE))
+                                .await
+                        }
+                    };
+                    sender
+                        .offer(Completion::Page {
+                            origin,
+                            fetch,
+                            asked,
+                            result,
+                        })
+                        .await;
+                },
+                span,
+            ),
+        )))
     }
 
-    pub fn load_work(&mut self, core: &Core, first: Seq) {
+    pub(crate) fn load_work(&mut self, core: &Core, first: Seq) {
         if self.work_reading.is_some() || self.agent.is_some() {
             return;
         }
@@ -972,8 +1079,8 @@ impl Conversation {
         self.work_reading = Some(first);
         self.work_task = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = client.work(&thread, &query).await;
-            let _ = sender
-                .send(Completion::Work {
+            sender
+                .offer(Completion::Work {
                     origin,
                     first,
                     result,
@@ -982,10 +1089,35 @@ impl Conversation {
         })));
     }
 
+    pub fn retry_load(&mut self, core: &Core) {
+        let Some(failure) = self.load_error.take() else {
+            return;
+        };
+        match failure {
+            LoadFailure::Page { fetch, .. } => {
+                let effects = match &mut self.view {
+                    Some(view) => view.retry_page(fetch),
+                    None => return,
+                };
+                self.perform(core, effects);
+            }
+            LoadFailure::Work { first, .. } => self.load_work(core, first),
+            LoadFailure::Agent { agent, .. } => {
+                self.agent = None;
+                self.open_agent(core, Some(agent));
+            }
+            failure @ LoadFailure::Ancestry { .. } => self.load_error = Some(failure),
+        }
+    }
+
     pub(crate) fn work_reading(&self) -> Option<Seq> {
         self.work_reading
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "switching agents resets every per-agent task and reading in one place so none is left behind"
+    )]
     pub fn open_agent(&mut self, core: &Core, agent: Option<ItemId>) {
         if self.agent == agent {
             return;
@@ -995,7 +1127,7 @@ impl Conversation {
         self.agent_task = None;
         self.work_task = None;
         self.work_reading = None;
-        self.answer_tasks.clear();
+        self.abandon_answers();
         self.load_error = None;
         self.scroll_frame = None;
         self.disclosures = DisclosureState::default();
@@ -1016,16 +1148,18 @@ impl Conversation {
             .and_then(|id| self.view.as_ref()?.shared_item(id));
         self.agent.clone_from(&agent);
         let effects = if let Some(view) = &mut self.view {
-            view.context.clear();
-            if let Some(item) = context {
-                view.context.insert(item.id.clone(), item);
-            }
+            view.context = Shared::new(
+                context
+                    .into_iter()
+                    .map(|item| (item.id.clone(), item))
+                    .collect(),
+            );
             view.reset()
         } else {
             Vec::new()
         };
-        self.rows.clear();
-        self.runs.clear();
+        self.rows = Shared::default();
+        self.runs = Shared::default();
         if let (Some(agent), Some((host, thread))) = (agent, self.open.as_ref()) {
             if let Some(host) = self
                 .host_instance
@@ -1040,13 +1174,17 @@ impl Conversation {
                 };
                 let sender = self.delivery.sender();
                 self.agent_task = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-                    let mut context = HashMap::new();
-                    let mut next = Some(agent);
+                    let mut context = BTreeMap::new();
+                    let mut next = Some(agent.clone());
                     let mut error = None;
                     for _ in 0..16 {
                         let Some(id) = next.take() else { break };
                         if context.contains_key(&id) {
-                            error = Some("Agent ancestry contains a cycle".to_owned());
+                            error = Some(LoadFailure::Ancestry {
+                                problem: Problem::new(
+                                    "This agent's ancestry loops back on itself, so it can't be shown.",
+                                ),
+                            });
                             break;
                         }
                         match client.item(&id).await {
@@ -1058,20 +1196,29 @@ impl Conversation {
                                 context.insert(id, Arc::new(item));
                             }
                             Ok(_) => {
-                                error = Some("Agent does not belong to this thread".to_owned());
+                                error = Some(LoadFailure::Ancestry {
+                                    problem: Problem::new("This agent doesn't belong to this thread."),
+                                });
                                 break;
                             }
                             Err(err) => {
-                                error = Some(format!("Couldn't load agent: {err:#}"));
+                                error = Some(LoadFailure::Agent {
+                                    agent: agent.clone(),
+                                    problem: Problem::calling_forge("Couldn't load this agent.", &err),
+                                });
                                 break;
                             }
                         }
                     }
                     if next.is_some() {
-                        error = Some("Agent ancestry exceeds 16 levels".to_owned());
+                        error = Some(LoadFailure::Ancestry {
+                            problem: Problem::new(
+                                "This agent is nested more than 16 levels deep, too deep to show.",
+                            ),
+                        });
                     }
-                    let _ = sender
-                        .send(Completion::Agent {
+                    sender
+                        .offer(Completion::Agent {
                             origin,
                             context,
                             error,
@@ -1085,21 +1232,6 @@ impl Conversation {
         }
         self.rebuild(core);
         self.scroll.push(ScrollAction::End);
-        self.events.push(ConversationEvent::AgentChanged);
-        self.events.push(ConversationEvent::ItemsChanged);
-    }
-
-    pub fn agent_context(&self) -> Option<Option<(u64, Option<String>)>> {
-        let agent = self.agent.as_ref()?;
-        let item = self.view.as_ref()?.item(agent);
-        Some(item.and_then(|item| match &item.kind {
-            ItemKind::Agent {
-                context_used: Some(used),
-                model,
-                ..
-            } => Some((*used, model.clone())),
-            _ => None,
-        }))
     }
 
     pub fn agent_trail(&self) -> Vec<(ItemId, String)> {
@@ -1122,7 +1254,7 @@ impl Conversation {
         trail
     }
 
-    pub fn toggle_work(
+    pub(crate) fn toggle_work(
         &mut self,
         core: &Core,
         run: &RunId,
@@ -1137,8 +1269,26 @@ impl Conversation {
                 .filter_map(|(row, _)| match row {
                     Row::Work {
                         run: Some(row_run), ..
-                    } if row_run == run => Some(row.key()),
-                    _ => None,
+                    }
+                    | Row::WorkHeader(row_run)
+                        if row_run == run =>
+                    {
+                        Some(row.key())
+                    }
+                    Row::Projected { .. }
+                    | Row::Work { .. }
+                    | Row::WorkHeader(_)
+                    | Row::EarlierWork { .. }
+                    | Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::Text { .. }
+                    | Row::Prompt(_)
+                    | Row::Compaction(_)
+                    | Row::Image(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentResult(_)
+                    | Row::AgentStatus(..) => None,
                 })
                 .collect();
             for header in headers {
@@ -1147,12 +1297,12 @@ impl Conversation {
             }
         }
         if let Some(view) = &mut self.view {
-            view.work_open.insert(run.clone(), open);
+            view.work_open.make_mut().insert(run.clone(), open);
             self.rebuild(core);
         }
     }
 
-    pub fn toggle_chain(
+    pub(crate) fn toggle_chain(
         &mut self,
         core: &Core,
         id: &ItemId,
@@ -1170,19 +1320,25 @@ impl Conversation {
             );
         }
         if let Some(view) = &mut self.view {
-            view.ui.entry(id.clone()).or_default().chain_open = Some(open);
+            view.ui.make_mut().entry(id.clone()).or_default().chain_open = Some(open);
             self.rebuild(core);
         }
     }
 
-    pub fn toggle_item(&mut self, core: &Core, id: &ItemId, open: bool) {
+    pub(crate) fn toggle_item(&mut self, core: &Core, id: &ItemId, open: bool) {
         if let Some(view) = &mut self.view {
-            view.ui.entry(id.clone()).or_default().expanded = Some(open);
+            view.ui.make_mut().entry(id.clone()).or_default().expanded = Some(open);
             self.rebuild(core);
         }
     }
 
-    pub fn answer(&mut self, core: &Core, item: ItemId, answer: Answer) {
+    fn abandon_answers(&mut self) {
+        if let Some(view) = &mut self.view {
+            view.abandon_answers();
+        }
+    }
+
+    pub(crate) fn answer(&mut self, core: &Core, item: ItemId, answer: Answer) {
         let Some((host, _)) = &self.open else { return };
         let Some(host) = self
             .host_instance
@@ -1191,12 +1347,11 @@ impl Conversation {
             return;
         };
         let Some(view) = &mut self.view else { return };
-        let ui = view.ui.entry(item.clone()).or_default();
-        if ui.sending {
+        if view.answers.get(&item).is_some_and(ItemAnswer::sending) {
             return;
         }
-        ui.sending = true;
-        ui.error = None;
+        let request = AnswerRequest(self.next_answer);
+        self.next_answer = self.next_answer.wrapping_add(1);
         let client = host.client.clone();
         let origin = Origin {
             host: host.id.clone(),
@@ -1205,18 +1360,23 @@ impl Conversation {
         };
         let sender = self.delivery.sender();
         let id = item.clone();
-        self.answer_tasks.insert(
+        let task = AbortOnDropHandle::new(runtime().spawn(async move {
+            let result = client.answer(&id, &answer).await;
+            sender
+                .offer(Completion::Answer {
+                    origin,
+                    item: id,
+                    request,
+                    result,
+                })
+                .await;
+        }));
+        view.answers.make_mut().insert(
             item,
-            AbortOnDropHandle::new(runtime().spawn(async move {
-                let result = client.answer(&id, &answer).await;
-                let _ = sender
-                    .send(Completion::Answer {
-                        origin,
-                        item: id,
-                        result,
-                    })
-                    .await;
-            })),
+            ItemAnswer::Sending {
+                request,
+                _task: Arc::new(task),
+            },
         );
         self.rebuild(core);
     }
@@ -1227,9 +1387,14 @@ impl Conversation {
             CoreEvent::Host { host, event }
                 if self.open.as_ref().is_some_and(|(open, _)| open == host) =>
             {
-                self.host_event(core, event, watched)
+                self.host_event(core, event, watched);
             }
-            _ => {}
+            CoreEvent::SettingsChanged
+            | CoreEvent::AccessChanged
+            | CoreEvent::McpSignInChanged
+            | CoreEvent::OpenUrl(_)
+            | CoreEvent::Account(_)
+            | CoreEvent::Host { .. } => {}
         }
     }
 
@@ -1260,7 +1425,11 @@ impl Conversation {
                 {
                     return;
                 }
-                let changed = view.apply_item(Arc::clone(item), watched && !self.landing.is_some());
+                let now = self.clock.now();
+                let changed = view.apply_item(
+                    Arc::clone(item),
+                    (watched && self.landing.is_none()).then_some(now),
+                );
                 view.set_live(host.live_targets(&thread));
                 let sent = matches!(
                     item.kind,
@@ -1269,31 +1438,30 @@ impl Conversation {
                         from_agent: None,
                         ..
                     }
-                ) && view.ui.get(&item.id).is_some_and(thread::ItemUi::fresh);
+                ) && view.ui.get(&item.id).is_some_and(|ui| ui.fresh(now));
                 if changed {
                     if watched && matches!(item.kind, ItemKind::AssistantMessage { .. }) {
                         self.observe_live_prose_arrival(&item.id);
                     }
                     if watched && self.landing.is_none() {
-                        self.scroll_frame.get_or_insert_with(Instant::now);
+                        self.scroll_frame.get_or_insert(now);
                     }
                     if sent {
                         self.reveal.borrow_mut().rush(item.position);
                     }
                     self.rebuild(core);
-                    self.events.push(ConversationEvent::ItemsChanged);
                 }
             }
             HostEvent::Live { thread_id, target } if thread_id == &thread => {
                 let text = host
                     .live_snapshot(&thread, target)
-                    .map(|snapshot| snapshot.text);
+                    .map(|snapshot| thread::LiveText::of(&snapshot));
                 if view.update_live(target, text) {
                     if watched && let artisan_api::LiveTarget::Text { item_id } = target {
                         self.observe_live_prose_arrival(item_id);
                     }
                     if watched && self.landing.is_none() {
-                        self.scroll_frame.get_or_insert_with(Instant::now);
+                        self.scroll_frame.get_or_insert_with(|| self.clock.now());
                     }
                     self.rebuild(core);
                 }
@@ -1308,16 +1476,21 @@ impl Conversation {
                 self.page_task = None;
                 self.work_task = None;
                 self.agent_task = None;
-                self.answer_tasks.clear();
                 self.work_reading = None;
                 self.landing = self.landing.map(|_| Landing::Loading);
                 let effects = view.reset();
                 view.set_live(host.live_targets(&thread));
                 self.perform(core, effects);
                 self.rebuild(core);
-                self.events.push(ConversationEvent::ItemsChanged);
             }
-            _ => {}
+            HostEvent::ImagesChanged
+            | HostEvent::EngineInstall { .. }
+            | HostEvent::ThreadSummaryChanged { .. }
+            | HostEvent::Changed
+            | HostEvent::WslDistro { .. }
+            | HostEvent::ThreadChanged { .. }
+            | HostEvent::Live { .. }
+            | HostEvent::EditorCall { .. } => {}
         }
     }
 
@@ -1326,7 +1499,7 @@ impl Conversation {
             self.host_instance
                 .map(|instance| (host, instance, self.generation))
         });
-        let current = core.host(&origin.host).map(|host| host.instance());
+        let current = core.host(&origin.host).map(editor_core::HostData::instance);
         completion_is_current(
             (&origin.host, origin.instance, origin.generation),
             open,
@@ -1334,7 +1507,7 @@ impl Conversation {
         )
     }
 
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
@@ -1349,13 +1522,14 @@ impl Conversation {
             .is_some_and(|((host, _), instance)| core.host_if_instance(host, instance).is_some())
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn page_task_finished(&self) -> bool {
-        self.page_task
-            .as_ref()
-            .is_some_and(|task| task.is_finished())
+    pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
+        self.delivery.wake_mailbox()
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match routing every kind of completed delivery back into the conversation"
+    )]
     pub fn drain(&mut self, core: &mut Core) -> bool {
         let mut changed = false;
         for completion in self.delivery.drain() {
@@ -1364,9 +1538,10 @@ impl Conversation {
                     .pending
                     .as_ref()
                     .is_some_and(|pending| &pending.origin == origin),
-                Completion::Work { .. } | Completion::Agent { .. } | Completion::Answer { .. } => {
-                    false
-                }
+                Completion::Work { .. }
+                | Completion::Agent { .. }
+                | Completion::Answer { .. }
+                | Completion::ReplyTail { .. } => false,
             };
             if committing {
                 self.commit(core);
@@ -1401,7 +1576,7 @@ impl Conversation {
                             self.load_error = None;
                             if self.landing == Some(Landing::Loading) {
                                 self.landing = Some(Landing::Settling {
-                                    until: Instant::now() + LANDING_SETTLE,
+                                    until: self.clock.now() + LANDING_SETTLE,
                                 });
                             }
                             let (items, spans) = (page.items.len(), page.work.len());
@@ -1411,7 +1586,19 @@ impl Conversation {
                             effects
                         }
                         Err(error) => {
-                            self.load_error = Some(format!("Couldn't load this thread: {error:#}"));
+                            tracing::warn!(
+                                thread = %view.thread,
+                                ?fetch,
+                                error = %diagnostics::chain(&error),
+                                "couldn't load a transcript page"
+                            );
+                            self.load_error = Some(LoadFailure::Page {
+                                fetch,
+                                problem: Problem::calling_forge(
+                                    LoadFailure::page_headline(fetch),
+                                    &error,
+                                ),
+                            });
                             view.page_failed()
                         }
                     };
@@ -1427,7 +1614,6 @@ impl Conversation {
                         );
                     }
                     self.perform(core, effects);
-                    self.events.push(ConversationEvent::ItemsChanged);
                 }
                 Completion::Work {
                     origin,
@@ -1443,11 +1629,18 @@ impl Conversation {
                             self.load_error = None;
                             if view.apply_work(first, page) {
                                 self.rebuild(core);
-                                self.events.push(ConversationEvent::ItemsChanged);
                             }
                         }
                         Err(error) => {
-                            self.load_error = Some(format!("Couldn't load this work: {error:#}"))
+                            tracing::warn!(
+                                thread = %view.thread,
+                                error = %diagnostics::chain(&error),
+                                "couldn't load a run's work"
+                            );
+                            self.load_error = Some(LoadFailure::Work {
+                                first,
+                                problem: Problem::calling_forge("Couldn't load this work.", &error),
+                            });
                         }
                     }
                 }
@@ -1461,7 +1654,7 @@ impl Conversation {
                     if let Some(view) = &mut self.view {
                         for (id, item) in context {
                             if view.context.get(&id).is_none_or(|old| old.seq < item.seq) {
-                                view.context.insert(id, item);
+                                view.context.make_mut().insert(id, item);
                                 changed = true;
                             }
                         }
@@ -1474,30 +1667,80 @@ impl Conversation {
                     if self.load_error.is_none() {
                         self.perform(core, effects);
                     }
-                    self.events.push(ConversationEvent::AgentChanged);
                 }
                 Completion::Answer {
                     origin,
                     item,
+                    request,
                     result,
                 } if self.accepts(core, &origin) => {
-                    self.answer_tasks.remove(&item);
-                    if let Some(ui) = self.view.as_mut().and_then(|view| view.ui.get_mut(&item)) {
-                        changed |= ui.sending;
-                        ui.sending = false;
-                        if let Err(error) = result {
-                            let error = Some(format!("Couldn't send the answer: {error:#}"));
-                            changed |= ui.error != error;
-                            ui.error = error;
+                    if let Some(view) = self.view.as_mut().filter(|view| {
+                        view.answers
+                            .get(&item)
+                            .is_some_and(|answer| answer.sent_by(request))
+                    }) {
+                        changed = true;
+                        match result {
+                            Ok(()) => {
+                                view.answers.remove(&item);
+                            }
+                            Err(error) => {
+                                view.answers
+                                    .make_mut()
+                                    .insert(item, ItemAnswer::Failed(answer_failure(&error)));
+                            }
                         }
                     }
                     self.rebuild(core);
                 }
-                _ => {}
+                Completion::ReplyTail {
+                    origin,
+                    reply,
+                    read,
+                } if self.accepts(core, &origin)
+                    && matches!(
+                        &self.reply_tail,
+                        Some(super::announce::ReplyTail::Reading { reply: reading, .. }) if *reading == reply
+                    ) =>
+                {
+                    let (_, thread) = self
+                        .open
+                        .as_ref()
+                        .expect("invariant: an accepted completion belongs to the open thread");
+                    self.reply_tail = Some(super::announce::ReplyTail::settle(thread, reply, read));
+                    changed = true;
+                }
+                Completion::Held { .. }
+                | Completion::Page { .. }
+                | Completion::Work { .. }
+                | Completion::Agent { .. }
+                | Completion::Answer { .. }
+                | Completion::ReplyTail { .. } => {}
             }
         }
         changed
     }
+}
+
+fn answer_failure(error: &CallError) -> String {
+    use artisan_api::Failure;
+    let why = match error.refused() {
+        Some(
+            failure @ (Failure::Thread(_)
+            | Failure::Run(_)
+            | Failure::Draft(_)
+            | Failure::Setting(_)
+            | Failure::Project(_)
+            | Failure::Mcp(_)
+            | Failure::Agent(_)
+            | Failure::Auth(_)
+            | Failure::Resource(_)
+            | Failure::Extension(_)
+            | Failure::Engine(_)),
+        ) => failure.to_string(),
+        Some(Failure::Internal | Failure::Legacy { .. }) | None => diagnostics::chain(error),
+    };
+    format!("Couldn't send the answer: {why}")
 }
 
 fn shape_source<'a>(
@@ -1505,7 +1748,7 @@ fn shape_source<'a>(
     id: &ItemId,
     slot: fold::Slot,
 ) -> Option<super::projection::ShapeSource<'a>> {
-    use super::projection::{ShapeSource, ShapeText};
+    use super::projection::{ShapeRevision, ShapeSource, ShapeText};
     let item = view.item(id)?;
     let seq = match slot {
         fold::Slot::Text(fold::TextSection::User) => {
@@ -1514,10 +1757,16 @@ fn shape_source<'a>(
             item.seq.hash(&mut hasher);
             hasher.finish()
         }
-        _ => 0,
+        fold::Slot::Prose
+        | fold::Slot::Plain(_)
+        | fold::Slot::Text(_)
+        | fold::Slot::Output
+        | fold::Slot::Answer
+        | fold::Slot::Preview => 0,
     };
+    let saved = ShapeRevision::Saved(item.seq);
     match (slot, &item.kind) {
-        (fold::Slot::Prose, artisan_api::ItemKind::AssistantMessage { text, .. }) => {
+        (fold::Slot::Prose, ItemKind::AssistantMessage { text, .. }) => {
             let live = (item.status == artisan_api::Status::Running)
                 .then(|| {
                     view.live.get(&artisan_api::LiveTarget::Text {
@@ -1526,14 +1775,19 @@ fn shape_source<'a>(
                 })
                 .flatten();
             match (live, text) {
-                (Some(rope), _) => Some(ShapeSource {
-                    text: ShapeText::Live(rope),
+                (Some(live), _) => Some(ShapeSource {
+                    text: ShapeText::Live(&live.text),
+                    revision: ShapeRevision::Live {
+                        epoch: live.epoch,
+                        bytes: live.text.len_bytes(),
+                    },
                     message: false,
                     seq,
                     running: item.status == artisan_api::Status::Running,
                 }),
                 (None, artisan_api::TextContent::Inline(source)) => Some(ShapeSource {
                     text: ShapeText::Inline(source),
+                    revision: saved,
                     message: false,
                     seq,
                     running: item.status == artisan_api::Status::Running,
@@ -1543,18 +1797,20 @@ fn shape_source<'a>(
         }
         (
             fold::Slot::Text(fold::TextSection::User),
-            artisan_api::ItemKind::UserMessage {
+            ItemKind::UserMessage {
                 text: artisan_api::TextContent::Inline(source),
                 ..
             },
         ) => Some(ShapeSource {
             text: ShapeText::Inline(source),
+            revision: saved,
             message: true,
             seq,
             running: false,
         }),
         (fold::Slot::Text(_), _) => slot.inline_text(item).map(|source| ShapeSource {
             text: ShapeText::Inline(source),
+            revision: saved,
             message: false,
             seq,
             running: false,
@@ -1574,3 +1830,19 @@ mod agent_tests;
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/switch.rs"]
 mod switch_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/arrival.rs"]
+mod arrival_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/answer.rs"]
+mod answer_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/memory.rs"]
+mod memory_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/load_failure.rs"]
+mod load_failure_tests;

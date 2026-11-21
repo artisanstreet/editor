@@ -14,50 +14,65 @@ pub struct BodyProjection {
     pub leaves: Range<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum ShapeText<'a> {
     Inline(&'a str),
     Live(&'a ropey::Rope),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShapeRevision {
+    Saved(artisan_api::Seq),
+    Live { epoch: u64, bytes: usize },
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct ShapeSource<'a> {
-    pub text: ShapeText<'a>,
-    pub message: bool,
-    pub seq: u64,
-    pub running: bool,
+    pub(crate) text: ShapeText<'a>,
+    pub(crate) revision: ShapeRevision,
+    pub(crate) message: bool,
+    pub(crate) seq: u64,
+    pub(crate) running: bool,
 }
 
 impl ShapeSource<'_> {
-    fn fingerprint(&self) -> (usize, u64) {
-        let mut hasher = DefaultHasher::new();
-        let len = match self.text {
-            ShapeText::Inline(text) => {
-                hasher.write(text.as_bytes());
-                text.len()
-            }
-            ShapeText::Live(rope) => {
-                for chunk in rope.chunks() {
-                    hasher.write(chunk.as_bytes());
-                }
-                rope.len_bytes()
-            }
-        };
-        self.message.hash(&mut hasher);
-        (len, hasher.finish())
-    }
-
     fn text(&self) -> Cow<'_, str> {
         match self.text {
             ShapeText::Inline(text) => Cow::Borrowed(text),
             ShapeText::Live(rope) => Cow::Owned(rope.to_string()),
         }
     }
+
+    fn appended_to(&self, shape: &BodyShape) -> Option<String> {
+        match (shape.revision, self.revision, self.text) {
+            (
+                ShapeRevision::Live { epoch, bytes },
+                ShapeRevision::Live {
+                    epoch: next_epoch,
+                    bytes: next_bytes,
+                },
+                ShapeText::Live(rope),
+            ) if epoch == next_epoch
+                && bytes <= next_bytes
+                && shape.message == self.message
+                && !self.message =>
+            {
+                Some(rope.byte_slice(bytes..).chunks().collect())
+            }
+            (
+                ShapeRevision::Saved(_) | ShapeRevision::Live { .. },
+                ShapeRevision::Saved(_) | ShapeRevision::Live { .. },
+                ShapeText::Inline(_) | ShapeText::Live(_),
+            ) => None,
+        }
+    }
 }
 
 struct BodyShape {
-    fingerprint: (usize, u64),
+    revision: ShapeRevision,
+    message: bool,
     signatures: Arc<[u64]>,
+    streaming: Option<editor_ui::markdown::ShapedSource>,
 }
 
 #[derive(Default)]
@@ -66,13 +81,13 @@ pub struct Projections {
     shapes: HashMap<BodyKey, BodyShape>,
 }
 
-pub fn block_version(
-    signature: u64,
-    seq: u64,
-    running: bool,
-    block: usize,
-    count: usize,
-) -> u64 {
+impl std::fmt::Debug for Projections {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Projections").finish_non_exhaustive()
+    }
+}
+
+fn block_version(signature: u64, seq: u64, running: bool, block: usize, count: usize) -> u64 {
     let mut hash = DefaultHasher::new();
     signature.hash(&mut hash);
     seq.hash(&mut hash);
@@ -83,7 +98,23 @@ pub fn block_version(
 }
 
 impl Projections {
-    pub fn leaf_count(&self, key: &BodyKey) -> Option<usize> {
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.bodies.capacity() * size_of::<(BodyKey, BodyProjection)>()
+            + self.shapes.capacity() * size_of::<(BodyKey, BodyShape)>()
+            + self
+                .shapes
+                .values()
+                .map(|shape| {
+                    size_of_val(&*shape.signatures)
+                        + shape
+                            .streaming
+                            .as_ref()
+                            .map_or(0, editor_ui::markdown::ShapedSource::resident_bytes)
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn leaf_count(&self, key: &BodyKey) -> Option<usize> {
         if let Some(shape) = self.shapes.get(key) {
             return Some(shape.signatures.len());
         }
@@ -91,11 +122,11 @@ impl Projections {
         (leaves.start == 0).then_some(leaves.end)
     }
 
-    pub fn shaped(&self, key: &BodyKey) -> bool {
+    pub(crate) fn shaped(&self, key: &BodyKey) -> bool {
         self.shapes.contains_key(key)
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.bodies.clear();
         self.shapes.clear();
     }
@@ -109,28 +140,49 @@ impl Projections {
     }
 
     fn shape(&mut self, key: &BodyKey, source: &ShapeSource<'_>) -> Option<Arc<[u64]>> {
-        let fingerprint = source.fingerprint();
         if let Some(shape) = self
             .shapes
             .get(key)
-            .filter(|shape| shape.fingerprint == fingerprint)
+            .filter(|shape| shape.revision == source.revision && shape.message == source.message)
         {
-            return Some(shape.signatures.clone());
+            return Some(Arc::clone(&shape.signatures));
         }
-        let text = source.text();
-        let command = source
-            .message
-            .then(|| artisan_mentions::special_command(&text))
-            .flatten()
-            .and_then(|range| text.get(range));
-        let signatures: Arc<[u64]> = editor_ui::markdown::leaf_signatures(&text, command)
-            .ok()?
-            .into();
+        let previous = self.shapes.remove(key);
+        let appended = previous
+            .as_ref()
+            .filter(|shape| shape.streaming.is_some())
+            .and_then(|shape| source.appended_to(shape));
+        let streaming = previous.and_then(|shape| shape.streaming);
+        let shaped = match (streaming, appended) {
+            (Some(streaming), Some(appended)) => streaming.append(&appended),
+            (streaming, None | Some(_)) => {
+                let text = source.text();
+                let command = source
+                    .message
+                    .then(|| artisan_mentions::special_command(&text))
+                    .flatten()
+                    .and_then(|range| text.get(range));
+                match streaming {
+                    Some(previous) => previous.extend(&text, command),
+                    None => editor_ui::markdown::ShapedSource::new(&text, command),
+                }
+            }
+        };
+        let shaped = match shaped {
+            Ok(shaped) => shaped,
+            Err(error) => {
+                tracing::warn!(item = %key.item, slot = ?key.slot, %error, "shape message body; showing it as one block");
+                return None;
+            }
+        };
+        let signatures = Arc::clone(shaped.signatures());
         self.shapes.insert(
             key.clone(),
             BodyShape {
-                fingerprint,
-                signatures: signatures.clone(),
+                revision: source.revision,
+                message: source.message,
+                signatures: Arc::clone(&signatures),
+                streaming: source.running.then_some(shaped),
             },
         );
         Some(signatures)
@@ -171,7 +223,11 @@ impl Projections {
                 }
                 continue;
             }
-            let shape_source = if slot.literal() { None } else { source(id, *slot) };
+            let shape_source = if slot.literal() {
+                None
+            } else {
+                source(id, *slot)
+            };
             if let Some(source) = shape_source
                 && let Some(signatures) = self
                     .shape(&key, &source)
@@ -221,3 +277,7 @@ impl Projections {
         result
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/projection.rs"]
+mod tests;

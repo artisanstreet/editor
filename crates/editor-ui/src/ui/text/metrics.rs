@@ -1,9 +1,11 @@
 use aqua_text::{FontFamily, TextStyle};
 
 use super::editor::Mode;
-use crate::ui::theme::{ArtisanTheme, Opacity, ProseTypography, RadiusStep, RadiusTokens};
+use crate::ui::theme::{
+    ArtisanTheme, Opacity, ProseTypography, RadiusStep, RadiusTokens, SpacingTokens,
+};
 
-pub struct EditorMetrics {
+pub(crate) struct EditorMetrics {
     pub text_style: TextStyle,
     pub line_height: f32,
     pub visible_lines: f32,
@@ -22,7 +24,7 @@ pub struct EditorMetrics {
 }
 
 impl EditorMetrics {
-    pub fn resolve(theme: &ArtisanTheme, mode: Mode, bare: bool, inset: bool) -> Self {
+    pub(crate) fn resolve(theme: &ArtisanTheme, mode: Mode, bare: bool, inset: bool) -> Self {
         let (size, line_height, visible_lines, mut padding_x, mut padding_y, mut radius) =
             match mode {
                 Mode::SingleLine => (14.0, 20.0, 1.0, 6.0, 2.0, 6.0),
@@ -30,8 +32,8 @@ impl EditorMetrics {
                     16.0,
                     24.0,
                     8.0,
-                    theme.spacing.steps(3.0),
-                    theme.spacing.steps(3.0),
+                    SpacingTokens::steps(3.0),
+                    SpacingTokens::steps(3.0),
                     RadiusTokens::value(RadiusStep::Xl),
                 ),
                 Mode::Prompt => (16.0, 24.0, 1.0, 8.0, 4.0, 0.0),
@@ -46,8 +48,8 @@ impl EditorMetrics {
         Self {
             text_style: TextStyle {
                 families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                size_px: size,
-                line_height_px: line_height,
+                size_px: theme.typography.size(size),
+                line_height_px: theme.typography.size(line_height),
                 weight: ProseTypography::BODY_WEIGHT,
                 letter_spacing_em: Some(theme.typography.tracking_em),
                 gpui_source_color: Some([
@@ -58,7 +60,7 @@ impl EditorMetrics {
                 ]),
                 ..TextStyle::default()
             },
-            line_height,
+            line_height: theme.typography.size(line_height),
             visible_lines,
             padding_x,
             padding_y,
@@ -83,7 +85,7 @@ impl EditorMetrics {
         }
     }
 
-    pub fn text_appearance(&self) -> aqua_ui::tree::TextAppearance {
+    pub(crate) fn text_appearance(&self) -> aqua_ui::tree::TextAppearance {
         aqua_ui::tree::TextAppearance {
             selection: self.selection,
             caret: self.caret,
@@ -93,7 +95,7 @@ impl EditorMetrics {
         }
     }
 
-    pub fn gpui_text_appearance(theme: &ArtisanTheme) -> aqua_ui::tree::GpuiTextAppearance {
+    pub(crate) fn gpui_text_appearance(theme: &ArtisanTheme) -> aqua_ui::tree::GpuiTextAppearance {
         let foreground = theme.colors.text.to_reference_paint();
         aqua_ui::tree::GpuiTextAppearance {
             selection: crate::ui::chrome::card::polar_selection(),
@@ -104,11 +106,11 @@ impl EditorMetrics {
         }
     }
 
-    pub fn min_height(&self) -> f32 {
-        self.line_height * self.visible_lines + self.padding_y * 2.0 + self.border_width * 2.0
-    }
-
-    pub fn prompt_max_height(&self, viewport_height: f32) -> f32 {
-        (viewport_height * 0.4).max(self.min_height() * 2.0)
+    pub(crate) fn min_height(&self) -> f32 {
+        self.border_width.mul_add(
+            2.0,
+            self.padding_y
+                .mul_add(2.0, self.line_height * self.visible_lines),
+        )
     }
 }

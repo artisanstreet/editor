@@ -1,0 +1,1 @@
+ALTER TABLE continues ADD COLUMN due_at INTEGER;

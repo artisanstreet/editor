@@ -1,8 +1,8 @@
-use editor_sources::SourceProviderExt;
+use artisan_api::{Collection, CollectionRef, ContentRef, ItemId, Question, QuestionOption};
 use editor_composer::questionnaire::QuestionnairePanel;
 use editor_core::{Core, HostId, HostInstance, RangeState};
+use editor_sources::SourceProviderExt;
 use editor_sources::{CollectionBrowser, page_record};
-use artisan_api::{Collection, CollectionRef, ContentRef, ItemId, Question, QuestionOption};
 use std::{cell::RefCell, rc::Rc};
 
 struct Owner<T: serde::de::DeserializeOwned + Send + 'static> {
@@ -60,8 +60,14 @@ pub struct QuestionPages {
     pub source_view: Option<editor_sources::ContentText>,
 }
 
+impl std::fmt::Debug for QuestionPages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionPages").finish_non_exhaustive()
+    }
+}
+
 impl QuestionPages {
-    pub fn sync(
+    pub(crate) fn sync(
         &mut self,
         core: &Core,
         host_id: Option<&HostId>,
@@ -112,31 +118,29 @@ impl QuestionPages {
                 Collection::Stored(source) => Some((question.id.clone(), source.clone())),
                 Collection::Inline(_) => None,
             });
-        match option {
-            Some((question, source)) => {
-                if self.option_question.as_ref() != Some(&(panel.step, question.clone()))
-                    || self.options.as_ref().is_none_or(|owner| {
-                        !owner.matches(host_id, instance, &active.item, &source)
-                    })
-                {
-                    self.options = Some(Owner {
-                        host: host_id.clone(),
-                        instance,
-                        item: active.item.clone(),
-                        source: source.clone(),
-                        browser: Rc::new(RefCell::new(CollectionBrowser::new(host, source))),
-                    });
-                    self.option_question = Some((panel.step, question));
-                }
+        if let Some((question, source)) = option {
+            if self.option_question.as_ref() != Some(&(panel.step, question.clone()))
+                || self
+                    .options
+                    .as_ref()
+                    .is_none_or(|owner| !owner.matches(host_id, instance, &active.item, &source))
+            {
+                self.options = Some(Owner {
+                    host: host_id.clone(),
+                    instance,
+                    item: active.item.clone(),
+                    source: source.clone(),
+                    browser: Rc::new(RefCell::new(CollectionBrowser::new(host, source))),
+                });
+                self.option_question = Some((panel.step, question));
             }
-            None => {
-                self.options = None;
-                self.option_question = None;
-            }
+        } else {
+            self.options = None;
+            self.option_question = None;
         }
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.questions = None;
         self.options = None;
         self.option_question = None;
@@ -159,7 +163,7 @@ impl QuestionPages {
         }
     }
 
-    pub fn question_error(&self) -> Option<&str> {
+    pub fn question_error(&self) -> Option<&editor_core::Problem> {
         match self.questions.as_ref()?.browser.window().state() {
             RangeState::Failed(error) => Some(error),
             RangeState::Loading | RangeState::Ready(_) => None,
@@ -224,7 +228,7 @@ impl QuestionPages {
         true
     }
 
-    pub fn option_action(
+    fn option_action(
         &self,
         panel: &QuestionnairePanel,
         index: u64,
@@ -262,7 +266,13 @@ pub struct OptionAction {
     action: editor_sources::CollectionAction<QuestionOption>,
 }
 
-pub fn option_preview(
+impl std::fmt::Debug for OptionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OptionAction").finish_non_exhaustive()
+    }
+}
+
+fn option_preview(
     option: &QuestionOption,
     panel: &QuestionnairePanel,
 ) -> editor_sources::CollectionPreview {
@@ -274,7 +284,7 @@ pub fn option_preview(
     }
 }
 
-pub fn question_preview(question: &Question, index: u64) -> editor_sources::CollectionPreview {
+fn question_preview(question: &Question, index: u64) -> editor_sources::CollectionPreview {
     let preview = match &question.text {
         artisan_api::TextContent::Inline(text) => text.chars().take(160).collect(),
         artisan_api::TextContent::Stored(_) => "Read content".to_owned(),
@@ -292,6 +302,12 @@ pub struct QuestionCollection {
     owner: Option<Owner<Question>>,
 }
 
+impl std::fmt::Debug for QuestionCollection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionCollection").finish_non_exhaustive()
+    }
+}
+
 pub struct QuestionCollectionAction {
     host: HostId,
     instance: HostInstance,
@@ -300,32 +316,43 @@ pub struct QuestionCollectionAction {
     action: editor_sources::CollectionAction<Question>,
 }
 
+impl std::fmt::Debug for QuestionCollectionAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionCollectionAction")
+            .finish_non_exhaustive()
+    }
+}
+
 impl QuestionCollectionAction {
-    pub fn matches_item(&self, item: &artisan_api::Item) -> bool {
+    pub(crate) fn matches_item(&self, item: &artisan_api::Item) -> bool {
         item.id == self.item
             && matches!(&item.kind, artisan_api::ItemKind::Question { questions: Collection::Stored(source), .. } if source == &self.source)
     }
 }
 
 impl QuestionCollection {
-    pub fn identity(&self) -> Option<(ItemId, CollectionRef)> {
+    pub(crate) fn identity(&self) -> Option<(ItemId, CollectionRef)> {
         self.owner
             .as_ref()
             .map(|owner| (owner.item.clone(), owner.source.clone()))
     }
-    pub fn dispatch_changed(&mut self, core: &Core, action: QuestionCollectionAction) -> bool {
+    pub(crate) fn dispatch_changed(
+        &mut self,
+        core: &Core,
+        action: QuestionCollectionAction,
+    ) -> bool {
         let before = self.browser().map(|browser| browser.borrow().view_state());
         self.dispatch(core, action);
         let after = self.browser().map(|browser| browser.borrow().view_state());
         before != after
     }
 
-    pub fn drain_changed(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_changed(&self, core: &Core) -> bool {
         self.browser().is_some_and(|browser| {
             editor_sources::drain_collection_changed(&mut browser.borrow_mut(), core)
         })
     }
-    pub fn open_provider(
+    pub(crate) fn open_provider(
         &mut self,
         provider: &editor_core::host::ScopedSourceProvider,
         item: &ItemId,
@@ -363,7 +390,7 @@ impl QuestionCollection {
         }
         true
     }
-    pub fn retain(
+    pub(crate) fn retain(
         &mut self,
         core: &Core,
         item: impl FnOnce(&ItemId) -> Option<std::sync::Arc<artisan_api::Item>>,
@@ -393,46 +420,15 @@ impl QuestionCollection {
         }
     }
 
-    pub fn open(
-        &mut self,
-        core: &Core,
-        host: &HostId,
-        instance: HostInstance,
-        item: &ItemId,
-        source: &CollectionRef,
-    ) -> bool {
-        let Some(host_data) = core.host_if_instance(host, instance) else {
-            self.owner = None;
-            return false;
-        };
-        if self
-            .owner
-            .as_ref()
-            .is_none_or(|owner| !owner.matches(host, instance, item, source))
-        {
-            self.owner = Some(Owner {
-                host: host.clone(),
-                instance,
-                item: item.clone(),
-                source: source.clone(),
-                browser: Rc::new(RefCell::new(CollectionBrowser::new(
-                    host_data,
-                    source.clone(),
-                ))),
-            });
-        }
-        true
-    }
-
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.owner = None;
     }
 
-    pub fn browser(&self) -> Option<Rc<RefCell<CollectionBrowser<Question>>>> {
+    pub(crate) fn browser(&self) -> Option<Rc<RefCell<CollectionBrowser<Question>>>> {
         Some(Rc::clone(&self.owner.as_ref()?.browser))
     }
 
-    pub fn dispatch(&mut self, core: &Core, action: QuestionCollectionAction) {
+    fn dispatch(&mut self, core: &Core, action: QuestionCollectionAction) {
         use editor_sources::CollectionAction;
         let Some(owner) = self.owner.as_mut() else {
             return;
@@ -449,64 +445,59 @@ impl QuestionCollection {
             CollectionAction::Request(index) => browser.request(core, index),
             CollectionAction::Retry => browser.retry(core),
             CollectionAction::Back => browser.clear_detail(),
-            CollectionAction::Read { page, index } => {
-                browser.open_detail(core, page, index, question_preview);
-            }
-            CollectionAction::Choose { page, index } => {
+            CollectionAction::Read { page, index } | CollectionAction::Choose { page, index } => {
                 browser.open_detail(core, page, index, question_preview);
             }
         }
     }
 
-    pub fn view(
+    pub(crate) fn view(
         &self,
-        theme: editor_ui::theme::ArtisanTheme,
+        theme: &editor_ui::theme::ArtisanTheme,
         document: aqua_text::document::SelectionDocumentId,
         source_id: aqua_text::document::SelectionSourceId,
         stored_detail: Option<aqua_ui::element::Element>,
         emit: Rc<dyn Fn(QuestionCollectionAction)>,
-    ) -> Result<Option<editor_sources::ContentView>, &'static str> {
-        let Some(owner) = self.owner.as_ref() else {
-            return Ok(None);
-        };
+    ) -> Option<editor_sources::ContentView> {
+        let owner = self.owner.as_ref()?;
         let browser = Rc::clone(&owner.browser);
         let host = owner.host.clone();
         let instance = owner.instance;
         let item = owner.item.clone();
         let source = owner.source.clone();
-        let action = Rc::new(move |action| {
-            emit(QuestionCollectionAction {
-                host: host.clone(),
-                instance,
-                item: item.clone(),
-                source: source.clone(),
-                action,
-            })
-        });
-        if browser.borrow().selected.is_some() {
-            return editor_sources::collection_detail(
+        let action: Rc<dyn Fn(editor_sources::CollectionAction<Question>)> =
+            Rc::new(move |action| {
+                emit(QuestionCollectionAction {
+                    host: host.clone(),
+                    instance,
+                    item: item.clone(),
+                    source: source.clone(),
+                    action,
+                });
+            });
+        if browser.borrow().selected().is_some() {
+            return Some(editor_sources::collection_detail(
                 &browser.borrow(),
                 theme,
                 None,
                 document,
                 source_id,
                 stored_detail,
-                action,
-            )
-            .map(Some);
+                &action,
+            ));
         }
-        Ok(Some(editor_sources::ContentView {
+        Some(editor_sources::ContentView {
             element: editor_sources::collection_list(
-                browser,
+                &browser,
                 "Questions",
                 theme,
                 None,
                 Rc::new(question_preview),
                 false,
-                action,
+                &action,
             ),
             selection: None,
-        }))
+        })
     }
 }
 
@@ -574,15 +565,13 @@ impl QuestionPages {
 pub fn stored_options(
     pages: &QuestionPages,
     panel: &QuestionnairePanel,
-    theme: editor_ui::theme::ArtisanTheme,
+    theme: &editor_ui::theme::ArtisanTheme,
     document: aqua_text::document::SelectionDocumentId,
     source_id: aqua_text::document::SelectionSourceId,
     stored_detail: Option<aqua_ui::element::Element>,
     dispatch: Rc<dyn Fn(OptionAction)>,
-) -> Result<Option<editor_sources::ContentView>, &'static str> {
-    let Some(owner) = pages.options.as_ref() else {
-        return Ok(None);
-    };
+) -> Option<editor_sources::ContentView> {
+    let owner = pages.options.as_ref()?;
     let browser = Rc::clone(&owner.browser);
     let host = owner.host.clone();
     let instance = owner.instance;
@@ -600,17 +589,16 @@ pub fn stored_options(
                 action,
             });
         });
-    if browser.borrow().selected.is_some() {
-        return editor_sources::collection_detail(
+    if browser.borrow().selected().is_some() {
+        return Some(editor_sources::collection_detail(
             &browser.borrow(),
             theme,
             None,
             document,
             source_id,
             stored_detail,
-            dispatch,
-        )
-        .map(Some);
+            &dispatch,
+        ));
     }
     let ticked = panel.ticked.clone();
     let sending = panel.sending.is_some();
@@ -622,10 +610,10 @@ pub fn stored_options(
             disabled: sending,
         },
     );
-    Ok(Some(editor_sources::ContentView {
+    Some(editor_sources::ContentView {
         element: editor_sources::collection_list(
-            browser, "Choices", theme, None, present, true, dispatch,
+            &browser, "Choices", theme, None, present, true, &dispatch,
         ),
         selection: None,
-    }))
+    })
 }

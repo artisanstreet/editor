@@ -98,6 +98,7 @@ impl ResidentBytes for ToolKind {
                         .map(|target| target.0.capacity())
                         .sum::<usize>()
             }
+            Self::Workflow { name, input } => optional(name.as_ref()) + payload(input.as_ref()),
             Self::Other { name, input } => name.capacity() + payload(input.as_ref()),
         }
     }

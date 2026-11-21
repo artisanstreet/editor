@@ -1,9 +1,11 @@
 use super::*;
+use crate::ui::media::source::MediaFailure;
+use editor_core::runtime;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-type Reply = oneshot::Sender<Result<Arc<[u8]>, MediaFailure>>;
+type Reply = oneshot::Sender<Result<Arc<[u8]>, MediaLoadError>>;
 
 const OBJ: &[u8] = b"v 0 0 0\nv 2 0 0\nv 0 1 0\nf 1 2 3\n";
 const LIMIT: Duration = Duration::from_secs(10);
@@ -21,14 +23,23 @@ impl Fixture {
         let fetcher = MediaFetcher::new("forge", move |_| {
             let (reply, receive) = oneshot::channel();
             calls.send(reply).unwrap();
-            Box::pin(async move { receive.await.unwrap_or(Err(MediaFailure::Unreadable)) })
+            Box::pin(async move {
+                receive
+                    .await
+                    .unwrap_or(Err(MediaLoadError::Fetch(MediaFailure::Unreadable(
+                        std::sync::Arc::new(std::io::Error::other("unreadable")),
+                    ))))
+            })
         })
         .owned_by(&[7], 1);
         let assets = ModelAssets::new();
         let (wake, incoming) = mpsc::channel();
-        assets.mailbox.borrow().set_waker(Arc::new(move || {
-            let _ = wake.send(());
-        }));
+        assets
+            .loads
+            .wake_mailbox()
+            .set_waker(Arc::new(move || match wake.send(()) {
+                Ok(()) | Err(mpsc::SendError(())) => {}
+            }));
         Self {
             assets,
             fetcher,
@@ -55,7 +66,7 @@ impl Fixture {
             Arc::new(|| {}),
         )
     }
-    fn reply(&self, bytes: Result<Arc<[u8]>, MediaFailure>) {
+    fn reply(&self, bytes: Result<Arc<[u8]>, MediaLoadError>) {
         self.calls.recv_timeout(LIMIT).unwrap().send(bytes).unwrap();
         self.wake.recv_timeout(LIMIT).unwrap();
         assert!(self.assets.drain());
@@ -92,7 +103,7 @@ fn concurrent_waiters_share_one_real_obj_parse() {
         panic!("expected software geometry")
     };
     assert_eq!(mesh.positions.len(), 3);
-    assert!(fixture.calls.try_recv().is_err());
+    fixture.calls.try_recv().unwrap_err();
 }
 
 #[test]
@@ -143,13 +154,11 @@ fn capability_format_and_up_select_distinct_cached_results() {
             .is_none()
     );
     fixture.reply(Ok(Arc::from(OBJ)));
-    assert!(
-        fixture
-            .request(&fixture.fetcher, soft, Some(Format::Stl), None, 4)
-            .unwrap()
-            .is_err()
-    );
-    assert!(fixture.calls.try_recv().is_err());
+    fixture
+        .request(&fixture.fetcher, soft, Some(Format::Stl), None, 4)
+        .unwrap()
+        .expect_err("an OBJ body declared as STL fails to load");
+    fixture.calls.try_recv().unwrap_err();
 }
 
 #[test]
@@ -161,7 +170,7 @@ fn failure_is_cached_and_a_new_revision_fetches_fresh_data() {
             .request(&fixture.fetcher, mode, None, None, 1)
             .is_none()
     );
-    fixture.reply(Err(MediaFailure::Missing));
+    fixture.reply(Err(MediaLoadError::Fetch(MediaFailure::Missing)));
     assert_eq!(
         fixture
             .request(&fixture.fetcher, mode, None, None, 1)
@@ -189,7 +198,7 @@ fn failure_is_cached_and_a_new_revision_fetches_fresh_data() {
             .triangles,
         1
     );
-    assert!(fixture.calls.try_recv().is_err());
+    fixture.calls.try_recv().unwrap_err();
 }
 
 #[test]
@@ -205,7 +214,9 @@ fn removing_owner_cancels_pending_fetch_and_recreation_loads_again() {
     let (cancelled, observed) = mpsc::channel();
     runtime::runtime().spawn(async move {
         abandoned.closed().await;
-        let _ = cancelled.send(());
+        match cancelled.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }
     });
     fixture.fetcher.retain_resources(&[]);
     observed.recv_timeout(LIMIT).unwrap();

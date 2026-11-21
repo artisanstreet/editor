@@ -2,51 +2,61 @@
 name = "editor-aqua"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "The native Windows Artisan Editor, built with Aqua"
 build = "build.rs"
 autotests = true
 
+[lib]
+doctest = false
+
+[[example]]
+name = "replay_engine"
+path = "../forge-engines/tests/fakes/engine/main.rs"
+required-features = ["qualification"]
+
 [features]
-test-support = ["editor-core/test-support", "editor-ui/test-support", "editor-sources/test-support", "editor-composer/test-support", "editor-conversation/test-support", "editor-sidebar/test-support", "editor-inspector/test-support", "editor-settings/test-support", "editor-marketplace/test-support"]
-heap-probe = ["aqua/probe-allocator"]
-profile-heap = ["aqua/profile-alloc"]
-qualification = ["editor-conversation/qualification", "test-support", "dep:forge-http", "dep:forge-store", "forge-store/qualification", "dep:rusqlite", "dep:sha2", "dep:hex"]
+test-support = ["editor-ui/test-support", "editor-sources/test-support", "editor-composer/test-support", "editor-conversation/test-support", "editor-sidebar/test-support", "editor-inspector/test-support", "editor-settings/test-support", "editor-marketplace/test-support"]
+qualification = ["editor-conversation/qualification", "test-support", "dep:forge-http", "dep:forge-store", "forge-store/qualification", "dep:rusqlite", "dep:sha2", "dep:hex", "test-support/scenario"]
 capture = ["qualification", "dep:aqua-gpu-d3d11", "dep:aqua-gpu-ref", "dep:aqua-runtime"]
 
 [dependencies]
-editor-core = { path = "../editor-core" }
-editor-ui = { path = "../editor-ui" }
-editor-sources = { path = "../editor-sources" }
-editor-composer = { path = "../editor-composer" }
-editor-conversation = { path = "../editor-conversation" }
-editor-sidebar = { path = "../editor-sidebar" }
-editor-inspector = { path = "../editor-inspector" }
-editor-settings = { path = "../editor-settings" }
-editor-marketplace = { path = "../editor-marketplace" }
+editor-core.workspace = true
+editor-ui.workspace = true
+editor-sources.workspace = true
+editor-composer.workspace = true
+editor-conversation.workspace = true
+editor-sidebar.workspace = true
+editor-inspector.workspace = true
+editor-settings.workspace = true
+editor-marketplace.workspace = true
 aqua = { workspace = true }
 aqua-core = { workspace = true }
 aqua-protocol = { workspace = true }
 aqua-text = { workspace = true }
+icu_casemap.workspace = true
+icu_normalizer.workspace = true
 aqua-ui = { workspace = true }
 aqua-reactive = { workspace = true }
 aqua-runtime = { workspace = true, optional = true }
 aqua-gpu-d3d11 = { workspace = true, optional = true }
 aqua-gpu-ref = { workspace = true, optional = true }
-artisan-api = { path = "../artisan-api", features = ["tls"] }
-artisan-account = { path = "../artisan-account" }
-artisan-paths = { path = "../artisan-paths" }
-artisan-payload = { path = "../artisan-payload" }
-semver = "=1.0.28"
-editor-assets = { path = "../editor-assets" }
-editor-audio = { path = "../editor-audio" }
-forge-http = { path = "../forge-http", optional = true }
-forge-store = { path = "../forge-store", optional = true }
+artisan-api = { workspace = true, features = ["tls"] }
+artisan-account.workspace = true
+artisan-paths.workspace = true
+diagnostics.workspace = true
+artisan-payload.workspace = true
+semver.workspace = true
+editor-assets.workspace = true
+editor-audio.workspace = true
+forge-http = { workspace = true, optional = true }
+forge-store = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
-palette = "0.7"
-anyhow.workspace = true
+palette.workspace = true
+thiserror.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -56,60 +66,32 @@ tracing-subscriber.workspace = true
 tempfile.workspace = true
 tokio-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
-file-rotate = "0.8.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
 
 [target.'cfg(windows)'.dev-dependencies]
-aqua-a11y-uia = { workspace = true }
 aqua-ime-tsf = { workspace = true, features = ["double"] }
 
 [dev-dependencies]
+aqua-a11y-uia = { workspace = true }
+axum.workspace = true
 aqua-media = { workspace = true }
-color.workspace = true
+insta.workspace = true
 base64.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 editor-aqua = { path = ".", features = ["test-support"] }
-sha2.workspace = true
-hex.workspace = true
+test-support = { workspace = true, features = ["shell", "net", "tokio", "http"] }
+divan.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-panic = "deny"
-todo = "deny"
-unimplemented = "deny"
-dbg_macro = "deny"
-allow_attributes_without_reason = "deny"
-undocumented_unsafe_blocks = "deny"
-str_to_string = "deny"
-missing_assert_message = "deny"
-unwrap_in_result = "deny"
-collapsible_if = "allow"
-collapsible_match = "allow"
-too_many_arguments = "allow"
-type_complexity = "allow"
-useless_conversion = "allow"
-needless_borrow = "allow"
-needless_borrows_for_generic_args = "allow"
-large_enum_variant = "allow"
-should_implement_trait = "allow"
-manual_clamp = "allow"
-manual_flatten = "allow"
-unnecessary_fold = "allow"
-unnecessary_unwrap = "allow"
-unnecessary_to_owned = "allow"
-unnecessary_result_map_or_else = "allow"
-let_and_return = "allow"
-derivable_impls = "allow"
-clone_on_copy = "allow"
-arc_with_non_send_sync = "allow"
-rc_buffer = "allow"
+[[bench]]
+name = "notifications"
+harness = false
 
 [build-dependencies]
-artisan-payload = { path = "../artisan-payload" }
+artisan-payload.workspace = true
 embed-resource = "=3.0.11"
+
+[lints]
+workspace = true
