@@ -158,10 +158,7 @@ impl ComposerOwner {
                 } else {
                     match composer.send(host) {
                         Ok(()) => effects.push(ComposerEffect::EditorChanged),
-                        Err(super::super::controller::SendRefusal::Empty) => {}
-                        Err(refusal) => {
-                            composer.notice = Some(editor_core::Problem::new(refusal.to_string()));
-                        }
+                        Err(refusal) => composer.refuse(refusal),
                     }
                 }
                 effects.push(ComposerEffect::FocusEditor);
@@ -326,9 +323,7 @@ impl ComposerOwner {
                     composer.reconcile();
                     match composer.send(host) {
                         Ok(()) => effects.push(ComposerEffect::EditorChanged),
-                        Err(refusal) => {
-                            composer.notice = Some(editor_core::Problem::new(refusal.to_string()));
-                        }
+                        Err(refusal) => composer.refuse(refusal),
                     }
                 } else if let Some(session) = &composer.session {
                     session.retry();
@@ -355,6 +350,7 @@ impl ComposerOwner {
                 effects.push(ComposerEffect::RetryThreadSettings);
             }
             ComposerAction::DismissNotice => {
+                composer.refused = None;
                 composer.notice = None;
                 if let Some(attachments) = &mut composer.attachments {
                     attachments.notice = None;

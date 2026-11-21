@@ -2197,9 +2197,9 @@ fn trying_again_after_the_thread_left_the_forge_says_the_thread_is_gone() {
         let composer = owner.controller.borrow();
         assert_eq!(
             composer
-                .notice
-                .as_ref()
-                .map(editor_aqua::core::Problem::headline),
+                .refused
+                .map(|refusal| refusal.to_string())
+                .as_deref(),
             Some("This thread isn't on this Forge."),
             "trying again names the real reason instead of blaming the connection"
         );
@@ -2277,9 +2277,9 @@ fn refused_image_says_to_remove_it(action: editor_aqua::composer::view::Composer
         let composer = owner.controller.borrow();
         assert_eq!(
             composer
-                .notice
-                .as_ref()
-                .map(editor_aqua::core::Problem::headline),
+                .refused
+                .map(|refusal| refusal.to_string())
+                .as_deref(),
             Some("An image couldn't be uploaded. Remove it or try it again."),
             "{why}"
         );
@@ -2555,5 +2555,72 @@ fn the_notice_about_an_unreadable_kept_draft_shows_once() {
             composer.notice, None,
             "coming back to the draft doesn't repeat the notice"
         );
+    });
+}
+
+#[test]
+fn a_refused_send_clears_once_its_cause_is_fixed_and_leaves_the_recovery_notice_in_place() {
+    use editor_aqua::composer::controller::{ComposerTarget, SendRefusal};
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::spool::DraftSpool;
+    use editor_aqua::composer::view::ComposerAction;
+
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "notice");
+        let drafts = directory.path().join("drafts");
+        std::fs::create_dir_all(&drafts).unwrap();
+        std::fs::write(drafts.join("notice-new_3aproject.json"), b"{ not json").unwrap();
+        let mut sessions = DraftSessions::with_spool(spool);
+        let owner = editor_aqua::composer::view::ComposerOwner::new(
+            &core,
+            &mut sessions,
+            ComposerTarget::NewThread {
+                host: host.clone(),
+                project: Some(artisan_api::ProjectId::from("project")),
+            },
+            std::rc::Rc::new(|_| {}),
+        );
+        let session = DraftHandle::clone(owner.controller.borrow().session.as_ref().unwrap());
+        answer_empty_draft(&listener, &acceptor, 0).await;
+        wait_for_session(&session, DraftSession::is_loaded).await;
+        let recovery = {
+            let mut composer = owner.controller.borrow_mut();
+            composer.sync(&core);
+            composer.editor.borrow_mut().set_text("send me");
+            composer.edited();
+            composer
+                .notice
+                .clone()
+                .expect("the unreadable draft is reported")
+        };
+
+        owner.dispatch_with_change(&mut core, ComposerAction::Send, None);
+        {
+            let composer = owner.controller.borrow();
+            assert_eq!(composer.refused, Some(SendRefusal::NoModel));
+            assert_eq!(
+                composer.notice.as_ref(),
+                Some(&recovery),
+                "the refusal doesn't replace the notice that says where the unreadable draft is"
+            );
+        }
+
+        {
+            let mut composer = owner.controller.borrow_mut();
+            composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
+            composer.sync(&core);
+            assert_eq!(
+                composer.refused, None,
+                "choosing a model clears the refusal"
+            );
+        }
+        owner.dispatch_with_change(&mut core, ComposerAction::Send, None);
+        let composer = owner.controller.borrow();
+        assert!(session.read(DraftSession::sending), "the message is sent");
+        assert_eq!(composer.refused, None);
+        assert_eq!(composer.notice.as_ref(), Some(&recovery));
     });
 }

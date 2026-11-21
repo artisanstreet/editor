@@ -8,7 +8,7 @@ use super::{
     questionnaire::QuestionnairePanel,
 };
 use artisan_api::{
-    CreateThread, EngineConfig, ItemId, ProjectId, SendMessage, SignInState, ThreadId,
+    BlobHash, CreateThread, EngineConfig, ItemId, ProjectId, SendMessage, SignInState, ThreadId,
 };
 use editor_core::{Core, HostData, HostId, HostInstance, delivery::Delivery, runtime::runtime};
 use editor_ui::text::editor::{Editor, ListKey, Mode};
@@ -123,6 +123,7 @@ pub struct Composer {
     pub(crate) cleared: Option<std::time::Instant>,
     parked: Vec<DraftBody>,
     pub notice: Option<editor_core::Problem>,
+    pub refused: Option<SendRefusal>,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
     target_generation: u64,
@@ -184,6 +185,7 @@ impl Composer {
             cleared: None,
             parked: Vec::new(),
             notice,
+            refused: None,
             session,
             host_instance,
             target_generation: 0,
@@ -236,6 +238,7 @@ impl Composer {
         self.file_shake = None;
         self.restore_revision = Some(0);
         self.notice = None;
+        self.refused = None;
         self.config = None;
         self.project = None;
         self.host_instance = core.host(self.target.host()).map(HostData::instance);
@@ -736,6 +739,7 @@ impl Composer {
         let lost = session.read(|state| state.lost().to_vec());
         let unrecovered = session.take_unrecovered();
         self.reconcile();
+        self.settle_refusal(core);
         for event in &events {
             match event {
                 SessionEvent::Accepted { .. } | SessionEvent::Changed => {}
@@ -999,7 +1003,36 @@ impl Composer {
         }
     }
 
-    pub fn send(&mut self, host: &HostData) -> Result<(), SendRefusal> {
+    fn settle_refusal(&mut self, core: &Core) {
+        let Some(refused) = self.refused else {
+            return;
+        };
+        let standing = core
+            .host(self.target.host())
+            .and_then(|host| self.readiness(host).err());
+        if standing != Some(refused) {
+            self.refused = None;
+        }
+    }
+
+    pub(crate) fn refuse(&mut self, refusal: SendRefusal) {
+        self.refused = match refusal {
+            SendRefusal::Empty => None,
+            refusal @ (SendRefusal::NoDraft
+            | SendRefusal::ForgeReconnected
+            | SendRefusal::DraftChanged
+            | SendRefusal::AnsweringQuestion
+            | SendRefusal::ThreadMissing
+            | SendRefusal::AlreadySending
+            | SendRefusal::DraftLoading
+            | SendRefusal::ImageUploading
+            | SendRefusal::ImageFailed
+            | SendRefusal::NoModel
+            | SendRefusal::NoProject) => Some(refusal),
+        };
+    }
+
+    fn readiness(&self, host: &HostData) -> Result<(Vec<BlobHash>, EngineConfig), SendRefusal> {
         let Some(session) = &self.session else {
             return Err(SendRefusal::NoDraft);
         };
@@ -1037,6 +1070,15 @@ impl Composer {
             },
         };
         let config = self.effective_config(host).ok_or(SendRefusal::NoModel)?;
+        if matches!(self.target, ComposerTarget::NewThread { .. }) && self.project(host).is_none() {
+            return Err(SendRefusal::NoProject);
+        }
+        Ok((images, config))
+    }
+
+    pub fn send(&mut self, host: &HostData) -> Result<(), SendRefusal> {
+        let (images, config) = self.readiness(host)?;
+        self.refused = None;
         let (create, thread_config, thread) = match &self.target {
             ComposerTarget::Thread { thread, .. } => (
                 None,

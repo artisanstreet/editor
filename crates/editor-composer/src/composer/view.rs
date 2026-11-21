@@ -732,6 +732,7 @@ struct ComposerRest {
     files: Vec<(u64, std::path::PathBuf, bool)>,
     file_shake: Option<(u64, std::time::Instant)>,
     notice: Option<editor_core::Problem>,
+    refused: Option<super::controller::SendRefusal>,
     session: Option<(bool, bool, Option<editor_core::Problem>, bool)>,
     cancelling: bool,
     continuing: bool,
@@ -849,6 +850,7 @@ impl ComposerRest {
                 .collect(),
             file_shake: composer.file_shake,
             notice: composer.notice.clone(),
+            refused: composer.refused,
             session: composer.session.as_ref().map(|session| {
                 session.read(|state| {
                     (

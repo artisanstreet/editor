@@ -282,6 +282,9 @@ impl ComposerOwner {
         let generation = controller.generation();
         let host_id = controller.target.host().clone();
         let dispatch = Rc::clone(&self.dispatch);
+        let refused = controller
+            .refused
+            .map(|refusal| editor_core::Problem::new(refusal.to_string()));
         let draft_error = controller
             .session
             .as_ref()
@@ -308,9 +311,9 @@ impl ComposerOwner {
                 })
             })
             .or_else(|| {
-                controller
-                    .notice
+                refused
                     .as_ref()
+                    .or(controller.notice.as_ref())
                     .or_else(|| {
                         controller
                             .attachments
