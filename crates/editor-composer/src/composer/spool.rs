@@ -6,20 +6,116 @@ use editor_core::{
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashMap},
     io::Write as _,
     path::{Path, PathBuf},
+    sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DraftSpool {
-    dir: PathBuf,
+pub(crate) trait SpoolDisk: Send + Sync {
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+    fn remove_tree(&self, path: &Path) -> std::io::Result<()>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalDisk;
+
+impl SpoolDisk for LocalDisk {
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::remove_dir_all(path)
+    }
+}
+
+struct Owner {
+    dir: PathBuf,
+    disk: Arc<dyn SpoolDisk>,
+    queues: Mutex<HashMap<String, Arc<Queue>>>,
+}
+
+#[derive(Clone)]
+pub struct DraftSpool {
+    owner: Arc<Owner>,
+}
+
+impl PartialEq for DraftSpool {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+    }
+}
+
+impl Eq for DraftSpool {}
+
+impl std::fmt::Debug for DraftSpool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DraftSpool")
+            .field("dir", &self.owner.dir)
+            .finish_non_exhaustive()
+    }
+}
+
+struct Order {
+    issued: u64,
+    serving: u64,
+    abandoned: BTreeSet<u64>,
+    migrated: bool,
+}
+
+impl Order {
+    fn advance(&mut self) {
+        self.serving += 1;
+        while self.abandoned.remove(&self.serving) {
+            self.serving += 1;
+        }
+    }
+}
+
+struct Queue {
+    order: Mutex<Order>,
+    served: Condvar,
+}
+
+impl Queue {
+    fn order(&self) -> MutexGuard<'_, Order> {
+        self.order.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+pub(crate) struct Turn {
+    owner: Arc<Owner>,
+    queue: Arc<Queue>,
+    host: HostId,
+    scope: String,
+    stem: String,
+    number: u64,
+    served: bool,
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let mut order = self.queue.order();
+        match (self.served, order.serving == self.number) {
+            (true, _) | (false, true) => order.advance(),
+            (false, false) => {
+                order.abandoned.insert(self.number);
+                return;
+            }
+        }
+        drop(order);
+        self.queue.served.notify_all();
+    }
+}
+
+pub(crate) struct Serving {
+    turn: Turn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BesideSlot(u64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Slot {
     Record,
     Beside(BesideSlot),
@@ -51,6 +147,12 @@ pub enum KeepSpooledDraftError {
         #[source]
         source: std::io::Error,
     },
+    #[error("list the drafts kept in {path}")]
+    List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("write the pasted image {path}")]
     WriteImage {
         path: PathBuf,
@@ -59,10 +161,29 @@ pub enum KeepSpooledDraftError {
     },
     #[error("write the draft")]
     Draft(#[source] WriteConfigError),
+    #[error("flush the folder {path} to disk")]
+    Sync {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("move the written draft {from} to {to}")]
+    Publish {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum TakeSpooledDraftError {
+    #[error("list the drafts kept in {path}")]
+    List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("the draft kept on this device is unreadable, so it was moved to {set_aside}")]
     SetAside {
         set_aside: PathBuf,
@@ -115,13 +236,7 @@ pub enum TakeSpooledImageError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SetAsideError {
-    #[error("create the folder {path} to move the unreadable draft into")]
-    CreateFolder {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("list the pasted images in {path}")]
+    #[error("list the drafts kept in {path}")]
     List {
         path: PathBuf,
         #[source]
@@ -134,18 +249,12 @@ pub enum SetAsideError {
         #[source]
         source: std::io::Error,
     },
-    #[error("flush the folder {path} to disk")]
-    Sync {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgetSpooledDraftError {
-    #[error("create the folder {path} to move the discarded draft into")]
-    CreateTombstone {
+    #[error("list the drafts kept in {path}")]
+    List {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -163,12 +272,6 @@ pub enum ForgetSpooledDraftError {
         #[source]
         source: std::io::Error,
     },
-    #[error("list the pasted images in {path}")]
-    List {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
     #[error("flush the folder {path} to disk")]
     Sync {
         path: PathBuf,
@@ -180,10 +283,52 @@ pub enum ForgetSpooledDraftError {
 impl ForgetSpooledDraftError {
     pub(crate) const fn slot_freed(&self) -> bool {
         match self {
-            Self::CreateTombstone { .. } | Self::Tombstone { .. } => false,
-            Self::Remove { .. } | Self::List { .. } | Self::Sync { .. } => true,
+            Self::List { .. } | Self::Tombstone { .. } => false,
+            Self::Remove { .. } | Self::Sync { .. } => true,
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum MigrateError {
+    #[error("list the drafts kept in {path}")]
+    List {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("create the folder {path} for drafts kept in the old layout")]
+    CreateFolder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("copy {from} to {to}")]
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("flush the folder {path} to disk")]
+    Sync {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("move the copied draft {from} to {to}")]
+    Publish {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove {path}")]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -220,6 +365,10 @@ impl ImageDigest {
     fn of(bytes: &[u8]) -> Self {
         Self(hex::encode(sha2::Sha256::digest(bytes)))
     }
+
+    fn file_name(&self) -> String {
+        format!("{}.image", self.0)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -232,125 +381,158 @@ struct Record {
     images: Vec<ImageDigest>,
 }
 
+const RECORD: &str = "record.json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Unit {
+    slot: Slot,
+    generation: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Entry {
+    Unit(Unit),
+    Tombstone,
+    Staging,
+    Other,
+}
+
+impl Entry {
+    fn of(name: &str) -> Self {
+        let unit = |slot: &str, generation: &str| {
+            let slot = match slot {
+                "record" => Some(Slot::Record),
+                slot => slot
+                    .strip_prefix("kept-")
+                    .and_then(|number| number.parse().ok())
+                    .map(|number| Slot::Beside(BesideSlot(number))),
+            };
+            slot.zip(generation.parse().ok())
+                .map(|(slot, generation)| Self::Unit(Unit { slot, generation }))
+        };
+        match name.split_once('.') {
+            Some((slot, generation)) => unit(slot, generation).unwrap_or(Self::Other),
+            None if name.starts_with("rejected-") => Self::Tombstone,
+            None if name.starts_with("staging-") => Self::Staging,
+            None => Self::Other,
+        }
+    }
+}
+
+impl Unit {
+    fn name(self) -> String {
+        match self.slot {
+            Slot::Record => format!("record.{}", self.generation),
+            Slot::Beside(BesideSlot(number)) => format!("kept-{number}.{}", self.generation),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Legacy {
+    Record,
+    Image(ImageDigest),
+    Beside(BesideSlot),
+    Tombstone,
+}
+
+impl Legacy {
+    fn of(stem: &str, name: &str) -> Option<Self> {
+        let rest = name.strip_prefix(stem)?.strip_prefix('.')?;
+        match rest {
+            "json" => Some(Self::Record),
+            rest => {
+                if let Some(digest) = rest.strip_suffix(".image") {
+                    return ImageDigest::try_from(digest.to_owned())
+                        .ok()
+                        .map(Self::Image);
+                }
+                if let Some(number) = rest.strip_prefix("kept-") {
+                    return number
+                        .parse()
+                        .ok()
+                        .map(|number| Self::Beside(BesideSlot(number)));
+                }
+                rest.strip_prefix("rejected-").map(|_| Self::Tombstone)
+            }
+        }
+    }
+}
+
+fn owners() -> MutexGuard<'static, HashMap<PathBuf, Weak<Owner>>> {
+    static OWNERS: OnceLock<Mutex<HashMap<PathBuf, Weak<Owner>>>> = OnceLock::new();
+    OWNERS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
 impl DraftSpool {
     #[must_use]
     pub fn new(editor_dir: &Path) -> Self {
-        Self {
-            dir: editor_dir.join("drafts"),
-        }
+        Self::at(editor_dir.join("drafts"), || Arc::new(LocalDisk))
     }
 
-    pub(crate) fn keep(
-        &self,
-        host: &HostId,
-        scope: &str,
-        draft: KeptDraft,
-        images: &[std::sync::Arc<[u8]>],
-        holder: Holder,
-    ) -> Result<Slot, KeepSpooledDraftError> {
-        self.create_folder()?;
+    #[cfg(test)]
+    pub(crate) fn with_disk(editor_dir: &Path, disk: Arc<dyn SpoolDisk>) -> Self {
+        let expected = Arc::clone(&disk);
+        let spool = Self::at(editor_dir.join("drafts"), move || disk);
+        assert!(
+            Arc::ptr_eq(&spool.owner.disk, &expected),
+            "invariant: a drafts folder is written through one disk"
+        );
+        spool
+    }
+
+    fn at(dir: PathBuf, disk: impl FnOnce() -> Arc<dyn SpoolDisk>) -> Self {
+        let mut owners = owners();
+        owners.retain(|_, owner| owner.strong_count() > 0);
+        if let Some(owner) = owners.get(&dir).and_then(Weak::upgrade) {
+            return Self { owner };
+        }
+        let owner = Arc::new(Owner {
+            dir: dir.clone(),
+            disk: disk(),
+            queues: Mutex::default(),
+        });
+        owners.insert(dir, Arc::downgrade(&owner));
+        Self { owner }
+    }
+
+    pub(crate) fn turn(&self, host: &HostId, scope: &str) -> Turn {
         let stem = stem(host, scope);
-        let slot = match holder {
-            Holder::Owner(slot) => slot,
-            Holder::Newcomer if occupied(&self.dir.join(format!("{stem}.json"))) => {
-                Slot::Beside(self.new_beside_slot(&stem)?)
-            }
-            Holder::Newcomer => Slot::Record,
+        let queue = Arc::clone(
+            self.owner
+                .queues
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(stem.clone())
+                .or_insert_with(|| {
+                    Arc::new(Queue {
+                        order: Mutex::new(Order {
+                            issued: 0,
+                            serving: 1,
+                            abandoned: BTreeSet::new(),
+                            migrated: false,
+                        }),
+                        served: Condvar::new(),
+                    })
+                }),
+        );
+        let number = {
+            let mut order = queue.order();
+            order.issued += 1;
+            order.issued
         };
-        let folder = self.folder(&stem, slot);
-        if let Slot::Beside(_) = slot {
-            create_beside_folder(&folder)?;
+        Turn {
+            owner: Arc::clone(&self.owner),
+            queue,
+            host: host.clone(),
+            scope: scope.to_owned(),
+            stem,
+            number,
+            served: false,
         }
-        let record = folder.join(format!("{stem}.json"));
-        let kept = self.write_record(&folder, &stem, &record, host, scope, draft, images)?;
-        if let Err(error) = remove_images(&folder, &stem, &kept) {
-            tracing::warn!(
-                host = %host,
-                %scope,
-                error = %::diagnostics::chain(&error),
-                "kept the draft on this device but couldn't remove images it no longer holds"
-            );
-        }
-        if let Slot::Beside(_) = slot
-            && let Err(source) = sync_folder(&self.dir)
-        {
-            tracing::warn!(
-                error = %source,
-                "kept a draft beside another, but its folder may not survive a power cut"
-            );
-        }
-        Ok(slot)
-    }
-
-    pub(crate) fn slot_path(&self, host: &HostId, scope: &str, slot: Slot) -> PathBuf {
-        let stem = stem(host, scope);
-        match slot {
-            Slot::Record => self.dir.join(format!("{stem}.json")),
-            Slot::Beside(_) => self.folder(&stem, slot),
-        }
-    }
-
-    fn folder(&self, stem: &str, slot: Slot) -> PathBuf {
-        match slot {
-            Slot::Record => self.dir.clone(),
-            Slot::Beside(BesideSlot(number)) => self.dir.join(format!("{stem}.kept-{number}")),
-        }
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a record is one host's scope with its draft and images, written to one folder"
-    )]
-    fn write_record(
-        &self,
-        folder: &Path,
-        stem: &str,
-        record: &Path,
-        host: &HostId,
-        scope: &str,
-        draft: KeptDraft,
-        images: &[std::sync::Arc<[u8]>],
-    ) -> Result<HashSet<PathBuf>, KeepSpooledDraftError> {
-        let digests = images
-            .iter()
-            .map(|bytes| {
-                let digest = ImageDigest::of(bytes);
-                self.write_image(&image_path(folder, stem, &digest), bytes)?;
-                Ok(digest)
-            })
-            .collect::<Result<Vec<_>, KeepSpooledDraftError>>()?;
-        let kept = digests
-            .iter()
-            .map(|digest| image_path(folder, stem, digest))
-            .collect();
-        config_file::write(
-            record,
-            &Record {
-                host: host.clone(),
-                scope: scope.to_owned(),
-                draft,
-                images: digests,
-            },
-        )
-        .map_err(KeepSpooledDraftError::Draft)?;
-        Ok(kept)
-    }
-
-    fn new_beside_slot(&self, stem: &str) -> Result<BesideSlot, KeepSpooledDraftError> {
-        (1_u64..)
-            .map(|number| {
-                let folder = self.folder(stem, Slot::Beside(BesideSlot(number)));
-                match std::fs::create_dir(&folder) {
-                    Ok(()) => Ok(Some(BesideSlot(number))),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-                    Err(source) => Err(KeepSpooledDraftError::CreateDirectory {
-                        path: folder,
-                        source,
-                    }),
-                }
-            })
-            .find_map(Result::transpose)
-            .expect("invariant: some beside number is free")
     }
 
     pub fn take(
@@ -358,17 +540,219 @@ impl DraftSpool {
         host: &HostId,
         scope: &str,
     ) -> Result<Option<SpooledDraft>, TakeSpooledDraftError> {
-        let stem = stem(host, scope);
-        let path = self.dir.join(format!("{stem}.json"));
-        match read_record(&self.dir, &stem, &path, host, scope) {
+        self.turn(host, scope).wait().take()
+    }
+}
+
+impl Turn {
+    pub(crate) fn wait(mut self) -> Serving {
+        let mut order = self.queue.order();
+        while order.serving != self.number {
+            order = self
+                .queue
+                .served
+                .wait(order)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        let migrated = order.migrated;
+        drop(order);
+        self.served = true;
+        let serving = Serving { turn: self };
+        if !migrated {
+            match serving.migrate() {
+                Ok(()) => serving.turn.queue.order().migrated = true,
+                Err(error) => tracing::error!(
+                    host = %serving.turn.host,
+                    scope = %serving.turn.scope,
+                    error = %::diagnostics::chain(&error),
+                    "couldn't move drafts kept in the old layout into the new one; trying again on the next save"
+                ),
+            }
+        }
+        serving
+    }
+}
+
+impl Serving {
+    pub(crate) const fn number(&self) -> u64 {
+        self.turn.number
+    }
+
+    fn root(&self) -> PathBuf {
+        self.turn.owner.dir.join(&self.turn.stem)
+    }
+
+    fn disk(&self) -> &dyn SpoolDisk {
+        &*self.turn.owner.disk
+    }
+
+    fn entries(&self) -> std::io::Result<Vec<(Entry, PathBuf)>> {
+        let root = self.root();
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        entries
+            .map(|entry| {
+                let entry = entry?;
+                let entry_kind = entry.file_name().to_str().map_or(Entry::Other, Entry::of);
+                Ok((entry_kind, entry.path()))
+            })
+            .collect()
+    }
+
+    fn units(&self) -> std::io::Result<Vec<Unit>> {
+        let mut units: Vec<Unit> = self
+            .entries()?
+            .into_iter()
+            .filter_map(|(entry, _)| match entry {
+                Entry::Unit(unit) => Some(unit),
+                Entry::Tombstone | Entry::Staging | Entry::Other => None,
+            })
+            .collect();
+        units.sort_by_key(|unit| (unit.slot, unit.generation));
+        Ok(units)
+    }
+
+    fn current(units: &[Unit], slot: Slot) -> Option<Unit> {
+        units.iter().copied().rfind(|unit| unit.slot == slot)
+    }
+
+    fn unit_path(&self, unit: Unit) -> PathBuf {
+        self.root().join(unit.name())
+    }
+
+    pub(crate) fn slot_path(&self, slot: Slot) -> PathBuf {
+        self.units()
+            .ok()
+            .and_then(|units| Self::current(&units, slot))
+            .map_or_else(|| self.root(), |unit| self.unit_path(unit))
+    }
+
+    fn create_root(&self) -> Result<(), KeepSpooledDraftError> {
+        let root = self.root();
+        if root.is_dir() {
+            return Ok(());
+        }
+        let failed = |path: &Path| {
+            let path = path.to_owned();
+            move |source| KeepSpooledDraftError::CreateDirectory { path, source }
+        };
+        let dir = &self.turn.owner.dir;
+        std::fs::create_dir_all(&root).map_err(failed(&root))?;
+        dir.parent()
+            .map_or(Ok(()), sync_folder)
+            .and_then(|()| sync_folder(dir))
+            .map_err(failed(&root))
+    }
+
+    pub(crate) fn keep(
+        &self,
+        draft: KeptDraft,
+        images: &[Arc<[u8]>],
+        holder: Holder,
+    ) -> Result<Slot, KeepSpooledDraftError> {
+        self.create_root()?;
+        let root = self.root();
+        let units = self.units().map_err(|source| KeepSpooledDraftError::List {
+            path: root.clone(),
+            source,
+        })?;
+        let slot = match holder {
+            Holder::Owner(slot) => slot,
+            Holder::Newcomer if Self::current(&units, Slot::Record).is_some() => {
+                let number = units
+                    .iter()
+                    .filter_map(|unit| match unit.slot {
+                        Slot::Beside(BesideSlot(number)) => Some(number),
+                        Slot::Record => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                Slot::Beside(BesideSlot(number + 1))
+            }
+            Holder::Newcomer => Slot::Record,
+        };
+        let unit = Unit {
+            slot,
+            generation: Self::current(&units, slot).map_or(1, |unit| unit.generation + 1),
+        };
+        let staging = tempfile::Builder::new()
+            .prefix("staging-")
+            .tempdir_in(&root)
+            .map_err(|source| KeepSpooledDraftError::CreateDirectory {
+                path: root.clone(),
+                source,
+            })?;
+        let digests = images
+            .iter()
+            .map(|bytes| {
+                let digest = ImageDigest::of(bytes);
+                write_image(&staging.path().join(digest.file_name()), bytes)?;
+                Ok(digest)
+            })
+            .collect::<Result<Vec<_>, KeepSpooledDraftError>>()?;
+        config_file::write(
+            &staging.path().join(RECORD),
+            &Record {
+                host: self.turn.host.clone(),
+                scope: self.turn.scope.clone(),
+                draft,
+                images: digests,
+            },
+        )
+        .map_err(KeepSpooledDraftError::Draft)?;
+        sync_folder(staging.path()).map_err(|source| KeepSpooledDraftError::Sync {
+            path: staging.path().to_owned(),
+            source,
+        })?;
+        let to = self.unit_path(unit);
+        self.disk().rename(staging.path(), &to).map_err(|source| {
+            KeepSpooledDraftError::Publish {
+                from: staging.path().to_owned(),
+                to: to.clone(),
+                source,
+            }
+        })?;
+        drop(staging.keep());
+        if let Err(source) = sync_folder(&root) {
+            tracing::warn!(
+                error = %source,
+                "kept a draft on this device, but it may not survive a power cut"
+            );
+        }
+        for older in units.iter().filter(|older| older.slot == slot) {
+            let path = self.unit_path(*older);
+            if let Err(error) = std::fs::remove_dir_all(&path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "kept the draft on this device but couldn't remove the version it replaces; removing it on the next save"
+                );
+            }
+        }
+        Ok(slot)
+    }
+
+    pub(crate) fn take(&self) -> Result<Option<SpooledDraft>, TakeSpooledDraftError> {
+        let units = self.units().map_err(|source| TakeSpooledDraftError::List {
+            path: self.root(),
+            source,
+        })?;
+        let Some(unit) = Self::current(&units, Slot::Record) else {
+            return Ok(None);
+        };
+        let folder = self.unit_path(unit);
+        match read_record(&folder, &self.turn.host, &self.turn.scope) {
             Ok(spooled) => Ok(spooled),
-            Err(unreadable) => Err(match self.set_aside(&stem, &self.dir, &path) {
+            Err(unreadable) => Err(match self.set_aside(&folder) {
                 Ok(set_aside) => TakeSpooledDraftError::SetAside {
                     set_aside,
                     source: Box::new(unreadable),
                 },
                 Err(source) => TakeSpooledDraftError::Left {
-                    path,
+                    path: folder.join(RECORD),
                     unreadable: Box::new(unreadable),
                     source: Box::new(source),
                 },
@@ -376,271 +760,326 @@ impl DraftSpool {
         }
     }
 
-    pub(crate) fn kept_beside(
-        &self,
-        host: &HostId,
-        scope: &str,
-        skip: impl Fn(Slot) -> bool,
-    ) -> Vec<Result<BesideDraft, KeptBesideError>> {
-        let stem = stem(host, scope);
-        let entries = match std::fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+    pub(crate) fn kept_beside(&self) -> Vec<Result<BesideDraft, KeptBesideError>> {
+        let units = match self.units() {
+            Ok(units) => units,
             Err(source) => {
                 return vec![Err(KeptBesideError::List {
-                    path: self.dir.clone(),
+                    path: self.root(),
                     source,
                 })];
             }
         };
-        let prefix = format!("{stem}.kept-");
-        let mut slots = Vec::new();
-        let mut failures = Vec::new();
-        for entry in entries {
-            match entry {
-                Ok(entry) => {
-                    let number = entry
-                        .file_name()
-                        .to_str()
-                        .and_then(|name| name.strip_prefix(&prefix))
-                        .and_then(|number| number.parse::<u64>().ok());
-                    if let Some(number) = number
-                        && !skip(Slot::Beside(BesideSlot(number)))
-                        && entry.path().is_dir()
-                    {
-                        slots.push(BesideSlot(number));
-                    }
-                }
-                Err(source) => failures.push(Err(KeptBesideError::List {
-                    path: self.dir.clone(),
-                    source,
-                })),
-            }
-        }
-        slots.sort_by_key(|BesideSlot(number)| *number);
+        let mut slots: Vec<BesideSlot> = units
+            .iter()
+            .filter_map(|unit| match unit.slot {
+                Slot::Beside(slot) => Some(slot),
+                Slot::Record => None,
+            })
+            .collect();
+        slots.dedup();
         slots
             .into_iter()
             .filter_map(|slot| {
-                let folder = self.folder(&stem, Slot::Beside(slot));
-                let path = folder.join(format!("{stem}.json"));
-                match read_record(&folder, &stem, &path, host, scope) {
+                let unit = Self::current(&units, Slot::Beside(slot))?;
+                let folder = self.unit_path(unit);
+                match read_record(&folder, &self.turn.host, &self.turn.scope) {
                     Ok(Some(spooled)) => Some(Ok(BesideDraft { slot, spooled })),
-                    Ok(None) => {
-                        remove_if_empty(&folder);
-                        None
-                    }
-                    Err(unreadable) => {
-                        Some(Err(self.set_aside_beside(&stem, &folder, &path, unreadable)))
-                    }
+                    Ok(None) => None,
+                    Err(unreadable) => Some(Err(match self.set_aside(&folder) {
+                        Ok(set_aside) => KeptBesideError::SetAside {
+                            set_aside,
+                            source: Box::new(unreadable),
+                        },
+                        Err(source) => KeptBesideError::Left {
+                            path: folder.join(RECORD),
+                            unreadable: Box::new(unreadable),
+                            source: Box::new(source),
+                        },
+                    })),
                 }
             })
-            .chain(failures)
             .collect()
     }
 
-    pub(crate) fn forget(
-        &self,
-        host: &HostId,
-        scope: &str,
-        slot: Slot,
-    ) -> Result<(), ForgetSpooledDraftError> {
-        let stem = stem(host, scope);
-        let from = self.slot_path(host, scope, slot);
-        if !occupied(&from) {
+    pub(crate) fn forget(&self, slot: Slot) -> Result<(), ForgetSpooledDraftError> {
+        let root = self.root();
+        let entries = self
+            .entries()
+            .map_err(|source| ForgetSpooledDraftError::List {
+                path: root.clone(),
+                source,
+            })?;
+        let mut units: Vec<Unit> = entries
+            .iter()
+            .filter_map(|(entry, _)| match entry {
+                Entry::Unit(unit) if unit.slot == slot => Some(*unit),
+                Entry::Unit(_) | Entry::Tombstone | Entry::Staging | Entry::Other => None,
+            })
+            .collect();
+        if units.is_empty() {
             return Ok(());
         }
-        let tombstone = self.new_tombstone(&stem, slot)?;
-        let moved = match slot {
-            Slot::Record => tombstone.join(format!("{stem}.json")),
-            Slot::Beside(_) => tombstone.clone(),
-        };
-        if let Err(source) = std::fs::rename(&from, &moved) {
-            if slot == Slot::Record {
-                remove_if_empty(&tombstone);
-            }
-            return Err(ForgetSpooledDraftError::Tombstone {
-                from,
-                to: moved,
-                source,
-            });
+        units.sort_by_key(|unit| unit.generation);
+        let taken = entries
+            .iter()
+            .filter_map(|(_, path)| path.file_name()?.to_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let mut tombstones = Vec::new();
+        let mut free = (1..=taken.len() + units.len()).map(|number| format!("rejected-{number}"));
+        for unit in units {
+            let name = free
+                .by_ref()
+                .find(|name| !taken.contains(name))
+                .expect("invariant: some tombstone number is free");
+            let from = self.unit_path(unit);
+            let tombstone = root.join(name);
+            self.disk().rename(&from, &tombstone).map_err(|source| {
+                ForgetSpooledDraftError::Tombstone {
+                    from,
+                    to: tombstone.clone(),
+                    source,
+                }
+            })?;
+            tombstones.push(tombstone);
         }
-        self.sync()?;
-        if slot == Slot::Record {
-            move_images(&self.dir, &stem, &tombstone)?;
+        self.sync_root()?;
+        for tombstone in &tombstones {
+            self.remove_tree(tombstone)?;
         }
-        remove_tombstone(&tombstone)?;
-        self.sync()
+        self.sync_root()?;
+        self.remove_root_if_empty();
+        Ok(())
     }
 
-    pub(crate) fn sweep_tombstones(
-        &self,
-        host: &HostId,
-        scope: &str,
-    ) -> Result<(), ForgetSpooledDraftError> {
-        let prefix = format!("{}.rejected-", stem(host, scope));
-        let listed = |source| ForgetSpooledDraftError::List {
-            path: self.dir.clone(),
-            source,
-        };
-        let entries = match std::fs::read_dir(&self.dir) {
+    pub(crate) fn sweep_tombstones(&self) -> Result<(), ForgetSpooledDraftError> {
+        let entries = self
+            .entries()
+            .map_err(|source| ForgetSpooledDraftError::List {
+                path: self.root(),
+                source,
+            })?;
+        let mut swept = false;
+        for (entry, path) in entries {
+            match entry {
+                Entry::Tombstone | Entry::Staging => {
+                    self.remove_tree(&path)?;
+                    swept = true;
+                }
+                Entry::Unit(_) | Entry::Other => {}
+            }
+        }
+        if swept {
+            self.sync_root()?;
+            self.remove_root_if_empty();
+        }
+        Ok(())
+    }
+
+    fn remove_tree(&self, path: &Path) -> Result<(), ForgetSpooledDraftError> {
+        removed(path, self.disk().remove_tree(path))
+    }
+
+    fn sync_root(&self) -> Result<(), ForgetSpooledDraftError> {
+        let root = self.root();
+        sync_folder(&root).map_err(|source| ForgetSpooledDraftError::Sync { path: root, source })
+    }
+
+    fn remove_root_if_empty(&self) {
+        match std::fs::remove_dir(self.root()) {
+            Ok(()) => {
+                if let Err(error) = sync_folder(&self.turn.owner.dir) {
+                    tracing::warn!(%error, "removed an empty drafts folder, but it may come back after a power cut");
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => tracing::warn!(
+                folder = %self.root().display(),
+                %error,
+                "couldn't remove an empty drafts folder; trying again on the next removal"
+            ),
+        }
+    }
+
+    fn set_aside(&self, unit: &Path) -> Result<PathBuf, SetAsideError> {
+        let root = self.root();
+        let taken = self
+            .entries()
+            .map_err(|source| SetAsideError::List {
+                path: root.clone(),
+                source,
+            })?
+            .into_iter()
+            .filter_map(|(_, path)| path.file_name()?.to_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let folder = (1..=taken.len() + 1)
+            .map(|number| format!("unreadable-{number}"))
+            .find(|name| !taken.contains(name))
+            .map(|name| root.join(name))
+            .expect("invariant: some set-aside number is free");
+        self.disk()
+            .rename(unit, &folder)
+            .map_err(|source| SetAsideError::Move {
+                from: unit.to_owned(),
+                to: folder.clone(),
+                source,
+            })?;
+        if let Err(source) = sync_folder(&root) {
+            tracing::warn!(
+                error = %source,
+                "moved an unreadable draft aside, but the move may not survive a power cut"
+            );
+        }
+        Ok(folder.join(RECORD))
+    }
+
+    fn migrate(&self) -> Result<(), MigrateError> {
+        let dir = &self.turn.owner.dir;
+        let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => return Err(listed(source)),
+            Err(source) => {
+                return Err(MigrateError::List {
+                    path: dir.clone(),
+                    source,
+                });
+            }
         };
-        let mut swept = false;
+        let listed = |source| MigrateError::List {
+            path: dir.clone(),
+            source,
+        };
+        let mut legacy = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(listed)?;
-            if entry
+            let path = entry.map_err(listed)?.path();
+            if let Some(found) = path
                 .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(&prefix))
+                .and_then(|name| name.to_str())
+                .and_then(|name| Legacy::of(&self.turn.stem, name))
             {
-                remove_tombstone(&entry.path())?;
-                swept = true;
+                legacy.push((found, path));
             }
         }
-        if swept { self.sync() } else { Ok(()) }
-    }
-
-    fn new_tombstone(&self, stem: &str, slot: Slot) -> Result<PathBuf, ForgetSpooledDraftError> {
-        (1_u64..)
-            .map(|number| {
-                let path = self.dir.join(format!("{stem}.rejected-{number}"));
-                match slot {
-                    Slot::Record => match std::fs::create_dir(&path) {
-                        Ok(()) => Ok(Some(path)),
-                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-                        Err(source) => {
-                            Err(ForgetSpooledDraftError::CreateTombstone { path, source })
-                        }
-                    },
-                    Slot::Beside(_) => Ok((!occupied(&path)).then_some(path)),
-                }
+        if legacy.is_empty() {
+            return Ok(());
+        }
+        let root = self.root();
+        std::fs::create_dir_all(&root).map_err(|source| MigrateError::CreateFolder {
+            path: root.clone(),
+            source,
+        })?;
+        let units = self.units().map_err(|source| MigrateError::List {
+            path: root.clone(),
+            source,
+        })?;
+        let images: Vec<(PathBuf, String)> = legacy
+            .iter()
+            .filter_map(|(found, path)| match found {
+                Legacy::Image(digest) if path.is_file() => Some((path.clone(), digest.file_name())),
+                Legacy::Image(_) | Legacy::Record | Legacy::Beside(_) | Legacy::Tombstone => None,
             })
-            .find_map(Result::transpose)
-            .expect("invariant: some tombstone number is free")
-    }
-
-    fn sync(&self) -> Result<(), ForgetSpooledDraftError> {
-        sync_folder(&self.dir).map_err(|source| ForgetSpooledDraftError::Sync {
-            path: self.dir.clone(),
+            .collect();
+        for (found, path) in &legacy {
+            match found {
+                Legacy::Record if path.is_file() => {
+                    if Self::current(&units, Slot::Record).is_none() {
+                        let mut files = images.clone();
+                        files.push((path.clone(), RECORD.to_owned()));
+                        self.publish_copy(Slot::Record, &files)?;
+                    }
+                    remove_file(path)?;
+                    for (image, _) in &images {
+                        remove_file(image)?;
+                    }
+                }
+                Legacy::Beside(slot) if path.is_dir() => {
+                    let record = path.join(format!("{}.json", self.turn.stem));
+                    if record.is_file() && Self::current(&units, Slot::Beside(*slot)).is_none() {
+                        let mut files = Vec::new();
+                        for entry in std::fs::read_dir(path).map_err(listed)? {
+                            let image = entry.map_err(listed)?.path();
+                            if let Some(Legacy::Image(digest)) = image
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .and_then(|name| Legacy::of(&self.turn.stem, name))
+                            {
+                                files.push((image, digest.file_name()));
+                            }
+                        }
+                        files.push((record, RECORD.to_owned()));
+                        self.publish_copy(Slot::Beside(*slot), &files)?;
+                    }
+                    std::fs::remove_dir_all(path).map_err(|source| MigrateError::Remove {
+                        path: path.clone(),
+                        source,
+                    })?;
+                }
+                Legacy::Tombstone => {
+                    if let Err(error) = self.remove_tree(path) {
+                        tracing::warn!(
+                            error = %::diagnostics::chain(&error),
+                            "couldn't remove a draft discarded in the old layout"
+                        );
+                    }
+                }
+                Legacy::Record | Legacy::Image(_) | Legacy::Beside(_) => {}
+            }
+        }
+        sync_folder(dir).map_err(|source| MigrateError::Sync {
+            path: dir.clone(),
             source,
         })
     }
 
-    fn create_folder(&self) -> Result<(), KeepSpooledDraftError> {
-        if self.dir.is_dir() {
-            return Ok(());
+    fn publish_copy(&self, slot: Slot, files: &[(PathBuf, String)]) -> Result<(), MigrateError> {
+        let root = self.root();
+        let staging = tempfile::Builder::new()
+            .prefix("staging-")
+            .tempdir_in(&root)
+            .map_err(|source| MigrateError::CreateFolder {
+                path: root.clone(),
+                source,
+            })?;
+        for (from, name) in files {
+            let to = staging.path().join(name);
+            std::fs::hard_link(from, &to)
+                .or_else(|_| std::fs::copy(from, &to).map(drop))
+                .map_err(|source| MigrateError::Copy {
+                    from: from.clone(),
+                    to: to.clone(),
+                    source,
+                })?;
         }
-        let failed = |source| KeepSpooledDraftError::CreateDirectory {
-            path: self.dir.clone(),
-            source,
-        };
-        std::fs::create_dir_all(&self.dir).map_err(failed)?;
-        self.dir
-            .parent()
-            .map_or(Ok(()), sync_folder)
-            .map_err(failed)
-    }
-
-    fn set_aside_beside(
-        &self,
-        stem: &str,
-        folder: &Path,
-        record: &Path,
-        unreadable: ReadConfigError,
-    ) -> KeptBesideError {
-        match self.set_aside(stem, folder, record) {
-            Ok(set_aside) => {
-                remove_if_empty(folder);
-                KeptBesideError::SetAside {
-                    set_aside,
-                    source: Box::new(unreadable),
-                }
-            }
-            Err(source) => KeptBesideError::Left {
-                path: record.to_owned(),
-                unreadable: Box::new(unreadable),
-                source: Box::new(source),
-            },
-        }
-    }
-
-    fn set_aside(&self, stem: &str, from: &Path, record: &Path) -> Result<PathBuf, SetAsideError> {
-        let folder = (1_u64..)
-            .map(|number| {
-                let folder = self.dir.join(format!("{stem}.unreadable-{number}"));
-                match std::fs::create_dir(&folder) {
-                    Ok(()) => Ok(Some(folder)),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
-                    Err(source) => Err(SetAsideError::CreateFolder {
-                        path: folder,
-                        source,
-                    }),
-                }
-            })
-            .find_map(Result::transpose)
-            .expect("invariant: some set-aside number is free")?;
-        let listed = |source| SetAsideError::List {
-            path: from.to_owned(),
-            source,
-        };
-        for entry in std::fs::read_dir(from).map_err(listed)? {
-            let path = entry.map_err(listed)?.path();
-            if let Some(name) = path.file_name().filter(|_| is_image_of(&path, stem)) {
-                move_into(&path, &folder.join(name))?;
-            }
-        }
-        let set_aside = folder.join(
-            record
-                .file_name()
-                .expect("invariant: a kept draft's record path names a file"),
-        );
-        sync_folder(&folder).map_err(|source| SetAsideError::Sync {
-            path: folder.clone(),
+        sync_folder(staging.path()).map_err(|source| MigrateError::Sync {
+            path: staging.path().to_owned(),
             source,
         })?;
-        move_into(record, &set_aside)?;
-        for synced in [&folder, &self.dir] {
-            if let Err(source) = sync_folder(synced) {
-                let error = SetAsideError::Sync {
-                    path: synced.clone(),
-                    source,
-                };
-                tracing::warn!(
-                    error = %::diagnostics::chain(&error),
-                    "moved an unreadable draft aside, but the move may not survive a power cut"
-                );
-            }
-        }
-        Ok(set_aside)
-    }
-
-    fn write_image(&self, path: &Path, bytes: &[u8]) -> Result<(), KeepSpooledDraftError> {
-        let failed = |source| KeepSpooledDraftError::WriteImage {
-            path: path.to_owned(),
-            source,
-        };
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.dir).map_err(failed)?;
-        temporary
-            .write_all(bytes)
-            .and_then(|()| temporary.as_file().sync_all())
-            .map_err(failed)?;
-        temporary
-            .persist(path)
-            .map(drop)
-            .map_err(|error| failed(error.error))
+        let to = self.unit_path(Unit {
+            slot,
+            generation: 1,
+        });
+        self.disk()
+            .rename(staging.path(), &to)
+            .map_err(|source| MigrateError::Publish {
+                from: staging.path().to_owned(),
+                to,
+                source,
+            })?;
+        drop(staging.keep());
+        sync_folder(&root).map_err(|source| MigrateError::Sync { path: root, source })
     }
 }
 
 fn read_record(
     folder: &Path,
-    stem: &str,
-    path: &Path,
     host: &HostId,
     scope: &str,
 ) -> Result<Option<SpooledDraft>, ReadConfigError> {
-    let record: Option<Record> = config_file::read(path)?;
+    let record: Option<Record> = config_file::read(&folder.join(RECORD))?;
     let Some(record) = record.filter(|record| &record.host == host && record.scope == scope) else {
         return Ok(None);
     };
@@ -648,7 +1087,7 @@ fn read_record(
         .images
         .iter()
         .map(|digest| {
-            let path = image_path(folder, stem, digest);
+            let path = folder.join(digest.file_name());
             let bytes = std::fs::read(&path).map_err(|source| TakeSpooledImageError::Read {
                 path: path.clone(),
                 source,
@@ -666,116 +1105,37 @@ fn read_record(
     }))
 }
 
-fn remove_if_empty(folder: &Path) {
-    match std::fs::remove_dir(folder) {
-        Ok(()) => tracing::info!(
-            folder = %folder.display(),
-            "removed an empty folder left by a draft that was never kept beside another"
-        ),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-            ) => {}
-        Err(error) => tracing::warn!(
-            folder = %folder.display(),
-            %error,
-            "couldn't remove an empty folder left by a draft that was never kept beside another; trying again on the next open"
-        ),
-    }
-}
-
-fn create_beside_folder(folder: &Path) -> Result<(), KeepSpooledDraftError> {
-    match std::fs::create_dir(folder) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(source) => Err(KeepSpooledDraftError::CreateDirectory {
-            path: folder.to_owned(),
-            source,
-        }),
-    }
-}
-
-fn move_images(folder: &Path, stem: &str, into: &Path) -> Result<(), ForgetSpooledDraftError> {
-    let listed = |source| ForgetSpooledDraftError::List {
-        path: folder.to_owned(),
+fn write_image(path: &Path, bytes: &[u8]) -> Result<(), KeepSpooledDraftError> {
+    let failed = |source| KeepSpooledDraftError::WriteImage {
+        path: path.to_owned(),
         source,
     };
-    for entry in std::fs::read_dir(folder).map_err(listed)? {
-        let path = entry.map_err(listed)?.path();
-        if let Some(name) = path.file_name().filter(|_| is_image_of(&path, stem)) {
-            std::fs::rename(&path, into.join(name)).map_err(|source| {
-                ForgetSpooledDraftError::Remove {
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-        }
-    }
-    Ok(())
+    let mut file = std::fs::File::create(path).map_err(failed)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(failed)
 }
 
-fn remove_tombstone(tombstone: &Path) -> Result<(), ForgetSpooledDraftError> {
-    match std::fs::remove_dir_all(tombstone) {
+fn removed(path: &Path, removal: std::io::Result<()>) -> Result<(), ForgetSpooledDraftError> {
+    match removal {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(ForgetSpooledDraftError::Remove {
-            path: tombstone.to_owned(),
+            path: path.to_owned(),
             source,
         }),
     }
 }
 
-fn remove_images(
-    folder: &Path,
-    stem: &str,
-    kept: &HashSet<PathBuf>,
-) -> Result<(), ForgetSpooledDraftError> {
-    let listed = |source| ForgetSpooledDraftError::List {
-        path: folder.to_owned(),
-        source,
-    };
-    let entries = match std::fs::read_dir(folder) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => return Err(listed(source)),
-    };
-    for entry in entries {
-        let path = entry.map_err(listed)?.path();
-        if is_image_of(&path, stem) && !kept.contains(&path) {
-            remove(&path)?;
-        }
+fn remove_file(path: &Path) -> Result<(), MigrateError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(MigrateError::Remove {
+            path: path.to_owned(),
+            source,
+        }),
     }
-    Ok(())
-}
-
-fn image_path(folder: &Path, stem: &str, digest: &ImageDigest) -> PathBuf {
-    folder.join(format!("{stem}.{}.image", digest.0))
-}
-
-fn occupied(record: &Path) -> bool {
-    std::fs::symlink_metadata(record).map_or_else(
-        |error| error.kind() != std::io::ErrorKind::NotFound,
-        |_| true,
-    )
-}
-
-fn is_image_of(path: &Path, stem: &str) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension == "image")
-        && path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_prefix(stem))
-            .is_some_and(|rest| rest.starts_with('.'))
-}
-
-fn move_into(from: &Path, to: &Path) -> Result<(), SetAsideError> {
-    std::fs::rename(from, to).map_err(|source| SetAsideError::Move {
-        from: from.to_owned(),
-        to: to.to_owned(),
-        source,
-    })
 }
 
 #[cfg(unix)]
@@ -790,17 +1150,6 @@ fn sync_folder(folder: &Path) -> std::io::Result<()> {
 )]
 fn sync_folder(_folder: &Path) -> std::io::Result<()> {
     Ok(())
-}
-
-fn remove(path: &Path) -> Result<(), ForgetSpooledDraftError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(ForgetSpooledDraftError::Remove {
-            path: path.to_owned(),
-            source,
-        }),
-    }
 }
 
 fn stem(host: &HostId, scope: &str) -> String {
@@ -818,4 +1167,4 @@ fn file_safe(text: &str) -> String {
 
 #[cfg(test)]
 #[path = "../../tests/composer/spool.rs"]
-mod tests;
+pub(super) mod tests;

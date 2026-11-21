@@ -1,6 +1,7 @@
 use super::*;
 use crate::composer::draft_session::Submission;
 use crate::composer::draft_session::{KeptDraft, Unrecovered};
+use crate::composer::spool::tests::{Direct as _, Rule, ScriptedDisk, named, unit};
 use artisan_api::tls::{Identity, fingerprint};
 use editor_core::{HostConfig, HostKind};
 
@@ -22,6 +23,8 @@ impl Forge {
 struct Device {
     _forge: Forge,
     directory: tempfile::TempDir,
+    spool: DraftSpool,
+    disk: Arc<ScriptedDisk>,
     core: Core,
     host: HostId,
     config: HostConfig,
@@ -50,9 +53,13 @@ impl Device {
         };
         let client = ForgeClient::new(&config.address, &config.fingerprint, &identity).unwrap();
         test_support::editor::core::connect_client(&mut core, &config, client.clone());
+        let disk = Arc::new(ScriptedDisk::default());
+        let spool = DraftSpool::with_disk(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
         Self {
             _forge: forge,
             directory,
+            spool,
+            disk,
             core,
             host: config.id.clone(),
             config,
@@ -61,11 +68,19 @@ impl Device {
     }
 
     fn spool(&self) -> DraftSpool {
-        DraftSpool::new(self.directory.path())
+        self.spool.clone()
     }
 
     fn drafts(&self) -> std::path::PathBuf {
         self.directory.path().join("drafts")
+    }
+
+    fn unit(&self, prefix: &str) -> std::path::PathBuf {
+        unit(&self.drafts(), "recovering-new", prefix)
+    }
+
+    fn settle(&self) {
+        drop(self.spool.turn(&self.host, "new").wait());
     }
 
     fn reopen(&self) -> DraftLease {
@@ -107,7 +122,7 @@ fn a_kept_image_gone_from_disk_comes_back_as_a_failed_image_beside_the_text() {
             Holder::Owner(Slot::Record),
         )
         .unwrap();
-    for entry in std::fs::read_dir(device.drafts()).unwrap() {
+    for entry in std::fs::read_dir(device.unit("record.")).unwrap() {
         let path = entry.unwrap().path();
         if path
             .extension()
@@ -140,7 +155,7 @@ fn an_unreadable_kept_draft_is_reported_and_left_for_the_user() {
             Holder::Owner(Slot::Record),
         )
         .unwrap();
-    let record = device.drafts().join("recovering-new.json");
+    let record = device.unit("record.").join("record.json");
     std::fs::write(&record, b"{ not json").unwrap();
 
     let lease = device.reopen();
@@ -450,13 +465,13 @@ fn saved_by_forge(device: &Device) -> DraftHandle {
         scope: "new".into(),
         client: device.client.clone(),
         spool: device.spool(),
-        rejections: Rejections::default(),
+        persisted: Mutex::new(Persisted::recovered(Kept::Recovered(Slot::Record))),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
             timer: None,
             version: 0,
-            kept: Kept::Recovered(Slot::Record),
+            forgetting: false,
         }),
         changed,
         cancelled: CancellationToken::new(),
@@ -479,14 +494,15 @@ fn a_recovered_draft_that_could_not_be_removed_once_saved_is_removed_on_closing(
             Holder::Owner(Slot::Record),
         )
         .unwrap();
-    let drafts = device.drafts();
+    let drafts = device.drafts().join("recovering-new");
     std::fs::set_permissions(&drafts, std::fs::Permissions::from_mode(0o555)).unwrap();
 
     let session = saved_by_forge(&device);
     session.retry();
+    device.settle();
     std::fs::set_permissions(&drafts, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(
-        drafts.join("recovering-new.json").exists(),
+        device.unit("record.").join("record.json").exists(),
         "the draft stays until it can be set aside"
     );
     let instance = device.core.host(&device.host).unwrap().instance();
@@ -571,19 +587,26 @@ fn retiring_reads_a_pasted_image_outside_the_draft_and_keeps_what_was_typed_mean
     assert!(kept.images[0].as_ref().is_ok_and(|bytes| *bytes == png()));
 }
 
-#[cfg(unix)]
+fn beside_an_unreadable_record(device: &Device) -> std::path::PathBuf {
+    std::fs::create_dir_all(device.drafts()).unwrap();
+    std::fs::write(device.drafts().join("recovering-new.json"), b"{ not json").unwrap();
+    drop(device.disk.arm(Rule::Refuse, named("unreadable-")));
+    device.drafts().join("recovering-new")
+}
+
 #[test]
 fn a_draft_opened_beside_an_unreadable_one_that_stays_is_kept_beside_it_on_retiring() {
     let mut device = Device::new();
-    let scope = "s".repeat(235);
-    let stem = format!("recovering-{scope}");
-    let record = device.drafts().join(format!("{stem}.json"));
-    std::fs::create_dir_all(device.drafts()).unwrap();
-    std::fs::write(&record, b"{ not json").unwrap();
+    beside_an_unreadable_record(&device);
     let instance = device.core.host(&device.host).unwrap().instance();
     let mut sessions = DraftSessions::with_spool(device.spool());
     let lease = sessions
-        .open(device.host.clone(), instance, scope, device.client.clone())
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
         .unwrap();
     assert!(matches!(
         lease.take_unrecovered()[..],
@@ -595,15 +618,12 @@ fn a_draft_opened_beside_an_unreadable_one_that_stays_is_kept_beside_it_on_retir
     sessions.retain_hosts(&device.core);
 
     assert_eq!(
-        std::fs::read(&record).unwrap(),
+        std::fs::read(device.unit("record.").join("record.json")).unwrap(),
         b"{ not json",
         "the unreadable draft stays untouched for the user"
     );
-    let beside = device
-        .drafts()
-        .join(format!("{stem}.kept-1"))
-        .join(format!("{stem}.json"));
-    let beside = std::fs::read_to_string(&beside).expect("the draft is written beside it");
+    let beside = std::fs::read_to_string(device.unit("kept-1.").join("record.json"))
+        .expect("the draft is written beside it");
     assert!(
         beside.contains("typed beside the unreadable one"),
         "{beside}"
@@ -611,55 +631,46 @@ fn a_draft_opened_beside_an_unreadable_one_that_stays_is_kept_beside_it_on_retir
     assert!(lease.read(DraftSession::removed));
 }
 
-#[cfg(unix)]
 #[test]
 fn a_session_kept_beside_an_unreadable_draft_again_and_again_reuses_one_slot() {
     let device = Device::new();
-    let scope = "s".repeat(235);
-    let stem = format!("recovering-{scope}");
-    std::fs::create_dir_all(device.drafts()).unwrap();
-    std::fs::write(device.drafts().join(format!("{stem}.json")), b"{ not json").unwrap();
-    let instance = device.core.host(&device.host).unwrap().instance();
-    let mut sessions = DraftSessions::with_spool(device.spool());
-    let lease = sessions
-        .open(device.host.clone(), instance, scope, device.client.clone())
-        .unwrap();
-    type_into(&lease, "first");
-    assert!(lease.keep_locally().unwrap());
-    type_into(&lease, "second");
-    assert!(lease.keep_locally().unwrap());
-
-    let slots: Vec<_> = std::fs::read_dir(device.drafts())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.contains(".kept-"))
-        .collect();
-    assert_eq!(slots, [format!("{stem}.kept-1")]);
-    let beside = std::fs::read_to_string(
-        device
-            .drafts()
-            .join(format!("{stem}.kept-1"))
-            .join(format!("{stem}.json")),
-    )
-    .unwrap();
-    assert!(beside.contains("second"), "{beside}");
-}
-
-#[cfg(unix)]
-#[test]
-fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
-    let mut device = Device::new();
-    let scope = "s".repeat(235);
-    let stem = format!("recovering-{scope}");
-    std::fs::create_dir_all(device.drafts()).unwrap();
-    std::fs::write(device.drafts().join(format!("{stem}.json")), b"{ not json").unwrap();
+    let root = beside_an_unreadable_record(&device);
     let instance = device.core.host(&device.host).unwrap().instance();
     let mut sessions = DraftSessions::with_spool(device.spool());
     let lease = sessions
         .open(
             device.host.clone(),
             instance,
-            scope.clone(),
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    type_into(&lease, "first");
+    assert!(lease.keep_locally().unwrap());
+    type_into(&lease, "second");
+    assert!(lease.keep_locally().unwrap());
+
+    let slots: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("kept-"))
+        .collect();
+    assert_eq!(slots, ["kept-1.2"]);
+    let beside = std::fs::read_to_string(device.unit("kept-1.").join("record.json")).unwrap();
+    assert!(beside.contains("second"), "{beside}");
+}
+
+#[test]
+fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
+    let mut device = Device::new();
+    beside_an_unreadable_record(&device);
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
             device.client.clone(),
         )
         .unwrap();
@@ -668,9 +679,15 @@ fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
     sessions.retain_hosts(&device.core);
     drop(lease);
     let instance = repair(&mut device);
+    drop(device.disk.arm(Rule::Refuse, named("unreadable-")));
 
     let lease = DraftSessions::with_spool(device.spool())
-        .open(device.host.clone(), instance, scope, device.client.clone())
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
         .unwrap();
     assert_eq!(
         lease.read(|state| state.body().text.clone()),
@@ -690,10 +707,6 @@ fn wait_until(lease: &DraftHandle, done: impl Fn() -> bool) {
         .await
         .expect("the draft finishes its work on this device");
     });
-}
-
-fn wait_until_removed(lease: &DraftHandle, path: &std::path::Path) {
-    wait_until(lease, || !path.exists());
 }
 
 fn kept_beside_a_record(device: &Device) {
@@ -747,13 +760,8 @@ fn reopening_offers_a_draft_kept_beside_the_record_and_keeping_mine_removes_it()
         lease.read(|state| state.body().text.clone()),
         "kept in the record"
     );
-    wait_until_removed(&lease, &device.drafts().join("recovering-new.kept-1"));
-    assert!(
-        device
-            .spool()
-            .kept_beside(&device.host, "new", |_| false)
-            .is_empty()
-    );
+    device.settle();
+    assert!(device.spool().kept_beside(&device.host, "new").is_empty());
 }
 
 #[test]
@@ -769,13 +777,13 @@ fn loading_the_draft_kept_beside_replaces_the_record_and_keeps_it_until_forge_ha
         lease.read(|state| state.body().text.clone()),
         "kept beside the record"
     );
-    wait_until_removed(&lease, &device.drafts().join("recovering-new.json"));
+    device.settle();
     assert!(
         device.spool().take(&device.host, "new").unwrap().is_none(),
         "the version the user didn't pick is removed"
     );
     assert!(lease.keep_locally().unwrap());
-    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
+    let beside = device.spool().kept_beside(&device.host, "new");
     let [Ok(beside)] = &beside[..] else {
         panic!("expected the chosen draft to stay kept beside: {beside:?}");
     };
@@ -907,8 +915,8 @@ fn loading_the_draft_kept_beside_keeps_the_records_unanswered_send_until_forge_h
         lease.read(|state| state.body().text.clone()),
         "kept beside the record"
     );
-    wait_until(&lease, settled(&lease));
-    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
+    device.settle();
+    let beside = device.spool().kept_beside(&device.host, "new");
     let [Ok(beside)] = &beside[..] else {
         panic!("expected the chosen draft to be kept beside: {beside:?}");
     };
@@ -942,7 +950,7 @@ fn keeping_mine_over_a_draft_kept_beside_with_an_unanswered_send_keeps_it_until_
         lease.read(|state| state.body().text.clone()),
         "kept in the record"
     );
-    wait_until(&lease, settled(&lease));
+    device.settle();
     let record = device
         .spool()
         .take(&device.host, "new")
@@ -964,8 +972,8 @@ fn keeping_mine_over_a_draft_kept_beside_with_an_unanswered_send_keeps_it_until_
 fn an_unreadable_draft_kept_beside_is_moved_aside_and_reported_once() {
     let device = Device::new();
     kept_beside_a_record(&device);
-    let beside = device.drafts().join("recovering-new.kept-1");
-    std::fs::write(beside.join("recovering-new.json"), b"{ not json").unwrap();
+    let beside = device.unit("kept-1.");
+    std::fs::write(beside.join("record.json"), b"{ not json").unwrap();
 
     let lease = device.reopen();
     let [Unrecovered::SetAside(set_aside)] = &lease.take_unrecovered()[..] else {
@@ -1043,31 +1051,22 @@ fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismi
     );
 }
 
-fn settled(lease: &DraftHandle) -> impl Fn() -> bool {
-    let rejections = lease.0.rejections.clone();
-    move || rejections.lock().is_empty()
-}
-
-#[cfg(unix)]
 #[test]
 fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_next_open() {
-    use std::os::unix::fs::PermissionsExt;
-
     let device = Device::new();
     kept_beside_a_record(&device);
-    let beside = device.drafts().join("recovering-new.kept-1");
-    let tombstone = device.drafts().join("recovering-new.rejected-1");
+    let beside = device.unit("kept-1.");
+    let tombstone = device.drafts().join("recovering-new").join("rejected-1");
     let lease = device.reopen();
-    std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o555)).unwrap();
+    drop(device.disk.arm(Rule::RefuseRemoval, named("rejected-")));
     lease.keep_local();
     assert!(
         !lease.read(DraftSession::conflict),
         "the choice is made at once"
     );
-    wait_until(&lease, settled(&lease));
+    device.settle();
     assert!(!beside.exists());
     assert!(tombstone.exists(), "the removal failed part way");
-    std::fs::set_permissions(&tombstone, std::fs::Permissions::from_mode(0o755)).unwrap();
     drop(lease);
 
     let lease = device.reopen();
@@ -1075,24 +1074,42 @@ fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_ne
         !lease.read(DraftSession::conflict),
         "the draft the user chose against isn't offered again"
     );
-    wait_until_removed(&lease, &tombstone);
+    device.settle();
+    assert!(!tombstone.exists());
 }
 
-#[cfg(unix)]
 #[test]
-fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn a_draft_the_user_chose_against_that_could_not_be_moved_is_offered_again() {
     let device = Device::new();
     kept_beside_a_record(&device);
-    let stuck = device.drafts().join("recovering-new.stuck.image");
-    std::fs::create_dir(&stuck).unwrap();
-    std::fs::write(stuck.join("inside"), b"pinned").unwrap();
-    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o555)).unwrap();
     let lease = device.reopen();
-    lease.use_remote();
-    wait_until(&lease, settled(&lease));
+    drop(device.disk.arm(Rule::Refuse, named("rejected-")));
+    lease.keep_local();
+    device.settle();
     drop(lease);
+
+    let lease = device.reopen();
+    assert!(
+        lease.read(DraftSession::conflict),
+        "the draft that couldn't be set aside is offered again rather than lost"
+    );
+    assert_eq!(
+        lease.read(|state| state.body().text.clone()),
+        "kept in the record"
+    );
+}
+
+#[test]
+fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
+    let device = Device::new();
+    kept_beside_a_record(&device);
+    let lease = device.reopen();
+    drop(device.disk.arm(Rule::RefuseRemoval, named("rejected-")));
+    lease.use_remote();
+    device.settle();
+    drop(lease);
+    let tombstone = device.drafts().join("recovering-new").join("rejected-1");
+    assert!(tombstone.exists(), "the removal failed part way");
     device
         .spool()
         .keep(
@@ -1105,10 +1122,11 @@ fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
         .unwrap();
 
     let lease = device.reopen();
-    wait_until(&lease, || {
-        !device.drafts().join("recovering-new.rejected-1").exists()
-    });
-    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+    device.settle();
+    assert!(
+        !tombstone.exists(),
+        "the half-removed draft is cleared on opening"
+    );
     assert_eq!(
         lease.read(|state| state.body().text.clone()),
         "saved where the old record was",
@@ -1116,7 +1134,7 @@ fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
     );
     drop(lease);
     assert!(
-        device.drafts().join("recovering-new.json").exists(),
+        device.unit("record.").join("record.json").exists(),
         "the new draft stays on this device"
     );
 }
@@ -1125,41 +1143,35 @@ fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
 fn a_choice_still_being_carried_out_is_honoured_by_the_drafts_that_take_over() {
     let device = Device::new();
     kept_beside_a_record(&device);
-    let instance = device.core.host(&device.host).unwrap().instance();
-    let mut sessions = DraftSessions::with_spool(device.spool());
-    sessions.rejections.lock().push(Rejected {
-        host: device.host.clone(),
-        scope: "new".into(),
-        slot: Slot::Record,
+    let lease = device.reopen();
+    let gate = device.disk.arm(Rule::PauseAfter, named("rejected-"));
+    lease.use_remote();
+    gate.reached();
+
+    let taking_over = std::thread::spawn({
+        let spool = device.spool();
+        let host = device.host.clone();
+        let instance = device.core.host(&device.host).unwrap().instance();
+        let client = device.client;
+        move || {
+            let lease = DraftSessions::with_spool(spool)
+                .open(host, instance, "new".into(), client)
+                .unwrap();
+            lease.read(|state| (state.body().text.clone(), state.conflict()))
+        }
     });
+    gate.release();
 
-    let mut remounted = DraftSessions::with_spool(device.spool());
-    remounted.take_held(sessions.hand_off_held());
-    let lease = remounted
-        .open(
-            device.host.clone(),
-            instance,
-            "new".into(),
-            device.client.clone(),
-        )
-        .unwrap();
     assert_eq!(
-        lease.read(|state| state.body().text.clone()),
-        "kept beside the record",
+        taking_over.join().unwrap(),
+        ("kept beside the record".to_owned(), false),
         "the draft being discarded isn't brought back"
-    );
-    assert!(!lease.read(DraftSession::conflict));
-    drop(lease);
-
-    assert!(
-        device.reopen().read(DraftSession::conflict),
-        "drafts that didn't take over know nothing of the choice"
     );
 }
 
 fn beside_slot(device: &Device) -> BesideSlot {
     kept_beside_a_record(device);
-    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
+    let beside = device.spool().kept_beside(&device.host, "new");
     let [Ok(beside)] = &beside[..] else {
         panic!("expected one draft kept beside the record: {beside:?}");
     };
@@ -1179,7 +1191,7 @@ fn set_aside_failed(lease: &DraftHandle) -> impl Fn() -> bool {
 fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and_sent_again() {
     let device = Device::refusing();
     let slot = beside_slot(&device);
-    std::fs::remove_file(device.drafts().join("recovering-new.json")).unwrap();
+    std::fs::remove_dir_all(device.unit("record.")).unwrap();
     let mut state = DraftSession::new("new".into());
     state.offer_rival(slot, kept("kept beside"), Vec::new(), Vec::new());
     state.submit(sending("sent before choosing", "displaced", None));
@@ -1189,13 +1201,13 @@ fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and
         scope: "new".into(),
         client: device.client.clone(),
         spool: device.spool(),
-        rejections: Rejections::default(),
+        persisted: Mutex::new(Persisted::recovered(Kept::Nothing)),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
             timer: None,
             version: 0,
-            kept: Kept::Nothing,
+            forgetting: false,
         }),
         changed,
         cancelled: CancellationToken::new(),
@@ -1204,7 +1216,7 @@ fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and
     session.use_remote();
 
     wait_until(&session, set_aside_failed(&session));
-    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
+    let beside = device.spool().kept_beside(&device.host, "new");
     let [Ok(beside)] = &beside[..] else {
         panic!("expected the chosen draft to be kept beside: {beside:?}");
     };
@@ -1268,4 +1280,45 @@ fn a_set_aside_message_is_sent_before_the_chosen_drafts_own_and_only_once_it_is_
         panic!("expected the chosen draft's message once the set-aside one is through");
     };
     assert_eq!(second.message.id, theirs.message.id);
+}
+
+#[test]
+fn a_background_save_that_finishes_late_never_replaces_the_draft_kept_on_retiring() {
+    let device = Device::new();
+    keep_record_and_beside(
+        &device,
+        kept("mine"),
+        kept_sending(&sending("sent beside", "beside-message", None)),
+    );
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    let gate = device.disk.arm(Rule::PauseBefore, named("record."));
+    lease.keep_local();
+    gate.reached();
+    type_into(&lease, "edited while the save was stuck");
+
+    let retiring = std::thread::spawn(move || {
+        sessions.retire();
+        sessions
+    });
+    gate.release();
+    let sessions = retiring.join().unwrap();
+    assert_eq!(sessions.unkept(), None);
+    drop(lease);
+    device.settle();
+
+    let reopened = device.reopen();
+    assert_eq!(
+        reopened.read(|state| state.body().text.clone()),
+        "edited while the save was stuck",
+        "the draft kept on retiring wins over the older save still on its way to disk"
+    );
 }

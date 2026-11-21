@@ -118,6 +118,7 @@ fn sending_while_a_draft_kept_beside_waits_for_a_choice_is_refused_and_keeps_the
     use crate::composer::draft_body::DraftBody;
     use crate::composer::draft_session::{DraftSession, KeptDraft};
     use crate::composer::persistence::DraftSessions;
+    use crate::composer::spool::tests::Direct as _;
     use crate::composer::spool::{DraftSpool, Holder, Slot};
     use artisan_api::tls::{Identity, fingerprint};
     use editor_core::{ForgeClient, HostConfig, HostId, HostKind};

@@ -118,14 +118,18 @@ fn removing_host_keeps_the_composers_draft_and_unfinished_image_on_this_device()
     core.remove_host(&config.id).unwrap();
     workspace.handle_event(&core, &editor_aqua::core::CoreEvent::HostsChanged, false);
 
-    let images = std::fs::read_dir(directory.path().join("drafts"))
-        .unwrap()
-        .filter(|entry| {
-            entry
-                .as_ref()
-                .unwrap()
-                .path()
-                .extension()
+    let listed = |folder: &std::path::Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    };
+    let images = listed(&directory.path().join("drafts"))
+        .iter()
+        .flat_map(|scope| listed(scope))
+        .flat_map(|kept| listed(&kept))
+        .filter(|path| {
+            path.extension()
                 .is_some_and(|extension| extension == "image")
         })
         .count();

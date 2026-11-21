@@ -2636,6 +2636,28 @@ fn a_refused_send_clears_once_its_cause_is_fixed_and_leaves_the_recovery_notice_
     });
 }
 
+fn kept_record(root: &std::path::Path) -> Value {
+    let [record] = &kept_units(root, "record.")[..] else {
+        panic!("expected one kept draft in {root:?}");
+    };
+    serde_json::from_slice(&std::fs::read(record.join("record.json")).unwrap()).unwrap()
+}
+
+fn kept_units(root: &std::path::Path, prefix: &str) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(prefix))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[test]
 fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_removes_it() {
     use editor_aqua::composer::controller::ComposerTarget;
@@ -2717,22 +2739,23 @@ fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_remov
             Value::Null,
             "finishing it doesn't clear the draft the user kept"
         );
-        let kept: Value = serde_json::from_slice(
-            &std::fs::read(drafts.join("rivals-new_3aproject.json")).unwrap(),
-        )
-        .unwrap();
+        let root = drafts.join("rivals-new_3aproject");
+        let kept = kept_record(&root);
         assert_eq!(
             kept["set_aside"][0]["message"]["id"], "beside-message",
             "it stays on this device with the kept draft until Forge has it"
         );
-        assert!(!beside.exists(), "the draft the user chose against is gone");
+        assert!(
+            kept_units(&root, "kept-").is_empty(),
+            "the draft the user chose against is gone"
+        );
         respond(
             &mut socket,
             accepted_message("beside-message", "sent beside"),
         )
         .await;
         drop(socket);
-        while drafts.join("rivals-new_3aproject.json").exists() {
+        while root.exists() {
             changed.changed().await.unwrap();
         }
         assert_eq!(session.read(|state| state.body().text.clone()), "mine");

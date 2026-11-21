@@ -134,13 +134,20 @@ fn a_draft_this_device_could_not_keep_at_sign_out_comes_back_and_is_kept_once_at
         ),
         "the draft Forge never saw is kept on this device at shutdown: {outcome:?}"
     );
-    let kept: Vec<_> = std::fs::read_dir(directory.path().join("drafts"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
+    let listed = |folder: &std::path::Path| -> Vec<_> {
+        std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    };
+    let scopes = listed(&directory.path().join("drafts"));
+    let [scope] = &scopes[..] else {
+        panic!("one thread's draft is kept: {scopes:?}");
+    };
+    let kept = listed(scope);
     let [record] = &kept[..] else {
         panic!("one draft is kept, with no copy beside it: {kept:?}");
     };
-    let record = std::fs::read_to_string(record).unwrap();
+    let record = std::fs::read_to_string(record.join("record.json")).unwrap();
     assert!(record.contains("only copy of this text"), "{record}");
 }
