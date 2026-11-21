@@ -2208,8 +2208,28 @@ fn trying_again_after_the_thread_left_the_forge_says_the_thread_is_gone() {
 
 #[test]
 fn trying_again_with_a_refused_image_says_to_remove_the_image() {
-    use editor_aqua::composer::draft_session::DraftSession;
+    refused_image_says_to_remove_it(
+        editor_aqua::composer::view::ComposerAction::RetryDraft,
+        "trying again names the failed image instead of blaming the connection",
+    );
+}
+
+#[test]
+fn sending_with_a_refused_image_says_to_remove_the_image() {
     use editor_aqua::composer::view::ComposerAction;
+    use editor_aqua::ui::text::mount::EditorEvent;
+    refused_image_says_to_remove_it(
+        ComposerAction::Editor(EditorEvent::Submitted),
+        "pressing Enter explains why nothing was sent",
+    );
+    refused_image_says_to_remove_it(
+        ComposerAction::Send,
+        "the Send button explains why nothing was sent",
+    );
+}
+
+fn refused_image_says_to_remove_it(action: editor_aqua::composer::view::ComposerAction, why: &str) {
+    use editor_aqua::composer::draft_session::DraftSession;
 
     let (_directory, mut core, _config, _client) = fixture();
     run(async {
@@ -2252,7 +2272,7 @@ fn trying_again_with_a_refused_image_says_to_remove_the_image() {
         owner.controller.borrow_mut().sync(&core);
         assert!(sending.read(DraftSession::send_failed));
 
-        owner.dispatch_with_change(&mut core, ComposerAction::RetryDraft, None);
+        owner.dispatch_with_change(&mut core, action, None);
 
         let composer = owner.controller.borrow();
         assert_eq!(
@@ -2261,7 +2281,7 @@ fn trying_again_with_a_refused_image_says_to_remove_the_image() {
                 .as_ref()
                 .map(editor_aqua::core::Problem::headline),
             Some("An image couldn't be uploaded. Remove it or try it again."),
-            "trying again names the failed image instead of blaming the connection"
+            "{why}"
         );
     });
 }

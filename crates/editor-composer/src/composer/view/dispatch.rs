@@ -155,8 +155,14 @@ impl ComposerOwner {
                         self.send_answer(host, answer, composer.generation());
                         effects.push(ComposerEffect::EditorChanged);
                     }
-                } else if composer.send(host).is_ok() {
-                    effects.push(ComposerEffect::EditorChanged);
+                } else {
+                    match composer.send(host) {
+                        Ok(()) => effects.push(ComposerEffect::EditorChanged),
+                        Err(super::super::controller::SendRefusal::Empty) => {}
+                        Err(refusal) => {
+                            composer.notice = Some(editor_core::Problem::new(refusal.to_string()));
+                        }
+                    }
                 }
                 effects.push(ComposerEffect::FocusEditor);
             }
