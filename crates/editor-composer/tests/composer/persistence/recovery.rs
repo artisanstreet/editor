@@ -103,6 +103,7 @@ fn a_kept_image_gone_from_disk_comes_back_as_a_failed_image_beside_the_text() {
             "new",
             kept("text beside an image"),
             &[Arc::from(&b"image"[..])],
+            Holder::Owner,
         )
         .unwrap();
     for entry in std::fs::read_dir(device.drafts()).unwrap() {
@@ -130,7 +131,13 @@ fn an_unreadable_kept_draft_is_reported_and_left_for_the_user() {
     let device = Device::new();
     device
         .spool()
-        .keep(&device.host, "new", kept("an older draft"), &[])
+        .keep(
+            &device.host,
+            "new",
+            kept("an older draft"),
+            &[],
+            Holder::Owner,
+        )
         .unwrap();
     let record = device.drafts().join("recovering-new.json");
     std::fs::write(&record, b"{ not json").unwrap();
@@ -180,7 +187,7 @@ fn removing_the_pairing_keeps_a_recovered_draft_as_it_was_last_edited() {
     let mut device = Device::new();
     device
         .spool()
-        .keep(&device.host, "new", kept("recovered"), &[])
+        .keep(&device.host, "new", kept("recovered"), &[], Holder::Owner)
         .unwrap();
     let instance = device.core.host(&device.host).unwrap().instance();
     let mut sessions = DraftSessions::with_spool(device.spool());
@@ -383,7 +390,7 @@ fn saved_by_forge(device: &Device) -> DraftHandle {
         host: device.host.clone(),
         scope: "new".into(),
         client: device.client.clone(),
-        spool: Some(device.spool()),
+        spool: device.spool(),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
@@ -401,7 +408,7 @@ fn a_recovered_draft_that_could_not_be_removed_once_saved_is_removed_on_closing(
     let device = Device::new();
     device
         .spool()
-        .keep(&device.host, "new", kept("saved since"), &[])
+        .keep(&device.host, "new", kept("saved since"), &[], Holder::Owner)
         .unwrap();
     let record = device.drafts().join("recovering-new.json");
     let kept_record = std::fs::read(&record).unwrap();
@@ -493,4 +500,44 @@ fn retiring_reads_a_pasted_image_outside_the_draft_and_keeps_what_was_typed_mean
     assert_eq!(kept.draft.body.text, "typed while closing");
     assert_eq!(kept.images.len(), 1);
     assert!(kept.images[0].as_ref().is_ok_and(|bytes| *bytes == png()));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_draft_opened_beside_an_unreadable_one_that_stays_is_kept_beside_it_on_retiring() {
+    let mut device = Device::new();
+    let scope = "s".repeat(235);
+    let stem = format!("recovering-{scope}");
+    let record = device.drafts().join(format!("{stem}.json"));
+    std::fs::create_dir_all(device.drafts()).unwrap();
+    std::fs::write(&record, b"{ not json").unwrap();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(device.host.clone(), instance, scope, device.client.clone())
+        .unwrap();
+    assert!(matches!(
+        lease.take_unrecovered(),
+        Some(Unrecovered::Left(_))
+    ));
+    type_into(&lease, "typed beside the unreadable one");
+
+    device.core.remove_host(&device.host).unwrap();
+    sessions.retain_hosts(&device.core);
+
+    assert_eq!(
+        std::fs::read(&record).unwrap(),
+        b"{ not json",
+        "the unreadable draft stays untouched for the user"
+    );
+    let beside = device
+        .drafts()
+        .join(format!("{stem}.kept-1"))
+        .join(format!("{stem}.json"));
+    let beside = std::fs::read_to_string(&beside).expect("the draft is written beside it");
+    assert!(
+        beside.contains("typed beside the unreadable one"),
+        "{beside}"
+    );
+    assert!(lease.read(DraftSession::removed));
 }

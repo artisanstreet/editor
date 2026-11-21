@@ -1,7 +1,6 @@
 use aqua_text::{SharedFonts, SharedRuns};
 use artisan_api::tls::{Identity, fingerprint};
 use editor_aqua::composer::controller::ComposerTarget;
-use editor_aqua::composer::persistence::DraftSessions;
 use editor_aqua::composer::view::ComposerOwner;
 use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::ui::theme::ArtisanTheme;
@@ -46,7 +45,7 @@ fn a_sent_message_leaves_the_prompt_on_screen_at_once() {
         },
         client,
     );
-    let mut sessions = DraftSessions::default();
+    let (_spool, mut sessions) = crate::draft_sessions();
     let owner = ComposerOwner::new(
         &core,
         &mut sessions,
@@ -98,7 +97,7 @@ fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
         },
         client,
     );
-    let mut sessions = DraftSessions::default();
+    let (_spool, mut sessions) = crate::draft_sessions();
     let owner = ComposerOwner::new(
         &core,
         &mut sessions,
@@ -153,7 +152,7 @@ fn a_failed_stop_is_explained_on_the_card_until_dismissed() {
         },
         client,
     );
-    let mut sessions = DraftSessions::default();
+    let (_spool, mut sessions) = crate::draft_sessions();
     let owner = ComposerOwner::new(
         &core,
         &mut sessions,

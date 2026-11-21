@@ -21,3 +21,14 @@ mod sliding_tab;
 mod tsf;
 #[path = "composer/view.rs"]
 mod view;
+
+fn draft_sessions() -> (
+    tempfile::TempDir,
+    editor_aqua::composer::persistence::DraftSessions,
+) {
+    let spool = tempfile::tempdir().unwrap();
+    let sessions = editor_aqua::composer::persistence::DraftSessions::with_spool(
+        editor_aqua::composer::spool::DraftSpool::new(spool.path()),
+    );
+    (spool, sessions)
+}

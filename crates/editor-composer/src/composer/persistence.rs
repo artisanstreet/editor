@@ -4,7 +4,7 @@ use super::draft_session::{
     AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptDraft, KeptLostImage, LostKey,
     Operation, PostMessageError, SAVE_DELAY, Submission, Unrecovered,
 };
-use super::spool::{DraftSpool, KeepSpooledDraftError, TakeSpooledDraftError};
+use super::spool::{DraftSpool, Holder, KeepSpooledDraftError, Placed, TakeSpooledDraftError};
 use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use std::{
@@ -28,6 +28,7 @@ pub enum SessionEvent {
 enum Kept {
     Nothing,
     Recovered,
+    Written,
     Unforgotten,
 }
 
@@ -43,7 +44,7 @@ struct Inner {
     host: HostId,
     scope: String,
     client: ForgeClient,
-    spool: Option<DraftSpool>,
+    spool: DraftSpool,
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
     cancelled: CancellationToken,
@@ -55,14 +56,20 @@ struct Keeping {
     scope: String,
     draft: KeptDraft,
     images: Vec<(String, AdoptedImage)>,
+    holder: Holder,
 }
 
 impl Keeping {
-    fn of(state: &DraftSession) -> Option<Self> {
+    fn of(shared: &Shared) -> Option<Self> {
+        let state = &shared.state;
         state.keepable().then(|| Self {
             scope: state.scope().to_owned(),
             draft: state.kept(),
             images: state.unacknowledged_images(),
+            holder: match shared.kept {
+                Kept::Nothing => Holder::Newcomer,
+                Kept::Recovered | Kept::Written | Kept::Unforgotten => Holder::Owner,
+            },
         })
     }
 }
@@ -71,8 +78,6 @@ impl Keeping {
 enum KeepLocallyError {
     #[error("read an image that Forge has not acknowledged")]
     Image(#[source] ReadImageError),
-    #[error("this Editor has no folder to keep drafts in")]
-    NoSpool,
     #[error("write the draft to this device")]
     Spool(#[source] KeepSpooledDraftError),
 }
@@ -116,7 +121,7 @@ fn held_by(state: &UnkeptDraftsState, spool: &DraftSpool) -> Option<UnkeptDrafts
     let mut held = state
         .held
         .iter()
-        .filter(|held| held.session.0.spool.as_ref() == Some(spool));
+        .filter(|held| held.session.0.spool == *spool);
     let first = held.next()?;
     let count = 1 + held.count();
     let headline = if count == 1 {
@@ -139,7 +144,7 @@ pub fn unkept_drafts(spool: &DraftSpool) -> Option<UnkeptDrafts> {
 }
 
 pub fn keep_unkept(spool: &DraftSpool) -> Option<UnkeptDrafts> {
-    keep_held(|session| session.0.spool.as_ref() == Some(spool));
+    keep_held(|session| session.0.spool == *spool);
     unkept_drafts(spool)
 }
 
@@ -275,10 +280,10 @@ impl Drop for DraftLease {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DraftSessions {
     sessions: HashMap<(HostId, HostInstance, String), DraftHandle>,
-    spool: Option<DraftSpool>,
+    spool: DraftSpool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -373,7 +378,7 @@ impl DraftSessions {
     pub fn with_spool(spool: DraftSpool) -> Self {
         Self {
             sessions: HashMap::new(),
-            spool: Some(spool),
+            spool,
         }
     }
 
@@ -404,9 +409,8 @@ impl DraftSessions {
             return Err(DraftsFull { host, scope });
         }
         let mut state = DraftSession::new(scope.clone());
-        let mut spool = self.spool.clone();
-        let recovered = match self.spool.as_ref().map(|spool| spool.take(&host, &scope)) {
-            Some(Ok(Some(spooled))) => {
+        let recovered = match self.spool.take(&host, &scope) {
+            Ok(Some(spooled)) => {
                 let mut images = Vec::new();
                 let mut damaged = Vec::new();
                 for image in spooled.images {
@@ -436,8 +440,8 @@ impl DraftSessions {
                 state.recover(spooled.draft, images, damaged);
                 Kept::Recovered
             }
-            Some(Ok(None)) | None => Kept::Nothing,
-            Some(Err(error)) => {
+            Ok(None) => Kept::Nothing,
+            Err(error) => {
                 tracing::error!(
                     host = %host,
                     %scope,
@@ -455,9 +459,8 @@ impl DraftSessions {
                             host = %host,
                             %scope,
                             error = %::diagnostics::chain(&unreadable),
-                            "this draft won't be kept on this device so the unreadable one isn't overwritten"
+                            "this draft will be kept beside the unreadable one so it isn't overwritten"
                         );
-                        spool = None;
                         state.set_unrecovered(Unrecovered::Left(path));
                     }
                 }
@@ -469,7 +472,7 @@ impl DraftSessions {
             host,
             scope,
             client,
-            spool,
+            spool: self.spool.clone(),
             shared: Mutex::new(Shared {
                 state,
                 viewers: Vec::new(),
@@ -533,7 +536,8 @@ impl DraftHandle {
     }
 
     fn keep_locally(&self) -> Result<bool, KeepLocallyError> {
-        match self.read(Keeping::of) {
+        let keeping = Keeping::of(&self.0.shared());
+        match keeping {
             Some(keeping) => self.keep(keeping).map(|()| true),
             None => Ok(false),
         }
@@ -544,10 +548,8 @@ impl DraftHandle {
             scope,
             mut draft,
             images,
+            holder,
         } = keeping;
-        let Some(spool) = self.0.spool.as_ref() else {
-            return Err(KeepLocallyError::NoSpool);
-        };
         let images = images
             .into_iter()
             .filter_map(|(name, image)| match image {
@@ -572,12 +574,27 @@ impl DraftHandle {
                 },
             })
             .collect::<Vec<_>>();
-        let kept = spool
-            .keep(&self.0.host, &scope, draft, &images)
+        let kept = self
+            .0
+            .spool
+            .keep(&self.0.host, &scope, draft, &images, holder)
             .map_err(KeepLocallyError::Spool);
         match &kept {
-            Ok(()) => {
+            Ok(Placed::Record) => {
+                let mut shared = self.0.shared();
+                if shared.kept == Kept::Nothing {
+                    shared.kept = Kept::Written;
+                }
+                drop(shared);
                 tracing::warn!(host = %self.0.host, %scope, "kept an unsaved draft on this device until Forge can take it");
+            }
+            Ok(Placed::Beside(path)) => {
+                tracing::warn!(
+                    host = %self.0.host,
+                    %scope,
+                    path = %path.display(),
+                    "kept an unsaved draft on this device beside another draft kept for the same thread"
+                );
             }
             Err(error) => {
                 tracing::error!(
@@ -588,11 +605,11 @@ impl DraftHandle {
                 );
             }
         }
-        kept
+        kept.map(drop)
     }
 
     fn forget_recovered(&self, shared: &mut Shared) {
-        if shared.kept == Kept::Recovered {
+        if matches!(shared.kept, Kept::Recovered | Kept::Written) {
             self.forget_acknowledged(shared);
         }
     }
@@ -608,15 +625,8 @@ impl DraftHandle {
         if !shared.state.settled_with_forge() {
             return;
         }
-        let Some(spool) = &self.0.spool else {
-            unreachable!(
-                "invariant: draft {} on Forge {} was recovered from the device spool it still holds",
-                shared.state.scope(),
-                self.0.host
-            );
-        };
         let scope = shared.state.scope();
-        match spool.forget(&self.0.host, scope) {
+        match self.0.spool.forget(&self.0.host, scope) {
             Ok(()) => shared.kept = Kept::Nothing,
             Err(error) => {
                 tracing::error!(
@@ -696,13 +706,10 @@ impl DraftHandle {
         loop {
             let (version, keeping) = {
                 let shared = self.0.shared();
-                (shared.version, Keeping::of(&shared.state))
+                (shared.version, Keeping::of(&shared))
             };
             if let Some(keeping) = keeping {
-                match self.keep(keeping) {
-                    Err(KeepLocallyError::NoSpool) | Ok(()) => {}
-                    Err(error) => return Err(error),
-                }
+                self.keep(keeping)?;
             }
             let shared = self.0.shared();
             if shared.version == version {

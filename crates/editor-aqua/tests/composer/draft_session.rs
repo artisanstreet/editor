@@ -148,11 +148,8 @@ fn edits_during_a_write_are_not_discarded() {
 )]
 fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     use artisan_api::tls::{Identity, fingerprint};
+    use editor_aqua::composer::controller::{Composer, ComposerTarget};
     use editor_aqua::composer::view::ComposerAction;
-    use editor_aqua::composer::{
-        controller::{Composer, ComposerTarget},
-        persistence::DraftSessions,
-    };
     use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
 
     let directory = tempfile::tempdir().unwrap();
@@ -172,7 +169,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     };
     test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let first = core.host(&id).unwrap().instance();
-    let mut sessions = DraftSessions::default();
+    let (_spool, mut sessions) = crate::draft_sessions();
     let target = ComposerTarget::NewThread {
         host: id.clone(),
         project: None,

@@ -2,7 +2,8 @@ use super::*;
 use artisan_api::tls::{Identity, fingerprint};
 use artisan_api::{DraftSnapshot, DraftWriteResult};
 
-fn pending_write() -> (DraftHandle, DraftBody) {
+fn pending_write() -> (DraftHandle, DraftBody, tempfile::TempDir) {
+    let spool = tempfile::tempdir().unwrap();
     let identity = Identity::generate("deadline-test").unwrap();
     let pin = fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = ForgeClient::new("127.0.0.1:1", &pin, &identity).unwrap();
@@ -25,7 +26,7 @@ fn pending_write() -> (DraftHandle, DraftBody) {
         host: HostId("deadline-test".into()),
         scope: "new".into(),
         client,
-        spool: None,
+        spool: DraftSpool::new(spool.path()),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
@@ -36,12 +37,12 @@ fn pending_write() -> (DraftHandle, DraftBody) {
         changed,
         cancelled: CancellationToken::new(),
     }));
-    (handle, *body)
+    (handle, *body, spool)
 }
 
 #[test]
 fn acknowledgement_before_deadline_recheck_is_saved_without_cancellation() {
-    let (handle, written) = pending_write();
+    let (handle, written, _spool) = pending_write();
     assert!(handle.read(DraftSession::pending));
     handle.mutate(|shared| {
         shared.state.written(Ok(DraftWriteResult {
@@ -58,7 +59,7 @@ fn acknowledgement_before_deadline_recheck_is_saved_without_cancellation() {
 
 #[test]
 fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
-    let (handle, _) = pending_write();
+    let (handle, _, _spool) = pending_write();
     assert!(handle.read(DraftSession::pending));
     handle.mutate(|shared| {
         shared
@@ -81,7 +82,7 @@ fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
 
 #[test]
 fn unacknowledged_write_at_deadline_is_cancelled_and_counted_once() {
-    let (handle, _) = pending_write();
+    let (handle, _, _spool) = pending_write();
     assert_eq!(
         handle.deadline_outcome(),
         ShutdownOutcome::Incomplete {

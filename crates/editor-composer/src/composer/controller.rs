@@ -759,7 +759,7 @@ impl Composer {
                     path.display()
                 ),
                 Unrecovered::Left(path) => format!(
-                    "A draft kept on this device couldn't be read. It stays at {}, and this draft isn't kept on this device until it's moved.",
+                    "A draft kept on this device couldn't be read. It stays at {}, and this draft is kept beside it.",
                     path.display()
                 ),
             }));

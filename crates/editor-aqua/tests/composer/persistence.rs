@@ -126,7 +126,7 @@ fn rejected_write_hands_the_message_back_and_sending_it_again_keeps_its_id() {
     let (_directory, core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(
                 config.id.clone(),
@@ -253,7 +253,7 @@ fn fixture() -> (tempfile::TempDir, Core, HostConfig, ForgeClient) {
 #[test]
 fn replacing_host_invalidates_old_draft_writer_but_preserves_current_writer() {
     let (_directory, mut core, config, client) = fixture();
-    let mut sessions = DraftSessions::default();
+    let (_spool, mut sessions) = crate::draft_sessions();
     let old_instance = core.host(&config.id).unwrap().instance();
     let old = sessions
         .open(
@@ -290,7 +290,7 @@ fn dropping_lease_and_manager_flushes_a_loaded_dirty_draft() {
     let (_directory, core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(
                 config.id.clone(),
@@ -338,7 +338,7 @@ fn graceful_teardown_finishes_an_inflight_write_and_queued_post() {
     let (_directory, core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(
                 config.id.clone(),
@@ -404,7 +404,7 @@ fn explicit_host_removal_cancels_an_inflight_write_and_queued_post() {
     let (_directory, mut core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(
                 config.id.clone(),
@@ -480,7 +480,7 @@ fn process_exit_waits_for_draft_write_acceptance() {
     let (_directory, core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(
                 config.id.clone(),
@@ -520,7 +520,7 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
     let (_directory, core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(
                 config.id.clone(),
@@ -541,7 +541,7 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
-                kept_locally: 0,
+                kept_locally: 1,
             }
         );
         let mut bytes = [0; 1024];
@@ -564,7 +564,7 @@ fn process_exit_reports_a_rejected_draft_write() {
     let (_directory, core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(
                 config.id.clone(),
@@ -593,7 +593,7 @@ fn process_exit_reports_a_rejected_draft_write() {
             ShutdownOutcome::Incomplete {
                 failed: 1,
                 timed_out: 0,
-                kept_locally: 0,
+                kept_locally: 1,
             }
         );
     });
@@ -1032,7 +1032,7 @@ fn an_image_forge_refuses_comes_back_as_a_failed_image_and_the_draft_keeps_savin
             host,
             project: Some(artisan_api::ProjectId::from("project")),
         };
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(&core, &mut sessions, target);
         let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
         assert!(route.starts_with("GET /drafts/"), "{route}");
@@ -1293,7 +1293,7 @@ fn an_image_whose_upload_failed_after_leaving_the_draft_uploads_on_retry() {
     let instance = core.host(&config.id).unwrap().instance();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(config.id.clone(), instance, "new".into(), client.clone())
             .unwrap();
@@ -1440,7 +1440,7 @@ fn an_image_still_uploading_when_leaving_the_draft_is_kept() {
     let instance = core.host(&config.id).unwrap().instance();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let mut lease = sessions
             .open(config.id.clone(), instance, "new".into(), client.clone())
             .unwrap();
@@ -1504,7 +1504,7 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
             },
             ForgeClient::new(&address, &pin, &identity).unwrap(),
         );
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(
             &core,
             &mut sessions,
@@ -1589,7 +1589,7 @@ fn a_failed_image_upload_during_a_conflict_still_asks_which_draft_to_keep() {
     let instance = core.host(&config.id).unwrap().instance();
     run(async {
         let (listener, acceptor, client) = server().await;
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let lease = sessions
             .open(config.id.clone(), instance, "new".into(), client.clone())
             .unwrap();
@@ -1663,7 +1663,7 @@ fn a_full_set_of_open_drafts_refuses_a_new_one_until_one_settles_and_closes() {
                 respond(&mut socket, json!({"revision": 0, "body": null})).await;
             }
         });
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let mut leases: Vec<DraftLease> = (0..MAX_OPEN_DRAFTS)
             .map(|draft| {
                 sessions
@@ -1738,7 +1738,7 @@ fn a_paragraph_shows_on_return_although_the_image_handed_over_with_it_was_refuse
             host: host.clone(),
             project: Some(artisan_api::ProjectId::from("elsewhere")),
         };
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(&core, &mut sessions, here.clone());
         answer_empty_draft(&listener, &acceptor, 0).await;
         let session = DraftHandle::clone(composer.session.as_ref().unwrap());
@@ -2040,7 +2040,7 @@ fn a_send_that_fails_while_another_thread_is_open_comes_back_and_resends_as_the_
             host: host.clone(),
             project: Some(artisan_api::ProjectId::from("project")),
         };
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(&core, &mut sessions, target.clone());
         let (posting, thread) =
             send_and_type_over(&core, &mut composer, &host, &listener, &acceptor).await;
@@ -2182,7 +2182,7 @@ fn trying_again_after_the_thread_left_the_forge_says_the_thread_is_gone() {
             .unwrap()
             .threads
             .insert(thread.clone(), known_thread(&thread));
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let target = ComposerTarget::Thread {
             host: host.clone(),
             thread: thread.clone(),
@@ -2236,7 +2236,7 @@ fn refused_image_says_to_remove_it(action: editor_aqua::composer::view::Composer
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "image-refused");
         let client = core.host(&host).unwrap().client.clone();
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let (owner, sending) =
             composer_whose_send_failed(&core, &host, &mut sessions, &listener, &acceptor).await;
         owner.controller.borrow_mut().sync(&core);
@@ -2295,7 +2295,7 @@ fn an_image_pasted_after_a_send_fails_but_before_the_composer_catches_up_stays()
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "pasting-after-failure");
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let (owner, _) =
             composer_whose_send_failed(&core, &host, &mut sessions, &listener, &acceptor).await;
 
@@ -2333,7 +2333,7 @@ fn trying_again_before_the_composer_catches_up_with_the_failure_sends_again() {
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "retrying-before-sync");
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let (owner, sending) =
             composer_whose_send_failed(&core, &host, &mut sessions, &listener, &acceptor).await;
 
@@ -2469,7 +2469,7 @@ fn an_image_pasted_while_another_clients_draft_loads_stays_and_asks_which_to_kee
     run(async {
         let (listener, acceptor, pin) = pinned_server().await;
         let host = connect_host(&mut core, &listener, &pin, "pasting");
-        let mut sessions = DraftSessions::default();
+        let (_spool, mut sessions) = crate::draft_sessions();
         let mut composer = Composer::new(
             &core,
             &mut sessions,

@@ -28,7 +28,13 @@ fn drafts_whose_host_and_scope_join_alike_are_kept_apart() {
     let first = HostId("forge-a".into());
     let second = HostId("forge".into());
     spool
-        .keep(&first, "new", kept("on the first Forge"), &[])
+        .keep(
+            &first,
+            "new",
+            kept("on the first Forge"),
+            &[],
+            Holder::Owner,
+        )
         .unwrap();
     spool
         .keep(
@@ -36,6 +42,7 @@ fn drafts_whose_host_and_scope_join_alike_are_kept_apart() {
             "a-new",
             kept("on the second Forge"),
             &[std::sync::Arc::from(&b"image"[..])],
+            Holder::Owner,
         )
         .unwrap();
 
@@ -65,6 +72,7 @@ fn a_missing_or_damaged_image_still_brings_back_the_drafts_text() {
                 std::sync::Arc::from(&b"first"[..]),
                 std::sync::Arc::from(&b"second"[..]),
             ],
+            Holder::Owner,
         )
         .unwrap();
     let mut stored: Vec<_> = std::fs::read_dir(directory.path().join("drafts"))
@@ -106,6 +114,7 @@ fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
             "new",
             kept("an older draft"),
             &[std::sync::Arc::from(&b"image"[..])],
+            Holder::Owner,
         )
         .unwrap();
     let record = directory.path().join("drafts").join("forge-new.json");
@@ -115,7 +124,7 @@ fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
         panic!("expected the unreadable draft to be moved aside");
     };
     spool
-        .keep(&host, "new", kept("a newer draft"), &[])
+        .keep(&host, "new", kept("a newer draft"), &[], Holder::Owner)
         .unwrap();
     assert_eq!(
         std::fs::read(&set_aside).unwrap(),
@@ -142,7 +151,7 @@ fn an_unreadable_kept_draft_that_cannot_be_moved_aside_is_reported_where_it_stil
     let host = HostId("forge".into());
     let scope = "s".repeat(239);
     spool
-        .keep(&host, &scope, kept("an older draft"), &[])
+        .keep(&host, &scope, kept("an older draft"), &[], Holder::Owner)
         .unwrap();
     let record = directory
         .path()
@@ -174,6 +183,7 @@ fn an_unreadable_kept_draft_is_moved_aside_with_images_whose_names_are_long() {
             &scope,
             kept("an older draft"),
             &[std::sync::Arc::from(&b"image"[..])],
+            Holder::Owner,
         )
         .unwrap();
     let record = directory
@@ -191,4 +201,48 @@ fn an_unreadable_kept_draft_is_moved_aside_with_images_whose_names_are_long() {
         "the notice names where the unreadable draft went"
     );
     assert!(!record.exists(), "nothing is left at the old place");
+}
+
+#[test]
+fn a_draft_that_did_not_recover_the_record_is_kept_beside_it_instead_of_over_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let spool = DraftSpool::new(directory.path());
+    let host = HostId("forge".into());
+    spool
+        .keep(
+            &host,
+            "new",
+            kept("the newer draft"),
+            &[std::sync::Arc::from(&b"newer image"[..])],
+            Holder::Owner,
+        )
+        .unwrap();
+
+    let Placed::Beside(beside) = spool
+        .keep(
+            &host,
+            "new",
+            kept("an older draft"),
+            &[std::sync::Arc::from(&b"older image"[..])],
+            Holder::Newcomer,
+        )
+        .unwrap()
+    else {
+        panic!("expected the draft to be kept beside the record");
+    };
+
+    let recovered = spool.take(&host, "new").unwrap().unwrap();
+    assert_eq!(recovered.draft, kept("the newer draft"));
+    assert!(matches!(&recovered.images[..], [Ok(bytes)] if bytes == b"newer image"));
+    assert!(
+        std::fs::read_to_string(&beside)
+            .unwrap()
+            .contains("an older draft")
+    );
+    let images: Vec<_> = std::fs::read_dir(beside.parent().unwrap())
+        .unwrap()
+        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+        .filter(|bytes| bytes == b"older image")
+        .collect();
+    assert_eq!(images.len(), 1, "its image is kept beside it");
 }

@@ -16,6 +16,18 @@ pub struct DraftSpool {
     dir: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Holder {
+    Owner,
+    Newcomer,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    Record,
+    Beside(PathBuf),
+}
+
 #[derive(Debug)]
 pub struct SpooledDraft {
     pub(crate) draft: KeptDraft,
@@ -180,31 +192,24 @@ impl DraftSpool {
         scope: &str,
         draft: KeptDraft,
         images: &[std::sync::Arc<[u8]>],
-    ) -> Result<(), KeepSpooledDraftError> {
+        holder: Holder,
+    ) -> Result<Placed, KeepSpooledDraftError> {
         self.create_folder()?;
         let stem = stem(host, scope);
-        let digests = images
-            .iter()
-            .map(|bytes| {
-                let digest = ImageDigest::of(bytes);
-                self.write_image(&self.image_path(&stem, &digest), bytes)?;
-                Ok(digest)
-            })
-            .collect::<Result<Vec<_>, KeepSpooledDraftError>>()?;
-        let kept: HashSet<PathBuf> = digests
-            .iter()
-            .map(|digest| self.image_path(&stem, digest))
-            .collect();
-        config_file::write(
-            &self.dir.join(format!("{stem}.json")),
-            &Record {
-                host: host.clone(),
-                scope: scope.to_owned(),
-                draft,
-                images: digests,
-            },
-        )
-        .map_err(KeepSpooledDraftError::Draft)?;
+        let record = self.dir.join(format!("{stem}.json"));
+        if holder == Holder::Newcomer && occupied(&record) {
+            let folder = self.beside_folder(&stem)?;
+            let record = folder.join(format!("{stem}.json"));
+            self.write_record(&folder, &stem, &record, host, scope, draft, images)?;
+            if let Err(source) = sync_folder(&self.dir) {
+                tracing::warn!(
+                    error = %source,
+                    "kept a draft beside another, but the new folder may not survive a power cut"
+                );
+            }
+            return Ok(Placed::Beside(record));
+        }
+        let kept = self.write_record(&self.dir, &stem, &record, host, scope, draft, images)?;
         if let Err(error) = self.remove_images(&stem, &kept) {
             tracing::warn!(
                 host = %host,
@@ -213,7 +218,63 @@ impl DraftSpool {
                 "kept the draft on this device but couldn't remove images it no longer holds"
             );
         }
-        Ok(())
+        Ok(Placed::Record)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a record is one host's scope with its draft and images, written to one folder"
+    )]
+    fn write_record(
+        &self,
+        folder: &Path,
+        stem: &str,
+        record: &Path,
+        host: &HostId,
+        scope: &str,
+        draft: KeptDraft,
+        images: &[std::sync::Arc<[u8]>],
+    ) -> Result<HashSet<PathBuf>, KeepSpooledDraftError> {
+        let digests = images
+            .iter()
+            .map(|bytes| {
+                let digest = ImageDigest::of(bytes);
+                self.write_image(&image_path(folder, stem, &digest), bytes)?;
+                Ok(digest)
+            })
+            .collect::<Result<Vec<_>, KeepSpooledDraftError>>()?;
+        let kept = digests
+            .iter()
+            .map(|digest| image_path(folder, stem, digest))
+            .collect();
+        config_file::write(
+            record,
+            &Record {
+                host: host.clone(),
+                scope: scope.to_owned(),
+                draft,
+                images: digests,
+            },
+        )
+        .map_err(KeepSpooledDraftError::Draft)?;
+        Ok(kept)
+    }
+
+    fn beside_folder(&self, stem: &str) -> Result<PathBuf, KeepSpooledDraftError> {
+        (1_u64..)
+            .map(|number| {
+                let folder = self.dir.join(format!("{stem}.kept-{number}"));
+                match std::fs::create_dir(&folder) {
+                    Ok(()) => Ok(Some(folder)),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+                    Err(source) => Err(KeepSpooledDraftError::CreateDirectory {
+                        path: folder,
+                        source,
+                    }),
+                }
+            })
+            .find_map(Result::transpose)
+            .expect("invariant: some beside number is free")
     }
 
     pub fn take(
@@ -247,7 +308,7 @@ impl DraftSpool {
             .images
             .iter()
             .map(|digest| {
-                let path = self.image_path(&stem, digest);
+                let path = image_path(&self.dir, &stem, digest);
                 let bytes = std::fs::read(&path).map_err(|source| TakeSpooledImageError::Read {
                     path: path.clone(),
                     source,
@@ -378,10 +439,17 @@ impl DraftSpool {
         }
         Ok(())
     }
+}
 
-    fn image_path(&self, stem: &str, digest: &ImageDigest) -> PathBuf {
-        self.dir.join(format!("{stem}.{}.image", digest.0))
-    }
+fn image_path(folder: &Path, stem: &str, digest: &ImageDigest) -> PathBuf {
+    folder.join(format!("{stem}.{}.image", digest.0))
+}
+
+fn occupied(record: &Path) -> bool {
+    std::fs::symlink_metadata(record).map_or_else(
+        |error| error.kind() != std::io::ErrorKind::NotFound,
+        |_| true,
+    )
 }
 
 fn is_image_of(path: &Path, stem: &str) -> bool {

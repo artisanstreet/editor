@@ -151,7 +151,6 @@ fn picker_host(
 fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() {
     use artisan_api::{DiscoveryState, EngineStatus, InstallState, SignInState};
     use editor_aqua::composer::controller::ComposerTarget;
-    use editor_aqua::composer::persistence::DraftSessions;
     use editor_aqua::composer::picker::Menu;
     use editor_aqua::composer::view::ComposerOwner;
     use editor_aqua::ui::theme::ArtisanTheme;
@@ -192,7 +191,7 @@ fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() 
     ] {
         engines.insert(engine.engine, engine);
     }
-    let mut sessions = DraftSessions::default();
+    let (_spool, mut sessions) = crate::draft_sessions();
     let owner = ComposerOwner::new(
         &core,
         &mut sessions,
@@ -298,7 +297,6 @@ fn every_setting_engine() -> artisan_api::EngineStatus {
 #[test]
 fn the_model_menus_setting_rows_keep_their_full_height_at_the_largest_text_size() {
     use editor_aqua::composer::controller::ComposerTarget;
-    use editor_aqua::composer::persistence::DraftSessions;
     use editor_aqua::composer::picker::Menu;
     use editor_aqua::composer::view::ComposerOwner;
     use editor_aqua::ui::kit::{Density, Row};
@@ -309,7 +307,7 @@ fn the_model_menus_setting_rows_keep_their_full_height_at_the_largest_text_size(
         .unwrap()
         .engines
         .insert(EngineId::Claude, every_setting_engine());
-    let mut sessions = DraftSessions::default();
+    let (_spool, mut sessions) = crate::draft_sessions();
     let owner = ComposerOwner::new(
         &core,
         &mut sessions,
