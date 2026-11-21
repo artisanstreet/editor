@@ -1000,16 +1000,27 @@ pub(crate) struct Prepared {
     pub(crate) gateway: crate::gateway::GatewayPass,
 }
 
-async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<PathBuf, PrepareError> {
-    let images = crate::images::thread_folder(hub.data_dir(), thread);
-    tokio::fs::create_dir_all(&images)
-        .await
-        .map_err(|source| PrepareError::ImageFolder {
-            thread: thread.clone(),
-            path: images.clone(),
+async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<Option<PathBuf>, PrepareError> {
+    match crate::images::grantable_folder(hub.data_dir(), thread).await {
+        Ok(images) => Ok(Some(images)),
+        Err(error @ crate::images::FolderError::NotAFolder { .. }) => {
+            tracing::warn!(
+                %thread,
+                error = diagnostics::chain(&error),
+                "the engine runs without its image folder"
+            );
+            Ok(None)
+        }
+        Err(crate::images::FolderError::Create {
+            thread,
+            path,
             source,
-        })?;
-    Ok(images)
+        }) => Err(PrepareError::ImageFolder {
+            thread,
+            path,
+            source,
+        }),
+    }
 }
 
 pub(crate) async fn prepare(
@@ -1064,7 +1075,7 @@ pub(crate) async fn prepare(
     for (name, url) in gateway.servers() {
         forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
     }
-    launch.readable.push(image_folder(hub, &thread.id).await?);
+    launch.readable.extend(image_folder(hub, &thread.id).await?);
     let mut config = thread.config.clone();
     match session.transport_option() {
         Some(option) => {

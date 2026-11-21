@@ -21,8 +21,14 @@ enum ImageCopyError {
     },
     #[error("the stored image {} has no file name", path.display())]
     Unnamed { path: PathBuf },
+    #[error(transparent)]
+    Folder(#[from] FolderError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FolderError {
     #[error("create the image folder {} of thread {thread}", path.display())]
-    Folder {
+    Create {
         thread: ThreadId,
         path: PathBuf,
         #[source]
@@ -75,6 +81,43 @@ impl Message {
 
 pub(crate) fn thread_folder(data: &Path, thread: &ThreadId) -> PathBuf {
     data.join(ROOT).join(crate::scratch::folder_key(thread))
+}
+
+fn plain_folder(
+    thread: &ThreadId,
+    dir: &Path,
+    entry: io::Result<std::fs::Metadata>,
+) -> Result<(), FolderError> {
+    let entry = entry.map_err(|source| FolderError::Create {
+        thread: thread.clone(),
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    if entry.file_type().is_dir() {
+        Ok(())
+    } else {
+        Err(FolderError::NotAFolder {
+            thread: thread.clone(),
+            path: dir.to_path_buf(),
+        })
+    }
+}
+
+fn ensure_folder(thread: &ThreadId, dir: &Path) -> Result<(), FolderError> {
+    let entry = std::fs::create_dir_all(dir).and_then(|()| std::fs::symlink_metadata(dir));
+    plain_folder(thread, dir, entry)
+}
+
+pub(crate) async fn grantable_folder(
+    data: &Path,
+    thread: &ThreadId,
+) -> Result<PathBuf, FolderError> {
+    let dir = thread_folder(data, thread);
+    let entry = match tokio::fs::create_dir_all(&dir).await {
+        Ok(()) => tokio::fs::symlink_metadata(&dir).await,
+        Err(error) => Err(error),
+    };
+    plain_folder(thread, &dir, entry).map(|()| dir)
 }
 
 fn remove_entry(path: &Path) -> Result<bool, RemoveImagesError> {
@@ -243,22 +286,7 @@ fn copy_one(thread: &ThreadId, dir: &Path, from: &Path) -> Result<PathBuf, Image
     let name = from.file_name().ok_or_else(|| ImageCopyError::Unnamed {
         path: from.to_path_buf(),
     })?;
-    let folder_error = |source| ImageCopyError::Folder {
-        thread: thread.clone(),
-        path: dir.to_path_buf(),
-        source,
-    };
-    std::fs::create_dir_all(dir).map_err(folder_error)?;
-    if !std::fs::symlink_metadata(dir)
-        .map_err(folder_error)?
-        .file_type()
-        .is_dir()
-    {
-        return Err(ImageCopyError::NotAFolder {
-            thread: thread.clone(),
-            path: dir.to_path_buf(),
-        });
-    }
+    ensure_folder(thread, dir)?;
     let to = dir.join(name);
     copy_pristine(from, dir, &to).map_err(|source| ImageCopyError::Copy {
         thread: thread.clone(),

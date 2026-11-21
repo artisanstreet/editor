@@ -598,6 +598,40 @@ async fn an_image_folder_replaced_by_a_symlink_gets_no_copy() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
+async fn an_image_folder_replaced_by_a_symlink_is_never_granted_to_the_engine() {
+    let granted = Arc::new(Mutex::new(None::<Vec<PathBuf>>));
+    let recorded = Arc::clone(&granted);
+    let script: Script = Arc::new(move |turn, _io| {
+        let recorded = Arc::clone(&recorded);
+        Box::pin(async move {
+            *recorded.lock().unwrap() = Some(turn.launch.readable.clone());
+            Outcome::done()
+        })
+    });
+    let fixture = fixture(script).await;
+    let folder = image_folder(&fixture, &fixture.thread_id);
+    let elsewhere = fixture.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &folder).unwrap();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("look"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+
+    let granted = granted.lock().unwrap().clone().expect("the run started");
+    assert!(
+        granted
+            .iter()
+            .all(|dir| *dir != folder && !dir.starts_with(&elsewhere)),
+        "the engine may read through the planted folder link: {granted:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
 async fn the_exclusive_sweep_removes_stale_partials_and_stray_files_and_goes_on_past_failures() {
     use std::os::unix::fs::PermissionsExt as _;
     let fixture = fixture(Arc::new(|_, _| Box::pin(async { Outcome::done() }))).await;
