@@ -305,6 +305,7 @@ impl Turns {
                 "invariant: run {run} of thread {thread} ends while it is live, not {other:?}"
             ),
         };
+        live.cancel.cancel();
         match ended {
             Ended::Settled => live.stop.resolve(Ok(())),
             Ended::Deferred => {
