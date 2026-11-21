@@ -1,4 +1,5 @@
 use super::*;
+use crate::composer::controller::SendRefusal;
 use artisan_api::{DraftSnapshot, DraftWriteResult, RunFailure};
 
 fn typed(text: &str) -> DraftBody {
@@ -114,7 +115,7 @@ fn reopened(kept: KeptDraft) -> DraftSession {
 fn submitted(text: &str) -> DraftSession {
     let mut state = loaded(1, &DraftBody::default());
     type_in(&mut state, typed(text));
-    state.submit(submission("message", text));
+    state.submit(submission("message", text)).unwrap();
     state
 }
 
@@ -302,7 +303,7 @@ fn an_unanswered_send_forge_already_took_is_finished_without_coming_back_as_a_dr
 fn an_unanswered_send_over_an_unchanged_draft_clears_it_when_accepted() {
     let mut closing = loaded(1, &typed("send th"));
     type_in(&mut closing, typed("send this"));
-    closing.submit(submission("message", "send this"));
+    closing.submit(submission("message", "send this")).unwrap();
     let mut state = reopened(closing.kept());
     load(&mut state, 1, &typed("send th"));
     assert_eq!(write(&mut state), (1, typed("send this")));
@@ -342,7 +343,7 @@ fn a_draft_another_client_cleared_while_saving_is_saved_again() {
 #[test]
 fn a_message_sent_during_a_conflict_is_posted_and_the_choice_stays_open() {
     let mut state = in_conflict();
-    state.submit(submission("message", "mine"));
+    state.submit(submission("message", "mine")).unwrap();
     let posted = post(&mut state);
     assert_eq!(
         posted.message.draft, None,
@@ -367,7 +368,7 @@ fn keeping_this_clients_draft_writes_it_over_the_other() {
 fn choosing_the_other_clients_draft_shows_it_and_keeps_a_message_on_its_way() {
     let mut state = in_conflict();
     let epoch = state.epoch();
-    state.submit(submission("message", "mine"));
+    state.submit(submission("message", "mine")).unwrap();
     state.use_remote();
     assert_ne!(state.epoch(), epoch, "the composer shows the chosen draft");
     assert_eq!(state.shown(), Some(&typed("theirs")));
@@ -428,7 +429,9 @@ fn a_send_that_fails_keeps_its_identity_for_an_identical_resend() {
     assert_eq!(state.posting(), Posting::Failed);
     type_in(&mut state, typed("send this, edited"));
     type_in(&mut state, typed("send this"));
-    state.submit(submission("second-attempt", "send this"));
+    state
+        .submit(submission("second-attempt", "send this"))
+        .unwrap();
     write(&mut state);
     saved(&mut state, 3, &typed("send this"));
     assert_eq!(
@@ -446,7 +449,9 @@ fn an_edited_resend_is_a_new_message() {
     let first = post(&mut state);
     state.posted(Err(not_sent(&first)), thread());
     type_in(&mut state, typed("send this instead"));
-    state.submit(submission("second-attempt", "send this instead"));
+    state
+        .submit(submission("second-attempt", "send this instead"))
+        .unwrap();
     write(&mut state);
     saved(&mut state, 3, &typed("send this instead"));
     assert_eq!(
@@ -474,12 +479,14 @@ fn try_again_after_a_failed_send_never_resends_on_its_own() {
 fn a_failed_load_hands_the_queued_message_back_with_its_identity() {
     let mut state = DraftSession::new("thread:thread".into());
     type_in(&mut state, typed("send this"));
-    state.submit(submission("message", "send this"));
+    state.submit(submission("message", "send this")).unwrap();
     assert!(matches!(state.next_operation(), Some(Operation::Load)));
     state.loaded(Err(refused(Failure::Internal)));
     assert_eq!(state.posting(), Posting::Failed);
     assert!(state.sendable(), "the message can be sent again");
-    state.submit(submission("second-attempt", "send this"));
+    state
+        .submit(submission("second-attempt", "send this"))
+        .unwrap();
     load(&mut state, 0, &DraftBody::default());
     write(&mut state);
     saved(&mut state, 1, &typed("send this"));
@@ -517,7 +524,9 @@ fn a_send_that_fails_while_no_composer_shows_it_comes_back_with_the_later_text_b
         Some(&handed_back("send this", &["typed meanwhile"])),
         "the failed message is back, with the later text parked beside it"
     );
-    state.submit(submission("second-attempt", "send this"));
+    state
+        .submit(submission("second-attempt", "send this"))
+        .unwrap();
     write(&mut state);
     saved(
         &mut state,
@@ -540,7 +549,9 @@ fn a_send_that_fails_while_no_composer_shows_it_comes_back_with_the_later_text_b
 fn retried_with_text_parked() -> (DraftSession, Submission) {
     let (mut state, first) = sent_and_typed_over("send this", "typed meanwhile");
     state.posted(Err(not_sent(&first)), thread());
-    state.submit(submission("second-attempt", "send this"));
+    state
+        .submit(submission("second-attempt", "send this"))
+        .unwrap();
     write(&mut state);
     saved(
         &mut state,
@@ -653,7 +664,9 @@ fn a_send_that_failed_before_closing_comes_back_on_reopening_with_its_identity()
         "the composer still says the send failed"
     );
     load(&mut state, 2, &typed("send this"));
-    state.submit(submission("after-reopening", "send this"));
+    state
+        .submit(submission("after-reopening", "send this"))
+        .unwrap();
     write(&mut state);
     saved(
         &mut state,
@@ -700,7 +713,10 @@ fn a_second_send_waits_for_the_first() {
     let mut state = submitted("first");
     assert!(!state.sendable(), "one message is sent at a time");
     type_in(&mut state, typed("second"));
-    state.submit(submission("second", "second"));
+    assert_eq!(
+        state.submit(submission("second", "second")),
+        Err(SendRefusal::AlreadySending)
+    );
     write(&mut state);
     saved(&mut state, 2, &typed("second"));
     assert_eq!(
@@ -718,7 +734,7 @@ fn a_follow_up_parked_behind_a_sent_message_becomes_the_draft_once_it_is_in() {
         ..typed("first")
     };
     type_in(&mut state, body.clone());
-    state.submit(submission("message", "first"));
+    state.submit(submission("message", "first")).unwrap();
     write(&mut state);
     saved(&mut state, 2, &body);
     let epoch = state.epoch();
@@ -940,7 +956,7 @@ fn a_set_aside_message_forge_refuses_for_good_comes_back_as_a_failed_message() {
     );
     assert!(matches!(state.next_operation(), Some(Operation::Load)));
     state.loaded(Ok(artisan_api::DraftSnapshot::default()));
-    state.submit(submission("next", "sent instead"));
+    state.submit(submission("next", "sent instead")).unwrap();
     let posted = loop {
         match state.next_operation() {
             Some(Operation::Write { body, .. }) => saved(&mut state, 1, &body),

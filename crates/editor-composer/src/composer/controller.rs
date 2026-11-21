@@ -949,11 +949,11 @@ impl Composer {
         let Some(session) = &self.session else {
             return Some("Draft unavailable");
         };
-        if session.read(DraftSession::sending) {
-            return Some("Sending…");
-        }
         if session.read(DraftSession::choosing_draft) {
             return Some("Choose which draft to keep first.");
+        }
+        if session.read(DraftSession::sending) {
+            return Some("Sending…");
         }
         let items = self
             .attachments
@@ -1059,11 +1059,11 @@ impl Composer {
         {
             return Err(SendRefusal::ThreadMissing);
         }
-        if session.read(DraftSession::sending) {
-            return Err(SendRefusal::AlreadySending);
-        }
         if session.read(DraftSession::choosing_draft) {
             return Err(SendRefusal::ChoosingDraft);
+        }
+        if session.read(DraftSession::sending) {
+            return Err(SendRefusal::AlreadySending);
         }
         if !session.read(DraftSession::sendable) {
             return Err(SendRefusal::DraftLoading);
@@ -1128,7 +1128,7 @@ impl Composer {
                 message,
                 create,
                 thread,
-            });
+            })?;
         }
         self.clear_input();
         self.cleared = Some(std::time::Instant::now());

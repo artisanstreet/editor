@@ -1,4 +1,5 @@
 use super::attachment::{PendingUpload, ReadImageError, upload_image};
+use super::controller::SendRefusal;
 use super::draft_body::DraftBody;
 use super::draft_session::{
     AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptDraft, KeptLostImage, LostKey,
@@ -1055,9 +1056,12 @@ impl DraftHandle {
         self.pump();
     }
 
-    pub fn submit(&self, submission: Submission) {
-        self.mutate(|shared| shared.state.submit(submission));
+    pub fn submit(&self, submission: Submission) -> Result<(), SendRefusal> {
+        let mut submitted = Ok(());
+        self.mutate(|shared| submitted = shared.state.submit(submission));
+        submitted?;
         self.flush();
+        Ok(())
     }
 
     pub fn retry(&self) {

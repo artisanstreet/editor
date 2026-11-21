@@ -261,17 +261,19 @@ fn removing_the_pairing_keeps_a_fresh_draft_its_unanswered_message_and_unfinishe
         )
         .unwrap();
     type_into(&lease, "typed while Forge was away");
-    lease.submit(Submission {
-        message: artisan_api::SendMessage {
-            id: ItemId("unanswered".into()),
-            text: "typed while Forge was away".into(),
-            images: Vec::new(),
-            config: None,
-            draft: None,
-        },
-        create: None,
-        thread: ThreadId("thread".into()),
-    });
+    lease
+        .submit(Submission {
+            message: artisan_api::SendMessage {
+                id: ItemId("unanswered".into()),
+                text: "typed while Forge was away".into(),
+                images: Vec::new(),
+                config: None,
+                draft: None,
+            },
+            create: None,
+            thread: ThreadId("thread".into()),
+        })
+        .unwrap();
     type_into(&lease, "typed after sending");
     let image = png();
     lease.adopt_image(PendingUpload::kept(image.clone()));
@@ -312,17 +314,19 @@ fn a_send_that_fails_before_the_pairing_is_removed_keeps_the_text_typed_after_it
         )
         .unwrap();
     type_into(&lease, "typed while Forge was away");
-    lease.submit(Submission {
-        message: artisan_api::SendMessage {
-            id: ItemId("unanswered".into()),
-            text: "typed while Forge was away".into(),
-            images: Vec::new(),
-            config: None,
-            draft: None,
-        },
-        create: None,
-        thread: ThreadId("thread".into()),
-    });
+    lease
+        .submit(Submission {
+            message: artisan_api::SendMessage {
+                id: ItemId("unanswered".into()),
+                text: "typed while Forge was away".into(),
+                images: Vec::new(),
+                config: None,
+                draft: None,
+            },
+            create: None,
+            thread: ThreadId("thread".into()),
+        })
+        .unwrap();
     type_into(&lease, "typed after sending");
     wait_until(&lease, || lease.read(|state| state.error().is_some()));
 
@@ -1193,8 +1197,10 @@ fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and
     let slot = beside_slot(&device);
     std::fs::remove_dir_all(device.unit("record.")).unwrap();
     let mut state = DraftSession::new("new".into());
+    state
+        .submit(sending("sent before choosing", "displaced", None))
+        .unwrap();
     state.offer_rival(slot, kept("kept beside"), Vec::new(), Vec::new());
-    state.submit(sending("sent before choosing", "displaced", None));
     let (changed, _) = watch::channel(0);
     let session = DraftHandle(Arc::new(Inner {
         host: device.host.clone(),

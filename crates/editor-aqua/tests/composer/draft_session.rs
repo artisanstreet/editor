@@ -650,7 +650,7 @@ fn send_again(session: &mut DraftSession) {
     again.message.id = artisan_api::ItemId::from("second-attempt");
     again.thread = artisan_api::ThreadId::from("second-thread");
     again.create.as_mut().unwrap().id = again.thread.clone();
-    session.submit(again);
+    session.submit(again).unwrap();
 }
 
 fn assert_original_submission(session: &mut DraftSession) {
@@ -674,7 +674,7 @@ fn draft_load_failure_hands_the_message_back_and_sending_it_again_keeps_its_iden
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     let body = typed("Keep my draft");
     type_in(&mut session, body.clone());
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     assert!(session.sending());
     session.loaded(Err(unanswered("offline")));
     assert!(!session.sending());
@@ -696,7 +696,7 @@ fn draft_write_failure_hands_the_message_back_without_losing_the_draft() {
     session.loaded(Ok(DraftSnapshot::default()));
     let body = typed("Keep my draft");
     type_in(&mut session, body.clone());
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
@@ -721,7 +721,7 @@ fn a_message_whose_draft_another_client_replaced_is_sent_and_their_draft_stays()
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
     type_in(&mut session, typed("Keep my draft"));
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     let Some(Operation::Write { .. }) = session.next_operation() else {
         panic!("expected a draft write");
     };
@@ -897,7 +897,7 @@ fn the_message_posts_before_a_draft_typed_after_it_is_saved() {
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
     type_in(&mut session, typed("Keep my draft"));
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     save_next(&mut session);
     type_in(&mut session, typed("the next message"));
     let Some(Operation::Post(request)) = session.next_operation() else {
@@ -912,7 +912,7 @@ fn a_draft_typed_while_the_message_posts_survives_its_acceptance() {
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
     type_in(&mut session, typed("Keep my draft"));
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     save_next(&mut session);
     assert!(matches!(session.next_operation(), Some(Operation::Post(_))));
     let typed = typed("the next message");
@@ -944,7 +944,7 @@ fn a_failed_post_reports_the_failure_and_keeps_the_messages_identity_for_sending
     assert!(matches!(session.next_operation(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot::default()));
     type_in(&mut session, typed("Keep my draft"));
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     save_next(&mut session);
     assert!(matches!(session.next_operation(), Some(Operation::Post(_))));
     assert!(!session.send_failed());
@@ -968,7 +968,7 @@ fn posting_follows_a_new_thread_send_from_queued_to_accepted() {
     session.loaded(Ok(DraftSnapshot::default()));
     assert_eq!(session.posting(), Posting::Idle);
     type_in(&mut session, typed("Keep my draft"));
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     let thread = submission().thread;
     assert_eq!(session.posting(), Posting::Sending(thread.clone()));
     save_next(&mut session);
@@ -980,6 +980,6 @@ fn posting_follows_a_new_thread_send_from_queued_to_accepted() {
     assert!(matches!(session.next_operation(), Some(Operation::Post(_))));
     session.posted(Ok(()), thread.clone());
     assert_eq!(session.posting(), Posting::Accepted(thread));
-    session.submit(submission());
+    session.submit(submission()).unwrap();
     assert!(matches!(session.posting(), Posting::Sending(_)));
 }

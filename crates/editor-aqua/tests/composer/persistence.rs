@@ -139,17 +139,19 @@ fn rejected_write_hands_the_message_back_and_sending_it_again_keeps_its_id() {
         let mut changed = lease.subscribe();
         let draft = json!({"text": "preserve this prompt"});
         type_into(&lease, typed("preserve this prompt"));
-        lease.submit(Submission {
-            thread: ThreadId("thread".into()),
-            create: None,
-            message: SendMessage {
-                id: ItemId("original-message".into()),
-                text: "preserve this prompt".into(),
-                images: Vec::new(),
-                config: None,
-                draft: None,
-            },
-        });
+        lease
+            .submit(Submission {
+                thread: ThreadId("thread".into()),
+                create: None,
+                message: SendMessage {
+                    id: ItemId("original-message".into()),
+                    text: "preserve this prompt".into(),
+                    images: Vec::new(),
+                    config: None,
+                    draft: None,
+                },
+            })
+            .unwrap();
         assert!(lease.read(editor_aqua::composer::draft_session::DraftSession::sending));
         let (mut socket, route, _) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
@@ -170,17 +172,19 @@ fn rejected_write_hands_the_message_back_and_sending_it_again_keeps_its_id() {
         );
         assert!(lease.read(editor_aqua::composer::draft_session::DraftSession::pending));
 
-        lease.submit(Submission {
-            thread: ThreadId("thread".into()),
-            create: None,
-            message: SendMessage {
-                id: ItemId("second-attempt".into()),
-                text: "preserve this prompt".into(),
-                images: Vec::new(),
-                config: None,
-                draft: None,
-            },
-        });
+        lease
+            .submit(Submission {
+                thread: ThreadId("thread".into()),
+                create: None,
+                message: SendMessage {
+                    id: ItemId("second-attempt".into()),
+                    text: "preserve this prompt".into(),
+                    images: Vec::new(),
+                    config: None,
+                    draft: None,
+                },
+            })
+            .unwrap();
         let (mut socket, route, _) = request(&listener, &acceptor).await;
         assert_eq!(route, "GET /drafts/new HTTP/1.1");
         respond(&mut socket, json!({"revision": 0, "body": null})).await;
@@ -349,17 +353,19 @@ fn graceful_teardown_finishes_an_inflight_write_and_queued_post() {
             .unwrap();
         load(&lease, &listener, &acceptor).await;
         type_into(&lease, typed("send survives teardown"));
-        lease.submit(Submission {
-            thread: ThreadId("thread".into()),
-            create: None,
-            message: SendMessage {
-                id: ItemId("message".into()),
-                text: "send survives teardown".into(),
-                images: Vec::new(),
-                config: None,
-                draft: None,
-            },
-        });
+        lease
+            .submit(Submission {
+                thread: ThreadId("thread".into()),
+                create: None,
+                message: SendMessage {
+                    id: ItemId("message".into()),
+                    text: "send survives teardown".into(),
+                    images: Vec::new(),
+                    config: None,
+                    draft: None,
+                },
+            })
+            .unwrap();
         let handle = DraftHandle::clone(&lease);
         let mut changed = handle.subscribe();
         let (mut socket, route, body) = request(&listener, &acceptor).await;
@@ -415,17 +421,19 @@ fn explicit_host_removal_cancels_an_inflight_write_and_queued_post() {
             .unwrap();
         load(&lease, &listener, &acceptor).await;
         type_into(&lease, typed("stale pairing"));
-        lease.submit(Submission {
-            thread: ThreadId("thread".into()),
-            create: None,
-            message: SendMessage {
-                id: ItemId("stale-message".into()),
-                text: "stale pairing".into(),
-                images: Vec::new(),
-                config: None,
-                draft: None,
-            },
-        });
+        lease
+            .submit(Submission {
+                thread: ThreadId("thread".into()),
+                create: None,
+                message: SendMessage {
+                    id: ItemId("stale-message".into()),
+                    text: "stale pairing".into(),
+                    images: Vec::new(),
+                    config: None,
+                    draft: None,
+                },
+            })
+            .unwrap();
         let (mut socket, route, body) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
         let accepted_body = body["body"].clone();
@@ -1096,11 +1104,28 @@ fn accepted_message(id: &str, text: &str) -> Value {
     json!({"id": id, "thread_id": "thread", "position": 1, "seq": 1, "run_id": null, "parent_id": null, "status": "done", "created_at": 0, "updated_at": 0, "kind": {"type": "user_message", "text": text}})
 }
 
+fn message(
+    thread: &artisan_api::ThreadId,
+    text: &str,
+) -> editor_aqua::composer::draft_session::Submission {
+    editor_aqua::composer::draft_session::Submission {
+        thread: thread.clone(),
+        create: None,
+        message: artisan_api::SendMessage {
+            id: artisan_api::ItemId::from("message"),
+            text: text.into(),
+            images: Vec::new(),
+            config: None,
+            draft: None,
+        },
+    }
+}
+
 #[test]
 fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_draft() {
-    use artisan_api::{ItemId, SendMessage, ThreadId};
+    use artisan_api::ThreadId;
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
-    use editor_aqua::composer::draft_session::{DraftSession, Submission};
+    use editor_aqua::composer::draft_session::DraftSession;
     use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
@@ -1122,7 +1147,6 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
             thread: thread.clone(),
         };
         let scope = target.scope();
-
         let mut sessions = DraftSessions::with_spool(spool.clone());
         let lease = sessions
             .open(host.clone(), instance, scope.clone(), client)
@@ -1130,17 +1154,7 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
         answer_empty_draft(&listener, &acceptor, 0).await;
         wait_for_session(&lease, DraftSession::is_loaded).await;
         type_into(&lease, typed("send me"));
-        lease.submit(Submission {
-            thread: thread.clone(),
-            create: None,
-            message: SendMessage {
-                id: ItemId::from("message"),
-                text: "send me".into(),
-                images: Vec::new(),
-                config: None,
-                draft: None,
-            },
-        });
+        lease.submit(message(&thread, "send me")).unwrap();
         let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
         assert!(route.starts_with("PUT /drafts/"), "{route}");
         respond(

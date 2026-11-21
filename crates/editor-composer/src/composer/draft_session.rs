@@ -1,4 +1,5 @@
 use super::attachment::{PendingUpload, ReadImageError, UploadImageError};
+use super::controller::SendRefusal;
 use super::draft_body::{DraftBody, EMPTY_BODY, RemoteBody};
 use super::spool::BesideSlot;
 use artisan_api::{
@@ -1271,13 +1272,16 @@ impl DraftSession {
         true
     }
 
-    pub fn submit(&mut self, submission: Submission) {
+    pub fn submit(&mut self, submission: Submission) -> Result<(), SendRefusal> {
         let State::Open(draft) = &mut self.state else {
             self.dropped("a message sent from the composer");
-            return;
+            return Ok(());
         };
+        if !draft.rivals.is_empty() {
+            return Err(SendRefusal::ChoosingDraft);
+        }
         if draft.in_flight().is_some() {
-            return;
+            return Err(SendRefusal::AlreadySending);
         }
         let request = match std::mem::replace(&mut draft.send, Send::Idle) {
             Send::Outgoing(failed) if failed.request.resends(&submission) => failed.request,
@@ -1290,6 +1294,7 @@ impl DraftSession {
             edited: draft.edits.latest,
         }));
         draft.clear_failure();
+        Ok(())
     }
 
     pub fn retry(&mut self) {
