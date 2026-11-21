@@ -54,6 +54,29 @@ fn an_oversized_record_is_kept_truncated_and_says_how_long_it_was() {
 }
 
 #[test]
+fn inline_image_payloads_are_traced_as_their_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = Trace::start(dir.path(), "codex-t-1", Secrets::default()).unwrap();
+    let payload = "iVBORw0KGgo+/=".repeat(64 * 1024);
+    let line = format!(
+        r#"{{"content":[{{"type":"image","url":"data:image/webp;base64,{payload}"}},{{"type":"text","text":"look"}}]}}"#
+    );
+    started.trace.record(Kind::Out, &line);
+    finish(started);
+    let records = records(dir.path());
+    let out = of_kind(&records, "out");
+    assert_eq!(out.len(), 1, "{records:?}");
+    assert_eq!(
+        out[0]["text"],
+        format!(
+            r#"{{"content":[{{"type":"image","url":"data:image/webp;base64,<{} bytes>"}},{{"type":"text","text":"look"}}]}}"#,
+            payload.len()
+        )
+    );
+    assert!(out[0].get("truncated_from").is_none(), "{:?}", out[0]);
+}
+
+#[test]
 fn every_record_past_the_budget_is_counted_as_dropped() {
     let dir = tempfile::tempdir().unwrap();
     let started = Trace::start(dir.path(), "codex-t-2", Secrets::default()).unwrap();

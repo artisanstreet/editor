@@ -32,6 +32,8 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+pub const MAX_TURN_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_LINE_BYTES: usize = MAX_TURN_IMAGE_BYTES.div_ceil(3) * 4 + crate::process::MAX_LINE_BYTES;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SetTitleError {
@@ -86,6 +88,12 @@ pub enum RunError {
         path: std::path::PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("read the images of message {item}")]
+    ImageTask {
+        item: ItemId,
+        #[source]
+        source: tokio::task::JoinError,
     },
     #[error("{}; requested thread unload and retired the server. Underlying work may still be running.", if *interrupt_sent { "Codex did not confirm the turn stopped after an interrupt" } else { "Codex did not return the started turn ID before cancellation timed out" })]
     StopTimedOut { interrupt_sent: bool },
@@ -244,6 +252,8 @@ struct Admission(u64);
 struct Queued {
     admission: Admission,
     input: UserInput,
+    items: Vec<Value>,
+    image_bytes: usize,
     acknowledge: bool,
 }
 
@@ -326,7 +336,7 @@ impl Run {
                 })
                 .await;
         }
-        self.admit(turn.input.clone(), true);
+        self.admit(turn.input.clone(), true).await?;
         self.pump(turn)?;
         self.drive(turn).await
     }
@@ -431,7 +441,8 @@ impl Run {
                     images: Vec::new(),
                 },
                 false,
-            );
+            )
+            .await?;
         }
         if self.idle() {
             while let Ok(input) = self.io.inbox.try_recv() {
@@ -519,13 +530,17 @@ impl Run {
         Ok(true)
     }
 
-    fn admit(&mut self, input: UserInput, acknowledge: bool) {
+    async fn admit(&mut self, input: UserInput, acknowledge: bool) -> Result<(), RunError> {
+        let (items, image_bytes) = user_input(&input).await?;
         self.admitted += 1;
         self.queued.push(Queued {
             admission: Admission(self.admitted),
             input,
+            items,
+            image_bytes,
             acknowledge,
         });
+        Ok(())
     }
 
     fn requeue(&mut self, queued: Queued) {
@@ -541,7 +556,7 @@ impl Run {
 
     async fn input(&mut self, input: Input) -> Result<(), RunError> {
         match input {
-            Input::Steer(input) => self.admit(input, true),
+            Input::Steer(input) => self.admit(input, true).await?,
             Input::Answer { key, answer } => {
                 let events = self.decoder.answer(&key, &answer);
                 self.emit(events).await;
@@ -570,18 +585,17 @@ impl Run {
         let thread = self.decoder.thread().ok_or(RunError::NoThread)?.to_owned();
         if let Phase::Active { turn: turn_id } = &self.phase {
             for queued in std::mem::take(&mut self.queued) {
-                let params = json!({ "threadId": thread, "expectedTurnId": turn_id, "input": user_input(&queued.input)? });
+                let params =
+                    json!({ "threadId": thread, "expectedTurnId": turn_id, "input": queued.items });
                 let id = self.decoder.request("turn/steer", params);
                 self.steering.insert(id, queued);
             }
         } else if self.steering.is_empty() {
-            let queued = std::mem::take(&mut self.queued);
+            let later = self.queued.split_off(within_turn_images(&self.queued));
+            let queued = std::mem::replace(&mut self.queued, later);
             let input: Vec<Value> = queued
                 .iter()
-                .map(|queued| user_input(&queued.input))
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
+                .flat_map(|queued| queued.items.iter().cloned())
                 .collect();
             let mut params = json!({ "threadId": thread, "input": input });
             turn_overrides(turn, &mut params);
@@ -774,23 +788,58 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
 }
 
-fn user_input(input: &UserInput) -> Result<Vec<Value>, RunError> {
-    use base64::Engine as _;
+fn within_turn_images(queued: &[Queued]) -> usize {
+    let mut total = 0_usize;
+    let fitting = queued
+        .iter()
+        .take_while(|queued| {
+            total = total.saturating_add(queued.image_bytes);
+            total <= MAX_TURN_IMAGE_BYTES
+        })
+        .count();
+    fitting.max(1).min(queued.len())
+}
+
+async fn user_input(input: &UserInput) -> Result<(Vec<Value>, usize), RunError> {
     let mut items = Vec::new();
     if !input.text.is_empty() || input.images.is_empty() {
         items.push(json!({ "type": "text", "text": input.text, "text_elements": [] }));
     }
-    for path in &input.images {
-        let bytes = std::fs::read(path).map_err(|source| RunError::Image {
-            item: input.id.clone(),
-            path: path.clone(),
-            source,
-        })?;
-        let url = format!(
-            "data:image/webp;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        );
-        items.push(json!({ "type": "image", "url": url }));
+    if input.images.is_empty() {
+        return Ok((items, 0));
     }
-    Ok(items)
+    let (id, paths) = (input.id.clone(), input.images.clone());
+    let (images, bytes) = tokio::task::spawn_blocking(move || inline_images(&id, &paths))
+        .await
+        .map_err(|source| RunError::ImageTask {
+            item: input.id.clone(),
+            source,
+        })??;
+    items.extend(images);
+    Ok((items, bytes))
+}
+
+fn inline_images(
+    item: &ItemId,
+    paths: &[std::path::PathBuf],
+) -> Result<(Vec<Value>, usize), RunError> {
+    use base64::Engine as _;
+    let mut total = 0_usize;
+    let images = paths
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path).map_err(|source| RunError::Image {
+                item: item.clone(),
+                path: path.clone(),
+                source,
+            })?;
+            total = total.saturating_add(bytes.len());
+            let url = format!(
+                "data:image/webp;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            );
+            Ok(json!({ "type": "image", "url": url }))
+        })
+        .collect::<Result<Vec<_>, RunError>>()?;
+    Ok((images, total))
 }

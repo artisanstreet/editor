@@ -655,7 +655,7 @@ impl Trace {
 
     pub fn record(&self, kind: Kind, text: &str) {
         let Some(sink) = &self.sink else { return };
-        let text = Text::bounded(&sink.secrets.redact(text));
+        let text = Text::bounded(&sink.secrets.redact(&without_inline_payloads(text)));
         let reserved = text
             .kept()
             .len()
@@ -676,6 +676,31 @@ impl Trace {
             sink.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+fn without_inline_payloads(text: &str) -> std::borrow::Cow<'_, str> {
+    const MARK: &str = ";base64,";
+    if !text.contains(MARK) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut kept = String::with_capacity(text.len().min(MAX_RECORD_BYTES));
+    let mut rest = text;
+    while let Some((before, after)) = rest.split_once(MARK) {
+        let payload = after
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+            .count();
+        kept.push_str(before);
+        kept.push_str(MARK);
+        if payload > 0 {
+            kept.push('<');
+            kept.push_str(&payload.to_string());
+            kept.push_str(" bytes>");
+        }
+        rest = after.split_at(payload).1;
+    }
+    kept.push_str(rest);
+    std::borrow::Cow::Owned(kept)
 }
 
 #[derive(Debug)]

@@ -168,6 +168,7 @@ pub struct EngineProcess {
     stdout: BufReader<ChildStdout>,
     stderr_bytes: Arc<AtomicU64>,
     line: Vec<u8>,
+    line_limit: usize,
     oversized: bool,
     trace: Trace,
     stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
@@ -450,6 +451,7 @@ fn spawn_command(
         stdout,
         stderr_bytes,
         line: Vec::new(),
+        line_limit: MAX_LINE_BYTES,
         oversized: false,
         trace,
         stderr_task,
@@ -457,6 +459,11 @@ fn spawn_command(
 }
 
 impl EngineProcess {
+    pub(crate) const fn with_line_limit(mut self, limit: usize) -> Self {
+        self.line_limit = limit;
+        self
+    }
+
     pub(crate) async fn send(&mut self, value: &serde_json::Value) -> Result<(), SendError> {
         let Some(stdin) = self.stdin.as_mut() else {
             return Err(SendError::StdinClosed {
@@ -504,7 +511,7 @@ impl EngineProcess {
                     .position(|byte| *byte == b'\n')
                     .map_or((available, false), |index| (&available[..=index], true));
                 let used = chunk.len();
-                if !self.oversized && self.line.len() + used <= MAX_LINE_BYTES {
+                if !self.oversized && self.line.len() + used <= self.line_limit {
                     self.line.extend_from_slice(chunk);
                 } else {
                     self.oversized = true;
@@ -519,7 +526,7 @@ impl EngineProcess {
             if std::mem::take(&mut self.oversized) {
                 return Err(ReadError::Oversized {
                     program: self.program.clone(),
-                    limit: MAX_LINE_BYTES,
+                    limit: self.line_limit,
                 });
             }
             while matches!(line.last(), Some(b'\n' | b'\r')) {

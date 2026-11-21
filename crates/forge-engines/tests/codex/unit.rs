@@ -606,8 +606,8 @@ async fn generated_title_is_written_to_codex_without_resuming_or_prompting() {
     assert_eq!(methods, ["initialize", "initialized", "thread/name/set"]);
 }
 
-#[test]
-fn images_reach_codex_inline_from_the_path_forge_reads() {
+#[tokio::test]
+async fn images_reach_codex_inline_from_the_path_forge_reads() {
     use base64::Engine as _;
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("image.webp");
@@ -618,7 +618,7 @@ fn images_reach_codex_inline_from_the_path_forge_reads() {
         images: vec![image],
     };
 
-    let items = super::user_input(&input).unwrap();
+    let (items, bytes) = super::user_input(&input).await.unwrap();
 
     let url = format!(
         "data:image/webp;base64,{}",
@@ -631,4 +631,58 @@ fn images_reach_codex_inline_from_the_path_forge_reads() {
             json!({ "type": "image", "url": url }),
         ]
     );
+    assert_eq!(bytes, b"pristine".len());
+}
+
+fn queued_with(image_bytes: usize) -> super::Queued {
+    super::Queued {
+        admission: super::Admission(0),
+        input: crate::UserInput::default(),
+        items: Vec::new(),
+        image_bytes,
+        acknowledge: true,
+    }
+}
+
+#[test]
+fn a_turn_takes_queued_messages_only_while_their_images_fit_the_turn_cap() {
+    let mib = 1024 * 1024;
+    let queued = [100, 20, 20].map(|size| queued_with(size * mib));
+    assert_eq!(super::within_turn_images(&queued), 2);
+    let oversized = [queued_with(super::MAX_TURN_IMAGE_BYTES + 1), queued_with(0)];
+    assert_eq!(super::within_turn_images(&oversized), 1);
+    assert_eq!(super::within_turn_images(&[]), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_reads_a_line_that_echoes_a_message_over_the_default_line_limit() {
+    let base = tempfile::tempdir().unwrap();
+    let home = base.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let turn = crate::Turn {
+        thread_id: artisan_api::ThreadId::from("large-echo"),
+        engine: artisan_api::EngineId::Codex,
+        binary: "/bin/sh".into(),
+        home: home.clone(),
+        cwd: home.clone(),
+        config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
+        session_id: None,
+        input: crate::UserInput::default(),
+        launch: crate::Launch::default(),
+        trace_dir: None,
+    };
+    let long = crate::process::MAX_LINE_BYTES + 1;
+    let mut process = crate::process::spawn(
+        &turn,
+        &[
+            "-c".into(),
+            format!("head -c {long} /dev/zero | tr '\\0' a; printf '\\n'"),
+        ],
+    )
+    .await
+    .unwrap()
+    .with_line_limit(super::MAX_LINE_BYTES);
+    let line = process.next_line().await.unwrap().unwrap();
+    assert_eq!(line.len(), long);
 }

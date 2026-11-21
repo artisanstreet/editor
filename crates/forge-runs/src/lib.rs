@@ -65,6 +65,11 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+const _: () = assert!(
+    forge_store::MAX_MESSAGE_IMAGE_BYTES <= forge_engines::codex::MAX_TURN_IMAGE_BYTES as u64,
+    "Codex must read the echo of the largest message Forge accepts"
+);
+
 pub type HarnessFor = Arc<dyn Fn(EngineId) -> Arc<dyn Harness> + Send + Sync>;
 
 pub async fn sweep_leftovers(

@@ -258,7 +258,8 @@ impl Server {
             "codex-server",
         )
         .await
-        .map_err(StartError::Spawn)?;
+        .map_err(StartError::Spawn)?
+        .with_line_limit(super::MAX_LINE_BYTES);
         match tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process)).await {
             Err(_elapsed) => {
                 return Err(StartError::InitializeTimedOut {
