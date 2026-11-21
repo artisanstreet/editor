@@ -71,6 +71,23 @@ impl Message {
     pub(crate) const fn id(&self) -> &ItemId {
         &self.id
     }
+
+    pub(crate) fn unattached(self) -> UserInput {
+        let note = match self.stored.len() {
+            1 => "[The image sent with this message couldn't be attached.]".to_owned(),
+            count => format!("[The {count} images sent with this message couldn't be attached.]"),
+        };
+        let text = if self.text.is_empty() {
+            note
+        } else {
+            format!("{}\n\n{note}", self.text)
+        };
+        UserInput {
+            id: self.id,
+            text,
+            images: Vec::new(),
+        }
+    }
 }
 
 pub(crate) fn thread_folder(data: &Path, thread: &ThreadId) -> PathBuf {

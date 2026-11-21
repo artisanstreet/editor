@@ -401,3 +401,39 @@ async fn threads_with_any_id_run_with_their_images_inside_forges_folder() {
     assert!(!fixture.dir.path().parent().unwrap().join("escape").exists());
     drop(seen);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_steer_whose_image_cannot_be_copied_arrives_in_order_saying_so() {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let fixture = fixture(recording(Arc::clone(&seen))).await;
+    let blob = fixture.hub.store().put_image(png(10)).await.unwrap();
+    let stored = fixture.hub.store().blob_path(&blob.hash).unwrap();
+    let folder = image_folder(&fixture, &fixture.thread_id);
+    std::fs::create_dir_all(folder.join(stored.file_name().unwrap()).join("in the way")).unwrap();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("start"))
+        .await
+        .unwrap();
+    live(&fixture).await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, with_image("see this", &blob.hash))
+        .await
+        .unwrap();
+    fixture.settled().await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.texts,
+        vec![
+            "start".to_owned(),
+            "see this\n\n[The image sent with this message couldn't be attached.]".to_owned(),
+        ]
+    );
+    assert!(
+        seen.sent.is_empty(),
+        "the engine got an image Forge couldn't copy"
+    );
+    drop(seen);
+}

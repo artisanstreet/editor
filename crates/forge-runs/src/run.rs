@@ -755,14 +755,12 @@ async fn execute(
                             continue;
                         }
                         let id = message.id().clone();
+                        delivered.insert(id.clone());
                         match images.deliver(&message).await {
-                            Ok(input) => {
-                                delivered.insert(id);
-                                Input::Steer(input)
-                            }
+                            Ok(input) => Input::Steer(input),
                             Err(error) => {
-                                tracing::warn!(thread = %thread_id, run = %run_id, item = %id, "the steer waits for the next turn: {}", diagnostics::chain(&error));
-                                continue;
+                                tracing::warn!(thread = %thread_id, run = %run_id, item = %id, "the steer goes without its images: {}", diagnostics::chain(&error));
+                                Input::Steer(message.unattached())
                             }
                         }
                     }
