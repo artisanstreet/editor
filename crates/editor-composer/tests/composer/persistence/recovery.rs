@@ -1598,6 +1598,34 @@ fn kept_on_device(device: &Device) -> KeptDraft {
 }
 
 #[test]
+fn a_set_aside_message_forge_refuses_for_good_is_kept_on_this_device_as_handed_back() {
+    let device = Device::new();
+    let sessions = DraftSessions::with_spool(device.spool());
+    let session = with_a_set_aside_message(&device, &sessions);
+
+    refuse_for_good(&session);
+    device.settle();
+
+    let kept = kept_on_device(&device);
+    assert!(
+        kept.set_aside.is_empty(),
+        "the refused message is not sent again from this device"
+    );
+    assert_eq!(
+        kept.body.text, "refused for good",
+        "the refused message is back in the draft"
+    );
+    assert!(
+        kept.body
+            .follow_ups
+            .iter()
+            .any(|parked| parked.text == "typed after"),
+        "what was typed stays beside it: {:?}",
+        kept.body
+    );
+}
+
+#[test]
 fn a_hand_back_this_device_could_not_keep_is_reported_and_kept_when_trying_again() {
     let device = Device::new();
     let mut sessions = DraftSessions::with_spool(device.spool());
