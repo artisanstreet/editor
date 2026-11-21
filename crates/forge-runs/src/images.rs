@@ -11,7 +11,7 @@ const ROOT: &str = "run-images";
 static PARTIAL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ImageCopyError {
+enum ImageCopyError {
     #[error("copy the image {} to {} for thread {thread}", from.display(), to.display())]
     Copy {
         thread: ThreadId,
@@ -22,12 +22,6 @@ pub(crate) enum ImageCopyError {
     },
     #[error("the stored image {} has no file name", path.display())]
     Unnamed { path: PathBuf },
-    #[error("run the image copy task of thread {thread}")]
-    Task {
-        thread: ThreadId,
-        #[source]
-        source: tokio::task::JoinError,
-    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,23 +64,6 @@ impl Message {
 
     pub(crate) const fn id(&self) -> &ItemId {
         &self.id
-    }
-
-    pub(crate) fn unattached(self) -> UserInput {
-        let note = match self.stored.len() {
-            1 => "[The image sent with this message couldn't be attached.]".to_owned(),
-            count => format!("[The {count} images sent with this message couldn't be attached.]"),
-        };
-        let text = if self.text.is_empty() {
-            note
-        } else {
-            format!("{}\n\n{note}", self.text)
-        };
-        UserInput {
-            id: self.id,
-            text,
-            images: Vec::new(),
-        }
     }
 }
 
@@ -160,7 +137,7 @@ impl ThreadImages {
         }
     }
 
-    pub(crate) async fn deliver(&self, message: &Message) -> Result<UserInput, ImageCopyError> {
+    pub(crate) async fn deliver(&self, message: &Message) -> UserInput {
         let copies = if message.stored.is_empty() {
             Vec::new()
         } else {
@@ -169,44 +146,53 @@ impl ThreadImages {
                 self.dir.clone(),
                 message.stored.clone(),
             );
-            tokio::task::spawn_blocking(move || copy_all(&thread, &dir, &stored))
-                .await
-                .map_err(|source| ImageCopyError::Task {
-                    thread: self.thread.clone(),
-                    source,
-                })??
+            match tokio::task::spawn_blocking(move || copy_all(&thread, &dir, &stored)).await {
+                Ok(copies) => copies,
+                Err(error) => {
+                    tracing::warn!(thread = %self.thread, item = %message.id, %error, "the image copy task stopped");
+                    vec![None; message.stored.len()]
+                }
+            }
         };
-        Ok(UserInput {
+        UserInput {
             id: message.id.clone(),
             text: with_image_paths(message.text.clone(), &copies),
             images: message.stored.clone(),
-        })
+        }
     }
 }
 
-fn copy_all(
-    thread: &ThreadId,
-    dir: &Path,
-    stored: &[PathBuf],
-) -> Result<Vec<PathBuf>, ImageCopyError> {
+fn copy_all(thread: &ThreadId, dir: &Path, stored: &[PathBuf]) -> Vec<Option<PathBuf>> {
     stored
         .iter()
         .map(|from| {
-            let name = from
-                .file_name()
-                .ok_or_else(|| ImageCopyError::Unnamed { path: from.clone() })?;
-            let to = dir.join(name);
-            std::fs::create_dir_all(dir)
-                .and_then(|()| copy_pristine(from, &to))
-                .map_err(|source| ImageCopyError::Copy {
-                    thread: thread.clone(),
-                    from: from.clone(),
-                    to: to.clone(),
-                    source,
-                })?;
-            Ok(to)
+            copy_one(thread, dir, from)
+                .inspect_err(|error| {
+                    tracing::warn!(
+                        %thread,
+                        error = diagnostics::chain(error),
+                        "the image goes without its file path"
+                    );
+                })
+                .ok()
         })
         .collect()
+}
+
+fn copy_one(thread: &ThreadId, dir: &Path, from: &Path) -> Result<PathBuf, ImageCopyError> {
+    let name = from.file_name().ok_or_else(|| ImageCopyError::Unnamed {
+        path: from.to_path_buf(),
+    })?;
+    let to = dir.join(name);
+    std::fs::create_dir_all(dir)
+        .and_then(|()| copy_pristine(from, &to))
+        .map_err(|source| ImageCopyError::Copy {
+            thread: thread.clone(),
+            from: from.to_path_buf(),
+            to: to.clone(),
+            source,
+        })?;
+    Ok(to)
 }
 
 fn copy_pristine(from: &Path, to: &Path) -> io::Result<()> {
@@ -233,11 +219,14 @@ fn copy_pristine(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-fn with_image_paths(text: String, images: &[PathBuf]) -> String {
+fn with_image_paths(text: String, images: &[Option<PathBuf>]) -> String {
     let lines: Vec<String> = images
         .iter()
         .enumerate()
-        .map(|(index, path)| format!("[Image {} is saved at {}]", index + 1, path.display()))
+        .map(|(index, path)| match path {
+            Some(path) => format!("[Image {} is saved at {}]", index + 1, path.display()),
+            None => format!("[The file path of image {} isn't available.]", index + 1),
+        })
         .collect();
     match (text.is_empty(), lines.is_empty()) {
         (_, true) => text,

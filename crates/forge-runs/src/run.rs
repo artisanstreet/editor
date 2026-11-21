@@ -217,8 +217,6 @@ enum ExecuteError {
     Input(#[from] crate::InputError),
     #[error(transparent)]
     Prepare(#[from] PrepareError),
-    #[error(transparent)]
-    Images(#[from] crate::images::ImageCopyError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -674,7 +672,7 @@ async fn execute(
     let preparing = async {
         let mut input = UserInput::default();
         for item in pending {
-            let next = images.deliver(&hub.user_input(item, engine).await?).await?;
+            let next = images.deliver(&hub.user_input(item, engine).await?).await;
             if !input.text.is_empty() && !next.text.is_empty() {
                 input.text.push_str("\n\n");
             }
@@ -753,7 +751,6 @@ async fn execute(
     let mut forwarding_done = false;
     let mut adapter_finished = false;
     let outcome = {
-        let (thread_id, run_id) = (run.thread_id.clone(), run.id.clone());
         let forwarding = async {
             while let Some(inbound) = inbox.recv().await {
                 let input = match inbound {
@@ -761,15 +758,8 @@ async fn execute(
                         if delivered.contains(message.id()) {
                             continue;
                         }
-                        let id = message.id().clone();
-                        delivered.insert(id.clone());
-                        match images.deliver(&message).await {
-                            Ok(input) => Input::Steer(input),
-                            Err(error) => {
-                                tracing::warn!(thread = %thread_id, run = %run_id, item = %id, "the steer goes without its images: {}", diagnostics::chain(&error));
-                                Input::Steer(message.unattached())
-                            }
-                        }
+                        delivered.insert(message.id().clone());
+                        Input::Steer(images.deliver(&message).await)
                     }
                     Inbound::Answer { key, answer } => Input::Answer { key, answer },
                     Inbound::ClearGoal => Input::ClearGoal,

@@ -432,14 +432,18 @@ async fn threads_with_any_id_run_with_their_images_inside_forges_folder() {
     drop(seen);
 }
 
+fn block_copy(fixture: &Fixture, stored: &Path) {
+    let folder = image_folder(fixture, &fixture.thread_id);
+    std::fs::create_dir_all(folder.join(stored.file_name().unwrap()).join("in the way")).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_steer_whose_image_cannot_be_copied_arrives_in_order_saying_so() {
+async fn a_steer_whose_image_cannot_be_copied_keeps_its_image_and_says_the_path_is_missing() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let fixture = fixture(recording(Arc::clone(&seen))).await;
     let blob = fixture.hub.store().put_image(png(10)).await.unwrap();
     let stored = fixture.hub.store().blob_path(&blob.hash).unwrap();
-    let folder = image_folder(&fixture, &fixture.thread_id);
-    std::fs::create_dir_all(folder.join(stored.file_name().unwrap()).join("in the way")).unwrap();
+    block_copy(&fixture, &stored);
     fixture
         .hub
         .send_message(&fixture.thread_id, message("start"))
@@ -458,12 +462,45 @@ async fn a_steer_whose_image_cannot_be_copied_arrives_in_order_saying_so() {
         seen.texts,
         vec![
             "start".to_owned(),
-            "see this\n\n[The image sent with this message couldn't be attached.]".to_owned(),
+            "see this\n\n[The file path of image 1 isn't available.]".to_owned(),
         ]
     );
-    assert!(
-        seen.sent.is_empty(),
-        "the engine got an image Forge couldn't copy"
-    );
+    assert_eq!(seen.sent, vec![stored], "the steer lost its stored image");
     drop(seen);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_whose_image_cannot_be_copied_starts_with_its_image_and_says_the_path_is_missing() {
+    let turns = Arc::new(Mutex::new(Vec::<forge_engines::UserInput>::new()));
+    let recorded = Arc::clone(&turns);
+    let fixture = fixture(Arc::new(move |turn, _io| {
+        let recorded = Arc::clone(&recorded);
+        Box::pin(async move {
+            recorded.lock().unwrap().push(turn.input.clone());
+            Outcome::done()
+        })
+    }))
+    .await;
+    let blob = fixture.hub.store().put_image(png(12)).await.unwrap();
+    let stored = fixture.hub.store().blob_path(&blob.hash).unwrap();
+    block_copy(&fixture, &stored);
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, with_image("see this", &blob.hash))
+        .await
+        .unwrap();
+    let runs = fixture.settled().await;
+
+    assert!(
+        runs.iter().all(|run| run.status() == RunStatus::Done),
+        "{runs:?}"
+    );
+    let turns = turns.lock().unwrap();
+    assert_eq!(turns.len(), 1, "the run never reached the engine");
+    assert_eq!(
+        turns[0].text,
+        "see this\n\n[The file path of image 1 isn't available.]"
+    );
+    assert_eq!(turns[0].images, vec![stored]);
+    drop(turns);
 }
