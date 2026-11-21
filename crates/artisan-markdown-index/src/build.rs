@@ -1,7 +1,7 @@
 use super::PARSE_OPTIONS;
 use super::{
     Arc, BlockShape, BuildIndexError, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, ItemStart,
-    Kind, LeafContext, LeafSpacing, ListLevel, ListMark, ListShape, MarkdownIndex, Resume,
+    Kind, LeafContext, LeafSpacing, ListLevel, ListMark, ListShape, MarkdownIndex, Marker, Resume,
     SOURCE_BYTES, TableAlignment, Tag, TagEnd, Text, Token, event_heap_bytes,
 };
 use pulldown_cmark::Parser;
@@ -37,7 +37,8 @@ struct ActiveLeaf {
 }
 
 pub(crate) fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
-    build_from(source, 0, Resume::Start)
+    Ok(build_from(source, 0, Resume::Start)?
+        .expect("invariant: a build from the start resumes no list"))
 }
 
 #[expect(
@@ -52,7 +53,7 @@ pub(crate) fn build_from(
     source: &str,
     start: usize,
     resume: Resume,
-) -> Result<MarkdownIndex, BuildIndexError> {
+) -> Result<Option<MarkdownIndex>, BuildIndexError> {
     if source.len() > SOURCE_BYTES {
         return Err(BuildIndexError::SourceTooLarge {
             bytes: source.len(),
@@ -76,7 +77,7 @@ pub(crate) fn build_from(
     let (mut root_previous, mut continued) = match resume {
         Resume::Start => (None, None),
         Resume::After(shape) => (Some(shape), None),
-        Resume::Item(mark) => (Some(BlockShape::List), Some(mark)),
+        Resume::Item { list, marker } => (Some(BlockShape::List), Some((list, marker))),
     };
     let mut spacing = Vec::new();
     let mut table_source = None;
@@ -92,6 +93,11 @@ pub(crate) fn build_from(
         .into_offset_iter()
         .map(|(event, range)| (event, range.start + start..range.end + start))
     {
+        if let Some((list, marker)) = continued
+            && !continues_at(source, start, &event, &range, list, marker)
+        {
+            return Ok(None);
+        }
         if admission_bytes > INDEX_BYTES {
             return Err(BuildIndexError::IndexTooLarge);
         }
@@ -171,7 +177,7 @@ pub(crate) fn build_from(
             match &event {
                 Event::Start(Tag::List(start)) => {
                     let top = lists.is_empty() && quote_depth == 0;
-                    let list = continued.take().filter(|_| top).map_or_else(
+                    let list = continued.take().map(|(list, _)| list).map_or_else(
                         || {
                             record_spacing(
                                 &mut root_previous,
@@ -205,11 +211,13 @@ pub(crate) fn build_from(
                     if let [list] = lists.as_slice()
                         && list.top
                         && let Some(line_start) = marker_line(source, range.start)
+                        && let Some(marker) = source.get(line_start..).and_then(marker_of)
                     {
                         result.items.push(ItemStart {
                             line_start,
                             first_leaf: result.leaves.len(),
                             list: list.mark(),
+                            marker,
                         });
                     }
                     items.push(OpenItem {
@@ -423,11 +431,40 @@ pub(crate) fn build_from(
         }
         result.leaves.push(current.leaf);
     }
+    if continued.is_some() {
+        return Ok(None);
+    }
     result.decoded = decoded.into_iter().collect();
     if result.resident_bytes() > INDEX_BYTES {
         return Err(BuildIndexError::IndexTooLarge);
     }
-    Ok(result)
+    Ok(Some(result))
+}
+
+fn continues_at(
+    source: &str,
+    line_start: usize,
+    event: &Event<'_>,
+    range: &std::ops::Range<usize>,
+    list: ListMark,
+    marker: Marker,
+) -> bool {
+    matches!(event, Event::Start(Tag::List(first)) if first.is_some() == list.start.is_some())
+        && marker_line(source, range.start) == Some(line_start)
+        && source.get(line_start..).and_then(marker_of) == Some(marker)
+}
+
+fn marker_of(line: &str) -> Option<Marker> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = line.get(indent..)?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let delimiter = *rest.as_bytes().get(digits)?;
+    let valid = if digits == 0 {
+        matches!(delimiter, b'-' | b'*' | b'+')
+    } else {
+        matches!(delimiter, b'.' | b')')
+    };
+    valid.then_some(Marker { indent, delimiter })
 }
 
 fn marker_line(source: &str, marker: usize) -> Option<usize> {

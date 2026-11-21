@@ -97,3 +97,62 @@ fn long_lists_quotes_and_fenced_brackets_stream_without_reparsing_from_the_start
         );
     }
 }
+
+const TRICKY: &[&str] = &[
+    "- a\n- b\n-x\n- four\n",
+    "1. a\n2. b\n3.0 is the default\n\n- c\n",
+    "1. a\n2. b\n---\n3. c\n4. d\n",
+    "- a\n- b\n---\n1. c\n2. d\n",
+    "* a\n* b\n* * *\n1. c\n",
+    "- a\n- b\n+ c\n- d\n",
+    "1. a\n2. b\n3) c\n4. d\n",
+    "- a\n- b\n  - c\n - d\n   - e\n",
+    "1. a\n2. b\n\n3. c\n4. d\n",
+    "- a\n- b\n-\n  x\n- c\n",
+    "- a\n- b\n- ```\n  code\n  ```\n- c\n",
+    "- a\n- b\n```\nfence\n- not an item\n```\n- c\n",
+    "- a\n- b\n- c\n  ---\n- d\n",
+    "- a\n- b\n- c\n===\n- d\n",
+    "Para\n\n- a\n- b\n2. c\n1. d\n",
+    "1. a\n1. b\n10. c\n100. d\n",
+    "- a\n- b\n    - code?\n- c\n",
+    "> - a\n> - b\n- c\n- d\n",
+    "- a\n- b\n- | x | y |\n  | - | - |\n  | 1 | 2 |\n- c\n",
+    "- [ ] a\n- [x] b\n- [ ]c\n- [ ] d\n",
+];
+
+fn assert_matches_full(index: &MarkdownIndex, source: &str) {
+    let full = MarkdownIndex::build(source).expect("index");
+    assert_eq!(
+        records(index),
+        records(&full),
+        "the incremental index of {source:?} matches a full build"
+    );
+}
+
+fn char_ends(text: &str, chunk: usize) -> impl Iterator<Item = usize> + '_ {
+    (chunk..text.len())
+        .step_by(chunk)
+        .chain([text.len()])
+        .filter(|end| text.is_char_boundary(*end))
+}
+
+#[test]
+fn appending_tricky_lists_fences_and_rules_in_any_chunks_indexes_them_as_a_full_build() {
+    for text in TRICKY {
+        for split in (0..=text.len()).filter(|split| text.is_char_boundary(*split)) {
+            let prefix = text.get(..split).expect("a char boundary");
+            let index = MarkdownIndex::build(prefix).expect("index");
+            let (index, _) = index.append(text).expect("index");
+            assert_matches_full(&index, text);
+        }
+        for chunk in [1, 2, 3, 5, 8, 13] {
+            let mut index = MarkdownIndex::build("").expect("index");
+            for end in char_ends(text, chunk) {
+                let source = text.get(..end).expect("a char boundary");
+                index = index.append(source).expect("index").0;
+                assert_matches_full(&index, source);
+            }
+        }
+    }
+}

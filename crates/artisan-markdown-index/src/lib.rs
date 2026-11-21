@@ -157,11 +157,18 @@ struct ListMark {
     ordinal: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Marker {
+    indent: usize,
+    delimiter: u8,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ItemStart {
     line_start: usize,
     first_leaf: usize,
     list: ListMark,
+    marker: Marker,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,7 +181,7 @@ struct ListShape {
 enum Resume {
     Start,
     After(BlockShape),
-    Item(ListMark),
+    Item { list: ListMark, marker: Marker },
 }
 
 const RESUME_ATTEMPTS: usize = 3;
@@ -194,12 +201,14 @@ impl MarkdownIndex {
         let mut points = self.resume_points(previous);
         points.sort_by_key(|(kept, _, _)| std::cmp::Reverse(*kept));
         for (kept, boundary, resume) in points.into_iter().take(RESUME_ATTEMPTS) {
-            let suffix = build::build_from(source, boundary, resume)?;
+            let Some(suffix) = build::build_from(source, boundary, resume)? else {
+                continue;
+            };
             if suffix.definitions {
                 break;
             }
-            if let Resume::Item(mark) = resume
-                && !self.continues_alike(&suffix, mark)
+            if let Resume::Item { list, .. } = resume
+                && !self.continues_alike(&suffix, list)
             {
                 continue;
             }
@@ -306,8 +315,22 @@ impl MarkdownIndex {
                 .rev()
                 .filter(|item| item.list.ordinal > 0 && item.first_leaf > 0)
                 .filter(|item| follows(item.first_leaf, item.line_start))
+                .filter(|item| {
+                    previous
+                        .get(item.line_start..)
+                        .is_some_and(|line| line.contains('\n'))
+                })
                 .take(RESUME_ATTEMPTS)
-                .map(|item| (item.first_leaf, item.line_start, Resume::Item(item.list))),
+                .map(|item| {
+                    (
+                        item.first_leaf,
+                        item.line_start,
+                        Resume::Item {
+                            list: item.list,
+                            marker: item.marker,
+                        },
+                    )
+                }),
         );
         points
     }
