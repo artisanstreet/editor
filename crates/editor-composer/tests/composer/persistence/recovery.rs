@@ -949,3 +949,48 @@ fn an_empty_folder_left_for_a_draft_kept_beside_is_removed_on_opening() {
     assert!(!beside.exists());
     assert!(lease.take_unrecovered().is_empty());
 }
+
+#[test]
+fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismissed() {
+    let device = Device::new();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "first".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    type_into(&lease, "first");
+    std::fs::write(device.drafts(), b"not a folder").unwrap();
+    sessions.retire();
+    let dismissed = sessions.unkept().expect("the draft is held").generation;
+    std::fs::remove_file(device.drafts()).unwrap();
+    assert_eq!(sessions.keep_unkept(), None, "trying again keeps it");
+
+    let mut remounted = DraftSessions::with_spool(device.spool());
+    remounted.take_held(sessions.hand_off_held());
+    let lease = remounted
+        .open(
+            device.host.clone(),
+            instance,
+            "second".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    type_into(&lease, "second");
+    std::fs::remove_dir_all(device.drafts()).unwrap();
+    std::fs::write(device.drafts(), b"not a folder").unwrap();
+    remounted.retire();
+
+    assert_ne!(
+        remounted
+            .unkept()
+            .expect("the new draft is held")
+            .generation,
+        dismissed,
+        "the notice for a draft held after remounting isn't taken for the one dismissed before"
+    );
+}

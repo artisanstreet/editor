@@ -368,15 +368,16 @@ impl DraftSessions {
     }
 
     pub fn take_held(&mut self, mut handed: HeldDrafts) {
-        if handed.spool != self.spool || handed.held.is_empty() {
-            return;
+        let generation = self.generation.max(handed.generation);
+        self.generation =
+            if handed.spool == self.spool && !handed.held.is_empty() && !self.held.is_empty() {
+                generation.wrapping_add(1)
+            } else {
+                generation
+            };
+        if handed.spool == self.spool {
+            self.held.append(&mut handed.held);
         }
-        self.generation = if self.held.is_empty() {
-            handed.generation
-        } else {
-            handed.generation.wrapping_add(1)
-        };
-        self.held.append(&mut handed.held);
     }
 
     fn hold(&mut self, session: DraftHandle, error: KeepLocallyError) {
