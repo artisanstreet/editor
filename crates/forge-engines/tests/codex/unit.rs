@@ -671,6 +671,9 @@ fn queued_with(image_bytes: usize) -> super::Queued {
         admission: super::Admission(0),
         input: crate::UserInput::default(),
         image_bytes,
+        reserved: super::Budget::default()
+            .try_reserve(0)
+            .expect("an empty budget takes a text message"),
         acknowledge: true,
     }
 }
@@ -680,25 +683,24 @@ fn a_full_queue_holds_every_later_steer_for_the_next_run() {
     use super::Intake::{Holding, Open};
     let mib = 1024 * 1024;
     let cap = super::MAX_TURN_IMAGE_BYTES;
-    assert_eq!(
-        super::intake(Open, &[], cap * 2),
-        Open,
-        "an empty queue takes any message"
+    let budget = super::Budget::default();
+    let admits = |intake, outstanding, bytes| super::intake(intake, outstanding, &budget, bytes);
+    let oversized = admits(Open, 0, cap * 2);
+    assert!(oversized.is_some(), "an empty budget takes any message");
+    assert!(
+        admits(Open, 1, 1).is_none(),
+        "a message over the cap holds the whole budget"
     );
-    assert_eq!(
-        super::intake(Open, &[queued_with(100 * mib)], 28 * mib),
-        Open
-    );
-    assert_eq!(
-        super::intake(Open, &[queued_with(100 * mib)], 29 * mib),
-        Holding
-    );
-    let full: Vec<_> = (0..super::MAX_QUEUED).map(|_| queued_with(0)).collect();
-    assert_eq!(super::intake(Open, &full, 0), Holding);
-    assert_eq!(super::intake(Open, &full[1..], 0), Open);
-    assert_eq!(
-        super::intake(Holding, &[], 0),
-        Holding,
+    drop(oversized);
+    let first = admits(Open, 0, 100 * mib);
+    assert!(first.is_some());
+    assert!(admits(Open, 1, 29 * mib).is_none());
+    assert!(admits(Open, 1, 28 * mib).is_some());
+    drop(first);
+    assert!(admits(Open, super::MAX_QUEUED, 0).is_none());
+    assert!(admits(Open, super::MAX_QUEUED - 1, 0).is_some());
+    assert!(
+        admits(Holding, 0, 0).is_none(),
         "a held steer keeps its place ahead of later ones"
     );
 }

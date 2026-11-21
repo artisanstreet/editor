@@ -169,6 +169,102 @@ async fn image_steers_during_a_stalled_turn_start_fill_the_queue_and_the_rest_wa
 }
 
 #[tokio::test]
+async fn image_steers_while_codex_reads_nothing_stay_within_the_budget_and_the_rest_wait() {
+    let fixture = Fixture::new();
+    let (logs, _capturing) = test_support::logs::capture();
+    let image = fixture.root.join("image.webp");
+    std::fs::File::create(&image)
+        .unwrap()
+        .set_len(45 * 1024 * 1024)
+        .unwrap();
+    let steers: Vec<UserInput> = (0..4)
+        .map(|index| UserInput {
+            id: artisan_api::ItemId::from(format!("steer-{index}")),
+            text: format!("steer {index}."),
+            images: if index < 3 {
+                vec![image.clone()]
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+    let (inputs, inbox) = mpsc::channel(steers.len());
+    let (events, mut received) = mpsc::channel(1024);
+    let harness = tokio::spawn(crate::codex::CodexHarness.run(
+        fixture.turn("jam", None),
+        RunIo {
+            inbox,
+            events,
+            cancel: CancellationToken::new(),
+        },
+    ));
+    let mut accepted = Vec::new();
+    while accepted.is_empty() {
+        if let EngineEvent::InputAccepted { id } =
+            received.recv().await.expect("the jammed turn starts")
+        {
+            accepted.push(id.to_string());
+        }
+    }
+    for steer in steers {
+        inputs.send(Input::Steer(steer)).await.unwrap();
+    }
+    test_support::wait::eventually(
+        "Codex to hold the steers past the image budget",
+        test_support::wait::LIVENESS,
+        || {
+            std::future::ready(
+                logs.text()
+                    .matches("the steer waits for the next run")
+                    .count()
+                    == 2,
+            )
+        },
+    )
+    .await;
+    fixture.release_jam();
+    let outcome = tokio::time::timeout(Duration::from_secs(20), harness)
+        .await
+        .expect("the run ends once Codex reads again")
+        .unwrap();
+    drop(inputs);
+
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    while let Ok(event) = received.try_recv() {
+        if let EngineEvent::InputAccepted { id } = event {
+            accepted.push(id.to_string());
+        }
+    }
+    assert_eq!(
+        accepted[1..],
+        ["steer-0", "steer-1"],
+        "only the steers within the image budget were taken"
+    );
+    let input = fixture.input();
+    let next_turn = input
+        .lines()
+        .rfind(|line| line.contains("\"turn/start\""))
+        .unwrap();
+    let (first, second) = (
+        next_turn
+            .find("steer 0.")
+            .expect("the first steer is delivered"),
+        next_turn
+            .find("steer 1.")
+            .expect("the second steer is delivered"),
+    );
+    assert!(first < second, "the steers keep their order");
+    assert!(
+        !input.contains("steer 2.") && !input.contains("steer 3."),
+        "a held steer reached Codex"
+    );
+}
+
+#[tokio::test]
 async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
     let fixture = Fixture::new();
     let ((outcome, _), ()) = tokio::join!(

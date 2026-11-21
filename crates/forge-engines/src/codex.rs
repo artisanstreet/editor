@@ -28,11 +28,14 @@ use decoder::Decoder;
 use futures::future::BoxFuture;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
-pub const MAX_TURN_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+const IMAGE_BUDGET: u32 = 128 * 1024 * 1024;
+pub const MAX_TURN_IMAGE_BYTES: usize = IMAGE_BUDGET as usize;
 const MAX_QUEUED: usize = 32;
 const MAX_LINE_BYTES: usize = MAX_TURN_IMAGE_BYTES.div_ceil(3) * 4 + crate::process::MAX_LINE_BYTES;
 
@@ -170,6 +173,7 @@ impl Harness for CodexHarness {
                 io,
                 queued: Vec::new(),
                 intake: Intake::Open,
+                budget: Budget::default(),
                 admitted: 0,
                 phase: Phase::Idle,
                 steering: HashMap::new(),
@@ -251,10 +255,49 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Admission(u64);
 
+struct Budget(Arc<Semaphore>);
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self(Arc::new(Semaphore::new(MAX_TURN_IMAGE_BYTES)))
+    }
+}
+
+impl Budget {
+    fn charge(image_bytes: usize) -> u32 {
+        u32::try_from(image_bytes).map_or(IMAGE_BUDGET, |bytes| bytes.min(IMAGE_BUDGET))
+    }
+
+    fn try_reserve(&self, image_bytes: usize) -> Option<Reserved> {
+        Arc::clone(&self.0)
+            .try_acquire_many_owned(Self::charge(image_bytes))
+            .ok()
+            .map(|permit| Reserved {
+                _permit: Arc::new(permit),
+            })
+    }
+
+    async fn reserve(&self, image_bytes: usize) -> Reserved {
+        let permit = Arc::clone(&self.0)
+            .acquire_many_owned(Self::charge(image_bytes))
+            .await
+            .expect("invariant: a run never closes its image budget");
+        Reserved {
+            _permit: Arc::new(permit),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Reserved {
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
 struct Queued {
     admission: Admission,
     input: UserInput,
     image_bytes: usize,
+    reserved: Reserved,
     acknowledge: bool,
 }
 
@@ -294,6 +337,7 @@ struct Run {
     io: RunIo,
     queued: Vec<Queued>,
     intake: Intake,
+    budget: Budget,
     admitted: u64,
     phase: Phase,
     steering: HashMap<u64, Queued>,
@@ -351,7 +395,7 @@ impl Run {
 
     async fn call(&mut self, method: &str, params: Value) -> Result<Option<Value>, RequestError> {
         let id = self.decoder.request(method, params);
-        self.send_outbox().map_err(RequestError::Write)?;
+        self.send_outbox(&[]).map_err(RequestError::Write)?;
         loop {
             let line = tokio::select! {
                 line = self.conn.next_line() => line,
@@ -364,7 +408,7 @@ impl Run {
             };
             let events = self.decoder.feed(&line).map_err(RequestError::Decode)?;
             self.emit(events).await;
-            self.send_outbox().map_err(RequestError::Write)?;
+            self.send_outbox(&[]).map_err(RequestError::Write)?;
             if let Some(response) = self
                 .decoder
                 .take_responses()
@@ -540,28 +584,36 @@ impl Run {
 
     async fn admit(&mut self, input: UserInput, acknowledge: bool) -> Result<(), RunError> {
         let image_bytes = image_bytes(&input).await?;
-        self.enqueue(input, image_bytes, acknowledge);
+        let reserved = self.budget.reserve(image_bytes).await;
+        self.enqueue(input, image_bytes, reserved, acknowledge);
         Ok(())
     }
 
-    fn enqueue(&mut self, input: UserInput, image_bytes: usize, acknowledge: bool) {
+    fn enqueue(
+        &mut self,
+        input: UserInput,
+        image_bytes: usize,
+        reserved: Reserved,
+        acknowledge: bool,
+    ) {
         self.admitted += 1;
         self.queued.push(Queued {
             admission: Admission(self.admitted),
             input,
             image_bytes,
+            reserved,
             acknowledge,
         });
     }
 
     async fn steer(&mut self, input: UserInput) -> Result<(), RunError> {
         let image_bytes = image_bytes(&input).await?;
-        self.intake = intake(self.intake, &self.queued, image_bytes);
-        match self.intake {
-            Intake::Open => self.enqueue(input, image_bytes, true),
-            Intake::Holding => {
-                tracing::info!(item = %input.id, queued = self.queued.len(), "Codex's queue is full; the steer waits for the next run");
-            }
+        let outstanding = self.queued.len() + self.steering.len();
+        if let Some(reserved) = intake(self.intake, outstanding, &self.budget, image_bytes) {
+            self.enqueue(input, image_bytes, reserved, true);
+        } else {
+            self.intake = Intake::Holding;
+            tracing::info!(item = %input.id, outstanding, "Codex's queue is full; the steer waits for the next run");
         }
         Ok(())
     }
@@ -613,9 +665,10 @@ impl Run {
                 let params =
                     json!({ "threadId": thread, "expectedTurnId": turn_id, "input": input });
                 let id = self.decoder.request("turn/steer", params);
-                self.flush()?;
+                self.flush_holding(std::slice::from_ref(&queued.reserved))?;
                 self.steering.insert(id, queued);
             }
+            self.flush()
         } else if self.steering.is_empty() {
             let later = self.queued.split_off(within_turn_images(&self.queued));
             let queued = std::mem::replace(&mut self.queued, later);
@@ -627,6 +680,10 @@ impl Run {
                 access_overrides(permissions, &mut params);
             }
             let request = self.decoder.request("turn/start", params);
+            let held: Vec<Reserved> = queued
+                .iter()
+                .map(|queued| queued.reserved.clone())
+                .collect();
             let acknowledges = queued
                 .into_iter()
                 .filter(|queued| queued.acknowledge)
@@ -636,8 +693,10 @@ impl Run {
                 request,
                 acknowledges,
             });
+            self.flush_holding(&held)
+        } else {
+            self.flush()
         }
-        self.flush()
     }
 
     async fn acknowledge(&self, inputs: Vec<ItemId>) {
@@ -714,12 +773,16 @@ impl Run {
     }
 
     fn flush(&mut self) -> Result<(), RunError> {
-        self.send_outbox().map_err(RunError::Write)
+        self.flush_holding(&[])
     }
 
-    fn send_outbox(&mut self) -> Result<(), Ended> {
+    fn flush_holding(&mut self, held: &[Reserved]) -> Result<(), RunError> {
+        self.send_outbox(held).map_err(RunError::Write)
+    }
+
+    fn send_outbox(&mut self, held: &[Reserved]) -> Result<(), Ended> {
         for message in self.decoder.take_outbox() {
-            self.conn.send(message)?;
+            self.conn.send_holding(message, held.to_vec())?;
         }
         Ok(())
     }
@@ -824,15 +887,15 @@ fn within_turn_images(queued: &[Queued]) -> usize {
     fitting.max(1).min(queued.len())
 }
 
-fn intake(intake: Intake, queued: &[Queued], image_bytes: usize) -> Intake {
-    let held = queued
-        .iter()
-        .map(|queued| queued.image_bytes)
-        .fold(image_bytes, usize::saturating_add);
-    let fits = queued.is_empty() || (queued.len() < MAX_QUEUED && held <= MAX_TURN_IMAGE_BYTES);
+fn intake(
+    intake: Intake,
+    outstanding: usize,
+    budget: &Budget,
+    image_bytes: usize,
+) -> Option<Reserved> {
     match intake {
-        Intake::Open if fits => Intake::Open,
-        Intake::Open | Intake::Holding => Intake::Holding,
+        Intake::Open if outstanding < MAX_QUEUED => budget.try_reserve(image_bytes),
+        Intake::Open | Intake::Holding => None,
     }
 }
 

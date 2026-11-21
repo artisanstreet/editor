@@ -225,6 +225,7 @@ impl AppServer {
                 File::open(jam_gate)
                     .and_then(|gate| gate.lock_shared())
                     .expect("the test opens the jammed turn's gate");
+                completed(&thread, &turn, "completed");
             }
             "flood" => {
                 let delta = "x".repeat(1024 * 1024);

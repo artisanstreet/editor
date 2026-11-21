@@ -1,3 +1,4 @@
+use super::Reserved;
 use crate::Turn;
 use crate::process::{
     self, EngineProcess, ReadError, SendError, SpawnError, StderrWritten, StdinWriter,
@@ -361,13 +362,14 @@ enum WriteError {
 
 async fn write(
     mut stdin: StdinWriter,
-    mut queue: mpsc::UnboundedReceiver<Value>,
+    mut queue: mpsc::UnboundedReceiver<Outgoing>,
 ) -> Result<(), WriteError> {
-    while let Some(message) = queue.recv().await {
+    while let Some(Outgoing { message, held }) = queue.recv().await {
         tokio::time::timeout(WRITE_TIMEOUT, stdin.send(&message))
             .await
             .map_err(|_elapsed| WriteError::Stalled)?
             .map_err(WriteError::Send)?;
+        drop(held);
     }
     Ok(())
 }
@@ -425,11 +427,15 @@ impl Attachment {
     }
 
     pub(super) fn send(&self, message: Value) -> Result<(), Ended> {
+        self.send_holding(message, Vec::new())
+    }
+
+    pub(super) fn send_holding(&self, message: Value, held: Vec<Reserved>) -> Result<(), Ended> {
         self.server
             .commands
             .send(Command::Send {
                 run: self.run,
-                message,
+                outgoing: Outgoing { message, held },
             })
             .map_err(|_unsent| Ended)
     }
@@ -462,7 +468,7 @@ enum Command {
     },
     Send {
         run: u64,
-        message: Value,
+        outgoing: Outgoing,
     },
     Detach {
         run: u64,
@@ -472,6 +478,20 @@ enum Command {
         reply: oneshot::Sender<Result<(), ReleaseError>>,
     },
     Check,
+}
+
+struct Outgoing {
+    message: Value,
+    held: Vec<Reserved>,
+}
+
+impl From<Value> for Outgoing {
+    fn from(message: Value) -> Self {
+        Self {
+            message,
+            held: Vec::new(),
+        }
+    }
 }
 
 struct Release {
@@ -526,7 +546,7 @@ impl AgentPaths {
 struct Actor {
     server: Arc<Server>,
     process: EngineProcess,
-    writes: mpsc::UnboundedSender<Value>,
+    writes: mpsc::UnboundedSender<Outgoing>,
     writer: tokio_util::task::AbortOnDropHandle<Result<(), WriteError>>,
     commands: mpsc::UnboundedReceiver<Command>,
     runs: HashMap<u64, AttachedRun>,
@@ -657,8 +677,8 @@ impl Actor {
         self.reading = reading;
     }
 
-    fn write(&self, message: Value) {
-        if self.writes.send(message).is_err() {
+    fn write(&self, outgoing: impl Into<Outgoing>) {
+        if self.writes.send(outgoing.into()).is_err() {
             tracing::debug!("the Codex app-server writer has ended; its failure ends the server");
         }
     }
@@ -696,16 +716,16 @@ impl Actor {
                     },
                 );
             }
-            Command::Send { run, mut message } => {
-                if message.get("method").is_some()
-                    && let Some(id) = message.get_mut("id")
+            Command::Send { run, mut outgoing } => {
+                if outgoing.message.get("method").is_some()
+                    && let Some(id) = outgoing.message.get_mut("id")
                 {
                     let ours = self.next_id;
                     self.next_id += 1;
                     let theirs = std::mem::replace(id, json!(ours));
                     self.pending.insert(ours, (run, theirs));
                 }
-                self.write(message);
+                self.write(outgoing);
             }
             Command::Detach { run } => {
                 self.runs.remove(&run);

@@ -16,7 +16,7 @@ struct Fixture {
     root: PathBuf,
     env: Vec<(String, String)>,
     slow_gate: std::fs::File,
-    _jam_gate: std::fs::File,
+    jam_gate: std::fs::File,
 }
 
 impl Fixture {
@@ -49,12 +49,16 @@ impl Fixture {
             root,
             env,
             slow_gate,
-            _jam_gate: jam_gate,
+            jam_gate,
         }
     }
 
     fn release_slow(&self) {
         self.slow_gate.unlock().unwrap();
+    }
+
+    fn release_jam(&self) {
+        self.jam_gate.unlock().unwrap();
     }
 
     async fn release_slow_once_read(&self, needle: &str) {
