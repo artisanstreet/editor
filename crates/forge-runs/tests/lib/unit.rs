@@ -23,6 +23,8 @@ mod engine_failures;
 mod extensions_tests;
 #[path = "../gateway/calls.rs"]
 mod gateway_calls;
+#[path = "../images/copies.rs"]
+mod image_copies;
 #[path = "../launch/session.rs"]
 mod launch_session;
 #[path = "../live/snapshot.rs"]
@@ -51,7 +53,7 @@ use artisan_api::{
     ApprovalRequest, CreateProject, CreateThread, Decision, EngineConfig, ItemsQuery, Permissions,
     Phase, ProjectId, RunStatus, ToolKind,
 };
-use forge_engines::{EngineEvent, Outcome, RunIo, Turn};
+use forge_engines::{EngineEvent, Input, Outcome, RunIo, Turn};
 use futures::future::BoxFuture;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -1852,7 +1854,7 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         .unwrap();
     let (sender, receiver) = mpsc::channel(64);
     sender
-        .send(Input::Steer(
+        .send(Inbound::Steer(
             fixture
                 .hub
                 .user_input(&item, EngineId::Claude)
@@ -1861,7 +1863,7 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         ))
         .await
         .unwrap();
-    sender.send(Input::ClearGoal).await.unwrap();
+    sender.send(Inbound::ClearGoal).await.unwrap();
     let run_id = RunId::new();
     let stop = turns::StopSignal::default();
     fixture

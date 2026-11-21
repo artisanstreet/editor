@@ -8,6 +8,7 @@ mod extensions;
 pub mod failure;
 mod gateway;
 mod handoff;
+mod images;
 mod launch;
 mod mcp_auth;
 mod mcp_reach;
@@ -55,8 +56,9 @@ use artisan_api::{
     Answer, EngineId, Event, Item, ItemId, ItemKind, LiveTarget, RunId, SendMessage, Status,
     ThreadId,
 };
-use forge_engines::{Engines, Harness, Input};
+use forge_engines::{Engines, Harness};
 use forge_store::Store;
+use run::Inbound;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
@@ -136,7 +138,7 @@ enum Stopping {
 #[derive(Debug)]
 struct LiveRun {
     id: RunId,
-    inbox: mpsc::Sender<Input>,
+    inbox: mpsc::Sender<Inbound>,
     cancel: CancellationToken,
     engine: Option<EngineId>,
     launched: Option<artisan_api::Permissions>,
@@ -291,6 +293,9 @@ impl Hub {
                 stop_deadline,
             }),
         };
+        if let Err(error) = images::sweep(&hub.inner.data_dir) {
+            tracing::warn!("{}", diagnostics::chain(&error));
+        }
         hub.forward_engine_status();
         hub.start_dispatcher();
         hub.start_coordination();
@@ -445,7 +450,7 @@ impl Hub {
             .map(|run| (run.inbox.clone(), run.engine.unwrap_or(saved_engine)));
         if let Some((inbox, engine)) = live {
             let input = self.user_input(item, engine).await?;
-            if inbox.send(Input::Steer(input)).await.is_err() {
+            if inbox.send(Inbound::Steer(input)).await.is_err() {
                 self.resume_pending();
             }
         } else {
@@ -560,7 +565,7 @@ impl Hub {
                 })?;
         let ended = || AnswerError::refused(item_id, AnswerRefusal::RunEnded);
         let inbox = inbox.ok_or_else(ended)?;
-        if inbox.send(Input::Answer { key, answer }).await.is_err() {
+        if inbox.send(Inbound::Answer { key, answer }).await.is_err() {
             return Err(ended());
         }
         self.agent_attention(&item.thread_id).await;
@@ -677,7 +682,7 @@ impl Hub {
             let inbox = self.lock().get(thread_id).map(|run| run.inbox.clone());
             if let Some(inbox) = inbox
                 && inbox
-                    .send(Input::SetPermissions(thread.config.permissions))
+                    .send(Inbound::SetPermissions(thread.config.permissions))
                     .await
                     .is_err()
             {
@@ -754,7 +759,7 @@ impl Hub {
             EngineId::Codex | EngineId::OpenCode => {}
         }
         if let Some((inbox, _)) = live {
-            if inbox.send(Input::ClearGoal).await.is_err() {
+            if inbox.send(Inbound::ClearGoal).await.is_err() {
                 return Err(ClearGoalError::refused(thread_id, ClearGoalRefusal::Ending));
             }
         } else {
@@ -1240,7 +1245,7 @@ impl Hub {
         &self,
         item: &Item,
         engine: EngineId,
-    ) -> Result<forge_engines::UserInput, InputError> {
+    ) -> Result<images::Message, InputError> {
         let ItemKind::UserMessage {
             text,
             images,
@@ -1305,12 +1310,8 @@ impl Hub {
         } else {
             text
         };
-        let images = self.store().input_image_paths(images.clone()).await?;
-        Ok(forge_engines::UserInput {
-            id: item.id.clone(),
-            text: with_image_paths(text, &images),
-            images,
-        })
+        let stored = self.store().input_image_paths(images.clone()).await?;
+        Ok(images::Message::new(item.id.clone(), text, stored))
     }
 
     #[expect(
@@ -1469,19 +1470,6 @@ impl Hub {
 #[cfg(test)]
 #[path = "../tests/lib/unit.rs"]
 mod tests;
-
-fn with_image_paths(text: String, images: &[PathBuf]) -> String {
-    let lines: Vec<String> = images
-        .iter()
-        .enumerate()
-        .map(|(index, path)| format!("[Image {} is saved at {}]", index + 1, path.display()))
-        .collect();
-    match (text.is_empty(), lines.is_empty()) {
-        (_, true) => text,
-        (true, false) => lines.join("\n"),
-        (false, false) => format!("{text}\n\n{}", lines.join("\n")),
-    }
-}
 
 fn sender_line(sender: &artisan_api::Sender) -> String {
     let title = sender

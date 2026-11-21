@@ -20,6 +20,8 @@ pub enum PrepareError {
     #[error("{} is not installed", engine.display_name())]
     NotInstalled { engine: EngineId },
     #[error(transparent)]
+    ImageFolder(#[from] crate::images::ImageFolderError),
+    #[error(transparent)]
     Gateway(Box<crate::gateway::GatewayError>),
     #[error("prepare the folder of thread {thread}")]
     Folder {
@@ -55,6 +57,14 @@ pub enum PrepareError {
         #[source]
         source: artisan_api::ModelCustomizationsError,
     },
+}
+
+#[derive(Debug)]
+pub(crate) enum Inbound {
+    Steer(crate::images::Message),
+    Answer { key: String, answer: Answer },
+    ClearGoal,
+    SetPermissions(Permissions),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +212,8 @@ enum ExecuteError {
     Input(#[from] crate::InputError),
     #[error(transparent)]
     Prepare(#[from] PrepareError),
+    #[error(transparent)]
+    Images(#[from] crate::images::RunImagesError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -257,7 +269,7 @@ pub(crate) async fn drive(
     hub: &Hub,
     thread_id: &ThreadId,
     run_id: RunId,
-    inbox: mpsc::Receiver<Input>,
+    inbox: mpsc::Receiver<Inbound>,
     cancel: CancellationToken,
     stop: crate::turns::StopSignal,
 ) -> Result<Drove, DriveError> {
@@ -480,7 +492,7 @@ async fn conclude(
 }
 
 struct Control {
-    inbox: mpsc::Receiver<Input>,
+    inbox: mpsc::Receiver<Inbound>,
     cancel: CancellationToken,
     stop: crate::turns::StopSignal,
 }
@@ -653,10 +665,12 @@ async fn execute(
     } else {
         None
     };
+    let mut images =
+        crate::images::RunImages::open(hub.data_dir(), &run.thread_id, &run.id).await?;
     let preparing = async {
         let mut input = UserInput::default();
         for item in pending {
-            let next = hub.user_input(item, engine).await?;
+            let next = images.deliver(hub.user_input(item, engine).await?).await?;
             if !input.text.is_empty() && !next.text.is_empty() {
                 input.text.push_str("\n\n");
             }
@@ -735,13 +749,30 @@ async fn execute(
     let mut forwarding_done = false;
     let mut adapter_finished = false;
     let outcome = {
+        let (thread_id, run_id) = (run.thread_id.clone(), run.id.clone());
         let forwarding = async {
-            while let Some(input) = inbox.recv().await {
-                if let Input::Steer(message) = &input
-                    && !delivered.insert(message.id.clone())
-                {
-                    continue;
-                }
+            while let Some(inbound) = inbox.recv().await {
+                let input = match inbound {
+                    Inbound::Steer(message) => {
+                        if delivered.contains(message.id()) {
+                            continue;
+                        }
+                        let id = message.id().clone();
+                        match images.deliver(message).await {
+                            Ok(input) => {
+                                delivered.insert(id);
+                                Input::Steer(input)
+                            }
+                            Err(error) => {
+                                tracing::warn!(thread = %thread_id, run = %run_id, item = %id, "the steer waits for the next turn: {}", diagnostics::chain(&error));
+                                continue;
+                            }
+                        }
+                    }
+                    Inbound::Answer { key, answer } => Input::Answer { key, answer },
+                    Inbound::ClearGoal => Input::ClearGoal,
+                    Inbound::SetPermissions(permissions) => Input::SetPermissions(permissions),
+                };
                 let waiting = match &input {
                     Input::SetPermissions(permissions) => {
                         approvals_lock(&approvals).set(*permissions)
@@ -942,11 +973,10 @@ async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) 
     else {
         return false;
     };
-    let steer = Input::Steer(UserInput {
-        id: ItemId::new(),
-        text: crate::disk::steer(path, free),
-        images: Vec::new(),
-    });
+    let steer = Inbound::Steer(crate::images::Message::text_only(
+        ItemId::new(),
+        crate::disk::steer(path, free),
+    ));
     if inbox.try_send(steer).is_err() {
         return false;
     }
@@ -1030,7 +1060,9 @@ pub(crate) async fn prepare(
     for (name, url) in gateway.servers() {
         forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
     }
-    launch.readable.push(hub.store().blob_dir().to_path_buf());
+    launch
+        .readable
+        .push(crate::images::readable_folder(hub.data_dir(), &thread.id).await?);
     let mut config = thread.config.clone();
     match session.transport_option() {
         Some(option) => {

@@ -327,26 +327,6 @@ fn permissions_pick_auto_mode_or_skip_prompts() {
 }
 
 #[test]
-fn auto_runs_may_read_the_folders_forge_shares_but_never_edit_them() {
-    let blobs = std::path::PathBuf::from("/data/blobs");
-    let settings = |permissions| {
-        let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
-        config.permissions = permissions;
-        let args = super::launch_args(&config, None, std::slice::from_ref(&blobs));
-        let added = args.iter().position(|arg| arg == "--add-dir").unwrap();
-        assert_eq!(args[added + 1], "/data/blobs");
-        args.iter()
-            .position(|arg| arg == "--settings")
-            .map(|at| serde_json::from_str::<serde_json::Value>(&args[at + 1]).unwrap())
-    };
-    assert_eq!(
-        settings(artisan_api::Permissions::Auto).unwrap()["permissions"]["deny"],
-        serde_json::json!(["Edit(//data/blobs/**)"])
-    );
-    assert!(settings(artisan_api::Permissions::Full).is_none());
-}
-
-#[test]
 fn transcripts() {
     let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/transcripts/claude");
     let mut files: Vec<_> = std::fs::read_dir(directory)

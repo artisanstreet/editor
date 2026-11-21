@@ -221,8 +221,9 @@ fn the_chosen_variant_is_the_model_variant() {
 #[test]
 fn each_permission_level_is_an_agent_opencode_knows_and_auto_stays_in_its_worktree() {
     let home = tempfile::tempdir().unwrap();
-    let blobs = home.path().join("data/blobs");
-    let dir = super::write_agents(home.path(), std::slice::from_ref(&blobs)).unwrap();
+    let images = home.path().join("data/run-images/thread");
+    let agents = super::write_agents(home.path(), std::slice::from_ref(&images)).unwrap();
+    let dir = agents.path();
     let config: Value =
         serde_json::from_slice(&std::fs::read(dir.join("opencode.json")).unwrap()).unwrap();
     let rules = |permissions| config["agent"][super::agent_name(permissions)]["permission"].clone();
@@ -232,7 +233,7 @@ fn each_permission_level_is_an_agent_opencode_knows_and_auto_stays_in_its_worktr
         auto["external_directory"],
         serde_json::json!({
             "*": "deny",
-            format!("{}/*", blobs.to_string_lossy().replace('\\', "/")): "allow",
+            format!("{}/*", images.to_string_lossy().replace('\\', "/")): "allow",
         }),
         "Auto touches nothing outside its worktree but the folders Forge lets it read"
     );
@@ -246,24 +247,6 @@ fn each_permission_level_is_an_agent_opencode_knows_and_auto_stays_in_its_worktr
         order.first(),
         Some(&"*"),
         "OpenCode lets the last matching rule win, so the deny must come before the allowed folders"
-    );
-    assert_eq!(
-        auto["edit"],
-        serde_json::json!({
-            "*": "allow",
-            format!("{}/*", blobs.to_string_lossy().replace('\\', "/")): "deny",
-        }),
-        "Auto reads the folders Forge shares but never edits them"
-    );
-    assert_eq!(
-        auto["edit"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .next()
-            .map(String::as_str),
-        Some("*"),
-        "the folder deny must come after the allow it narrows"
     );
     let full = rules(artisan_api::Permissions::Full);
     assert_eq!(full["external_directory"], "allow");

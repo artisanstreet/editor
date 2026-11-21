@@ -55,8 +55,8 @@ pub enum ServerError {
     Password(#[source] getrandom::Error),
     #[error("encode Forge's OpenCode agents")]
     EncodeAgents(#[source] serde_json::Error),
-    #[error("read Forge's OpenCode agents at {}", path.display())]
-    ReadAgents {
+    #[error("create the folder for this OpenCode server's agents in {}", path.display())]
+    AgentsFolder {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -303,7 +303,7 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
         .ok_or_else(|| SetTitleError::NoSession {
             thread: turn.thread_id.clone(),
         })?;
-    let (mut server, password) = prepare(&turn).await.map_err(SetTitleError::Server)?;
+    let (mut server, password, _agents) = prepare(&turn).await.map_err(SetTitleError::Server)?;
     let result = async {
         let api = connect(&mut server, password)
             .await
@@ -338,11 +338,11 @@ async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
     result
 }
 
-async fn prepare(turn: &Turn) -> Result<(EngineProcess, String), ServerError> {
+async fn prepare(turn: &Turn) -> Result<(EngineProcess, String, tempfile::TempDir), ServerError> {
     let password = password()?;
-    let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
-    let server = spawn(turn, &password, &config_dir).await?;
-    Ok((server, password))
+    let agents = write_agents(&turn.home, &turn.launch.readable)?;
+    let server = spawn(turn, &password, agents.path()).await?;
+    Ok((server, password, agents))
 }
 
 async fn connect(server: &mut EngineProcess, password: String) -> Result<Api, ServerError> {
@@ -353,7 +353,7 @@ async fn connect(server: &mut EngineProcess, password: String) -> Result<Api, Se
 }
 
 async fn run(turn: &Turn, io: &mut RunIo) -> (Result<Outcome, RunError>, StderrWritten) {
-    let (mut server, password) = match prepare(turn).await {
+    let (mut server, password, _agents) = match prepare(turn).await {
         Ok(prepared) => prepared,
         Err(source) => return (Err(RunError::Server(source)), StderrWritten::default()),
     };
@@ -671,11 +671,7 @@ fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
             for dir in readable {
                 external.insert(folder_pattern(dir), json!("allow"));
             }
-            let mut edit = serde_json::Map::from_iter([("*".to_owned(), json!("allow"))]);
-            for dir in readable {
-                edit.insert(folder_pattern(dir), json!("deny"));
-            }
-            json!({ "*": "allow", "bash": "ask", "edit": edit, "external_directory": external })
+            json!({ "*": "allow", "bash": "ask", "external_directory": external })
         }
         Permissions::Full => {
             json!({ "*": "allow", "external_directory": "allow", "doom_loop": "allow" })
@@ -683,8 +679,18 @@ fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
     }
 }
 
-fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<PathBuf, ServerError> {
-    let dir = crate::home::forge_records(home).join("opencode");
+fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<tempfile::TempDir, ServerError> {
+    let parent = crate::home::forge_records(home).join("opencode");
+    let dir = std::fs::create_dir_all(&parent)
+        .and_then(|()| {
+            tempfile::Builder::new()
+                .prefix("server-")
+                .tempdir_in(&parent)
+        })
+        .map_err(|source| ServerError::AgentsFolder {
+            path: parent.clone(),
+            source,
+        })?;
     let agents: serde_json::Map<String, Value> = [Permissions::Auto, Permissions::Full]
         .into_iter()
         .map(|permissions| {
@@ -708,16 +714,9 @@ fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<PathBuf, ServerErro
     );
     let config = json!({ "$schema": "https://opencode.ai/config.json", "agent": agents });
     let bytes = serde_json::to_vec_pretty(&config).map_err(ServerError::EncodeAgents)?;
-    let path = dir.join("opencode.json");
-    let current = match std::fs::read(&path) {
-        Ok(current) => Some(current),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => return Err(ServerError::ReadAgents { path, source }),
-    };
-    if current.as_deref() != Some(bytes.as_slice()) {
-        artisan_paths::private::write_file(&path, &bytes)
-            .map_err(|source| ServerError::WriteAgents { path, source })?;
-    }
+    let path = dir.path().join("opencode.json");
+    artisan_paths::private::write_file(&path, &bytes)
+        .map_err(|source| ServerError::WriteAgents { path, source })?;
     Ok(dir)
 }
 

@@ -78,7 +78,7 @@ pub(super) async fn clear_goal(turn: Turn) -> Result<(), ClearGoalError> {
         .ok_or_else(|| ClearGoalError::NoSession {
             thread: turn.thread_id.clone(),
         })?;
-    let (mut server, password) = prepare(&turn).await.map_err(ClearGoalError::Server)?;
+    let (mut server, password, _agents) = prepare(&turn).await.map_err(ClearGoalError::Server)?;
     let result = async {
         let api = connect(&mut server, password)
             .await

@@ -7,7 +7,7 @@ fn a_fork_launches_as_its_thread_does() {
         let mut config = EngineConfig::new(artisan_api::EngineId::Claude);
         config.permissions = permissions;
         config.model = Some("claude-opus-5-5".to_owned());
-        let readable = [PathBuf::from("/data/blobs")];
+        let readable = [PathBuf::from("/data/run-images/thread")];
         let thread = launch_args(&config, Some("s1"), &readable);
         let fork = side_args(&config, Some("s1"), &readable);
         assert_eq!(fork[..thread.len()], thread[..]);

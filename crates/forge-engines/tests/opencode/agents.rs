@@ -1,34 +1,29 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[test]
-fn a_starting_server_never_reads_a_partial_agent_configuration() {
+fn each_server_reads_its_own_agents_and_they_go_with_it() {
     let home = tempfile::tempdir().unwrap();
-    let readable = [
-        vec![home.path().join("blobs-a")],
-        vec![home.path().join("blobs-b"), home.path().join("blobs-c")],
-    ];
-    let config = write_agents(home.path(), &readable[0])
-        .unwrap()
-        .join("opencode.json");
-    let writing = AtomicBool::new(true);
-    std::thread::scope(|scope| {
-        scope.spawn(|| {
-            for round in 0..400 {
-                write_agents(home.path(), &readable[round % 2]).unwrap();
-            }
-            writing.store(false, Ordering::Release);
-        });
-        let mut reads = 0_u32;
-        while writing.load(Ordering::Acquire) || reads == 0 {
-            let bytes = std::fs::read(&config).unwrap();
-            let parsed: Result<Value, _> = serde_json::from_slice(&bytes);
-            assert!(
-                parsed.is_ok_and(|config| config["agent"].is_object()),
-                "OpenCode read {} bytes of a half-written configuration",
-                bytes.len()
-            );
-            reads += 1;
-        }
-    });
+    let first = home.path().join("run-images/first");
+    let second = home.path().join("run-images/second");
+    let allowed = |agents: &tempfile::TempDir| {
+        let config: Value =
+            serde_json::from_slice(&std::fs::read(agents.path().join("opencode.json")).unwrap())
+                .unwrap();
+        config["agent"][agent_name(Permissions::Auto)]["permission"]["external_directory"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|pattern| *pattern != "*")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let one = write_agents(home.path(), std::slice::from_ref(&first)).unwrap();
+    let two = write_agents(home.path(), std::slice::from_ref(&second)).unwrap();
+
+    assert_eq!(allowed(&one), [folder_pattern(&first)]);
+    assert_eq!(allowed(&two), [folder_pattern(&second)]);
+    let folder = one.path().to_path_buf();
+    drop(one);
+    assert!(!folder.exists(), "a finished server's agents are removed");
 }
