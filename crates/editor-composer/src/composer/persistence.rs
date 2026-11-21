@@ -829,6 +829,17 @@ impl DraftHandle {
         }
     }
 
+    fn rekeep(&self) {
+        if self.0.persisted().kept == Kept::Nothing {
+            return;
+        }
+        let Some(keeping) = Keeping::of(&self.0, &self.0.shared()) else {
+            return;
+        };
+        let session = self.clone();
+        runtime().spawn_blocking(move || drop(session.keep(keeping)));
+    }
+
     fn forget_recovered(&self, shared: &mut Shared) {
         let kept = self.0.persisted().kept;
         if shared.forgetting
@@ -1208,7 +1219,11 @@ impl DraftHandle {
                     message = %request.message.id
                 );
                 let result = post(client, &request).instrument(span).await;
-                session.mutate(|shared| shared.state.posted_set_aside(result));
+                let mut handed_back = false;
+                session.mutate(|shared| handed_back = shared.state.posted_set_aside(result));
+                if handed_back {
+                    session.rekeep();
+                }
             }
             Operation::Post(request) => {
                 let span = tracing::info_span!(

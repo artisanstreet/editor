@@ -1,5 +1,5 @@
 use super::*;
-use artisan_api::{DraftSnapshot, DraftWriteResult};
+use artisan_api::{DraftSnapshot, DraftWriteResult, RunFailure};
 
 fn typed(text: &str) -> DraftBody {
     DraftBody {
@@ -874,4 +874,95 @@ fn removing_the_pairing_empties_the_draft_view() {
         !state.queue(typed("more"), state.epoch(), false),
         "nothing is saved"
     );
+}
+
+fn set_aside_recovered(text: &str) -> (DraftSession, Submission) {
+    let refused_message = submission("set-aside", text);
+    let kept: KeptDraft = serde_json::from_value(serde_json::json!({
+        "body": {"text": "typed since"},
+        "set_aside": [refused_message],
+    }))
+    .unwrap();
+    let mut state = DraftSession::new("new".into());
+    state.recover(kept, Vec::new(), Vec::new());
+    assert!(matches!(
+        state.next_operation(),
+        Some(Operation::PostSetAside(_))
+    ));
+    (state, refused_message)
+}
+
+fn set_aside_refused(failure: Failure, submission: &Submission) -> Result<(), PostMessageError> {
+    Err(PostMessageError::Send {
+        thread: submission.thread.clone(),
+        message: submission.message.id.clone(),
+        source: refused(failure),
+    })
+}
+
+#[test]
+fn a_set_aside_message_forge_refuses_for_good_comes_back_as_a_failed_message() {
+    let (mut state, refused_message) = set_aside_recovered("its image was collected");
+
+    assert!(state.posted_set_aside(set_aside_refused(
+        Failure::Run(RunFailure::ImageMissing {
+            blob: BlobHash("0".repeat(64)),
+        }),
+        &refused_message,
+    )));
+
+    let kept = state.kept();
+    assert!(
+        kept.set_aside.is_empty(),
+        "the device record no longer queues it"
+    );
+    assert_eq!(state.posting(), Posting::Failed);
+    assert_eq!(state.body().text, "its image was collected");
+    assert_eq!(
+        state
+            .body()
+            .follow_ups
+            .iter()
+            .map(|body| body.text.as_str())
+            .collect::<Vec<_>>(),
+        ["typed since"],
+        "what was typed since stays beside it"
+    );
+    assert!(state.error().is_some(), "the refusal is shown");
+
+    state.queue(
+        DraftBody {
+            text: "sent instead".to_owned(),
+            ..DraftBody::default()
+        },
+        state.epoch(),
+        false,
+    );
+    assert!(matches!(state.next_operation(), Some(Operation::Load)));
+    state.loaded(Ok(artisan_api::DraftSnapshot::default()));
+    state.submit(submission("next", "sent instead"));
+    let posted = loop {
+        match state.next_operation() {
+            Some(Operation::Write { body, .. }) => saved(&mut state, 1, &body),
+            operation => break operation,
+        }
+    };
+    assert!(
+        matches!(posted, Some(Operation::Post(_))),
+        "the next message isn't held behind the refused one: {posted:?}"
+    );
+}
+
+#[test]
+fn a_set_aside_message_that_fails_for_now_waits_to_be_sent_again() {
+    let (mut state, refused_message) = set_aside_recovered("forge was busy");
+
+    assert!(!state.posted_set_aside(set_aside_refused(Failure::Internal, &refused_message)));
+
+    assert_eq!(state.kept().set_aside, [refused_message]);
+    state.retry();
+    assert!(matches!(
+        state.next_operation(),
+        Some(Operation::PostSetAside(_))
+    ));
 }

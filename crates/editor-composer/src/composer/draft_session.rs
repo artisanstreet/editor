@@ -3,7 +3,7 @@ use super::draft_body::{DraftBody, EMPTY_BODY, RemoteBody};
 use super::spool::BesideSlot;
 use artisan_api::{
     BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, ErrorCode, Failure,
-    ItemId, ResourceFailure, SendMessage, ThreadId,
+    ItemId, ProjectFailure, ResourceFailure, SendMessage, ThreadId,
 };
 use editor_core::client::CallError;
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,30 @@ pub enum PostMessageError {
         #[source]
         source: CallError,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refusal {
+    Transient,
+    Permanent,
+}
+
+impl PostMessageError {
+    fn refusal(&self) -> Refusal {
+        let (Self::CreateThread { source, .. } | Self::Send { source, .. }) = self;
+        match source.refused() {
+            Some(Failure::Project(ProjectFailure::Removed { .. })) => Refusal::Permanent,
+            Some(failure) => match failure.code() {
+                ErrorCode::BadRequest | ErrorCode::NotFound => Refusal::Permanent,
+                ErrorCode::Conflict
+                | ErrorCode::Unauthorized
+                | ErrorCode::VersionMismatch
+                | ErrorCode::EngineUnavailable
+                | ErrorCode::Internal => Refusal::Transient,
+            },
+            None => Refusal::Transient,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -588,6 +612,34 @@ impl Draft {
             self.edits.edit();
         }
         true
+    }
+
+    fn hand_back_set_aside(&mut self, refused: Submission, failure: DraftFailure) {
+        let sent = DraftBody {
+            text: refused.message.text.clone(),
+            images: refused.message.images.clone(),
+            config: refused.message.config.clone(),
+            ..DraftBody::default()
+        };
+        match &self.send {
+            Send::Outgoing(_) => park(&mut self.body.follow_ups, sent),
+            Send::Idle | Send::Accepted(_) => {
+                self.body = fold_back(&sent, std::mem::take(&mut self.body));
+                self.send = Send::Outgoing(Box::new(Outgoing {
+                    request: unanswered(refused),
+                    sent,
+                    stage: Stage::Released,
+                    edited: self.edits.latest,
+                }));
+            }
+        }
+        self.edits.edit();
+        self.halt = match std::mem::replace(&mut self.halt, Halt::Clear) {
+            Halt::Conflict { .. } => Halt::Conflict {
+                failed: Some(failure),
+            },
+            Halt::Clear | Halt::Failed(_) => Halt::Failed(failure),
+        };
     }
 
     fn fail(&mut self, scope: &str, failure: DraftFailure) -> bool {
@@ -1465,10 +1517,10 @@ impl DraftSession {
         }
     }
 
-    pub(crate) fn posted_set_aside(&mut self, result: Result<(), PostMessageError>) {
+    pub(crate) fn posted_set_aside(&mut self, result: Result<(), PostMessageError>) -> bool {
         let State::Open(draft) = &mut self.state else {
             self.dropped("a set-aside message's result");
-            return;
+            return false;
         };
         let request = std::mem::replace(&mut draft.request, Request::Idle);
         assert!(
@@ -1479,6 +1531,22 @@ impl DraftSession {
         match result {
             Ok(()) => {
                 draft.set_aside.remove(0);
+                false
+            }
+            Err(source) if source.refusal() == Refusal::Permanent => {
+                let failure = DraftFailure::SetAside {
+                    scope: self.scope.clone(),
+                    source,
+                };
+                tracing::warn!(
+                    scope = %self.scope,
+                    error = %diagnostics::chain(&failure),
+                    "Forge refused a message sent from a draft the user set aside for good; handing its text back"
+                );
+                let refused = draft.set_aside.remove(0).request;
+                draft.hand_back_set_aside(refused, failure);
+                self.handed_back();
+                true
             }
             Err(source) => {
                 let failure = DraftFailure::SetAside {
@@ -1491,6 +1559,7 @@ impl DraftSession {
                     "a message sent from a draft the user set aside failed; it waits for Try again"
                 );
                 draft.set_aside[0].stage = SetAsideStage::Failed(failure);
+                false
             }
         }
     }
