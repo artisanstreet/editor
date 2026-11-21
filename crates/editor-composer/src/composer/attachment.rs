@@ -174,6 +174,14 @@ impl PendingUpload {
         }
     }
 
+    #[cfg(all(test, unix))]
+    pub(crate) fn from_path(path: PathBuf, name: String) -> Self {
+        Self {
+            origin: Arc::new(Source::Path(path)),
+            name,
+        }
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }

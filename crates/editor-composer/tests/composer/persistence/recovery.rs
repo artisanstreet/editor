@@ -425,3 +425,72 @@ fn a_recovered_draft_that_could_not_be_removed_once_saved_is_removed_on_closing(
         "the next start doesn't bring back a draft Forge already saved"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn retiring_reads_a_pasted_image_outside_the_draft_and_keeps_what_was_typed_meanwhile() {
+    let device = Device::new();
+    let pasted = device.directory.path().join("pasted.png");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&pasted)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    let session = lease.handle.clone();
+    session.mutate(|shared| {
+        shared.state.adopt(PendingUpload::from_path(
+            pasted.clone(),
+            "pasted.png".into(),
+        ));
+    });
+    let retiring = std::thread::spawn({
+        let session = session.clone();
+        move || session.retire()
+    });
+    let writer = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&pasted)
+        .unwrap();
+    assert!(
+        session.0.shared.try_lock().is_ok(),
+        "reading the pasted image doesn't hold the draft that saves wait on"
+    );
+    session.mutate(|shared| {
+        let epoch = shared.state.epoch();
+        assert!(shared.state.queue(
+            DraftBody {
+                text: "typed while closing".to_owned(),
+                ..DraftBody::default()
+            },
+            epoch,
+            false,
+        ));
+    });
+    let replacement = device.directory.path().join("pasted.png.new");
+    std::fs::write(&replacement, png()).unwrap();
+    std::fs::rename(&replacement, &pasted).unwrap();
+    drop(writer);
+    retiring.join().unwrap().unwrap();
+
+    assert!(session.read(DraftSession::removed));
+    let kept = device
+        .spool()
+        .take(&device.host, "new")
+        .unwrap()
+        .expect("the retired draft is kept on this device");
+    assert_eq!(kept.draft.body.text, "typed while closing");
+    assert_eq!(kept.images.len(), 1);
+    assert!(kept.images[0].as_ref().is_ok_and(|bytes| *bytes == png()));
+}

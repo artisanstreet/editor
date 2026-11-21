@@ -687,23 +687,29 @@ impl DraftHandle {
     }
 
     fn retire(&self) -> Result<(), KeepLocallyError> {
-        let mut kept = Ok(());
         self.mutate(|shared| {
             if let Some(timer) = shared.timer.take() {
                 timer.abort();
             }
-            self.0.cancelled.cancel();
-            if let Some(keeping) = Keeping::of(&shared.state) {
-                kept = match self.keep(keeping) {
-                    Err(KeepLocallyError::NoSpool) => Ok(()),
-                    kept => kept,
-                };
-            }
-            if kept.is_ok() {
-                shared.state.remove();
-            }
         });
-        kept
+        self.0.cancelled.cancel();
+        loop {
+            let (version, keeping) = {
+                let shared = self.0.shared();
+                (shared.version, Keeping::of(&shared.state))
+            };
+            if let Some(keeping) = keeping {
+                match self.keep(keeping) {
+                    Err(KeepLocallyError::NoSpool) | Ok(()) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let shared = self.0.shared();
+            if shared.version == version {
+                self.publish(shared, |shared| shared.state.remove());
+                return Ok(());
+            }
+        }
     }
 
     pub(crate) fn take_unrecovered(&self) -> Option<Unrecovered> {
@@ -719,7 +725,10 @@ impl DraftHandle {
     }
 
     fn mutate(&self, update: impl FnOnce(&mut Shared)) {
-        let mut shared = self.0.shared();
+        self.publish(self.0.shared(), update);
+    }
+
+    fn publish(&self, mut shared: MutexGuard<'_, Shared>, update: impl FnOnce(&mut Shared)) {
         update(&mut shared);
         self.forget_recovered(&mut shared);
         shared.emit(&SessionEvent::Changed);
