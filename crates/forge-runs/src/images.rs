@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "../tests/images/unit.rs"]
+mod tests;
+
 use artisan_api::{ItemId, ThreadId};
 use forge_engines::UserInput;
 use forge_store::{DataLock, Store, ThreadIdsError};
@@ -158,33 +162,38 @@ fn swept(path: &Path) -> usize {
 }
 
 fn partials(folder: &Path) -> Vec<PathBuf> {
-    let is_folder =
-        std::fs::symlink_metadata(folder).is_ok_and(|folder| folder.file_type().is_dir());
-    if !is_folder {
-        return Vec::new();
-    }
-    match std::fs::read_dir(folder) {
-        Ok(entries) => entries
-            .filter_map(|entry| {
-                entry
-                    .inspect_err(|error| {
-                        tracing::warn!(folder = %folder.display(), %error, "list a live thread's image copies");
-                    })
-                    .ok()
-            })
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(PARTIAL_SUFFIX)
-            })
-            .map(|entry| entry.path())
-            .collect(),
+    match std::fs::symlink_metadata(folder) {
+        Ok(entry) if entry.file_type().is_dir() => {}
+        Ok(_) => return Vec::new(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => {
-            tracing::warn!(folder = %folder.display(), %error, "list a live thread's image copies");
-            Vec::new()
+            tracing::warn!(folder = %folder.display(), %error, "check a live thread's image folder; its partial copies stay");
+            return Vec::new();
         }
     }
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(folder = %folder.display(), %error, "list a live thread's image copies");
+            return Vec::new();
+        }
+    };
+    entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                tracing::warn!(folder = %folder.display(), %error, "list a live thread's image copies");
+                None
+            }
+        })
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(PARTIAL_SUFFIX)
+        })
+        .map(|entry| entry.path())
+        .collect()
 }
 
 pub(crate) async fn sweep(
@@ -299,11 +308,7 @@ fn copy_one(thread: &ThreadId, dir: &Path, from: &Path) -> Result<PathBuf, Image
 
 fn copy_pristine(from: &Path, dir: &Path, to: &Path) -> io::Result<()> {
     let pristine = std::fs::read(from)?;
-    let intact = || {
-        std::fs::symlink_metadata(to).is_ok_and(|copy| copy.file_type().is_file())
-            && std::fs::read(to).is_ok_and(|copy| copy == pristine)
-    };
-    if intact() {
+    if intact(to, &pristine) {
         return Ok(());
     }
     let mut partial = tempfile::Builder::new()
@@ -315,7 +320,30 @@ fn copy_pristine(from: &Path, dir: &Path, to: &Path) -> io::Result<()> {
         Ok(_) => Ok(()),
         Err(error) => {
             drop(error.file);
-            if intact() { Ok(()) } else { Err(error.error) }
+            if intact(to, &pristine) {
+                Ok(())
+            } else {
+                Err(error.error)
+            }
+        }
+    }
+}
+
+fn intact(copy: &Path, pristine: &[u8]) -> bool {
+    match std::fs::symlink_metadata(copy) {
+        Ok(entry) if entry.file_type().is_file() => {}
+        Ok(_) => return false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        Err(error) => {
+            tracing::warn!(copy = %copy.display(), %error, "check an image copy; copying it again");
+            return false;
+        }
+    }
+    match std::fs::read(copy) {
+        Ok(bytes) => bytes == pristine,
+        Err(error) => {
+            tracing::warn!(copy = %copy.display(), %error, "read an image copy; copying it again");
+            false
         }
     }
 }
