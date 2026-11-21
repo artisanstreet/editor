@@ -86,11 +86,18 @@ pub(crate) enum KeptBesideError {
         #[source]
         source: std::io::Error,
     },
-    #[error("the draft kept beside another at {path} is unreadable and stays there")]
-    Unreadable {
-        path: PathBuf,
+    #[error("the draft kept beside another is unreadable, so it was moved to {set_aside}")]
+    SetAside {
+        set_aside: PathBuf,
         #[source]
         source: Box<ReadConfigError>,
+    },
+    #[error("the draft kept beside another at {path} is unreadable ({unreadable}) and stays there")]
+    Left {
+        path: PathBuf,
+        unreadable: Box<ReadConfigError>,
+        #[source]
+        source: Box<SetAsideError>,
     },
 }
 
@@ -325,7 +332,7 @@ impl DraftSpool {
         let path = self.dir.join(format!("{stem}.json"));
         match read_record(&self.dir, &stem, &path, host, scope) {
             Ok(spooled) => Ok(spooled),
-            Err(unreadable) => Err(match self.set_aside(&stem, &path) {
+            Err(unreadable) => Err(match self.set_aside(&stem, &self.dir, &path) {
                 Ok(set_aside) => TakeSpooledDraftError::SetAside {
                     set_aside,
                     source: Box::new(unreadable),
@@ -384,13 +391,16 @@ impl DraftSpool {
             .filter_map(|slot| {
                 let folder = self.folder(&stem, Slot::Beside(slot));
                 let path = folder.join(format!("{stem}.json"));
-                read_record(&folder, &stem, &path, host, scope)
-                    .map_err(|source| KeptBesideError::Unreadable {
-                        path,
-                        source: Box::new(source),
-                    })
-                    .map(|spooled| spooled.map(|spooled| BesideDraft { slot, spooled }))
-                    .transpose()
+                match read_record(&folder, &stem, &path, host, scope) {
+                    Ok(Some(spooled)) => Some(Ok(BesideDraft { slot, spooled })),
+                    Ok(None) => {
+                        remove_if_empty(&folder);
+                        None
+                    }
+                    Err(unreadable) => {
+                        Some(Err(self.set_aside_beside(&stem, &folder, &path, unreadable)))
+                    }
+                }
             })
             .chain(failures)
             .collect()
@@ -443,7 +453,30 @@ impl DraftSpool {
             .map_err(failed)
     }
 
-    fn set_aside(&self, stem: &str, record: &Path) -> Result<PathBuf, SetAsideError> {
+    fn set_aside_beside(
+        &self,
+        stem: &str,
+        folder: &Path,
+        record: &Path,
+        unreadable: ReadConfigError,
+    ) -> KeptBesideError {
+        match self.set_aside(stem, folder, record) {
+            Ok(set_aside) => {
+                remove_if_empty(folder);
+                KeptBesideError::SetAside {
+                    set_aside,
+                    source: Box::new(unreadable),
+                }
+            }
+            Err(source) => KeptBesideError::Left {
+                path: record.to_owned(),
+                unreadable: Box::new(unreadable),
+                source: Box::new(source),
+            },
+        }
+    }
+
+    fn set_aside(&self, stem: &str, from: &Path, record: &Path) -> Result<PathBuf, SetAsideError> {
         let folder = (1_u64..)
             .map(|number| {
                 let folder = self.dir.join(format!("{stem}.unreadable-{number}"));
@@ -459,10 +492,10 @@ impl DraftSpool {
             .find_map(Result::transpose)
             .expect("invariant: some set-aside number is free")?;
         let listed = |source| SetAsideError::List {
-            path: self.dir.clone(),
+            path: from.to_owned(),
             source,
         };
-        for entry in std::fs::read_dir(&self.dir).map_err(listed)? {
+        for entry in std::fs::read_dir(from).map_err(listed)? {
             let path = entry.map_err(listed)?.path();
             if let Some(name) = path.file_name().filter(|_| is_image_of(&path, stem)) {
                 move_into(&path, &folder.join(name))?;
@@ -541,6 +574,25 @@ fn read_record(
         draft: record.draft,
         images,
     }))
+}
+
+fn remove_if_empty(folder: &Path) {
+    match std::fs::remove_dir(folder) {
+        Ok(()) => tracing::info!(
+            folder = %folder.display(),
+            "removed an empty folder left by a draft that was never kept beside another"
+        ),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) => {}
+        Err(error) => tracing::warn!(
+            folder = %folder.display(),
+            %error,
+            "couldn't remove an empty folder left by a draft that was never kept beside another; trying again on the next open"
+        ),
+    }
 }
 
 fn create_beside_folder(folder: &Path) -> Result<(), KeepSpooledDraftError> {

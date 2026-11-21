@@ -5,7 +5,7 @@ use super::draft_session::{
     Operation, PostMessageError, RivalChoice, SAVE_DELAY, Submission, Unrecovered,
 };
 use super::spool::{
-    BesideSlot, DraftSpool, Holder, KeepSpooledDraftError, Slot, SpooledDraft,
+    BesideSlot, DraftSpool, Holder, KeepSpooledDraftError, KeptBesideError, Slot, SpooledDraft,
     TakeSpooledDraftError,
 };
 use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
@@ -446,7 +446,7 @@ impl DraftSessions {
             return Err(DraftsFull { host, scope });
         }
         let mut state = DraftSession::new(scope.clone());
-        let mut beside = self.kept_beside(&host, &scope).into_iter();
+        let mut beside = self.kept_beside(&host, &scope, &mut state).into_iter();
         let recovered = match self
             .take_back(&host, &scope)
             .and_then(|held| held.hand_over())
@@ -510,7 +510,12 @@ impl DraftSessions {
         Ok(lease)
     }
 
-    fn kept_beside(&self, host: &HostId, scope: &str) -> Vec<(BesideSlot, SpooledDraft)> {
+    fn kept_beside(
+        &self,
+        host: &HostId,
+        scope: &str,
+        state: &mut DraftSession,
+    ) -> Vec<(BesideSlot, SpooledDraft)> {
         self.spool
             .kept_beside(host, scope)
             .into_iter()
@@ -523,6 +528,15 @@ impl DraftSessions {
                         error = %::diagnostics::chain(&error),
                         "a draft kept beside another on this device can't be offered"
                     );
+                    match error {
+                        KeptBesideError::List { .. } => {}
+                        KeptBesideError::SetAside { set_aside, .. } => {
+                            state.set_unrecovered(Unrecovered::SetAside(set_aside));
+                        }
+                        KeptBesideError::Left { path, .. } => {
+                            state.set_unrecovered(Unrecovered::Left(path));
+                        }
+                    }
                     None
                 }
             })
@@ -852,7 +866,7 @@ impl DraftHandle {
         Some((keeping.draft, images, kept))
     }
 
-    pub(crate) fn take_unrecovered(&self) -> Option<Unrecovered> {
+    pub(crate) fn take_unrecovered(&self) -> Vec<Unrecovered> {
         self.0.shared().state.take_unrecovered()
     }
 

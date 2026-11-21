@@ -143,7 +143,7 @@ fn an_unreadable_kept_draft_is_reported_and_left_for_the_user() {
     std::fs::write(&record, b"{ not json").unwrap();
 
     let lease = device.reopen();
-    let Some(Unrecovered::SetAside(set_aside)) = lease.take_unrecovered() else {
+    let [Unrecovered::SetAside(set_aside)] = &lease.take_unrecovered()[..] else {
         panic!("expected the unreadable draft to be reported");
     };
     assert_eq!(
@@ -585,8 +585,8 @@ fn a_draft_opened_beside_an_unreadable_one_that_stays_is_kept_beside_it_on_retir
         .open(device.host.clone(), instance, scope, device.client.clone())
         .unwrap();
     assert!(matches!(
-        lease.take_unrecovered(),
-        Some(Unrecovered::Left(_))
+        lease.take_unrecovered()[..],
+        [Unrecovered::Left(_)]
     ));
     type_into(&lease, "typed beside the unreadable one");
 
@@ -910,4 +910,42 @@ fn keeping_mine_over_a_draft_kept_beside_with_an_unanswered_send_keeps_it_until_
         device.drafts().join("recovering-new.kept-1").exists(),
         "the message the user already sent stays on this device until Forge answers"
     );
+}
+
+#[test]
+fn an_unreadable_draft_kept_beside_is_moved_aside_and_reported_once() {
+    let device = Device::new();
+    kept_beside_a_record(&device);
+    let beside = device.drafts().join("recovering-new.kept-1");
+    std::fs::write(beside.join("recovering-new.json"), b"{ not json").unwrap();
+
+    let lease = device.reopen();
+    let [Unrecovered::SetAside(set_aside)] = &lease.take_unrecovered()[..] else {
+        panic!("expected the unreadable draft kept beside to be reported");
+    };
+    assert_eq!(
+        std::fs::read(set_aside).unwrap(),
+        b"{ not json",
+        "the unreadable draft is kept where the notice says"
+    );
+    assert!(!beside.exists(), "it is no longer offered as a draft");
+    assert!(!lease.read(DraftSession::conflict));
+    drop(lease);
+
+    assert!(
+        device.reopen().take_unrecovered().is_empty(),
+        "opening again doesn't report it again"
+    );
+}
+
+#[test]
+fn an_empty_folder_left_for_a_draft_kept_beside_is_removed_on_opening() {
+    let device = Device::new();
+    let beside = device.drafts().join("recovering-new.kept-1");
+    std::fs::create_dir_all(&beside).unwrap();
+
+    let lease = device.reopen();
+
+    assert!(!beside.exists());
+    assert!(lease.take_unrecovered().is_empty());
 }

@@ -385,7 +385,7 @@ pub struct DraftSession {
     scope: String,
     epoch: u64,
     handed_back: Option<u64>,
-    unrecovered: Option<Unrecovered>,
+    unrecovered: Vec<Unrecovered>,
     state: State,
 }
 
@@ -742,7 +742,7 @@ impl DraftSession {
             scope,
             epoch: 0,
             handed_back: None,
-            unrecovered: None,
+            unrecovered: Vec::new(),
             state: State::Open(Box::new(Draft {
                 body: DraftBody::default(),
                 remote: Remote::Unloaded(None),
@@ -814,12 +814,12 @@ impl DraftSession {
             .and_then(|snapshot| snapshot.body.unreadable())
     }
 
-    pub(crate) const fn take_unrecovered(&mut self) -> Option<Unrecovered> {
-        self.unrecovered.take()
+    pub(crate) fn take_unrecovered(&mut self) -> Vec<Unrecovered> {
+        std::mem::take(&mut self.unrecovered)
     }
 
     pub(crate) fn set_unrecovered(&mut self, unrecovered: Unrecovered) {
-        self.unrecovered = Some(unrecovered);
+        self.unrecovered.push(unrecovered);
     }
 
     pub fn is_loaded(&self) -> bool {

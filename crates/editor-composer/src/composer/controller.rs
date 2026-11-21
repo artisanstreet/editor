@@ -756,17 +756,23 @@ impl Composer {
         self.editor
             .borrow_mut()
             .set_disabled(self.questionnaire.sending.is_some());
-        if let Some(unrecovered) = unrecovered {
-            self.notice = Some(editor_core::Problem::new(match unrecovered {
-                Unrecovered::SetAside(path) => format!(
-                    "A draft kept on this device couldn't be read. It was moved to {}.",
-                    path.display()
-                ),
-                Unrecovered::Left(path) => format!(
-                    "A draft kept on this device couldn't be read. It stays at {}, and this draft is kept beside it.",
-                    path.display()
-                ),
-            }));
+        if !unrecovered.is_empty() {
+            self.notice = Some(editor_core::Problem::new(
+                unrecovered
+                    .iter()
+                    .map(|unrecovered| match unrecovered {
+                        Unrecovered::SetAside(path) => format!(
+                            "A draft kept on this device couldn't be read. It was moved to {}.",
+                            path.display()
+                        ),
+                        Unrecovered::Left(path) => format!(
+                            "A draft kept on this device couldn't be read. It stays at {}, and this draft is kept beside it.",
+                            path.display()
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ));
         }
         self.show_lost(lost);
         events
