@@ -250,6 +250,9 @@ impl Model {
                 (EngineId::OpenCode, Permissions::Auto) => {
                     "Edits run; it asks before terminal commands."
                 }
+                (EngineId::Antigravity, Permissions::Auto) => {
+                    "Antigravity's auto mode: safe actions run, risky ones ask first."
+                }
                 (_, Permissions::Full) => "Everything runs, nothing asks. No sandbox.",
             };
             spec.push(

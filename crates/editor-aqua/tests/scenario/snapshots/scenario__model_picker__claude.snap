@@ -11,6 +11,7 @@ Menu
   Button "Claude Code" [selected]
   Button "Codex"
   Button "OpenCode"
+  Button "Antigravity"
   ScrollView
     Group "Claude Code"
       Label "Claude Code"
@@ -27,3 +28,8 @@ Menu
     Label "OpenCode is not ready: not installed."
     Button "Install OpenCode"
       Label "Install OpenCode"
+    Group "Antigravity"
+      Label "Antigravity"
+    Label "Antigravity is not ready: not installed."
+    Button "Install Antigravity"
+      Label "Install Antigravity"

@@ -96,7 +96,7 @@ fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> CallToolE
 
 const OWN_SERVERS: [&str; 2] = ["artisan", "computer"];
 
-const HARNESS: &str = "claude, codex or opencode";
+const HARNESS: &str = "claude, codex, opencode or antigravity";
 
 fn scope_properties() -> Value {
     json!({

@@ -46,10 +46,15 @@ struct Paths {
     reason = "None is an engine without a customisable home; every current engine has one"
 )]
 fn paths(engine: EngineId, home: &Path) -> Option<Paths> {
-    let (config, prompt) = match engine {
-        EngineId::Claude => (home.join(".claude"), "CLAUDE.md"),
-        EngineId::Codex => (home.join(".codex"), "AGENTS.md"),
-        EngineId::OpenCode => (home.join("config/opencode"), "AGENTS.md"),
+    let (config, prompt, skills) = match engine {
+        EngineId::Claude => (home.join(".claude"), "CLAUDE.md", "skills"),
+        EngineId::Codex => (home.join(".codex"), "AGENTS.md", "skills"),
+        EngineId::OpenCode => (home.join("config/opencode"), "AGENTS.md", "skills"),
+        EngineId::Antigravity => (
+            home.join(crate::antigravity::GEMINI_DIR),
+            "GEMINI.md",
+            "config/skills",
+        ),
     };
     let shadows = if engine == EngineId::Codex {
         vec![config.join("AGENTS.override.md")]
@@ -59,7 +64,7 @@ fn paths(engine: EngineId, home: &Path) -> Option<Paths> {
     Some(Paths {
         prompt: config.join(prompt),
         shadows,
-        skills: config.join("skills"),
+        skills: config.join(skills),
     })
 }
 
@@ -659,6 +664,7 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                 .write(text.as_bytes(), PRIVATE_FILE)
                 .map_err(configuring)?;
         }
+        EngineId::Antigravity => {}
         EngineId::OpenCode => {
             if !servers.is_empty() {
                 let config = json!({ "mcp": opencode_servers(servers) });
@@ -685,6 +691,7 @@ pub fn with_gateway_mcp(engine: EngineId, launch: &mut Launch, name: &str, url: 
         EngineId::Claude | EngineId::Codex => {
             launch.gateway_mcp.push((name.to_owned(), url.to_owned()));
         }
+        EngineId::Antigravity => {}
         EngineId::OpenCode => merge_opencode_config(
             launch,
             &json!({ "mcp": { name: { "type": "remote", "url": url, "enabled": true } } }),

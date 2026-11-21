@@ -850,6 +850,7 @@ pub(super) fn engine_icon(theme: &ArtisanTheme, engine: artisan_api::EngineId) -
         artisan_api::EngineId::Codex => AssetId::SVGL_OPENAI,
         artisan_api::EngineId::OpenCode if theme.colors.mode.is_dark() => AssetId::BRANDS_OPENCODE,
         artisan_api::EngineId::OpenCode => AssetId::BRANDS_OPENCODE_LIGHT,
+        artisan_api::EngineId::Antigravity => AssetId::SVGL_ANTIGRAVITY,
     }
 }
 

@@ -620,6 +620,7 @@ fn engine_marks(
             EngineId::Codex => AssetId::SVGL_OPENAI,
             EngineId::OpenCode if theme.colors.mode.is_dark() => AssetId::BRANDS_OPENCODE,
             EngineId::OpenCode => AssetId::BRANDS_OPENCODE_LIGHT,
+            EngineId::Antigravity => AssetId::SVGL_ANTIGRAVITY,
         };
         let selector = format!("{}-mark-{}", item.selector(), mark.engine.as_str());
         let tip = mark.label;

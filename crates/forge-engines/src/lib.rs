@@ -1,4 +1,5 @@
 mod account;
+pub mod antigravity;
 mod catalog;
 pub mod claude;
 pub mod claudeai;
@@ -73,6 +74,7 @@ pub fn harness(engine: EngineId) -> Arc<dyn Harness> {
     match engine {
         EngineId::Claude => Arc::new(claude::ClaudeHarness::new(Arc::new(claude::WallClock))),
         EngineId::OpenCode => Arc::new(opencode::OpenCodeHarness),
+        EngineId::Antigravity => Arc::new(antigravity::AntigravityHarness),
         EngineId::Codex => Arc::new(codex::CodexHarness),
     }
 }

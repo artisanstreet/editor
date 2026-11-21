@@ -96,6 +96,7 @@ impl EngineEvent {
             EngineId::Claude => "Claude",
             EngineId::Codex => "Codex",
             EngineId::OpenCode => "OpenCode",
+            EngineId::Antigravity => "Antigravity",
         };
         Self::Live {
             target: LiveKind::Status,

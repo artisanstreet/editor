@@ -79,6 +79,7 @@ pub(super) fn user_bubble(
             artisan_api::EngineId::Claude => theme.colors.claude,
             artisan_api::EngineId::Codex => theme.colors.text,
             artisan_api::EngineId::OpenCode => theme.colors.gray.step(9),
+            artisan_api::EngineId::Antigravity => theme.colors.antigravity,
         }),
         None => bubble,
     };
