@@ -393,7 +393,7 @@ async fn start_mode(
             );
         }
         if let HeldLock::Data { exclusive } = &lock {
-            hub.sweep_leftovers(exclusive).await;
+            forge_runs::sweep_leftovers(&config.data_dir, &store, exclusive).await;
         }
         reconcile_startup(&hub).await?;
         let listener = match inherited {

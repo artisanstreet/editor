@@ -314,7 +314,7 @@ async fn the_exclusive_sweep_removes_only_the_image_folders_of_removed_threads()
     }
 
     let exclusive = forge_store::DataLock::acquire(fixture.dir.path()).unwrap();
-    fixture.hub.sweep_leftovers(&exclusive).await;
+    sweep_leftovers(fixture.dir.path(), fixture.hub.store(), &exclusive).await;
 
     assert!(
         kept.join("image.png").exists(),

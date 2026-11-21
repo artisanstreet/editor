@@ -321,7 +321,7 @@ pub enum BindingError {
     },
 }
 
-fn binding(
+async fn binding(
     config: &crate::ServeConfig,
     registry: &Registry,
     handoff: Option<PathBuf>,
@@ -376,14 +376,15 @@ fn binding(
             }),
             ..system
         };
-        drop(
+        let store =
             forge_store::Store::open_restoring_in(&exclusive, environment).map_err(|source| {
                 BindingError::Store {
                     dir: config.data_dir.clone(),
                     source: Box::new(source),
                 }
-            })?,
-        );
+            })?;
+        forge_runs::sweep_leftovers(&config.data_dir, &store, &exclusive).await;
+        drop(store);
     }
     let address = config.listen;
     let listener =
@@ -575,7 +576,7 @@ pub(super) async fn serve(
         lock,
         id,
         directory,
-    } = binding(&config, &registry, handoff)?;
+    } = binding(&config, &registry, handoff).await?;
     let mut backend = process::spawn_backend(
         &binary,
         &config.data_dir,
@@ -1062,3 +1063,7 @@ fn prune(service: &Service, members: &[runtime::Member]) -> Result<(), MaintainE
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/upgrade/controller.rs"]
+mod tests;

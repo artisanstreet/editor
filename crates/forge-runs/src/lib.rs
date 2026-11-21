@@ -67,6 +67,23 @@ use tokio_util::task::TaskTracker;
 
 pub type HarnessFor = Arc<dyn Fn(EngineId) -> Arc<dyn Harness> + Send + Sync>;
 
+pub async fn sweep_leftovers(
+    data_dir: &std::path::Path,
+    store: &Store,
+    exclusive: &forge_store::DataLock,
+) {
+    match images::sweep(data_dir, store, exclusive).await {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(removed, "removed the image copies of removed threads"),
+        Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
+    }
+    match forge_engines::opencode::sweep_leftover_servers(data_dir) {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(removed, "removed leftover OpenCode server folders"),
+        Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
+    }
+}
+
 #[derive(Clone)]
 pub struct Hub {
     inner: Arc<Inner>,
@@ -297,19 +314,6 @@ impl Hub {
         hub.start_dispatcher();
         hub.start_coordination();
         hub
-    }
-
-    pub async fn sweep_leftovers(&self, exclusive: &forge_store::DataLock) {
-        match images::sweep(self.data_dir(), self.store(), exclusive).await {
-            Ok(0) => {}
-            Ok(removed) => tracing::info!(removed, "removed the image copies of removed threads"),
-            Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
-        }
-        match self.engines().sweep_opencode_servers() {
-            Ok(0) => {}
-            Ok(removed) => tracing::info!(removed, "removed leftover OpenCode server folders"),
-            Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
-        }
     }
 
     #[must_use]

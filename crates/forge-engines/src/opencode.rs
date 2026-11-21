@@ -724,7 +724,11 @@ fn servers_folder(home: &Path) -> PathBuf {
     crate::home::forge_records(home).join("opencode")
 }
 
-pub(crate) fn sweep_servers(home: &Path) -> Result<usize, SweepServersError> {
+pub fn sweep_leftover_servers(data_dir: &Path) -> Result<usize, SweepServersError> {
+    sweep_servers(&crate::install::Layout::new(data_dir).home(artisan_api::EngineId::OpenCode))
+}
+
+fn sweep_servers(home: &Path) -> Result<usize, SweepServersError> {
     let parent = servers_folder(home);
     let own = own_servers();
     let listed = match std::fs::read_dir(&parent) {

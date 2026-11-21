@@ -524,10 +524,6 @@ impl Engines {
         self.inner.layout.home(engine)
     }
 
-    pub fn sweep_opencode_servers(&self) -> Result<usize, crate::opencode::SweepServersError> {
-        crate::opencode::sweep_servers(&self.home(EngineId::OpenCode))
-    }
-
     #[must_use]
     pub fn launch_env_for_binary(&self, engine: EngineId, binary: &Path) -> Vec<(String, String)> {
         crate::engines::environment(engine, Some(binary), &self.home(engine))
