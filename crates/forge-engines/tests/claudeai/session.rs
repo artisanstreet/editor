@@ -92,3 +92,22 @@ fn cookie(session: &Session, name: &str) -> Option<String> {
             .map(str::to_owned)
     })
 }
+
+#[test]
+fn signing_out_over_a_folder_where_the_session_belongs_keeps_the_folder() {
+    let home = tempfile::tempdir().expect("a home");
+    let folder = Session::path(home.path());
+    std::fs::create_dir_all(folder.join("inside")).expect("a folder in the session's place");
+    std::fs::write(folder.join("inside/keep"), "the user's").expect("a file in it");
+
+    let removed = Session::remove(home.path());
+
+    assert!(
+        matches!(&removed, Err(RemoveSessionError { source: crate::home::RemoveError::Folder { path }, .. }) if *path == folder),
+        "{removed:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join("inside/keep")).expect("the folder survived"),
+        "the user's"
+    );
+}

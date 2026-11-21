@@ -111,16 +111,29 @@ pub(crate) fn read(home: &Path, relative: &Path) -> io::Result<Option<Vec<u8>>> 
     }
 }
 
-pub(crate) fn remove(home: &Path, relative: &Path) -> io::Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveError {
+    #[error("{} is a folder, so it is left alone rather than removed as a file", path.display())]
+    Folder { path: PathBuf },
+    #[error("remove {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+pub(crate) fn remove(home: &Path, relative: &Path) -> Result<(), RemoveError> {
     let path = home.join(relative);
     let removed = match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path),
+        Ok(metadata) if metadata.is_dir() => return Err(RemoveError::Folder { path }),
         Ok(_) => fs::remove_file(&path),
         Err(error) => Err(error),
     };
     match removed {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other,
+        Err(source) => Err(RemoveError::Remove { path, source }),
     }
 }
 
@@ -145,7 +158,7 @@ pub enum ConfigError {
         engine: EngineId,
         path: PathBuf,
         #[source]
-        source: io::Error,
+        source: RemoveError,
     },
 }
 

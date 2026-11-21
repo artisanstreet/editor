@@ -49,7 +49,7 @@ pub(crate) enum UpdateSessionError {
 pub struct RemoveSessionError {
     path: PathBuf,
     #[source]
-    source: std::io::Error,
+    source: crate::home::RemoveError,
 }
 
 pub(super) static FILE_LOCK: Mutex<()> = Mutex::new(());

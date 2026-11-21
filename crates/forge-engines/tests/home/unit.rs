@@ -50,3 +50,22 @@ fn a_missing_file_is_written() {
         b"x"
     );
 }
+
+#[test]
+fn removing_a_config_where_a_folder_sits_refuses_and_keeps_it() {
+    let home = tempfile::tempdir().expect("a home");
+    let folder = home.path().join("mcp.json");
+    fs::create_dir_all(folder.join("inside")).expect("a folder in the file's place");
+    fs::write(folder.join("inside/keep"), "the user's").expect("a file in it");
+
+    let removed = remove_config(EngineId::Claude, home.path(), Path::new("mcp.json"));
+
+    assert!(
+        matches!(&removed, Err(ConfigError::Remove { source: RemoveError::Folder { path }, .. }) if *path == folder),
+        "{removed:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(folder.join("inside/keep")).expect("the folder survived"),
+        "the user's"
+    );
+}
