@@ -53,7 +53,27 @@ pub enum MediaLoadError {
     TooLarge,
 }
 
-pub type MediaFetch = Pin<Box<dyn Future<Output = Result<Arc<[u8]>, MediaFailure>> + Send>>;
+impl From<editor_core::client::CallError> for MediaLoadError {
+    fn from(error: editor_core::client::CallError) -> Self {
+        use artisan_api::{ErrorCode, Failure, ResourceFailure, ThreadFailure};
+        if error.too_large() {
+            return Self::TooLarge;
+        }
+        Self::Fetch(match error.refused() {
+            Some(
+                Failure::Resource(ResourceFailure::FileNotFound { .. })
+                | Failure::Thread(ThreadFailure::NotFound { .. })
+                | Failure::Legacy {
+                    code: ErrorCode::NotFound,
+                },
+            ) => MediaFailure::Missing,
+            Some(_) => MediaFailure::Unreadable(Arc::new(error)),
+            None => MediaFailure::ForgeUnreachable(Arc::new(error)),
+        })
+    }
+}
+
+pub type MediaFetch = Pin<Box<dyn Future<Output = Result<Arc<[u8]>, MediaLoadError>> + Send>>;
 
 static MEDIA_WORK: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
@@ -449,13 +469,12 @@ pub async fn load_image_bytes(
                     item: fetcher.item.clone(),
                 })
                 .await
-                .map_err(|failure| {
+                .inspect_err(|failure| {
                     tracing::warn!(
                         path,
-                        error = %::diagnostics::chain(&failure),
+                        error = %::diagnostics::chain(failure),
                         "fetch media from Forge"
                     );
-                    MediaLoadError::Fetch(failure)
                 })
         }
         Parsed::Invalid => Err(MediaLoadError::Invalid),

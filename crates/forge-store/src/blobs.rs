@@ -11,7 +11,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_BLOB_BYTES: usize = artisan_api::TUNNEL_BODY_MAX_BYTES;
 pub const MAX_MESSAGE_IMAGES: usize = 128;
 pub const MAX_MESSAGE_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_IMAGE_PIXELS: u64 = 16_777_216;

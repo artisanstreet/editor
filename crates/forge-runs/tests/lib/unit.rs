@@ -37,6 +37,8 @@ mod mcp_reach_tests;
 mod park_unreadable;
 #[path = "../resources/beneath.rs"]
 mod resource_beneath;
+#[path = "../resources/limit.rs"]
+mod resource_limit;
 #[path = "../resources/paths.rs"]
 mod resource_paths;
 #[path = "../resources/snapshot.rs"]

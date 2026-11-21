@@ -8,7 +8,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-const MAX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RESOURCE_BYTES: u64 = artisan_api::TUNNEL_BODY_MAX_BYTES as u64;
 
 const SNAPSHOTS_PER_ITEM: usize = 32;
 const KERNEL_RELEASE: &str = "/proc/sys/kernel/osrelease";
@@ -33,8 +33,10 @@ pub enum ResourceError {
     OtherDistribution { distribution: String },
     #[error("Forge has no home directory")]
     NoHome,
-    #[error("resource must be a regular file no larger than 128 MiB")]
+    #[error("{} is not a regular file", path.display())]
     NotRegular { path: PathBuf },
+    #[error("{} is {bytes} bytes, more than the {MAX_RESOURCE_BYTES} an Editor can carry", path.display())]
+    TooLarge { path: PathBuf, bytes: u64 },
     #[error("{} is outside the thread's folder", path.display())]
     Outside { path: PathBuf },
     #[error("{} is reached through a symbolic link", path.display())]
@@ -542,20 +544,26 @@ fn read_kept(path: &Path) -> Result<Vec<u8>, ResourceError> {
     read_regular(file, path)
 }
 
-fn read_regular(file: std::fs::File, path: &Path) -> Result<Vec<u8>, ResourceError> {
-    let too_large = || ResourceError::NotRegular {
+pub(crate) fn read_regular(file: std::fs::File, path: &Path) -> Result<Vec<u8>, ResourceError> {
+    let too_large = |bytes| ResourceError::TooLarge {
         path: path.to_path_buf(),
+        bytes,
     };
     let metadata = file.metadata().map_err(|error| io_failure(path, error))?;
-    if !metadata.is_file() || metadata.len() > MAX_RESOURCE_BYTES {
-        return Err(too_large());
+    if !metadata.is_file() {
+        return Err(ResourceError::NotRegular {
+            path: path.to_path_buf(),
+        });
+    }
+    if metadata.len() > MAX_RESOURCE_BYTES {
+        return Err(too_large(metadata.len()));
     }
     let mut bytes = Vec::new();
     file.take(MAX_RESOURCE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| io_failure(path, error))?;
     if bytes.len() as u64 > MAX_RESOURCE_BYTES {
-        Err(too_large())
+        Err(too_large(bytes.len() as u64))
     } else {
         Ok(bytes)
     }

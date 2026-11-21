@@ -5,7 +5,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-type Reply = oneshot::Sender<Result<Arc<[u8]>, MediaFailure>>;
+type Reply = oneshot::Sender<Result<Arc<[u8]>, MediaLoadError>>;
 
 const OBJ: &[u8] = b"v 0 0 0\nv 2 0 0\nv 0 1 0\nf 1 2 3\n";
 const LIMIT: Duration = Duration::from_secs(10);
@@ -26,8 +26,8 @@ impl Fixture {
             Box::pin(async move {
                 receive
                     .await
-                    .unwrap_or(Err(MediaFailure::Unreadable(std::sync::Arc::new(
-                        std::io::Error::other("unreadable"),
+                    .unwrap_or(Err(MediaLoadError::Fetch(MediaFailure::Unreadable(
+                        std::sync::Arc::new(std::io::Error::other("unreadable")),
                     ))))
             })
         })
@@ -66,7 +66,7 @@ impl Fixture {
             Arc::new(|| {}),
         )
     }
-    fn reply(&self, bytes: Result<Arc<[u8]>, MediaFailure>) {
+    fn reply(&self, bytes: Result<Arc<[u8]>, MediaLoadError>) {
         self.calls.recv_timeout(LIMIT).unwrap().send(bytes).unwrap();
         self.wake.recv_timeout(LIMIT).unwrap();
         assert!(self.assets.drain());
@@ -170,7 +170,7 @@ fn failure_is_cached_and_a_new_revision_fetches_fresh_data() {
             .request(&fixture.fetcher, mode, None, None, 1)
             .is_none()
     );
-    fixture.reply(Err(MediaFailure::Missing));
+    fixture.reply(Err(MediaLoadError::Fetch(MediaFailure::Missing)));
     assert_eq!(
         fixture
             .request(&fixture.fetcher, mode, None, None, 1)

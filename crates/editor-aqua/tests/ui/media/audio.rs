@@ -18,7 +18,9 @@ fn fetched_audio_deduplicates_success_and_failure_until_revision_changes() {
         Box::pin(async move {
             counter.fetch_add(1, Ordering::SeqCst);
             if request.path == "missing.wav" {
-                Err(MediaFailure::Missing)
+                Err(editor_aqua::ui::media::source::MediaLoadError::Fetch(
+                    MediaFailure::Missing,
+                ))
             } else {
                 Ok(Arc::<[u8]>::from(&b"audio"[..]))
             }

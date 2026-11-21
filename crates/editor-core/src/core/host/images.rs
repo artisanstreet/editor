@@ -139,7 +139,7 @@ impl HostData {
         }
         self.images.loads.remove(&hash);
         match (result, self.images.assets.as_ref()) {
-            (Ok(bytes), Some(_)) if bytes.len() > 32 * 1024 * 1024 => {
+            (Ok(bytes), Some(_)) if bytes.len() > artisan_api::TUNNEL_BODY_MAX_BYTES => {
                 self.finish_image(hash, Err(DECODE_FAILURE.into()));
                 true
             }

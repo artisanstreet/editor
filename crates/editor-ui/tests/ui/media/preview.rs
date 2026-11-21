@@ -30,7 +30,11 @@ fn fixture() -> (
         .insert(aqua_media::decode::DecodedImage::from_rgba(2, 1, vec![255; 8]).expect("image"))
         .expect("asset");
     let fetcher = MediaFetcher::new("preview", |_| {
-        Box::pin(async { Err(super::super::source::MediaFailure::Missing) })
+        Box::pin(async {
+            Err(crate::ui::media::source::MediaLoadError::Fetch(
+                super::super::source::MediaFailure::Missing,
+            ))
+        })
     })
     .owned_by(&[42], 1);
     let sources = vec![

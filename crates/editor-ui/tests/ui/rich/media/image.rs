@@ -16,7 +16,9 @@ fn retry_refetches_the_failed_file_and_releases_the_cached_image() {
         let result = if flag.load(Ordering::SeqCst) {
             Ok(Arc::clone(&bytes))
         } else {
-            Err(crate::ui::media::source::MediaFailure::Missing)
+            Err(MediaLoadError::Fetch(
+                crate::ui::media::source::MediaFailure::Missing,
+            ))
         };
         Box::pin(async move { result })
     })
@@ -87,8 +89,10 @@ fn a_failed_image_offers_a_keyboard_reachable_retry_button() {
     use std::cell::RefCell;
     let fetcher = MediaFetcher::new("test", |_| {
         Box::pin(async {
-            Err(crate::ui::media::source::MediaFailure::ForgeUnreachable(
-                Arc::new(std::io::Error::other("Forge did not answer")),
+            Err(MediaLoadError::Fetch(
+                crate::ui::media::source::MediaFailure::ForgeUnreachable(Arc::new(
+                    std::io::Error::other("Forge did not answer"),
+                )),
             ))
         })
     })

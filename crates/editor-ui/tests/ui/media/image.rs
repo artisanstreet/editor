@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn fetcher() -> MediaFetcher {
     MediaFetcher::new("test", |_| {
-        Box::pin(async { Err(source::MediaFailure::Missing) })
+        Box::pin(async { Err(MediaLoadError::Fetch(source::MediaFailure::Missing)) })
     })
 }
 
@@ -227,4 +227,41 @@ fn a_remote_image_loads_only_after_its_message_allows_remote_images() {
         Some(Err(ImageError::NeedsConsent))
     ));
     loader.clear();
+}
+
+fn forge_error(failure: editor_core::client::CallFailure) -> editor_core::client::CallError {
+    editor_core::client::CallError {
+        method: reqwest::Method::GET,
+        path: "/threads/thread/resource".into(),
+        failure: Box::new(failure),
+    }
+}
+
+#[test]
+fn an_image_too_large_to_carry_says_so_and_offers_no_try_again() {
+    use artisan_api::{ApiError, Failure, Limited, ResourceFailure};
+    use editor_core::client::{CallFailure, ReadBodyError, ResponseError};
+
+    let refused = Failure::Resource(ResourceFailure::TooLarge {
+        subject: Limited::File,
+        actual: Some(60 * 1024 * 1024),
+        limit: artisan_api::TUNNEL_BODY_MAX_BYTES as u64,
+    });
+    let message = refused.to_string();
+    for error in [
+        forge_error(CallFailure::Read(ReadBodyError::TooLarge {
+            limit: artisan_api::TUNNEL_BODY_MAX_BYTES,
+        })),
+        forge_error(CallFailure::Answer(ResponseError::Refused {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            error: ApiError::new(refused, message),
+        })),
+    ] {
+        let shown = ImageError::Load(MediaLoadError::from(error));
+        assert_eq!(shown.summary(), "Too large to preview");
+        assert!(
+            !shown.retryable(),
+            "trying a too-large image again can never work"
+        );
+    }
 }

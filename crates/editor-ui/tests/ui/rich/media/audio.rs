@@ -28,10 +28,10 @@ fn an_unreachable_track_offers_retry_that_fetches_it_again() {
         let up = flag.load(Ordering::SeqCst);
         Box::pin(async move {
             if up {
-                Err(MediaFailure::Missing)
+                Err(MediaLoadError::Fetch(MediaFailure::Missing))
             } else {
-                Err(MediaFailure::ForgeUnreachable(Arc::new(
-                    std::io::Error::other("Forge did not answer"),
+                Err(MediaLoadError::Fetch(MediaFailure::ForgeUnreachable(
+                    Arc::new(std::io::Error::other("Forge did not answer")),
                 )))
             }
         })

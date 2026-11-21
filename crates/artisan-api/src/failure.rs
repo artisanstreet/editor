@@ -320,6 +320,8 @@ pub enum Limited {
     Upload,
     #[error("folder listing")]
     Listing,
+    #[error("file")]
+    File,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]

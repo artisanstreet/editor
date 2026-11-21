@@ -3,7 +3,10 @@ use aqua::images::ImageAssets;
 use std::sync::Arc;
 
 fn fetcher() -> MediaFetcher {
-    MediaFetcher::new("test", |_| Box::pin(async { Err(MediaFailure::Missing) })).owned_by(&[1], 1)
+    MediaFetcher::new("test", |_| {
+        Box::pin(async { Err(MediaLoadError::Fetch(MediaFailure::Missing)) })
+    })
+    .owned_by(&[1], 1)
 }
 
 fn model() -> ImageCompare {
@@ -110,10 +113,10 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
         let up = flag.load(Ordering::SeqCst);
         Box::pin(async move {
             if up {
-                Err(MediaFailure::Missing)
+                Err(MediaLoadError::Fetch(MediaFailure::Missing))
             } else {
-                Err(MediaFailure::ForgeUnreachable(Arc::new(
-                    std::io::Error::other("Forge did not answer"),
+                Err(MediaLoadError::Fetch(MediaFailure::ForgeUnreachable(
+                    Arc::new(std::io::Error::other("Forge did not answer")),
                 )))
             }
         })

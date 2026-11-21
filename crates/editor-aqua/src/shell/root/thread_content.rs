@@ -108,7 +108,7 @@ impl RootViews {
                             )
                             .await
                             .map(std::sync::Arc::<[u8]>::from)
-                            .map_err(media_failure)
+                            .map_err(crate::ui::media::source::MediaLoadError::from)
                     })
                 },
             );
@@ -622,22 +622,6 @@ impl RootViews {
             }),
             scale: crate::measure::narrow(window.scale_factor),
         }
-    }
-}
-
-fn media_failure(error: crate::core::client::CallError) -> crate::ui::media::source::MediaFailure {
-    use crate::ui::media::source::MediaFailure;
-    use artisan_api::{ErrorCode, Failure, ResourceFailure, ThreadFailure};
-    match error.refused() {
-        Some(
-            Failure::Resource(ResourceFailure::FileNotFound { .. })
-            | Failure::Thread(ThreadFailure::NotFound { .. })
-            | Failure::Legacy {
-                code: ErrorCode::NotFound,
-            },
-        ) => MediaFailure::Missing,
-        Some(_) => MediaFailure::Unreadable(std::sync::Arc::new(error)),
-        None => MediaFailure::ForgeUnreachable(std::sync::Arc::new(error)),
     }
 }
 

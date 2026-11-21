@@ -39,4 +39,9 @@ fn a_file_the_relay_cannot_carry_does_not_open_over_a_direct_connection_either()
         ),
         "{over:?}"
     );
+    assert!(
+        over.too_large(),
+        "an answer over the limit is too large, not lost"
+    );
+    assert_eq!(over.fault(), editor_core::client::ForgeFault::TooLarge);
 }

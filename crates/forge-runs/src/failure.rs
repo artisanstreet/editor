@@ -653,6 +653,11 @@ impl ResourceError {
             Self::NotRegular { path: file } => {
                 Failure::Resource(ResourceFailure::NotAFile { path: path(file) })
             }
+            Self::TooLarge { bytes, .. } => too_large(
+                Limited::File,
+                *bytes,
+                artisan_api::TUNNEL_BODY_MAX_BYTES as u64,
+            ),
             Self::Outside { path: file } => {
                 Failure::Resource(ResourceFailure::Outside { path: path(file) })
             }

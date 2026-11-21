@@ -40,7 +40,11 @@ fn completed_image_invalidates_retained_loading_row() {
     )
     .into();
     let fetcher = MediaFetcher::new("retained-image", |_| {
-        Box::pin(async { Err(editor_aqua::ui::media::source::MediaFailure::Missing) })
+        Box::pin(async {
+            Err(editor_aqua::ui::media::source::MediaLoadError::Fetch(
+                editor_aqua::ui::media::source::MediaFailure::Missing,
+            ))
+        })
     })
     .owned_by(&[1], 1);
     let images = Images::new();

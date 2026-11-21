@@ -1917,6 +1917,7 @@ dependencies = [
  "palette",
  "ply-rs-bw",
  "pulldown-cmark",
+ "reqwest",
  "serde",
  "serde_json",
  "skrifa 0.46.2",

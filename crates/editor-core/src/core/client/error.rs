@@ -186,6 +186,18 @@ impl CallError {
     }
 
     #[must_use]
+    pub fn too_large(&self) -> bool {
+        self.fault() == ForgeFault::TooLarge
+            || matches!(
+                self.refused(),
+                Some(Failure::Resource(artisan_api::ResourceFailure::TooLarge {
+                    subject: artisan_api::Limited::File,
+                    ..
+                }))
+            )
+    }
+
+    #[must_use]
     pub fn fault(&self) -> ForgeFault {
         self.failure.fault()
     }
@@ -198,6 +210,7 @@ pub enum ForgeFault {
     Unauthorized,
     Incompatible,
     Unreadable,
+    TooLarge,
     Failed,
 }
 
@@ -241,6 +254,7 @@ impl ForgeFault {
             Self::Unauthorized => "Forge didn't accept this Editor's credential.",
             Self::Incompatible => "Forge and this Editor speak different versions.",
             Self::Unreadable => "Forge's answer couldn't be read.",
+            Self::TooLarge => "It's too large to bring over from Forge.",
             Self::Failed => "Forge ran into a problem.",
         }
     }
@@ -258,12 +272,14 @@ impl CallFailure {
                 Relay::Closed | Relay::Open(_) | Relay::Exchange(_) | Relay::TimedOut => {
                     ForgeFault::Unreachable
                 }
-                Relay::Decode(_) | Relay::Bytes(_) | Relay::TooLarge { .. } => {
-                    ForgeFault::Unreadable
-                }
+                Relay::TooLarge { .. } => ForgeFault::TooLarge,
+                Relay::Decode(_) | Relay::Bytes(_) => ForgeFault::Unreadable,
             },
             Self::Reach(_) | Self::Task(_) => ForgeFault::Unreachable,
-            Self::Read(_) | Self::Decode(_) | Self::Inconsistent { .. } => ForgeFault::Unreadable,
+            Self::Read(ReadBodyError::TooLarge { .. }) => ForgeFault::TooLarge,
+            Self::Read(ReadBodyError::Chunk(_)) | Self::Decode(_) | Self::Inconsistent { .. } => {
+                ForgeFault::Unreadable
+            }
             Self::Build(_) | Self::StreamingBody | Self::EncodeBody(_) => ForgeFault::Failed,
         }
     }

@@ -275,6 +275,7 @@ impl ConnectionPresenter {
                 ForgeFault::Unrecognised
                 | ForgeFault::Unreachable
                 | ForgeFault::Unreadable
+                | ForgeFault::TooLarge
                 | ForgeFault::Failed,
             )
             | None => None,

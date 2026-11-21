@@ -322,7 +322,13 @@ fn closing_wakes_everyone_waiting_and_releases_every_result() {
 #[test]
 fn fetcher_retention_and_clear_operate_on_the_shared_thread_cache() {
     use crate::ui::media::source::{MediaFailure, MediaFetcher};
-    let fetcher = MediaFetcher::new("thread", |_| Box::pin(async { Err(MediaFailure::Missing) }));
+    let fetcher = MediaFetcher::new("thread", |_| {
+        Box::pin(async {
+            Err(crate::ui::media::source::MediaLoadError::Fetch(
+                MediaFailure::Missing,
+            ))
+        })
+    });
     let first = fetcher.clone().owned_by(&[1, 2], 1);
     let second = fetcher.clone().owned_by(&[3], 1);
     let key = "shared".to_owned();

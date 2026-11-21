@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-type Reply = oneshot::Sender<Result<Arc<[u8]>, MediaFailure>>;
+type Reply = oneshot::Sender<Result<Arc<[u8]>, MediaLoadError>>;
 
 const LIMIT: Duration = Duration::from_secs(10);
 
@@ -24,8 +24,8 @@ impl Fixture {
             Box::pin(async move {
                 receive
                     .await
-                    .unwrap_or(Err(MediaFailure::Unreadable(Arc::new(
-                        std::io::Error::other("unreadable"),
+                    .unwrap_or(Err(MediaLoadError::Fetch(MediaFailure::Unreadable(
+                        Arc::new(std::io::Error::other("unreadable")),
                     ))))
             })
         })
@@ -56,7 +56,7 @@ impl Fixture {
         )
     }
 
-    fn reply(&self, bytes: Result<Arc<[u8]>, MediaFailure>) {
+    fn reply(&self, bytes: Result<Arc<[u8]>, MediaLoadError>) {
         self.calls
             .recv_timeout(LIMIT)
             .expect("the track was fetched")
@@ -73,7 +73,7 @@ impl Fixture {
 fn a_missing_track_says_the_file_does_not_exist() {
     let fixture = Fixture::new();
     assert!(fixture.request("tracks/intro.ogg").is_none());
-    fixture.reply(Err(MediaFailure::Missing));
+    fixture.reply(Err(MediaLoadError::Fetch(MediaFailure::Missing)));
     let error = fixture
         .request("tracks/intro.ogg")
         .expect("the failure is cached")
@@ -89,8 +89,8 @@ fn a_missing_track_says_the_file_does_not_exist() {
 fn an_unreachable_host_is_told_apart_from_a_missing_file() {
     let fixture = Fixture::new();
     assert!(fixture.request("tracks/outro.ogg").is_none());
-    fixture.reply(Err(MediaFailure::ForgeUnreachable(Arc::new(
-        std::io::Error::other("Forge did not answer"),
+    fixture.reply(Err(MediaLoadError::Fetch(MediaFailure::ForgeUnreachable(
+        Arc::new(std::io::Error::other("Forge did not answer")),
     ))));
     assert_eq!(
         fixture.request("tracks/outro.ogg"),
