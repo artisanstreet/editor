@@ -120,27 +120,27 @@ impl SpoolDisk for ScriptedDisk {
     fn sync_folder(&self, folder: &Path) -> std::io::Result<()> {
         match self.take(Operation::Sync, folder) {
             Some(_) => Err(std::io::Error::other("flush refused by the test disk")),
-            None => std::fs::File::open(folder).and_then(|folder| folder.sync_all()),
+            None => LocalDisk::shared().sync_folder(folder),
         }
     }
 
     fn remove_empty_folder(&self, path: &Path) -> std::io::Result<()> {
         match self.take(Operation::Removal, path) {
             Some(_) => Err(std::io::Error::other("removal refused by the test disk")),
-            None => std::fs::remove_dir(path),
+            None => LocalDisk::shared().remove_empty_folder(path),
         }
     }
 
     fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
         match self.take(Operation::Removal, path) {
             Some(_) => Err(std::io::Error::other("removal refused by the test disk")),
-            None => std::fs::remove_dir_all(path),
+            None => LocalDisk::shared().remove_tree(path),
         }
     }
 
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
         let Some(armed) = self.take(Operation::Rename, to) else {
-            return std::fs::rename(from, to);
+            return LocalDisk::shared().rename(from, to);
         };
         let pause = |armed: &Armed| {
             armed.reached.send(()).unwrap();
@@ -149,10 +149,10 @@ impl SpoolDisk for ScriptedDisk {
         match armed.rule {
             Rule::PauseBefore => {
                 pause(&armed);
-                std::fs::rename(from, to)
+                LocalDisk::shared().rename(from, to)
             }
             Rule::PauseAfter => {
-                let renamed = std::fs::rename(from, to);
+                let renamed = LocalDisk::shared().rename(from, to);
                 pause(&armed);
                 renamed
             }
