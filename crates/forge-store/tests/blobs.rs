@@ -92,6 +92,50 @@ async fn collection_never_deletes_an_image_a_message_just_referenced() {
     }
 }
 
+#[tokio::test]
+async fn collection_keeps_images_of_messages_parked_in_a_saved_draft() {
+    use std::time::{Duration, SystemTime};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let parked = store.put_blob(image(1)).await.unwrap().hash;
+    let attached = store.put_blob(image(2)).await.unwrap().hash;
+    let dropped = store.put_blob(image(3)).await.unwrap().hash;
+    for hash in [&parked, &attached, &dropped] {
+        std::fs::File::options()
+            .write(true)
+            .open(store.blob_path(hash).unwrap())
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_hours(2))
+            .unwrap();
+    }
+    store
+        .set_draft(
+            "home".to_owned(),
+            artisan_api::WriteDraft {
+                expected_revision: 0,
+                body: serde_json::json!({
+                    "text": "next",
+                    "images": [attached.as_str()],
+                    "follow_ups": [{"text": "refused", "images": [parked.as_str()]}],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    store.gc_blobs().await.unwrap();
+
+    assert!(
+        store.blob_path(&parked).is_some(),
+        "a message parked in a draft keeps its image"
+    );
+    assert!(store.blob_path(&attached).is_some());
+    assert!(
+        store.blob_path(&dropped).is_none(),
+        "an image nothing refers to is collected"
+    );
+}
+
 fn image(shade: u8) -> Vec<u8> {
     webp::Encoder::from_rgb(&[shade, shade, shade], 1, 1)
         .encode_lossless()
