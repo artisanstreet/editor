@@ -750,7 +750,9 @@ pub(crate) async fn sign_in(binary: &Path, home: &Path) -> SignInState {
     match probe(command, home).await {
         Ok(Probed {
             signed_in: true, ..
-        }) => SignInState::SignedIn { account: None },
+        }) => SignInState::SignedIn {
+            account: account(home),
+        },
         Ok(Probed {
             signed_in: false, ..
         }) => SignInState::SignedOut,
@@ -762,6 +764,63 @@ pub(crate) async fn sign_in(binary: &Path, home: &Path) -> SignInState {
             }
         }
     }
+}
+
+const TOKEN_FILE: [&str; 2] = ["antigravity-cli", "antigravity-oauth-token"];
+
+#[derive(Debug, thiserror::Error)]
+enum AccountError {
+    #[error("read the Antigravity token file {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse the Antigravity token file {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(serde::Deserialize)]
+struct TokenAccount {
+    id_token_email: Option<String>,
+}
+
+fn account(home: &Path) -> Option<String> {
+    let path = TOKEN_FILE
+        .iter()
+        .fold(home.join(GEMINI_DIR), |path, part| path.join(part));
+    match read_account(&path) {
+        Ok(account) => account,
+        Err(AccountError::Read { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "couldn't read the Antigravity account email"
+            );
+            None
+        }
+    }
+}
+
+fn read_account(path: &Path) -> Result<Option<String>, AccountError> {
+    let text = std::fs::read(path).map_err(|source| AccountError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    let token: TokenAccount =
+        serde_json::from_slice(&text).map_err(|source| AccountError::Parse {
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok(token
+        .id_token_email
+        .filter(|email| !email.trim().is_empty()))
 }
 
 fn models(opened: &Opened) -> crate::catalog::Listing {
