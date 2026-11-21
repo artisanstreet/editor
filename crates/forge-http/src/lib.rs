@@ -331,7 +331,7 @@ async fn start_mode(
     } else {
         let lock = lock_data_dir(&config.data_dir)?;
         let store = Store::open_restoring_in(&lock, environment);
-        (HeldLock::Data { _exclusive: lock }, store)
+        (HeldLock::Data { exclusive: lock }, store)
     };
     let store = store.map_err(|source| StartError::Store {
         dir: config.data_dir.clone(),
@@ -391,6 +391,9 @@ async fn start_mode(
                 error = diagnostics::chain(&error),
                 "collect unreferenced blobs"
             );
+        }
+        if let HeldLock::Data { exclusive } = &lock {
+            hub.sweep_leftovers(exclusive).await;
         }
         reconcile_startup(&hub).await?;
         let listener = match inherited {
@@ -874,7 +877,7 @@ pub use forge_store::{DataLock, LockDataError};
 #[derive(Debug)]
 enum HeldLock {
     Generation { _shared: std::fs::File },
-    Data { _exclusive: DataLock },
+    Data { exclusive: DataLock },
 }
 
 pub fn lock_data_dir(dir: &Path) -> Result<DataLock, LockDataError> {

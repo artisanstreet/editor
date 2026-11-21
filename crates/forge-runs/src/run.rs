@@ -20,8 +20,6 @@ pub enum PrepareError {
     #[error("{} is not installed", engine.display_name())]
     NotInstalled { engine: EngineId },
     #[error(transparent)]
-    ImageFolder(#[from] crate::images::ImageFolderError),
-    #[error(transparent)]
     Gateway(Box<crate::gateway::GatewayError>),
     #[error("prepare the folder of thread {thread}")]
     Folder {
@@ -213,7 +211,7 @@ enum ExecuteError {
     #[error(transparent)]
     Prepare(#[from] PrepareError),
     #[error(transparent)]
-    Images(#[from] crate::images::RunImagesError),
+    Images(#[from] crate::images::ImageCopyError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -665,12 +663,11 @@ async fn execute(
     } else {
         None
     };
-    let mut images =
-        crate::images::RunImages::open(hub.data_dir(), &run.thread_id, &run.id).await?;
+    let images = crate::images::ThreadImages::of(hub.data_dir(), &run.thread_id);
     let preparing = async {
         let mut input = UserInput::default();
         for item in pending {
-            let next = images.deliver(hub.user_input(item, engine).await?).await?;
+            let next = images.deliver(&hub.user_input(item, engine).await?).await?;
             if !input.text.is_empty() && !next.text.is_empty() {
                 input.text.push_str("\n\n");
             }
@@ -758,7 +755,7 @@ async fn execute(
                             continue;
                         }
                         let id = message.id().clone();
-                        match images.deliver(message).await {
+                        match images.deliver(&message).await {
                             Ok(input) => {
                                 delivered.insert(id);
                                 Input::Steer(input)
@@ -1060,9 +1057,13 @@ pub(crate) async fn prepare(
     for (name, url) in gateway.servers() {
         forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
     }
-    launch
-        .readable
-        .push(crate::images::readable_folder(hub.data_dir(), &thread.id).await?);
+    let images = crate::images::thread_folder(hub.data_dir(), &thread.id);
+    if tokio::fs::metadata(&images)
+        .await
+        .is_ok_and(|folder| folder.is_dir())
+    {
+        launch.readable.push(images);
+    }
     let mut config = thread.config.clone();
     match session.transport_option() {
         Some(option) => {

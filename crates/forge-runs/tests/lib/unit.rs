@@ -344,6 +344,10 @@ impl Fixture {
     }
 
     async fn settled(&self) -> Vec<artisan_api::Run> {
+        self.settled_of(&self.thread_id).await
+    }
+
+    async fn settled_of(&self, thread: &ThreadId) -> Vec<artisan_api::Run> {
         test_support::wait::while_progressing(
             "the run to settle",
             test_support::wait::LIVENESS,
@@ -351,18 +355,18 @@ impl Fixture {
             || async {
                 let store = self.hub.store();
                 let before = store.head();
-                let idle = !self.hub.lock().holds(&self.thread_id);
+                let idle = !self.hub.lock().holds(thread);
                 let waiting = store
                     .pending_threads(8, Vec::new())
                     .await
                     .unwrap()
-                    .contains(&self.thread_id);
+                    .contains(thread);
                 let running = store
-                    .latest_run(&self.thread_id)
+                    .latest_run(thread)
                     .await
                     .unwrap()
                     .is_some_and(|run| run.status() == RunStatus::Running);
-                let still_idle = !self.hub.lock().holds(&self.thread_id);
+                let still_idle = !self.hub.lock().holds(thread);
                 (store.head() == before && idle && !waiting && !running && still_idle).then_some(())
             },
         )
@@ -371,7 +375,7 @@ impl Fixture {
         state
             .runs
             .into_iter()
-            .filter(|run| run.thread_id == self.thread_id)
+            .filter(|run| run.thread_id == *thread)
             .collect()
     }
 

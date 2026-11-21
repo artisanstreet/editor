@@ -293,13 +293,18 @@ impl Hub {
                 stop_deadline,
             }),
         };
-        if let Err(error) = images::sweep(&hub.inner.data_dir) {
-            tracing::warn!("{}", diagnostics::chain(&error));
-        }
         hub.forward_engine_status();
         hub.start_dispatcher();
         hub.start_coordination();
         hub
+    }
+
+    pub async fn sweep_leftovers(&self, exclusive: &forge_store::DataLock) {
+        match images::sweep(self.data_dir(), self.store(), exclusive).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "removed the image copies of removed threads"),
+            Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
+        }
     }
 
     #[must_use]

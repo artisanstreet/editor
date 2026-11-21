@@ -108,8 +108,8 @@ pub use threads::{
     CreateProjectFailure, InspectorError, LastReplyError, LatestRunError, MAX_LIVE_PROJECTS,
     MAX_PROJECT_NAME_BYTES, MAX_PROJECT_PATH_BYTES, MarkUnreadError, ReadProjectError,
     ReadRunError, ReadThreadError, RemoveProjectError, ReplaceTitleError, ReplaceTitleFailure,
-    STATE_BYTES, SettleThreadError, StateError, ThreadTitlesError, ThreadsPageError,
-    UpdateThreadError, UpsertRunError, WorkingAgentsError,
+    STATE_BYTES, SettleThreadError, StateError, ThreadIdsError, ThreadTitlesError,
+    ThreadsPageError, UpdateThreadError, UpsertRunError, WorkingAgentsError,
 };
 pub use writer::{
     InputFailure, MAX_CONFIG_BYTES, MAX_MESSAGE_TEXT_BYTES, MAX_TITLE_BYTES, SETTINGS_BYTES,

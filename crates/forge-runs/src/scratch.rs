@@ -149,6 +149,10 @@ fn inside_work_tree(path: &Path) -> bool {
     path.ancestors().any(|dir| dir.join(".git").exists())
 }
 
+pub(crate) fn folder_key(thread: &ThreadId) -> String {
+    FolderKey::of(thread).current().to_owned()
+}
+
 enum FolderKey {
     Canonical { key: String, legacy: String },
     Hashed(String),

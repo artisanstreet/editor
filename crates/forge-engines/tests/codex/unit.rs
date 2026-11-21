@@ -605,3 +605,30 @@ async fn generated_title_is_written_to_codex_without_resuming_or_prompting() {
         .collect();
     assert_eq!(methods, ["initialize", "initialized", "thread/name/set"]);
 }
+
+#[test]
+fn images_reach_codex_inline_from_the_path_forge_reads() {
+    use base64::Engine as _;
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("image.webp");
+    std::fs::write(&image, b"pristine").unwrap();
+    let input = crate::UserInput {
+        id: artisan_api::ItemId::from("item"),
+        text: "look".to_owned(),
+        images: vec![image],
+    };
+
+    let items = super::user_input(&input).unwrap();
+
+    let url = format!(
+        "data:image/webp;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(b"pristine")
+    );
+    assert_eq!(
+        items,
+        vec![
+            json!({ "type": "text", "text": "look", "text_elements": [] }),
+            json!({ "type": "image", "url": url }),
+        ]
+    );
+}

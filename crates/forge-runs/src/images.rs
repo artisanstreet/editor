@@ -1,23 +1,20 @@
-use artisan_api::{ItemId, RunId, ThreadId};
+use artisan_api::{ItemId, ThreadId};
 use forge_engines::UserInput;
-use std::collections::HashMap;
+use forge_store::{DataLock, Store, ThreadIdsError};
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROOT: &str = "run-images";
 
+static PARTIAL: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum RunImagesError {
-    #[error("create the image folder {} of run {run}", path.display())]
-    Create {
-        run: RunId,
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("copy the image {} to {} for run {run}", from.display(), to.display())]
+pub(crate) enum ImageCopyError {
+    #[error("copy the image {} to {} for thread {thread}", from.display(), to.display())]
     Copy {
-        run: RunId,
+        thread: ThreadId,
         from: PathBuf,
         to: PathBuf,
         #[source]
@@ -25,26 +22,31 @@ pub(crate) enum RunImagesError {
     },
     #[error("the stored image {} has no file name", path.display())]
     Unnamed { path: PathBuf },
-    #[error("run the image copy task of run {run}")]
+    #[error("run the image copy task of thread {thread}")]
     Task {
-        run: RunId,
+        thread: ThreadId,
         #[source]
         source: tokio::task::JoinError,
     },
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("clear the run image folders in {}", path.display())]
-pub(crate) struct SweepError {
-    path: PathBuf,
-    #[source]
-    source: io::Error,
+pub(crate) enum SweepError {
+    #[error("list the image folders in {}", path.display())]
+    List {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(transparent)]
+    Threads(#[from] ThreadIdsError),
+    #[error(transparent)]
+    Remove(#[from] RemoveImagesError),
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("create the image folder {} of thread {thread}", path.display())]
-pub struct ImageFolderError {
-    thread: ThreadId,
+#[error("remove the image folder {}", path.display())]
+pub(crate) struct RemoveImagesError {
     path: PathBuf,
     #[source]
     source: io::Error,
@@ -71,127 +73,147 @@ impl Message {
     }
 }
 
-fn thread_folder(data: &Path, thread: &ThreadId) -> PathBuf {
-    data.join(ROOT).join(thread.as_str())
+pub(crate) fn thread_folder(data: &Path, thread: &ThreadId) -> PathBuf {
+    data.join(ROOT).join(crate::scratch::folder_key(thread))
 }
 
-pub(crate) async fn readable_folder(
-    data: &Path,
-    thread: &ThreadId,
-) -> Result<PathBuf, ImageFolderError> {
-    let path = thread_folder(data, thread);
-    tokio::fs::create_dir_all(&path)
-        .await
-        .map_err(|source| ImageFolderError {
-            thread: thread.clone(),
-            path: path.clone(),
-            source,
-        })?;
-    Ok(path)
-}
-
-pub(crate) fn sweep(data: &Path) -> Result<(), SweepError> {
-    let path = data.join(ROOT);
+fn remove_folder(path: PathBuf) -> Result<(), RemoveImagesError> {
     match std::fs::remove_dir_all(&path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(SweepError {
-            path,
-            source: error,
-        }),
+        Err(source) if source.kind() != io::ErrorKind::NotFound => {
+            Err(RemoveImagesError { path, source })
+        }
         Ok(()) | Err(_) => Ok(()),
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct RunImages {
-    run: RunId,
-    dir: PathBuf,
-    copies: HashMap<PathBuf, PathBuf>,
+pub(crate) fn remove_thread_folder(
+    data: &Path,
+    thread: &ThreadId,
+) -> Result<(), RemoveImagesError> {
+    remove_folder(thread_folder(data, thread))
 }
 
-impl RunImages {
-    pub(crate) async fn open(
-        data: &Path,
-        thread: &ThreadId,
-        run: &RunId,
-    ) -> Result<Self, RunImagesError> {
-        let dir = thread_folder(data, thread).join(run.as_str());
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|source| RunImagesError::Create {
-                run: run.clone(),
-                path: dir.clone(),
+pub(crate) async fn sweep(
+    data: &Path,
+    store: &Store,
+    _exclusive: &DataLock,
+) -> Result<usize, SweepError> {
+    let root = data.join(ROOT);
+    let listed = match std::fs::read_dir(&root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        listed => listed
+            .and_then(|entries| {
+                entries
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<io::Result<Vec<_>>>()
+            })
+            .map_err(|source| SweepError::List {
+                path: root.clone(),
                 source,
-            })?;
-        Ok(Self {
-            run: run.clone(),
-            dir,
-            copies: HashMap::new(),
-        })
+            })?,
+    };
+    let live: HashSet<String> = store
+        .thread_ids()
+        .await?
+        .iter()
+        .map(crate::scratch::folder_key)
+        .collect();
+    let orphans: Vec<_> = listed
+        .into_iter()
+        .filter(|name| !live.contains(name.to_string_lossy().as_ref()))
+        .collect();
+    let removed = orphans.len();
+    for name in orphans {
+        remove_folder(root.join(name))?;
     }
-
-    pub(crate) async fn deliver(&mut self, message: Message) -> Result<UserInput, RunImagesError> {
-        let Message { id, text, stored } = message;
-        let missing: Vec<(PathBuf, PathBuf)> = stored
-            .iter()
-            .filter(|from| !self.copies.contains_key(*from))
-            .map(|from| {
-                let name = from
-                    .file_name()
-                    .ok_or_else(|| RunImagesError::Unnamed { path: from.clone() })?;
-                Ok((from.clone(), self.dir.join(name)))
-            })
-            .collect::<Result<_, RunImagesError>>()?;
-        if !missing.is_empty() {
-            let run = self.run.clone();
-            let copied = tokio::task::spawn_blocking(move || copy_all(&run, missing))
-                .await
-                .map_err(|source| RunImagesError::Task {
-                    run: self.run.clone(),
-                    source,
-                })??;
-            self.copies.extend(copied);
-        }
-        let images: Vec<PathBuf> = stored
-            .iter()
-            .map(|from| {
-                self.copies
-                    .get(from)
-                    .cloned()
-                    .unwrap_or_else(|| unreachable!("invariant: every stored image was copied"))
-            })
-            .collect();
-        Ok(UserInput {
-            id,
-            text: with_image_paths(text, &images),
-            images,
-        })
-    }
+    Ok(removed)
 }
 
-impl Drop for RunImages {
-    fn drop(&mut self) {
-        match std::fs::remove_dir_all(&self.dir) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                tracing::warn!(run = %self.run, folder = %self.dir.display(), %error, "remove the run's image copies");
-            }
-            Ok(()) | Err(_) => {}
+#[derive(Debug)]
+pub(crate) struct ThreadImages {
+    thread: ThreadId,
+    dir: PathBuf,
+}
+
+impl ThreadImages {
+    pub(crate) fn of(data: &Path, thread: &ThreadId) -> Self {
+        Self {
+            thread: thread.clone(),
+            dir: thread_folder(data, thread),
         }
+    }
+
+    pub(crate) async fn deliver(&self, message: &Message) -> Result<UserInput, ImageCopyError> {
+        let copies = if message.stored.is_empty() {
+            Vec::new()
+        } else {
+            let (thread, dir, stored) = (
+                self.thread.clone(),
+                self.dir.clone(),
+                message.stored.clone(),
+            );
+            tokio::task::spawn_blocking(move || copy_all(&thread, &dir, &stored))
+                .await
+                .map_err(|source| ImageCopyError::Task {
+                    thread: self.thread.clone(),
+                    source,
+                })??
+        };
+        Ok(UserInput {
+            id: message.id.clone(),
+            text: with_image_paths(message.text.clone(), &copies),
+            images: message.stored.clone(),
+        })
     }
 }
 
 fn copy_all(
-    run: &RunId,
-    missing: Vec<(PathBuf, PathBuf)>,
-) -> Result<Vec<(PathBuf, PathBuf)>, RunImagesError> {
-    for (from, to) in &missing {
-        std::fs::copy(from, to).map_err(|source| RunImagesError::Copy {
-            run: run.clone(),
-            from: from.clone(),
-            to: to.clone(),
-            source,
-        })?;
+    thread: &ThreadId,
+    dir: &Path,
+    stored: &[PathBuf],
+) -> Result<Vec<PathBuf>, ImageCopyError> {
+    stored
+        .iter()
+        .map(|from| {
+            let name = from
+                .file_name()
+                .ok_or_else(|| ImageCopyError::Unnamed { path: from.clone() })?;
+            let to = dir.join(name);
+            std::fs::create_dir_all(dir)
+                .and_then(|()| copy_pristine(from, &to))
+                .map_err(|source| ImageCopyError::Copy {
+                    thread: thread.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    source,
+                })?;
+            Ok(to)
+        })
+        .collect()
+}
+
+fn copy_pristine(from: &Path, to: &Path) -> io::Result<()> {
+    let pristine = std::fs::read(from)?;
+    let intact = || std::fs::read(to).is_ok_and(|copy| copy == pristine);
+    if intact() {
+        return Ok(());
     }
-    Ok(missing)
+    let mut partial = to.as_os_str().to_os_string();
+    partial.push(format!(
+        ".{}-{}.partial",
+        std::process::id(),
+        PARTIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    let partial = PathBuf::from(partial);
+    match std::fs::write(&partial, &pristine).and_then(|()| std::fs::rename(&partial, to)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(cleanup) = std::fs::remove_file(&partial) {
+                tracing::debug!(partial = %partial.display(), %cleanup, "remove the partial image copy");
+            }
+            if intact() { Ok(()) } else { Err(error) }
+        }
+    }
 }
 
 fn with_image_paths(text: String, images: &[PathBuf]) -> String {

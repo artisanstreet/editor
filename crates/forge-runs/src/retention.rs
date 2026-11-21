@@ -127,6 +127,18 @@ impl Hub {
     pub(crate) async fn forget_removed_thread(&self, thread: Thread) {
         self.revoke_gateway_credential(&thread.id);
         self.inner.side.forget(&thread.id);
+        let (data, id) = (self.data_dir().to_path_buf(), thread.id.clone());
+        match tokio::task::spawn_blocking(move || crate::images::remove_thread_folder(&data, &id))
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(thread = %thread.id, "{}", diagnostics::chain(&error));
+            }
+            Err(error) => {
+                tracing::warn!(thread = %thread.id, "remove the image copies task of removed thread: {error}");
+            }
+        }
         if !thread.project_id.is_scratch() {
             return;
         }

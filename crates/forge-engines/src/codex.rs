@@ -80,6 +80,13 @@ pub enum RunError {
     NoTurn,
     #[error("Codex has no thread for this run")]
     NoThread,
+    #[error("read the image {} of message {item}", path.display())]
+    Image {
+        item: ItemId,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{}; requested thread unload and retired the server. Underlying work may still be running.", if *interrupt_sent { "Codex did not confirm the turn stopped after an interrupt" } else { "Codex did not return the started turn ID before cancellation timed out" })]
     StopTimedOut { interrupt_sent: bool },
 }
@@ -563,7 +570,7 @@ impl Run {
         let thread = self.decoder.thread().ok_or(RunError::NoThread)?.to_owned();
         if let Phase::Active { turn: turn_id } = &self.phase {
             for queued in std::mem::take(&mut self.queued) {
-                let params = json!({ "threadId": thread, "expectedTurnId": turn_id, "input": user_input(&queued.input) });
+                let params = json!({ "threadId": thread, "expectedTurnId": turn_id, "input": user_input(&queued.input)? });
                 let id = self.decoder.request("turn/steer", params);
                 self.steering.insert(id, queued);
             }
@@ -571,7 +578,10 @@ impl Run {
             let queued = std::mem::take(&mut self.queued);
             let input: Vec<Value> = queued
                 .iter()
-                .flat_map(|queued| user_input(&queued.input))
+                .map(|queued| user_input(&queued.input))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
                 .collect();
             let mut params = json!({ "threadId": thread, "input": input });
             turn_overrides(turn, &mut params);
@@ -764,13 +774,23 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
 }
 
-fn user_input(input: &UserInput) -> Vec<Value> {
+fn user_input(input: &UserInput) -> Result<Vec<Value>, RunError> {
+    use base64::Engine as _;
     let mut items = Vec::new();
     if !input.text.is_empty() || input.images.is_empty() {
         items.push(json!({ "type": "text", "text": input.text, "text_elements": [] }));
     }
     for path in &input.images {
-        items.push(json!({ "type": "localImage", "path": path }));
+        let bytes = std::fs::read(path).map_err(|source| RunError::Image {
+            item: input.id.clone(),
+            path: path.clone(),
+            source,
+        })?;
+        let url = format!(
+            "data:image/webp;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        items.push(json!({ "type": "image", "url": url }));
     }
-    items
+    Ok(items)
 }

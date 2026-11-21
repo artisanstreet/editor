@@ -60,6 +60,7 @@ operation_error!(ReadRunError(StorageError), "read run {run}", run: RunId);
 operation_error!(LatestRunError(StorageError), "read the latest run of thread {thread}", thread: ThreadId);
 operation_error!(InspectorError(crate::ContentError), "summarize thread {thread} for the inspector", thread: ThreadId);
 operation_error!(ThreadTitlesError(StorageError), "read the thread titles");
+operation_error!(ThreadIdsError(StorageError), "read the thread ids");
 operation_error!(AgentThreadsError(StorageError), "read the agent threads of thread {thread}", thread: ThreadId);
 operation_error!(WorkingAgentsError(StorageError), "read the working agents");
 operation_error!(LastReplyError(crate::ContentError), "read the last reply of thread {thread}", thread: ThreadId);
@@ -372,6 +373,23 @@ impl Store {
         })
         .await
         .map_err(|cause| ThreadTitlesError {
+            cause: Box::new(cause),
+        })
+    }
+
+    pub async fn thread_ids(&self) -> Result<Vec<ThreadId>, ThreadIdsError> {
+        self.read(move |conn| {
+            let mut statement = conn
+                .prepare_cached(include_str!("sql/state/thread_ids.sql"))
+                .at("state/thread_ids.sql")?;
+            let rows = statement
+                .query_map([], |row| Ok(ThreadId::from(row.get::<_, String>(0)?)))
+                .at("state/thread_ids.sql")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .at("state/thread_ids.sql")
+        })
+        .await
+        .map_err(|cause| ThreadIdsError {
             cause: Box::new(cause),
         })
     }
