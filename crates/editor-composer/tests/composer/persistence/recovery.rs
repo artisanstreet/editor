@@ -791,3 +791,123 @@ fn taking_a_held_draft_back_does_not_count_as_a_new_draft_the_device_could_not_k
         "a notice the user dismissed isn't brought back by taking a draft back"
     );
 }
+
+fn sending(text: &str, id: &str, create: Option<artisan_api::CreateThread>) -> Submission {
+    Submission {
+        message: artisan_api::SendMessage {
+            id: ItemId(id.into()),
+            text: text.into(),
+            images: Vec::new(),
+            config: None,
+            draft: None,
+        },
+        create,
+        thread: ThreadId("thread".into()),
+    }
+}
+
+fn kept_sending(submission: &Submission) -> KeptDraft {
+    serde_json::from_value(serde_json::json!({
+        "body": {"text": submission.message.text},
+        "post": {
+            "submission": submission,
+            "sent": {"text": submission.message.text}
+        }
+    }))
+    .unwrap()
+}
+
+fn keep_record_and_beside(device: &Device, record: KeptDraft, beside: KeptDraft) {
+    let spool = device.spool();
+    spool
+        .keep(
+            &device.host,
+            "new",
+            record,
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    assert!(matches!(
+        spool
+            .keep(&device.host, "new", beside, &[], Holder::Newcomer)
+            .unwrap(),
+        Slot::Beside(_)
+    ));
+}
+
+#[test]
+fn loading_a_draft_kept_beside_with_an_unanswered_send_sends_it_again_under_its_ids() {
+    let device = Device::new();
+    let sent = sending(
+        "sent beside",
+        "beside-message",
+        Some(artisan_api::CreateThread {
+            id: ThreadId("thread".into()),
+            project_id: artisan_api::ProjectId::from("project"),
+            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        }),
+    );
+    keep_record_and_beside(&device, kept("kept in the record"), kept_sending(&sent));
+
+    let lease = device.reopen();
+    lease.use_remote();
+
+    assert!(
+        lease.read(DraftSession::sending),
+        "the message sent from the chosen draft goes out again"
+    );
+    assert_eq!(
+        lease.read(|state| state.kept().post.map(|post| post.submission)),
+        Some(sent),
+        "it keeps its message and new thread ids, so Forge never takes either twice"
+    );
+}
+
+#[test]
+fn loading_the_draft_kept_beside_keeps_the_records_unanswered_send_until_forge_has_it() {
+    let device = Device::new();
+    keep_record_and_beside(
+        &device,
+        kept_sending(&sending("sent from the record", "record-message", None)),
+        kept("kept beside the record"),
+    );
+
+    let lease = device.reopen();
+    lease.use_remote();
+
+    assert_eq!(
+        lease.read(|state| state.body().text.clone()),
+        "kept beside the record"
+    );
+    assert!(
+        device.drafts().join("recovering-new.json").exists(),
+        "the message the user already sent stays on this device until Forge answers"
+    );
+}
+
+#[test]
+fn keeping_mine_over_a_draft_kept_beside_with_an_unanswered_send_keeps_it_until_forge_has_it() {
+    let device = Device::new();
+    keep_record_and_beside(
+        &device,
+        kept("kept in the record"),
+        kept_sending(&sending("sent beside", "beside-message", None)),
+    );
+
+    let lease = device.reopen();
+    lease.keep_local();
+
+    assert!(!lease.read(DraftSession::conflict));
+    assert_eq!(
+        lease.read(|state| state.body().text.clone()),
+        "kept in the record"
+    );
+    assert!(
+        device.drafts().join("recovering-new.kept-1").exists(),
+        "the message the user already sent stays on this device until Forge answers"
+    );
+}

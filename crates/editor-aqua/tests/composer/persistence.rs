@@ -2635,3 +2635,101 @@ fn a_refused_send_clears_once_its_cause_is_fixed_and_leaves_the_recovery_notice_
         assert_eq!(composer.notice.as_ref(), Some(&recovery));
     });
 }
+
+#[test]
+fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_removes_it() {
+    use editor_aqua::composer::controller::ComposerTarget;
+    use editor_aqua::composer::draft_session::DraftSession;
+    use editor_aqua::composer::spool::DraftSpool;
+    use editor_aqua::composer::view::ComposerAction;
+
+    let (directory, mut core, _config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    run(async {
+        let (listener, acceptor, pin) = pinned_server().await;
+        let host = connect_host(&mut core, &listener, &pin, "rivals");
+        let target = ComposerTarget::NewThread {
+            host: host.clone(),
+            project: Some(artisan_api::ProjectId::from("project")),
+        };
+        let scope = target.scope();
+        let drafts = directory.path().join("drafts");
+        let beside = drafts.join("rivals-new_3aproject.kept-1");
+        std::fs::create_dir_all(&beside).unwrap();
+        let record = |draft: Value| {
+            let mut record = json!({"host": "rivals", "scope": scope});
+            record
+                .as_object_mut()
+                .unwrap()
+                .extend(draft.as_object().unwrap().clone());
+            serde_json::to_vec(&record).unwrap()
+        };
+        std::fs::write(
+            drafts.join("rivals-new_3aproject.json"),
+            record(json!({"body": {"text": "mine"}})),
+        )
+        .unwrap();
+        std::fs::write(
+            beside.join("rivals-new_3aproject.json"),
+            record(json!({
+                "body": {"text": "sent beside"},
+                "post": {
+                    "submission": {
+                        "message": {"id": "beside-message", "text": "sent beside", "images": [], "config": null},
+                        "create": null,
+                        "thread": "thread"
+                    },
+                    "sent": {"text": "sent beside"}
+                }
+            })),
+        )
+        .unwrap();
+
+        let mut sessions = DraftSessions::with_spool(spool);
+        let owner = editor_aqua::composer::view::ComposerOwner::new(
+            &core,
+            &mut sessions,
+            target,
+            std::rc::Rc::new(|_| {}),
+        );
+        let session = DraftHandle::clone(owner.controller.borrow().session.as_ref().unwrap());
+        let (mut socket, route, _) = composer_request(&listener, &acceptor).await;
+        assert!(route.starts_with("GET /drafts/"), "{route}");
+        respond(
+            &mut socket,
+            json!({"revision": 1, "body": {"text": "mine"}}),
+        )
+        .await;
+        drop(socket);
+        wait_for_session(&session, DraftSession::is_loaded).await;
+        assert!(session.read(DraftSession::conflict));
+
+        owner.dispatch_with_change(&mut core, ComposerAction::KeepDraft, None);
+        let mut changed = session.subscribe();
+        let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
+        assert_eq!(route, "POST /threads/thread/messages HTTP/1.1");
+        assert_eq!(
+            body["id"], "beside-message",
+            "the message the user already sent goes out under its own id"
+        );
+        assert_eq!(
+            body["draft"],
+            Value::Null,
+            "finishing it doesn't clear the draft the user kept"
+        );
+        assert!(
+            beside.exists(),
+            "it stays on this device until Forge has it"
+        );
+        respond(
+            &mut socket,
+            accepted_message("beside-message", "sent beside"),
+        )
+        .await;
+        drop(socket);
+        while beside.exists() {
+            changed.changed().await.unwrap();
+        }
+        assert_eq!(session.read(|state| state.body().text.clone()), "mine");
+    });
+}

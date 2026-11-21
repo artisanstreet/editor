@@ -2,7 +2,7 @@ use super::attachment::{PendingUpload, ReadImageError, upload_image};
 use super::draft_body::DraftBody;
 use super::draft_session::{
     AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptDraft, KeptLostImage, LostKey,
-    Operation, PostMessageError, SAVE_DELAY, Submission, Unrecovered,
+    Operation, PostMessageError, RivalChoice, SAVE_DELAY, Submission, Unrecovered,
 };
 use super::spool::{
     BesideSlot, DraftSpool, Holder, KeepSpooledDraftError, Slot, SpooledDraft,
@@ -919,34 +919,80 @@ impl DraftHandle {
     }
 
     pub(crate) fn keep_local(&self) {
-        self.mutate(|shared| {
-            if let Some(rejected) = shared.state.keep_local() {
-                self.forget_slot(
-                    Slot::Beside(rejected),
-                    "the draft the user chose not to keep",
-                );
-            }
-        });
+        let mut rejected = None;
+        self.mutate(|shared| rejected = shared.state.keep_local());
+        if let Some(RivalChoice { slot, unsent }) = rejected {
+            self.set_aside(
+                Some(Slot::Beside(slot)),
+                unsent,
+                "the draft the user chose not to keep",
+            );
+        }
         self.flush();
     }
 
     pub(crate) fn use_remote(&self) {
-        let mut took_rival = false;
+        let mut replaced = None;
         self.mutate(|shared| {
-            if let Some(chosen) = shared.state.use_remote() {
-                if let Some(rejected) = shared.kept.slot() {
-                    self.forget_slot(
-                        rejected,
-                        "the draft the user replaced with the one kept beside it",
-                    );
-                }
-                shared.kept = Kept::Recovered(Slot::Beside(chosen));
-                took_rival = true;
+            if let Some(RivalChoice { slot, unsent }) = shared.state.use_remote() {
+                replaced = Some((shared.kept.slot(), unsent));
+                shared.kept = Kept::Recovered(Slot::Beside(slot));
             }
         });
-        if took_rival {
+        if let Some((rejected, unsent)) = replaced {
+            self.set_aside(
+                rejected,
+                unsent,
+                "the draft the user replaced with the one kept beside it",
+            );
             self.flush();
         }
+    }
+
+    fn set_aside(&self, slot: Option<Slot>, unsent: Option<Submission>, which: &'static str) {
+        match unsent {
+            Some(request) => self.finish_unsent(request, slot, which),
+            None => {
+                if let Some(slot) = slot {
+                    self.forget_slot(slot, which);
+                }
+            }
+        }
+    }
+
+    fn finish_unsent(&self, request: Submission, slot: Option<Slot>, which: &'static str) {
+        let session = self.clone();
+        let span = tracing::info_span!(
+            "send_set_aside_message",
+            host = %session.0.host,
+            thread = %request.thread,
+            message = %request.message.id
+        );
+        runtime().spawn(
+            async move {
+                let cancelled = session.0.cancelled.clone();
+                let result = tokio::select! {
+                    biased;
+                    () = cancelled.cancelled() => return,
+                    result = post(&session.0.client, &request) => result,
+                };
+                match (result, slot) {
+                    (Ok(()), Some(slot)) => {
+                        session.forget_slot(slot, which);
+                        session.mutate(|_| {});
+                    }
+                    (Ok(()), None) => {}
+                    (Err(error), _) => tracing::error!(
+                        host = %session.0.host,
+                        scope = %session.0.scope,
+                        which,
+                        error = %::diagnostics::chain(&error),
+                        "couldn't finish a message sent from a draft the user set aside; it is sent again under the same id when this draft next opens"
+                    ),
+                }
+            }
+            .instrument(span),
+        );
     }
 
     fn forget_slot(&self, slot: Slot, which: &'static str) {
@@ -1007,27 +1053,7 @@ impl DraftHandle {
                     thread = %request.thread,
                     message = %request.message.id
                 );
-                let result = async {
-                    if let Some(create) = &request.create {
-                        client.create_thread(create).await.map_err(|source| {
-                            PostMessageError::CreateThread {
-                                thread: request.thread.clone(),
-                                source,
-                            }
-                        })?;
-                    }
-                    client
-                        .send_message(&request.thread, &request.message)
-                        .await
-                        .map(drop)
-                        .map_err(|source| PostMessageError::Send {
-                            thread: request.thread.clone(),
-                            message: request.message.id.clone(),
-                            source,
-                        })
-                }
-                .instrument(span)
-                .await;
+                let result = post(client, &request).instrument(span).await;
                 let accepted = result.is_ok();
                 session.mutate(|shared| {
                     shared.state.posted(result, request.thread.clone());
@@ -1042,6 +1068,27 @@ impl DraftHandle {
         }
         session.pump();
     }
+}
+
+async fn post(client: &ForgeClient, request: &Submission) -> Result<(), PostMessageError> {
+    if let Some(create) = &request.create {
+        client
+            .create_thread(create)
+            .await
+            .map_err(|source| PostMessageError::CreateThread {
+                thread: request.thread.clone(),
+                source,
+            })?;
+    }
+    client
+        .send_message(&request.thread, &request.message)
+        .await
+        .map(drop)
+        .map_err(|source| PostMessageError::Send {
+            thread: request.thread.clone(),
+            message: request.message.id.clone(),
+            source,
+        })
 }
 
 #[cfg(test)]

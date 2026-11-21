@@ -290,8 +290,26 @@ pub(crate) enum Unrecovered {
 struct Rival {
     slot: BesideSlot,
     body: DraftBody,
+    post: Option<UnsentPost>,
     lost: Vec<KeptLostImage>,
     images: Vec<PendingUpload>,
+}
+
+#[derive(Debug)]
+pub struct RivalChoice {
+    pub(crate) slot: BesideSlot,
+    pub(crate) unsent: Option<Submission>,
+}
+
+fn unanswered(mut request: Submission) -> Submission {
+    request.message.draft = None;
+    request
+}
+
+impl UnsentPost {
+    fn unanswered(self) -> Option<Submission> {
+        (!self.released).then(|| unanswered(self.submission))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -476,6 +494,37 @@ impl Draft {
         if matches!(self.halt, Halt::Failed(_)) {
             self.halt = Halt::Clear;
         }
+    }
+
+    fn restore(&mut self, body: DraftBody, post: Option<UnsentPost>) {
+        self.edits.edit();
+        if let Some(post) = post {
+            let differs = post.sent != body;
+            self.send = Send::Outgoing(Box::new(Outgoing {
+                request: post.submission,
+                sent: post.sent,
+                stage: if post.released {
+                    Stage::Released
+                } else {
+                    Stage::Queued
+                },
+                edited: self.edits.latest,
+            }));
+            if differs {
+                self.edits.edit();
+            }
+        }
+        self.body = body;
+    }
+
+    fn set_aside_send(&mut self) -> Option<Submission> {
+        let Send::Outgoing(outgoing) = &self.send else {
+            return None;
+        };
+        let unsent =
+            (outgoing.stage != Stage::Released).then(|| unanswered(outgoing.request.clone()));
+        self.send = Send::Idle;
+        unsent
     }
 
     fn snapshot(&self) -> Option<&Snapshot> {
@@ -862,24 +911,7 @@ impl DraftSession {
             );
         };
         draft.remote = Remote::Unloaded(recovery.base);
-        draft.edits.edit();
-        if let Some(post) = recovery.post {
-            let differs = post.sent != recovery.body;
-            draft.send = Send::Outgoing(Box::new(Outgoing {
-                request: post.submission,
-                sent: post.sent,
-                stage: if post.released {
-                    Stage::Released
-                } else {
-                    Stage::Queued
-                },
-                edited: draft.edits.latest,
-            }));
-            if differs {
-                draft.edits.edit();
-            }
-        }
-        draft.body = recovery.body;
+        draft.restore(recovery.body, recovery.post);
         for lost in recovery.lost.into_iter().chain(damaged) {
             draft.lose(lost.name, lost.reason);
         }
@@ -901,13 +933,10 @@ impl DraftSession {
                 self.scope
             );
         };
-        let body = match recovery.post {
-            Some(post) => fold_back(&post.sent, recovery.body),
-            None => recovery.body,
-        };
         draft.rivals.push(Rival {
             slot,
-            body,
+            body: recovery.body,
+            post: recovery.post,
             lost: recovery.lost.into_iter().chain(damaged).collect(),
             images,
         });
@@ -1121,10 +1150,14 @@ impl DraftSession {
         }
     }
 
-    pub fn keep_local(&mut self) -> Option<BesideSlot> {
+    pub fn keep_local(&mut self) -> Option<RivalChoice> {
         if let State::Open(draft) = &mut self.state {
             if !draft.rivals.is_empty() {
-                return Some(draft.rivals.remove(0).slot);
+                let rival = draft.rivals.remove(0);
+                return Some(RivalChoice {
+                    slot: rival.slot,
+                    unsent: rival.post.and_then(UnsentPost::unanswered),
+                });
             }
             draft.halt = match std::mem::replace(&mut draft.halt, Halt::Clear) {
                 Halt::Conflict {
@@ -1136,19 +1169,16 @@ impl DraftSession {
         None
     }
 
-    pub fn use_remote(&mut self) -> Option<BesideSlot> {
+    pub fn use_remote(&mut self) -> Option<RivalChoice> {
         let State::Open(draft) = &mut self.state else {
             return None;
         };
         if !draft.rivals.is_empty() {
             let rival = draft.rivals.remove(0);
-            draft.body = rival.body;
-            draft.edits.edit();
+            let unsent = draft.set_aside_send();
             draft.adopting.clear();
             draft.lost.clear();
-            if draft.outgoing().is_some() {
-                draft.send = Send::Idle;
-            }
+            draft.restore(rival.body, rival.post);
             for lost in rival.lost {
                 draft.lose(lost.name, lost.reason);
             }
@@ -1156,7 +1186,10 @@ impl DraftSession {
                 draft.adopt(image);
             }
             self.replaced();
-            return Some(rival.slot);
+            return Some(RivalChoice {
+                slot: rival.slot,
+                unsent,
+            });
         }
         draft.body = draft
             .snapshot()
