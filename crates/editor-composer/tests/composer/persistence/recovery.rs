@@ -4,7 +4,23 @@ use crate::composer::draft_session::{KeptDraft, Unrecovered};
 use artisan_api::tls::{Identity, fingerprint};
 use editor_core::{HostConfig, HostKind};
 
+enum Forge {
+    Silent(test_support::net::SilentListener),
+    Refusing(test_support::net::ClosingListener),
+}
+
+impl Forge {
+    fn address(&self) -> String {
+        match self {
+            Self::Silent(listener) => listener.address(),
+            Self::Refusing(listener) => listener.address(),
+        }
+        .to_string()
+    }
+}
+
 struct Device {
+    _forge: Forge,
     directory: tempfile::TempDir,
     core: Core,
     host: HostId,
@@ -14,19 +30,28 @@ struct Device {
 
 impl Device {
     fn new() -> Self {
+        Self::at(Forge::Silent(test_support::net::SilentListener::bind()))
+    }
+
+    fn refusing() -> Self {
+        Self::at(Forge::Refusing(test_support::net::ClosingListener::bind()))
+    }
+
+    fn at(forge: Forge) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut core = test_support::editor::core::test_core(directory.path());
         let identity = Identity::generate("recovery-test").unwrap();
         let config = HostConfig {
             id: HostId("recovering".into()),
             name: "Forge".into(),
-            address: "127.0.0.1:1".into(),
+            address: forge.address(),
             fingerprint: fingerprint(identity.certificate_der().unwrap().as_ref()),
             kind: HostKind::Local,
         };
         let client = ForgeClient::new(&config.address, &config.fingerprint, &identity).unwrap();
         test_support::editor::core::connect_client(&mut core, &config, client.clone());
         Self {
+            _forge: forge,
             directory,
             core,
             host: config.id.clone(),
@@ -238,6 +263,62 @@ fn removing_the_pairing_keeps_a_fresh_draft_its_unanswered_message_and_unfinishe
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(images, vec![image]);
+}
+
+#[test]
+fn a_send_that_fails_before_the_pairing_is_removed_keeps_the_text_typed_after_it() {
+    let mut device = Device::refusing();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    type_into(&lease, "typed while Forge was away");
+    lease.submit(Submission {
+        message: artisan_api::SendMessage {
+            id: ItemId("unanswered".into()),
+            text: "typed while Forge was away".into(),
+            images: Vec::new(),
+            config: None,
+            draft: None,
+        },
+        create: None,
+        thread: ThreadId("thread".into()),
+    });
+    type_into(&lease, "typed after sending");
+    let mut changed = lease.subscribe();
+    runtime().block_on(async {
+        while lease.read(|state| state.error().is_none()) {
+            changed.changed().await.unwrap();
+        }
+    });
+
+    device.core.remove_host(&device.host).unwrap();
+    sessions.retain_hosts(&device.core);
+    drop(lease);
+    drop(sessions);
+
+    let kept = device
+        .spool()
+        .take(&device.host, "new")
+        .unwrap()
+        .expect("the removed pairing's draft is kept on this device");
+    let post = kept.draft.post.expect("the failed message is kept");
+    assert_eq!(post.submission.message.id, ItemId("unanswered".into()));
+    assert_eq!(post.sent.text, "typed while Forge was away");
+    let typed: Vec<_> = std::iter::once(&kept.draft.body)
+        .chain(&kept.draft.body.follow_ups)
+        .map(|body| body.text.as_str())
+        .collect();
+    assert!(
+        typed.contains(&"typed after sending"),
+        "the text typed after the failed send is kept beside it: {typed:?}"
+    );
 }
 
 fn saved_by_forge(device: &Device) -> DraftHandle {
