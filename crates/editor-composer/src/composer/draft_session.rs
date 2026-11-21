@@ -833,6 +833,10 @@ impl DraftSession {
         })
     }
 
+    pub(crate) fn choosing_draft(&self) -> bool {
+        self.draft().is_some_and(|draft| !draft.rivals.is_empty())
+    }
+
     pub fn halted(&self) -> bool {
         self.draft().is_none_or(Draft::halted)
     }

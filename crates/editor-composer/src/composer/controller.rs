@@ -952,6 +952,9 @@ impl Composer {
         if session.read(DraftSession::sending) {
             return Some("Sending…");
         }
+        if session.read(DraftSession::choosing_draft) {
+            return Some("Choose which draft to keep first.");
+        }
         let items = self
             .attachments
             .as_ref()
@@ -1030,6 +1033,7 @@ impl Composer {
             | SendRefusal::AnsweringQuestion
             | SendRefusal::ThreadMissing
             | SendRefusal::AlreadySending
+            | SendRefusal::ChoosingDraft
             | SendRefusal::DraftLoading
             | SendRefusal::ImageUploading
             | SendRefusal::ImageFailed
@@ -1057,6 +1061,9 @@ impl Composer {
         }
         if session.read(DraftSession::sending) {
             return Err(SendRefusal::AlreadySending);
+        }
+        if session.read(DraftSession::choosing_draft) {
+            return Err(SendRefusal::ChoosingDraft);
         }
         if !session.read(DraftSession::sendable) {
             return Err(SendRefusal::DraftLoading);
@@ -1143,6 +1150,8 @@ pub enum SendRefusal {
     ThreadMissing,
     #[error("This message is already being sent.")]
     AlreadySending,
+    #[error("Choose which draft to keep first.")]
+    ChoosingDraft,
     #[error("This draft is still loading. Try again once it has loaded.")]
     DraftLoading,
     #[error("This message has nothing to send. Type it again, then send it.")]
