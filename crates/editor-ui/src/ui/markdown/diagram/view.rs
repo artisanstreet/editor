@@ -76,9 +76,12 @@ impl DiagramState {
     }
 
     fn destination(&self, bounds: Rect, diagram: &DiagramSvg, scale: f32) -> Rect {
-        let (width, height) = (diagram.width() * scale, diagram.height() * scale);
-        let fit = (bounds.w / width).min(bounds.h / height).min(1.0);
-        let displayed = (width * fit * self.zoom, height * fit * self.zoom);
+        let (width, height) = (diagram.width(), diagram.height());
+        let fit = (bounds.w / width)
+            .min(viewport_height(diagram, 1.0) / height)
+            .min(1.0);
+        let size = fit * scale * self.zoom;
+        let displayed = (width * size, height * size);
         Rect {
             x: bounds.x + (bounds.w - displayed.0) / 2.0 + self.pan.x,
             y: bounds.y + (bounds.h - displayed.1) / 2.0 + self.pan.y,
@@ -112,6 +115,10 @@ impl DiagramState {
         self.drag = Some(point);
         true
     }
+}
+
+fn viewport_height(diagram: &DiagramSvg, scale: f32) -> f32 {
+    (diagram.height() * scale).clamp(MIN_VIEWPORT_PX, MAX_VIEWPORT_PX)
 }
 
 type Shared = Rc<RefCell<DiagramState>>;
@@ -177,7 +184,7 @@ pub(crate) fn view(
     let key_invalidate = Rc::clone(invalidate);
     let viewport = ui::Box::new()
         .width(Length::Pct(100.0))
-        .height((diagram.height() * scale).clamp(MIN_VIEWPORT_PX, MAX_VIEWPORT_PX))
+        .height(viewport_height(diagram, scale))
         .clip(true)
         .child(canvas)
         .build()

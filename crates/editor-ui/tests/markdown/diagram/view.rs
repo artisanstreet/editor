@@ -273,13 +273,21 @@ fn the_viewport_shows_a_focus_ring_when_tab_reaches_it() {
 }
 
 fn painted(theme: &ArtisanTheme, diagram: &Arc<DiagramSvg>) -> (Arc<str>, Rect, Rect) {
+    painted_in(theme, diagram, 1200.0)
+}
+
+fn painted_in(
+    theme: &ArtisanTheme,
+    diagram: &Arc<DiagramSvg>,
+    width: f32,
+) -> (Arc<str>, Rect, Rect) {
     use aqua_text::{SharedFonts, SharedRuns};
     let state = Rc::new(RefCell::new(DiagramState::new()));
     let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
     let element = view(theme, "diagram", diagram, &state, &invalidate);
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(move |_| element).unwrap();
-    app.set_viewport(1200.0, 1200.0, 1.0);
+    app.set_viewport(width, 1200.0, 1.0);
     app.build_frame().unwrap();
     let viewport = app
         .tree()
@@ -334,5 +342,49 @@ fn a_larger_text_size_draws_the_diagram_larger() {
     assert!(
         larger_viewport.h > standard_viewport.h,
         "the viewport stayed {standard_viewport:?} at 225%"
+    );
+}
+
+#[test]
+fn a_larger_text_size_enlarges_a_diagram_that_fills_the_viewport_width() {
+    let state = DiagramState::new();
+    let wide = diagram(800.0, 200.0);
+    let standard = state.destination(viewport(), &wide, 1.0);
+    let larger = state.destination(viewport(), &wide, 2.25);
+    assert_eq!((standard.w, standard.h), (400.0, 100.0));
+    assert_eq!((larger.w, larger.h), (900.0, 225.0));
+    assert_eq!(
+        (larger.x + larger.w / 2.0, larger.y + larger.h / 2.0),
+        (210.0, 120.0)
+    );
+}
+
+#[test]
+fn a_larger_text_size_enlarges_a_diagram_that_fills_the_viewport_height() {
+    let state = DiagramState::new();
+    let tall = diagram(200.0, 1000.0);
+    let bounds = Rect {
+        h: MAX_VIEWPORT_PX,
+        ..viewport()
+    };
+    let standard = state.destination(bounds, &tall, 1.0);
+    let larger = state.destination(bounds, &tall, 2.25);
+    assert_eq!((standard.w, standard.h), (88.0, 440.0));
+    assert_eq!((larger.w, larger.h), (198.0, 990.0));
+}
+
+#[test]
+fn a_larger_text_size_draws_a_width_constrained_diagram_larger() {
+    let wide = diagram(800.0, 200.0);
+    let standard = ArtisanTheme::resolved();
+    let mut larger = standard;
+    larger.typography = larger.typography.scaled(2.25);
+    let (_, standard_viewport, standard_drawn) = painted_in(&standard, &wide, 400.0);
+    let (_, larger_viewport, larger_drawn) = painted_in(&larger, &wide, 400.0);
+    assert_eq!(standard_viewport.w.to_bits(), larger_viewport.w.to_bits());
+    assert!(
+        (larger_drawn.w / standard_drawn.w - 2.25).abs() < 1e-3
+            && (larger_drawn.h / standard_drawn.h - 2.25).abs() < 1e-3,
+        "the diagram went from {standard_drawn:?} to {larger_drawn:?} at 225%"
     );
 }
