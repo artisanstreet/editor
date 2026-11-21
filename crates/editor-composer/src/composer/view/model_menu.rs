@@ -312,7 +312,7 @@ fn model_list_pane(
     scroll: f32,
     dispatch: &Dispatch,
 ) -> Element {
-    use super::super::model_list::{ROW_GAP, SECTION_SPACER, group_row_height};
+    use super::super::model_list::{MODEL_GAP, ROW_GAP, SECTION_SPACER, group_row_height};
     use super::super::picker::ModelRow;
     let muted = theme.colors.text_muted;
     let mut rows = UiBox::new()
@@ -343,6 +343,14 @@ fn model_list_pane(
                         engine.display_name(),
                     )
                     .build(),
+                );
+            }
+            ModelRow::Gap(_) => {
+                rows = rows.child(
+                    UiBox::new()
+                        .height(MODEL_GAP)
+                        .style(Style::new().flex_shrink(0.0))
+                        .build(),
                 );
             }
             ModelRow::Gate(_) => {
@@ -850,6 +858,7 @@ pub(super) fn engine_icon(theme: &ArtisanTheme, engine: artisan_api::EngineId) -
         artisan_api::EngineId::Codex => AssetId::SVGL_OPENAI,
         artisan_api::EngineId::OpenCode if theme.colors.mode.is_dark() => AssetId::BRANDS_OPENCODE,
         artisan_api::EngineId::OpenCode => AssetId::BRANDS_OPENCODE_LIGHT,
+        artisan_api::EngineId::Antigravity => AssetId::SVGL_ANTIGRAVITY,
     }
 }
 

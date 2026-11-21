@@ -2,6 +2,15 @@
   "_comment": "Captured from https://api.svgl.app on 2026-08-24 during Phase 6 asset archaeology (extraction-time evidence; validation never uses the network). Entries for exactly the 12 svgl logos vendored under modules/assets/svg/svgl/. Note: upstream publishes no per-logo license field; brandUrl/url are the attribution evidence.",
   "entries": [
     {
+      "id": 17,
+      "title": "Google Antigravity",
+      "category": "Google",
+      "route": "https://svgl.app/library/antigravity.svg",
+      "wordmark": "https://svgl.app/library/antigravity-wordmark.svg",
+      "url": "https://www.google.com/antigravity",
+      "captured": "2026-11-20"
+    },
+    {
       "id": 576,
       "title": "GitHub",
       "category": "Software",

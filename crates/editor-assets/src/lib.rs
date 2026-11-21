@@ -432,6 +432,7 @@ catalog! {
     (SIMPLE_ICONS_MEITUAN, "simple-icons.meituan", Some("0 0 24 24"), true, "svg/simple-icons/meituan.svg"),
     (SIMPLE_ICONS_SOURCEHUT, "simple-icons.sourcehut", Some("0 0 24 24"), true, "svg/simple-icons/sourcehut.svg"),
     (SIMPLE_ICONS_XIAOMI, "simple-icons.xiaomi", Some("0 0 24 24"), true, "svg/simple-icons/xiaomi.svg"),
+    (SVGL_ANTIGRAVITY, "svgl.antigravity", Some("0 0 16 15"), false, "svg/svgl/antigravity.svg"),
     (SVGL_CLAUDE_AI, "svgl.claude-ai", Some("0 0 256 257"), true, "svg/svgl/claude-ai.svg"),
     (SVGL_DEEPSEEK, "svgl.deepseek", Some("0 0 24 24"), true, "svg/svgl/deepseek.svg"),
     (SVGL_GIT, "svgl.git", Some("0 0 256 256"), true, "svg/svgl/git.svg"),

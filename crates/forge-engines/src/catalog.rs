@@ -58,6 +58,12 @@ pub(crate) enum ListModelsError {
     OpenCodeDecode(#[source] serde_json::Error),
     #[error("opencode listed no models")]
     OpenCodeEmpty,
+    #[error("ask Antigravity for its models")]
+    AntigravityProbe(#[source] crate::antigravity::ProbeError),
+    #[error("Antigravity is signed out, so it lists no models")]
+    AntigravitySignedOut,
+    #[error("Antigravity listed no models")]
+    AntigravityEmpty,
 }
 
 pub(crate) async fn list(
@@ -83,6 +89,7 @@ pub(crate) async fn list(
         }
         ModelSource::CodexAppServer => codex(&program).await?,
         ModelSource::OpenCodeCli => opencode(&program, http).await?,
+        ModelSource::AntigravityAcp => antigravity(&program).await?,
     };
     Ok(finish(engine, listing))
 }
@@ -617,6 +624,7 @@ fn claude_model(value: &Value) -> Option<Model> {
         default_variant: None,
         lab: None,
         group: None,
+        section: None,
     })
 }
 
@@ -836,6 +844,7 @@ fn codex_listing(rows: &[Value], windows: &[(String, u64, u64)]) -> Listing {
             default_variant: None,
             lab: None,
             group: None,
+            section: None,
         });
     }
     listing
@@ -923,6 +932,20 @@ fn codex_context_windows(path: &Path) -> Result<Vec<(String, u64, u64)>, ReadCac
 const MODELS_DEV: &str = "https://models.dev/api.json";
 const MODELS_DEV_MAX_BYTES: usize = 32 * 1024 * 1024;
 const MODELS_DEV_FRESH: Duration = Duration::from_hours(12);
+
+async fn antigravity(program: &Program<'_>) -> Result<Listing, ListModelsError> {
+    let command = command(program).map_err(ListModelsError::NotInstalled)?;
+    let probed = crate::antigravity::probe(command, program.home)
+        .await
+        .map_err(ListModelsError::AntigravityProbe)?;
+    if !probed.signed_in {
+        return Err(ListModelsError::AntigravitySignedOut);
+    }
+    if probed.listing.models.is_empty() {
+        return Err(ListModelsError::AntigravityEmpty);
+    }
+    Ok(probed.listing)
+}
 
 async fn opencode(
     program: &Program<'_>,

@@ -40,6 +40,10 @@ pub(crate) enum Feed {
         repository: &'static str,
         platform: &'static str,
     },
+    Antigravity {
+        platform: &'static str,
+        folder: &'static str,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +57,7 @@ pub(crate) enum ModelSource {
     ClaudeCatalog,
     CodexAppServer,
     OpenCodeCli,
+    AntigravityAcp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,6 +276,47 @@ const fn spec(engine: EngineId, platform: Platform) -> Spec {
                 config: None,
             }
         }
+        EngineId::Antigravity => {
+            let target = match platform {
+                P::LinuxX64 => Some(("linux_amd64", "linux-x64", Archive::TarGz)),
+                P::LinuxX64Musl => Some(("linux_amd64_musl", "linux-x64-musl", Archive::TarGz)),
+                P::LinuxArm64 => Some(("linux_arm64", "linux-arm", Archive::TarGz)),
+                P::LinuxArm64Musl => Some(("linux_arm64_musl", "linux-arm-musl", Archive::TarGz)),
+                P::WindowsX64 => Some(("windows_amd64", "windows-x64", Archive::Binary)),
+                P::WindowsArm64 => Some(("windows_arm64", "windows-arm", Archive::Binary)),
+                P::MacArm64 => Some(("darwin_arm64", "darwin-arm", Archive::TarGz)),
+                P::MacX64 => Some(("darwin_amd64", "darwin-x64", Archive::TarGz)),
+                P::Other => None,
+            };
+            Spec {
+                artifact: match target {
+                    Some((platform, folder, archive)) => Some(Artifact {
+                        feed: Feed::Antigravity { platform, folder },
+                        archive,
+                        strip: "",
+                        entry: match archive {
+                            Archive::Binary => "antigravity.exe",
+                            Archive::TarGz => "antigravity",
+                        },
+                        path_dirs: &[],
+                    }),
+                    None => None,
+                },
+                minimum: Some("1.5.12"),
+                device_login: Some(crate::antigravity::LOGIN_ARGS),
+                accepts_login_code: true,
+                logout: None,
+                models: ModelSource::AntigravityAcp,
+                config: None,
+            }
+        }
+    }
+}
+
+pub(crate) fn profile_args(engine: EngineId, home: &std::path::Path) -> Vec<String> {
+    match engine {
+        EngineId::Antigravity => crate::antigravity::profile_args(home),
+        EngineId::Claude | EngineId::Codex | EngineId::OpenCode => Vec::new(),
     }
 }
 
@@ -325,6 +371,7 @@ pub(crate) fn environment(
     match engine {
         EngineId::Claude => env.push(("DISABLE_UPDATES".into(), "1".into())),
         EngineId::Codex => {}
+        EngineId::Antigravity => env.extend(crate::antigravity::environment()),
         EngineId::OpenCode if root.is_some_and(understands_opencode_home) => {
             env.push(("OPENCODE_HOME".into(), home.display().to_string()));
         }

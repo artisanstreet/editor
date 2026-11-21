@@ -63,7 +63,9 @@ fn refresh(
 }
 fn integrity(value: Integrity) -> &'static str {
     match value {
-        Integrity::VendorSha256 => "Verified by the vendor's published checksum.",
+        Integrity::VendorSha256 | Integrity::VendorSha512 => {
+            "Verified by the vendor's published checksum."
+        }
         Integrity::NpmSha512 => {
             "Verified by the checksum the npm registry publishes for each release."
         }
@@ -287,6 +289,9 @@ fn account_copy(status: &EngineStatus) -> String {
 fn sign_in_copy(engine: EngineId) -> String {
     match engine {
         EngineId::OpenCode => "Sign in to use models beyond OpenCode's free ones.".into(),
+        EngineId::Antigravity => {
+            "Sign in with the Google account that has your Gemini plan.".into()
+        }
         EngineId::Claude | EngineId::Codex => {
             format!("{} can't run until you sign in.", engine.display_name())
         }

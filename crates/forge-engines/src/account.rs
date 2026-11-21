@@ -88,6 +88,7 @@ async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
         EngineId::Claude => &["auth", "status"],
         EngineId::Codex => &["login", "status"],
         EngineId::OpenCode => return opencode_sign_in(binary, home).await,
+        EngineId::Antigravity => return antigravity_sign_in(binary, home).await,
     };
     match run_short(engine, binary, home, args, CHECK_TIMEOUT).await {
         Ok((success, stdout, stderr)) => parse_status(engine, success, &stdout, &stderr),
@@ -139,6 +140,33 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
             engine.display_name()
         ),
     }
+}
+
+async fn antigravity_sign_in(binary: &Path, home: &Path) -> SignInState {
+    let engine = EngineId::Antigravity;
+    let usage = match crate::install::usage_lock(home) {
+        Ok(usage) => usage,
+        Err(error) => {
+            return SignInState::Failed {
+                message: format!(
+                    "Couldn't check the Antigravity sign-in: {}",
+                    diagnostics::chain(&RunShortError::UsageLock {
+                        engine,
+                        source: error
+                    })
+                ),
+            };
+        }
+    };
+    if let Err(source) = fs2::FileExt::lock_shared(&usage) {
+        return SignInState::Failed {
+            message: format!(
+                "Couldn't check the Antigravity sign-in: {}",
+                diagnostics::chain(&RunShortError::Share { engine, source })
+            ),
+        };
+    }
+    crate::antigravity::sign_in(binary, home).await
 }
 
 async fn opencode_sign_in(binary: &Path, home: &Path) -> SignInState {
@@ -770,6 +798,13 @@ impl SignIn {
                     if this.context_generation() != generation {
                         return;
                     }
+                    if this.engine == EngineId::Antigravity {
+                        if let Err(error) = crate::antigravity::logout(&binary, &this.home).await {
+                            tracing::warn!(engine = %this.engine, error = diagnostics::chain(&error), "logout failed");
+                        }
+                        this.probe_snapshot(binary, generation, lease).await;
+                        return;
+                    }
                     if this.engine == EngineId::OpenCode {
                         if let Err(error) = opencode_logout(&binary, &this.home).await {
                             tracing::warn!(engine = %this.engine, error = diagnostics::chain(&error), "logout failed");
@@ -849,6 +884,7 @@ impl SignIn {
         let mut command = engine_command(self.engine, &binary, &self.home);
         command
             .args(args)
+            .args(crate::engines::profile_args(engine, &self.home))
             .stdin(Stdio::piped())
             .env("NO_OPEN_BROWSER", "1");
         #[cfg(unix)]
