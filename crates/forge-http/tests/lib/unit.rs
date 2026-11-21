@@ -1086,20 +1086,31 @@ async fn a_paired_device_that_stalls_inside_its_request_headers_is_disconnected(
 async fn connections_beyond_the_handshake_bound_are_refused() {
     use tokio::io::AsyncReadExt as _;
     let (_dir, address, _store) = forge().await;
-    let mut silent = Vec::new();
-    for _ in 0..handshakes::PER_PEER {
-        silent.push(tokio::net::TcpStream::connect(address).await.unwrap());
+    let mut connections = Vec::new();
+    for _ in 0..=handshakes::PER_PEER {
+        connections.push(tokio::net::TcpStream::connect(address).await.unwrap());
     }
-    let mut refused = tokio::net::TcpStream::connect(address).await.unwrap();
-    let mut byte = [0_u8; 1];
-    let read = tokio::time::timeout(Duration::from_secs(5), refused.read(&mut byte))
-        .await
-        .expect("a connection past the bound waited for a handshake slot");
+    let reads = connections.iter_mut().map(|connection| {
+        Box::pin(async move {
+            let mut byte = [0_u8; 1];
+            connection.read(&mut byte).await
+        })
+    });
+    let (read, _, still_waiting) =
+        tokio::time::timeout(Duration::from_secs(5), futures::future::select_all(reads))
+            .await
+            .expect(
+                "one connection past the bound is refused instead of waiting for a handshake slot",
+            );
     assert!(
         matches!(read, Ok(0) | Err(_)),
         "a refused connection is closed: {read:?}"
     );
-    drop(silent);
+    assert_eq!(
+        still_waiting.len(),
+        handshakes::PER_PEER,
+        "the connections within the bound keep waiting for their handshake"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
