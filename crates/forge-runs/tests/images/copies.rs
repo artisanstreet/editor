@@ -504,3 +504,94 @@ async fn a_run_whose_image_cannot_be_copied_starts_with_its_image_and_says_the_p
     assert_eq!(turns[0].images, vec![stored]);
     drop(turns);
 }
+
+fn first_turn_recorder() -> (Arc<Mutex<Vec<forge_engines::UserInput>>>, Script) {
+    let turns = Arc::new(Mutex::new(Vec::<forge_engines::UserInput>::new()));
+    let recorded = Arc::clone(&turns);
+    let script: Script = Arc::new(move |turn, _io| {
+        let recorded = Arc::clone(&recorded);
+        Box::pin(async move {
+            recorded.lock().unwrap().push(turn.input.clone());
+            Outcome::done()
+        })
+    });
+    (turns, script)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn symlinks_planted_in_the_image_folder_never_redirect_a_copy() {
+    let (turns, script) = first_turn_recorder();
+    let fixture = fixture(script).await;
+    let blob = fixture.hub.store().put_image(png(13)).await.unwrap();
+    let stored = fixture.hub.store().blob_path(&blob.hash).unwrap();
+    let name = stored.file_name().unwrap().to_string_lossy().into_owned();
+    let folder = image_folder(&fixture, &fixture.thread_id);
+    std::fs::create_dir_all(&folder).unwrap();
+    let victim = fixture.dir.path().join("victim");
+    std::fs::write(&victim, b"precious").unwrap();
+    std::os::unix::fs::symlink(&victim, folder.join(&name)).unwrap();
+    for counter in 0..256 {
+        std::os::unix::fs::symlink(
+            &victim,
+            folder.join(format!("{name}.{}-{counter}.partial", std::process::id())),
+        )
+        .unwrap();
+    }
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, with_image("look", &blob.hash))
+        .await
+        .unwrap();
+    fixture.settled().await;
+
+    assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+    let copy = folder.join(&name);
+    assert!(
+        std::fs::symlink_metadata(&copy)
+            .unwrap()
+            .file_type()
+            .is_file(),
+        "the planted link still stands"
+    );
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        std::fs::read(&stored).unwrap()
+    );
+    let turns = turns.lock().unwrap();
+    assert_eq!(named_copies(&turns[0].text), vec![copy]);
+    drop(turns);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_image_folder_replaced_by_a_symlink_gets_no_copy() {
+    let (turns, script) = first_turn_recorder();
+    let fixture = fixture(script).await;
+    let blob = fixture.hub.store().put_image(png(14)).await.unwrap();
+    let stored = fixture.hub.store().blob_path(&blob.hash).unwrap();
+    let folder = image_folder(&fixture, &fixture.thread_id);
+    let elsewhere = fixture.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &folder).unwrap();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, with_image("look", &blob.hash))
+        .await
+        .unwrap();
+    fixture.settled().await;
+
+    assert_eq!(
+        std::fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "Forge wrote through the planted folder link"
+    );
+    let turns = turns.lock().unwrap();
+    assert_eq!(
+        turns[0].text,
+        "look\n\n[The file path of image 1 isn't available.]"
+    );
+    assert_eq!(turns[0].images, vec![stored]);
+    drop(turns);
+}

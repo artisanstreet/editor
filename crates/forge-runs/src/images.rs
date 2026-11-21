@@ -3,12 +3,11 @@ use forge_engines::UserInput;
 use forge_store::{DataLock, Store, ThreadIdsError};
 use std::collections::HashSet;
 use std::io;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROOT: &str = "run-images";
-
-static PARTIAL: AtomicU64 = AtomicU64::new(0);
+const PARTIAL_SUFFIX: &str = ".partial";
 
 #[derive(Debug, thiserror::Error)]
 enum ImageCopyError {
@@ -22,6 +21,15 @@ enum ImageCopyError {
     },
     #[error("the stored image {} has no file name", path.display())]
     Unnamed { path: PathBuf },
+    #[error("create the image folder {} of thread {thread}", path.display())]
+    Folder {
+        thread: ThreadId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("the image folder {} of thread {thread} is not a plain folder", path.display())]
+    NotAFolder { thread: ThreadId, path: PathBuf },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -183,38 +191,51 @@ fn copy_one(thread: &ThreadId, dir: &Path, from: &Path) -> Result<PathBuf, Image
     let name = from.file_name().ok_or_else(|| ImageCopyError::Unnamed {
         path: from.to_path_buf(),
     })?;
-    let to = dir.join(name);
-    std::fs::create_dir_all(dir)
-        .and_then(|()| copy_pristine(from, &to))
-        .map_err(|source| ImageCopyError::Copy {
+    let folder_error = |source| ImageCopyError::Folder {
+        thread: thread.clone(),
+        path: dir.to_path_buf(),
+        source,
+    };
+    std::fs::create_dir_all(dir).map_err(folder_error)?;
+    if !std::fs::symlink_metadata(dir)
+        .map_err(folder_error)?
+        .file_type()
+        .is_dir()
+    {
+        return Err(ImageCopyError::NotAFolder {
             thread: thread.clone(),
-            from: from.to_path_buf(),
-            to: to.clone(),
-            source,
-        })?;
+            path: dir.to_path_buf(),
+        });
+    }
+    let to = dir.join(name);
+    copy_pristine(from, dir, &to).map_err(|source| ImageCopyError::Copy {
+        thread: thread.clone(),
+        from: from.to_path_buf(),
+        to: to.clone(),
+        source,
+    })?;
     Ok(to)
 }
 
-fn copy_pristine(from: &Path, to: &Path) -> io::Result<()> {
+fn copy_pristine(from: &Path, dir: &Path, to: &Path) -> io::Result<()> {
     let pristine = std::fs::read(from)?;
-    let intact = || std::fs::read(to).is_ok_and(|copy| copy == pristine);
+    let intact = || {
+        std::fs::symlink_metadata(to).is_ok_and(|copy| copy.file_type().is_file())
+            && std::fs::read(to).is_ok_and(|copy| copy == pristine)
+    };
     if intact() {
         return Ok(());
     }
-    let mut partial = to.as_os_str().to_os_string();
-    partial.push(format!(
-        ".{}-{}.partial",
-        std::process::id(),
-        PARTIAL.fetch_add(1, Ordering::Relaxed)
-    ));
-    let partial = PathBuf::from(partial);
-    match std::fs::write(&partial, &pristine).and_then(|()| std::fs::rename(&partial, to)) {
-        Ok(()) => Ok(()),
+    let mut partial = tempfile::Builder::new()
+        .prefix(".")
+        .suffix(PARTIAL_SUFFIX)
+        .tempfile_in(dir)?;
+    partial.write_all(&pristine)?;
+    match partial.persist(to) {
+        Ok(_) => Ok(()),
         Err(error) => {
-            if let Err(cleanup) = std::fs::remove_file(&partial) {
-                tracing::debug!(partial = %partial.display(), %cleanup, "remove the partial image copy");
-            }
-            if intact() { Ok(()) } else { Err(error) }
+            drop(error.file);
+            if intact() { Ok(()) } else { Err(error.error) }
         }
     }
 }
