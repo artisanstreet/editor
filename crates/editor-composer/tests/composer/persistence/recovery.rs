@@ -678,6 +678,15 @@ fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
     assert!(!lease.read(DraftSession::conflict));
 }
 
+fn wait_until_removed(lease: &DraftLease, path: &std::path::Path) {
+    let mut changed = lease.subscribe();
+    runtime().block_on(async {
+        while path.exists() {
+            changed.changed().await.unwrap();
+        }
+    });
+}
+
 fn kept_beside_a_record(device: &Device) {
     let spool = device.spool();
     spool
@@ -729,8 +738,13 @@ fn reopening_offers_a_draft_kept_beside_the_record_and_keeping_mine_removes_it()
         lease.read(|state| state.body().text.clone()),
         "kept in the record"
     );
-    assert!(!device.drafts().join("recovering-new.kept-1").exists());
-    assert!(device.spool().kept_beside(&device.host, "new").is_empty());
+    wait_until_removed(&lease, &device.drafts().join("recovering-new.kept-1"));
+    assert!(
+        device
+            .spool()
+            .kept_beside(&device.host, "new", |_| false)
+            .is_empty()
+    );
 }
 
 #[test]
@@ -746,12 +760,13 @@ fn loading_the_draft_kept_beside_replaces_the_record_and_keeps_it_until_forge_ha
         lease.read(|state| state.body().text.clone()),
         "kept beside the record"
     );
+    wait_until_removed(&lease, &device.drafts().join("recovering-new.json"));
     assert!(
         device.spool().take(&device.host, "new").unwrap().is_none(),
         "the version the user didn't pick is removed"
     );
     assert!(lease.keep_locally().unwrap());
-    let beside = device.spool().kept_beside(&device.host, "new");
+    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
     let [Ok(beside)] = &beside[..] else {
         panic!("expected the chosen draft to stay kept beside: {beside:?}");
     };
@@ -993,4 +1008,42 @@ fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismi
         dismissed,
         "the notice for a draft held after remounting isn't taken for the one dismissed before"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_next_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let device = Device::new();
+    kept_beside_a_record(&device);
+    let beside = device.drafts().join("recovering-new.kept-1");
+    let lease = device.reopen();
+    std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let failed = || {
+        rejected()
+            .iter()
+            .any(|rejected| rejected.spool == device.spool() && rejected.removal == Removal::Failed)
+    };
+    let mut changed = lease.subscribe();
+    lease.keep_local();
+    assert!(
+        !lease.read(DraftSession::conflict),
+        "the choice is made at once"
+    );
+    runtime().block_on(async {
+        while !failed() {
+            changed.changed().await.unwrap();
+        }
+    });
+    assert!(beside.exists());
+    std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(lease);
+
+    let lease = device.reopen();
+    assert!(
+        !lease.read(DraftSession::conflict),
+        "the draft the user chose against isn't offered again"
+    );
+    wait_until_removed(&lease, &beside);
 }

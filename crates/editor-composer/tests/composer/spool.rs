@@ -246,7 +246,7 @@ fn a_draft_that_did_not_recover_the_record_is_kept_beside_it_instead_of_over_it(
     let recovered = spool.take(&host, "new").unwrap().unwrap();
     assert_eq!(recovered.draft, kept("the newer draft"));
     assert!(matches!(&recovered.images[..], [Ok(bytes)] if bytes == b"newer image"));
-    let beside = spool.kept_beside(&host, "new");
+    let beside = spool.kept_beside(&host, "new", |_| false);
     let [Ok(beside)] = &beside[..] else {
         panic!("expected one draft kept beside the record: {beside:?}");
     };
@@ -295,7 +295,7 @@ fn a_draft_kept_beside_again_rewrites_its_own_slot_and_drops_images_it_no_longer
         slot
     );
 
-    let beside = spool.kept_beside(&host, "new");
+    let beside = spool.kept_beside(&host, "new", |_| false);
     let [Ok(beside)] = &beside[..] else {
         panic!("expected one draft kept beside the record: {beside:?}");
     };
@@ -306,5 +306,5 @@ fn a_draft_kept_beside_again_rewrites_its_own_slot_and_drops_images_it_no_longer
 
     spool.forget(&host, "new", slot).unwrap();
     assert!(!folder.exists());
-    assert!(spool.kept_beside(&host, "new").is_empty());
+    assert!(spool.kept_beside(&host, "new", |_| false).is_empty());
 }

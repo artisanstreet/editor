@@ -260,6 +260,14 @@ impl DraftSpool {
         Ok(slot)
     }
 
+    pub(crate) fn slot_path(&self, host: &HostId, scope: &str, slot: Slot) -> PathBuf {
+        let stem = stem(host, scope);
+        match slot {
+            Slot::Record => self.dir.join(format!("{stem}.json")),
+            Slot::Beside(_) => self.folder(&stem, slot),
+        }
+    }
+
     fn folder(&self, stem: &str, slot: Slot) -> PathBuf {
         match slot {
             Slot::Record => self.dir.clone(),
@@ -350,6 +358,7 @@ impl DraftSpool {
         &self,
         host: &HostId,
         scope: &str,
+        skip: impl Fn(Slot) -> bool,
     ) -> Vec<Result<BesideDraft, KeptBesideError>> {
         let stem = stem(host, scope);
         let entries = match std::fs::read_dir(&self.dir) {
@@ -374,6 +383,7 @@ impl DraftSpool {
                         .and_then(|name| name.strip_prefix(&prefix))
                         .and_then(|number| number.parse::<u64>().ok());
                     if let Some(number) = number
+                        && !skip(Slot::Beside(BesideSlot(number)))
                         && entry.path().is_dir()
                     {
                         slots.push(BesideSlot(number));
