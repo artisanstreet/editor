@@ -67,8 +67,8 @@ pub struct Editor {
     bridge: Arc<A11yBridge>,
     published: Rc<RefCell<Published>>,
     engine: ReplayingEngine,
-    forges: Vec<ForgeServer>,
-    stopped: Vec<crate::net::ClosingListener>,
+    forges: Vec<Hosted>,
+    stopped: Vec<(crate::net::ClosingListener, Reservation)>,
     directory: TempDir,
 }
 
@@ -225,8 +225,41 @@ fn pointer(at: Point, buttons: u8) -> PointerEvent {
     }
 }
 
+#[cfg(unix)]
+type Reservation = crate::net::PortReservation;
+#[cfg(not(unix))]
+type Reservation = ();
+
+#[cfg(unix)]
+fn reserve() -> (Reservation, std::net::SocketAddr) {
+    let reservation = crate::net::PortReservation::loopback();
+    let address = reservation.address();
+    (reservation, address)
+}
+
+#[cfg(not(unix))]
+fn reserve() -> (Reservation, std::net::SocketAddr) {
+    (
+        (),
+        std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)),
+    )
+}
+
+struct Hosted {
+    server: ForgeServer,
+    reservation: Reservation,
+}
+
+impl std::ops::Deref for Hosted {
+    type Target = ForgeServer;
+
+    fn deref(&self) -> &ForgeServer {
+        &self.server
+    }
+}
+
 struct Served {
-    forges: Vec<ForgeServer>,
+    forges: Vec<Hosted>,
     invites: Vec<ForgeInvite>,
     engine: ReplayingEngine,
 }
@@ -244,7 +277,7 @@ fn serve(scenario: Scenario, root: &Path, work: &Path) -> Served {
             scenario.engine,
             scenario.case,
         ));
-        let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let (reservation, loopback) = reserve();
         let forge = runtime
             .block_on(ForgeServer::start(forge_data, loopback))
             .unwrap_or_else(|error| panic!("start the Forge {}: {error}", seed.name));
@@ -275,7 +308,10 @@ fn serve(scenario: Scenario, root: &Path, work: &Path) -> Served {
             name: seed.name,
             pairing,
         });
-        forges.push(forge);
+        forges.push(Hosted {
+            server: forge,
+            reservation,
+        });
     }
     Served {
         forges,
@@ -346,7 +382,7 @@ struct Prepared {
     directory: TempDir,
     files: EditorFiles,
     screen: Screen,
-    forges: Vec<ForgeServer>,
+    forges: Vec<Hosted>,
     engine: ReplayingEngine,
     hosts: usize,
 }
@@ -405,7 +441,11 @@ impl Scenario {
         super::uia::NativeEditor::open(
             move || Prepared::core(files, screen),
             (WIDTH, HEIGHT),
-            (directory, forges, engine),
+            (
+                directory,
+                forges.into_iter().map(|hosted| hosted.server).collect(),
+                engine,
+            ),
         )
     }
 }
@@ -480,13 +520,16 @@ impl Editor {
     }
 
     pub fn stop_forge(&mut self) {
-        let forge = self.forges.remove(0);
-        let address = forge.address();
+        let Hosted {
+            server,
+            reservation,
+        } = self.forges.remove(0);
+        let address = server.address();
         editor_aqua::core::runtime::runtime()
-            .block_on(forge.shutdown())
+            .block_on(server.shutdown())
             .expect("stop the scenario's Forge");
         self.stopped
-            .push(crate::net::ClosingListener::bind_at(address));
+            .push((crate::net::ClosingListener::bind_at(address), reservation));
     }
 
     fn pump(&mut self) {
