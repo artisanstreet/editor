@@ -93,6 +93,7 @@ pub struct AxisOption {
 pub enum ModelRow {
     Engine(EngineId),
     Gate(EngineId),
+    Gap(EngineId),
     Group {
         engine: EngineId,
         name: String,
@@ -111,6 +112,7 @@ impl ModelRow {
         match self {
             Self::Engine(engine)
             | Self::Gate(engine)
+            | Self::Gap(engine)
             | Self::Group { engine, .. }
             | Self::Model { engine, .. } => *engine,
         }
@@ -463,6 +465,7 @@ impl PickerState {
                     } if *row_engine == engine => Some(id.clone()),
                     ModelRow::Engine(_)
                     | ModelRow::Gate(_)
+                    | ModelRow::Gap(_)
                     | ModelRow::Group { .. }
                     | ModelRow::Model { .. } => None,
                 })
@@ -495,11 +498,7 @@ impl PickerState {
                 .collect();
         if models.iter().all(|(_, model)| model.group.is_none()) {
             rows.push(ModelRow::Engine(engine));
-            rows.extend(models.into_iter().map(|(index, model)| ModelRow::Model {
-                engine,
-                id: model.id.clone(),
-                index,
-            }));
+            rows.extend(sectioned(engine, &models));
             return;
         }
         let mut groups: Vec<(&str, Vec<(usize, &Model)>)> = Vec::new();
@@ -537,3 +536,25 @@ impl PickerState {
         }
     }
 }
+
+fn sectioned(engine: EngineId, models: &[(usize, &Model)]) -> Vec<ModelRow> {
+    let mut rows = Vec::with_capacity(models.len());
+    let mut section = None;
+    for (index, model) in models {
+        let here = model.section.as_deref();
+        if section.is_some_and(|previous| previous != here) {
+            rows.push(ModelRow::Gap(engine));
+        }
+        section = Some(here);
+        rows.push(ModelRow::Model {
+            engine,
+            id: model.id.clone(),
+            index: *index,
+        });
+    }
+    rows
+}
+
+#[cfg(test)]
+#[path = "../../tests/composer/picker.rs"]
+mod tests;

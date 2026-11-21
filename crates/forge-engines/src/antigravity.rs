@@ -847,7 +847,7 @@ fn models(opened: &Opened) -> crate::catalog::Listing {
         return crate::catalog::Listing::default();
     };
     let current = model.current_value.as_deref();
-    let models = model
+    let mut models: Vec<artisan_api::Model> = model
         .choices()
         .into_iter()
         .map(|choice| {
@@ -867,21 +867,46 @@ fn models(opened: &Opened) -> crate::catalog::Listing {
                 None
             }
             .filter(|effort| efforts.contains(effort));
+            let id = &choice.value;
             artisan_api::Model {
                 name: choice.name.clone().unwrap_or_else(|| choice.value.clone()),
-                id: choice.value,
+                id: choice.value.clone(),
                 description: choice.description,
                 efforts,
                 default_effort,
                 supports_images: true,
+                lab: lab(id).map(str::to_owned),
+                section: Some(section(id).to_owned()),
                 ..artisan_api::Model::default()
             }
         })
         .collect();
+    models.sort_by_key(|model| model.section.as_deref() != Some(GEMINI_SECTION));
     crate::catalog::Listing {
         models,
         default: model.current_value.clone(),
         commands: None,
+    }
+}
+
+const GEMINI_SECTION: &str = "Gemini";
+const OTHER_SECTION: &str = "Other";
+
+fn lab(model: &str) -> Option<&'static str> {
+    [
+        ("gemini-", "Google"),
+        ("claude-", "Anthropic"),
+        ("gpt-", "OpenAI"),
+    ]
+    .into_iter()
+    .find_map(|(prefix, lab)| model.starts_with(prefix).then_some(lab))
+}
+
+fn section(model: &str) -> &'static str {
+    if model.starts_with("gemini-") {
+        GEMINI_SECTION
+    } else {
+        OTHER_SECTION
     }
 }
 
