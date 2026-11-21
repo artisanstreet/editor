@@ -350,10 +350,11 @@ impl ComposerOwner {
                 effects.push(ComposerEffect::RetryThreadSettings);
             }
             ComposerAction::DismissNotice => {
-                composer.refused = None;
-                composer.notice = None;
-                if let Some(attachments) = &mut composer.attachments {
-                    attachments.notice = None;
+                if composer.refused.take().is_none() {
+                    composer.notice = None;
+                    if let Some(attachments) = &mut composer.attachments {
+                        attachments.notice = None;
+                    }
                 }
             }
             ComposerAction::CloseNote => {

@@ -2608,6 +2608,17 @@ fn a_refused_send_clears_once_its_cause_is_fixed_and_leaves_the_recovery_notice_
             );
         }
 
+        owner.dispatch_with_change(&mut core, ComposerAction::DismissNotice, None);
+        {
+            let composer = owner.controller.borrow();
+            assert_eq!(composer.refused, None, "dismissing hides the refusal");
+            assert_eq!(
+                composer.notice.as_ref(),
+                Some(&recovery),
+                "dismissing the refusal shows the notice underneath instead of deleting it"
+            );
+        }
+
         {
             let mut composer = owner.controller.borrow_mut();
             composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
