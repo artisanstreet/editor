@@ -152,6 +152,36 @@ async fn engines_get_pristine_bytes_and_overwrite_only_thread_copies_that_outliv
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_steer_carrying_the_threads_first_image_names_a_path_the_engine_may_read() {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let fixture = fixture(recording(Arc::clone(&seen))).await;
+    let blob = fixture.hub.store().put_image(png(11)).await.unwrap();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("start"))
+        .await
+        .unwrap();
+    live(&fixture).await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, with_image("now this", &blob.hash))
+        .await
+        .unwrap();
+    fixture.settled().await;
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.copies.len(), 1, "the steer named its image");
+    let copy = &seen.copies[0];
+    assert!(
+        seen.readable.iter().any(|dir| copy.starts_with(dir)),
+        "the engine may not read {} from {:?}",
+        copy.display(),
+        seen.readable
+    );
+    drop(seen);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_resent_image_restores_the_copy_the_engine_overwrote() {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let fixture = fixture(recording(Arc::clone(&seen))).await;

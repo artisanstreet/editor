@@ -27,6 +27,13 @@ pub enum PrepareError {
         #[source]
         source: Box<crate::scratch::ThreadFolderError>,
     },
+    #[error("create the image folder {} of thread {thread}", path.display())]
+    ImageFolder {
+        thread: ThreadId,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("read what {engine} gets at launch")]
     Customisation {
         engine: EngineId,
@@ -1003,6 +1010,18 @@ pub(crate) struct Prepared {
     pub(crate) gateway: crate::gateway::GatewayPass,
 }
 
+async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<PathBuf, PrepareError> {
+    let images = crate::images::thread_folder(hub.data_dir(), thread);
+    tokio::fs::create_dir_all(&images)
+        .await
+        .map_err(|source| PrepareError::ImageFolder {
+            thread: thread.clone(),
+            path: images.clone(),
+            source,
+        })?;
+    Ok(images)
+}
+
 pub(crate) async fn prepare(
     hub: &Hub,
     thread: &artisan_api::Thread,
@@ -1055,13 +1074,7 @@ pub(crate) async fn prepare(
     for (name, url) in gateway.servers() {
         forge_engines::with_gateway_mcp(engine, &mut launch, name, url);
     }
-    let images = crate::images::thread_folder(hub.data_dir(), &thread.id);
-    if tokio::fs::metadata(&images)
-        .await
-        .is_ok_and(|folder| folder.is_dir())
-    {
-        launch.readable.push(images);
-    }
+    launch.readable.push(image_folder(hub, &thread.id).await?);
     let mut config = thread.config.clone();
     match session.transport_option() {
         Some(option) => {
