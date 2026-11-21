@@ -57,6 +57,7 @@ struct Inner {
     scope: String,
     client: ForgeClient,
     spool: DraftSpool,
+    rejections: Rejections,
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
     cancelled: CancellationToken,
@@ -219,6 +220,7 @@ impl Drop for DraftLease {
 pub struct DraftSessions {
     sessions: HashMap<(HostId, HostInstance, String), DraftHandle>,
     spool: DraftSpool,
+    rejections: Rejections,
     held: Vec<Unkept>,
     generation: u64,
 }
@@ -235,6 +237,7 @@ impl std::fmt::Debug for DraftSessions {
 
 pub struct HeldDrafts {
     spool: DraftSpool,
+    rejections: Rejections,
     held: Vec<Unkept>,
     generation: u64,
 }
@@ -265,24 +268,34 @@ pub enum ShutdownOutcome {
 }
 
 struct Rejected {
-    spool: DraftSpool,
     host: HostId,
     scope: String,
     slot: Slot,
 }
 
 impl Rejected {
-    fn holds(&self, spool: &DraftSpool, host: &HostId, scope: &str) -> bool {
-        self.spool == *spool && self.host == *host && self.scope == scope
+    fn holds(&self, host: &HostId, scope: &str) -> bool {
+        self.host == *host && self.scope == scope
     }
 }
 
-fn rejected() -> MutexGuard<'static, Vec<Rejected>> {
-    static REJECTED: OnceLock<Mutex<Vec<Rejected>>> = OnceLock::new();
-    REJECTED
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+#[derive(Clone, Default)]
+struct Rejections(Arc<Mutex<Vec<Rejected>>>);
+
+impl Rejections {
+    fn lock(&self) -> MutexGuard<'_, Vec<Rejected>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn adopt(&mut self, handed: Self) {
+        if Arc::ptr_eq(&self.0, &handed.0) {
+            return;
+        }
+        let mut adopted = handed.lock();
+        adopted.append(&mut self.lock());
+        drop(adopted);
+        *self = handed;
+    }
 }
 
 fn pending_shutdown() -> MutexGuard<'static, Vec<DraftHandle>> {
@@ -375,6 +388,7 @@ impl DraftSessions {
         Self {
             sessions: HashMap::new(),
             spool,
+            rejections: Rejections::default(),
             held: Vec::new(),
             generation: 0,
         }
@@ -383,6 +397,7 @@ impl DraftSessions {
     pub fn hand_off_held(&mut self) -> HeldDrafts {
         HeldDrafts {
             spool: self.spool.clone(),
+            rejections: self.rejections.clone(),
             held: std::mem::take(&mut self.held),
             generation: self.generation,
         }
@@ -398,6 +413,7 @@ impl DraftSessions {
             };
         if handed.spool == self.spool {
             self.held.append(&mut handed.held);
+            self.rejections.adopt(handed.rejections.clone());
         }
     }
 
@@ -520,6 +536,7 @@ impl DraftSessions {
             scope,
             client,
             spool: self.spool.clone(),
+            rejections: self.rejections.clone(),
             shared: Mutex::new(Shared {
                 state,
                 viewers: Vec::new(),
@@ -572,9 +589,10 @@ impl DraftSessions {
     }
 
     fn rejected_slots(&self, host: &HostId, scope: &str) -> Vec<Slot> {
-        rejected()
+        self.rejections
+            .lock()
             .iter()
-            .filter(|rejected| rejected.holds(&self.spool, host, scope))
+            .filter(|rejected| rejected.holds(host, scope))
             .map(|rejected| rejected.slot)
             .collect()
     }
@@ -1062,8 +1080,7 @@ impl DraftHandle {
 
     fn forget_slot(&self, slot: Slot, which: &'static str) {
         let inner = &self.0;
-        rejected().push(Rejected {
-            spool: inner.spool.clone(),
+        inner.rejections.lock().push(Rejected {
             host: inner.host.clone(),
             scope: inner.scope.clone(),
             slot,
@@ -1091,10 +1108,11 @@ impl DraftHandle {
                     "couldn't set aside a draft the user chose against; it is offered again when this draft next opens"
                 ),
             }
-            let mut rejected = rejected();
-            if let Some(index) = rejected.iter().position(|rejected| {
-                rejected.slot == slot && rejected.holds(&inner.spool, &inner.host, &inner.scope)
-            }) {
+            let mut rejected = inner.rejections.lock();
+            if let Some(index) = rejected
+                .iter()
+                .position(|rejected| rejected.slot == slot && rejected.holds(&inner.host, &inner.scope))
+            {
                 rejected.remove(index);
             }
             drop(rejected);

@@ -448,6 +448,7 @@ fn saved_by_forge(device: &Device) -> DraftHandle {
         scope: "new".into(),
         client: device.client.clone(),
         spool: device.spool(),
+        rejections: Rejections::default(),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
@@ -1016,9 +1017,9 @@ fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismi
     );
 }
 
-fn settled(device: &Device) -> impl Fn() -> bool {
-    let spool = device.spool();
-    move || !rejected().iter().any(|rejected| rejected.spool == spool)
+fn settled(lease: &DraftLease) -> impl Fn() -> bool {
+    let rejections = lease.0.rejections.clone();
+    move || rejections.lock().is_empty()
 }
 
 #[cfg(unix)]
@@ -1037,7 +1038,7 @@ fn a_draft_the_user_chose_against_that_could_not_be_removed_is_removed_on_the_ne
         !lease.read(DraftSession::conflict),
         "the choice is made at once"
     );
-    wait_until(&lease, settled(&device));
+    wait_until(&lease, settled(&lease));
     assert!(!beside.exists());
     assert!(tombstone.exists(), "the removal failed part way");
     std::fs::set_permissions(&tombstone, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1064,7 +1065,7 @@ fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
     std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o555)).unwrap();
     let lease = device.reopen();
     lease.use_remote();
-    wait_until(&lease, settled(&device));
+    wait_until(&lease, settled(&lease));
     drop(lease);
     device
         .spool()
@@ -1091,5 +1092,41 @@ fn a_draft_saved_where_a_half_removed_one_was_survives_the_next_open() {
     assert!(
         device.drafts().join("recovering-new.json").exists(),
         "the new draft stays on this device"
+    );
+}
+
+#[test]
+fn a_choice_still_being_carried_out_is_honoured_by_the_drafts_that_take_over() {
+    let device = Device::new();
+    kept_beside_a_record(&device);
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    sessions.rejections.lock().push(Rejected {
+        host: device.host.clone(),
+        scope: "new".into(),
+        slot: Slot::Record,
+    });
+
+    let mut remounted = DraftSessions::with_spool(device.spool());
+    remounted.take_held(sessions.hand_off_held());
+    let lease = remounted
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    assert_eq!(
+        lease.read(|state| state.body().text.clone()),
+        "kept beside the record",
+        "the draft being discarded isn't brought back"
+    );
+    assert!(!lease.read(DraftSession::conflict));
+    drop(lease);
+
+    assert!(
+        device.reopen().read(DraftSession::conflict),
+        "drafts that didn't take over know nothing of the choice"
     );
 }
