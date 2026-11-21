@@ -208,7 +208,7 @@ fn spawn_now(
         EngineId::Claude if !turn.launch.gateway_mcp.is_empty() => Some(
             crate::customise::GatewayConfig::for_claude(&turn.launch.gateway_mcp),
         ),
-        EngineId::Claude | EngineId::Codex | EngineId::OpenCode => None,
+        EngineId::Claude | EngineId::Codex | EngineId::OpenCode | EngineId::Antigravity => None,
     };
     let launch_args = gateway.as_ref().map_or_else(
         || turn.launch.args.clone(),

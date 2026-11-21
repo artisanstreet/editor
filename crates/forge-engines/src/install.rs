@@ -632,6 +632,16 @@ pub(crate) async fn latest_version(
                 })?
                 .to_owned()
         }
+        Feed::Antigravity { platform, .. } => {
+            let url = format!("{ANTIGRAVITY_UPDATER}/manifests/{platform}.json");
+            get_json(http, &url)
+                .await
+                .map_err(LatestVersionError::Get)?
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| LatestVersionError::NoVersion { url: url.clone() })?
+                .to_owned()
+        }
         Feed::Release { repository, .. } => {
             let url =
                 format!("https://github.com/{repository}/releases/latest/download/manifest.json");
@@ -661,6 +671,18 @@ pub(crate) async fn published_versions(
             package, dist_tag, ..
         } => (package, dist_tag),
         Feed::Release { repository, .. } => return release_versions(http, repository).await,
+        Feed::Antigravity { .. } => {
+            let releases = antigravity_releases(http).await?;
+            let mut versions: Vec<String> = releases
+                .into_iter()
+                .map(|release| release.version)
+                .filter(|version| check_version(version).is_ok())
+                .collect();
+            versions.sort_by(|left, right| compare_versions(right, left));
+            versions.dedup();
+            versions.truncate(MAX_LISTED_VERSIONS);
+            return Ok(versions);
+        }
     };
     let url = format!("{NPM_REGISTRY}/{}", npm_name(package));
     let text = http
@@ -713,6 +735,83 @@ fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
 }
 
 const RELEASE_TAG: &str = "artisan-v";
+const ANTIGRAVITY_UPDATER: &str =
+    "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app";
+const ANTIGRAVITY_BUCKET: &str =
+    "https://storage.googleapis.com/antigravity-public/antigravity-cli";
+
+#[derive(serde::Deserialize)]
+struct AntigravityRelease {
+    version: String,
+    execution_id: String,
+}
+
+async fn antigravity_releases(http: &reqwest::Client) -> Result<Vec<AntigravityRelease>, GetError> {
+    let url = format!("{ANTIGRAVITY_UPDATER}/releases");
+    let listing = get_json(http, &url).await?;
+    serde_json::from_value(listing).map_err(|source| GetError::Json { url, source })
+}
+
+async fn resolve_antigravity(
+    http: &reqwest::Client,
+    folder: &'static str,
+    version: &str,
+) -> Result<(String, Expected), ResolveError> {
+    let failed = |source| ResolveError::Get {
+        version: version.to_owned(),
+        source,
+    };
+    let release = antigravity_releases(http)
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .find(|release| release.version == version)
+        .ok_or_else(|| ResolveError::Unlisted {
+            version: version.to_owned(),
+        })?;
+    if !release
+        .execution_id
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+    {
+        return Err(missing(version, folder, "usable build id"));
+    }
+    let build = format!(
+        "{ANTIGRAVITY_BUCKET}/{version}-{}/{folder}/",
+        release.execution_id
+    );
+    let url = format!("{build}manifest.json");
+    let manifest = get_manifest(http, &url, version).await?;
+    if manifest.get("version").and_then(serde_json::Value::as_str) != Some(version) {
+        return Err(ResolveError::OtherVersion {
+            url,
+            version: version.to_owned(),
+        });
+    }
+    let download = manifest
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| missing(version, folder, "url"))?;
+    let file = download
+        .strip_prefix(&build)
+        .filter(|file| {
+            !file.is_empty()
+                && file
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".-_".contains(&byte))
+        })
+        .ok_or_else(|| ResolveError::OutsideBucket {
+            version: version.to_owned(),
+            url: download.to_owned(),
+        })?;
+    let digest = manifest
+        .get("sha512")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|hex| hex::decode(hex).ok())
+        .filter(|digest| digest.len() == 64)
+        .ok_or_else(|| missing(version, folder, "sha512"))?;
+    Ok((format!("{build}{file}"), Expected::Sha512(digest)))
+}
 
 fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<String> {
     let on_channel = |version: &str| match version.split_once('-') {
@@ -764,6 +863,10 @@ pub enum ResolveError {
         platform: &'static str,
         field: &'static str,
     },
+    #[error("Antigravity's release list has no {version}")]
+    Unlisted { version: String },
+    #[error("Antigravity {version} points outside Google's release bucket: {url}")]
+    OutsideBucket { version: String, url: String },
     #[error("{package} {version} points outside the registry: {tarball}")]
     OutsideRegistry {
         package: &'static str,
@@ -881,6 +984,7 @@ pub(crate) async fn resolve(
             repository,
             platform,
         } => resolve_release(http, repository, platform, version).await?,
+        Feed::Antigravity { folder, .. } => resolve_antigravity(http, folder, version).await?,
     };
     Ok(Resolved {
         version: version.to_owned(),

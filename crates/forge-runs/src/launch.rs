@@ -58,6 +58,9 @@ pub(crate) enum LaunchSession {
     OpenCode {
         resume: Option<SessionId>,
     },
+    Antigravity {
+        resume: Option<SessionId>,
+    },
 }
 
 pub(crate) enum Branch {
@@ -84,6 +87,7 @@ impl LaunchSession {
             }
             EngineId::Codex => Self::Codex { resume: session },
             EngineId::OpenCode => Self::OpenCode { resume: session },
+            EngineId::Antigravity => Self::Antigravity { resume: session },
         })
     }
 
@@ -119,21 +123,23 @@ impl LaunchSession {
             (EngineId::Claude, _) => Self::fresh(hub, EngineId::Claude).await,
             (EngineId::Codex, session) => Ok(Self::Codex { resume: session }),
             (EngineId::OpenCode, session) => Ok(Self::OpenCode { resume: session }),
+            (EngineId::Antigravity, session) => Ok(Self::Antigravity { resume: session }),
         }
     }
 
     pub(crate) const fn resume(&self) -> Option<&SessionId> {
         match self {
-            Self::Claude { resume, .. } | Self::Codex { resume } | Self::OpenCode { resume } => {
-                resume.as_ref()
-            }
+            Self::Claude { resume, .. }
+            | Self::Codex { resume }
+            | Self::OpenCode { resume }
+            | Self::Antigravity { resume } => resume.as_ref(),
         }
     }
 
     pub(crate) const fn transport_option(&self) -> Option<&'static str> {
         match self {
             Self::Claude { transport, .. } => transport.option(),
-            Self::Codex { .. } | Self::OpenCode { .. } => None,
+            Self::Codex { .. } | Self::OpenCode { .. } | Self::Antigravity { .. } => None,
         }
     }
 

@@ -41,6 +41,7 @@ async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<Usag
         EngineId::OpenCode => read_opencode(binary, home)
             .await
             .map_err(ReadUsageError::OpenCode),
+        EngineId::Antigravity => return None,
     };
     match read {
         Ok((windows, spend)) if !windows.is_empty() || spend.is_some() => Some(UsageLimits {

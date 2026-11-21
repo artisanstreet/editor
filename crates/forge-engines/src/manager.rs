@@ -820,6 +820,7 @@ impl Engines {
 fn integrity(engine: EngineId) -> Option<Integrity> {
     Some(match host_spec(engine).artifact?.feed {
         Feed::Claude { .. } => Integrity::VendorSha256,
+        Feed::Antigravity { .. } => Integrity::VendorSha512,
         Feed::Npm { .. } => Integrity::NpmSha512,
         Feed::Release { .. } => Integrity::ArtisanSha256,
     })
