@@ -505,6 +505,7 @@ async fn a_run_whose_image_cannot_be_copied_starts_with_its_image_and_says_the_p
     drop(turns);
 }
 
+#[cfg(unix)]
 fn first_turn_recorder() -> (Arc<Mutex<Vec<forge_engines::UserInput>>>, Script) {
     let turns = Arc::new(Mutex::new(Vec::<forge_engines::UserInput>::new()));
     let recorded = Arc::clone(&turns);
@@ -693,6 +694,7 @@ async fn a_linked_image_cache_is_never_swept_written_or_granted() {
     assert_eq!(text, "look\n\n[The file path of image 1 isn't available.]");
 }
 
+#[cfg(unix)]
 fn walkdir(base: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![base.to_path_buf()];
