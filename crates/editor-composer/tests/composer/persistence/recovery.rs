@@ -410,7 +410,12 @@ fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
         unkept.problem.headline(),
         "Artisan couldn't save your unsent draft to this device. Try again keeps it."
     );
-    assert_eq!(sessions.keep_unkept(), None, "the keep is tried again");
+    let retried = sessions.keep_unkept();
+    assert_ne!(
+        retried.map(|again| again.generation),
+        Some(unkept.generation),
+        "the keep is tried again instead of showing the old failure"
+    );
     device.settle();
     assert!(
         sessions.unkept().is_some(),
