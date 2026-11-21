@@ -1,5 +1,6 @@
 use super::attachment::{PendingUpload, ReadImageError, UploadImageError};
 use super::draft_body::{DraftBody, EMPTY_BODY, RemoteBody};
+use super::spool::BesideSlot;
 use artisan_api::{
     BlobHash, CreateThread, DraftRevision, DraftSnapshot, DraftWriteResult, ErrorCode, Failure,
     ItemId, ResourceFailure, SendMessage, ThreadId,
@@ -148,6 +149,8 @@ impl DraftFailure {
 }
 
 const CONFLICT: &str = "This draft changed on another client. Choose which version to keep.";
+const RIVAL: &str =
+    "Another version of this draft was kept on this device. Choose which version to keep.";
 const REMOVED: &str = "This Forge pairing was removed.";
 
 #[derive(Debug)]
@@ -283,6 +286,14 @@ pub(crate) enum Unrecovered {
     Left(PathBuf),
 }
 
+#[derive(Debug)]
+struct Rival {
+    slot: BesideSlot,
+    body: DraftBody,
+    lost: Vec<KeptLostImage>,
+    images: Vec<PendingUpload>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Planned {
     Load,
@@ -342,6 +353,7 @@ struct Draft {
     request: Request,
     halt: Halt,
     send: Send,
+    rivals: Vec<Rival>,
 }
 
 #[derive(Debug)]
@@ -423,8 +435,8 @@ fn keep_parked(earlier: &DraftBody, body: DraftBody) -> DraftBody {
 }
 
 impl Draft {
-    const fn halted(&self) -> bool {
-        !matches!(self.halt, Halt::Clear)
+    fn halted(&self) -> bool {
+        !matches!(self.halt, Halt::Clear) || !self.rivals.is_empty()
     }
 
     fn outgoing(&self) -> Option<&Outgoing> {
@@ -637,6 +649,12 @@ impl Draft {
             return None;
         }
         let loaded = matches!(self.remote, Remote::Loaded(_));
+        if !self.rivals.is_empty() {
+            return match &self.halt {
+                Halt::Clear if !loaded => Some(Planned::Load),
+                Halt::Clear | Halt::Failed(_) | Halt::Conflict { .. } => None,
+            };
+        }
         match &self.halt {
             Halt::Failed(_) | Halt::Conflict { failed: Some(_) } => None,
             Halt::Conflict { failed: None } => {
@@ -690,6 +708,7 @@ impl DraftSession {
                 request: Request::Idle,
                 halt: Halt::Clear,
                 send: Send::Idle,
+                rivals: Vec::new(),
             })),
         }
     }
@@ -760,8 +779,9 @@ impl DraftSession {
     }
 
     pub fn conflict(&self) -> bool {
-        self.draft()
-            .is_some_and(|draft| matches!(draft.halt, Halt::Conflict { .. }))
+        self.draft().is_some_and(|draft| {
+            !draft.rivals.is_empty() || matches!(draft.halt, Halt::Conflict { .. })
+        })
     }
 
     pub fn halted(&self) -> bool {
@@ -771,6 +791,9 @@ impl DraftSession {
     pub fn error(&self) -> Option<editor_core::Problem> {
         match &self.state {
             State::Removed => Some(editor_core::Problem::new(REMOVED)),
+            State::Open(draft) if !draft.rivals.is_empty() => {
+                Some(editor_core::Problem::new(RIVAL))
+            }
             State::Open(draft) => match &draft.halt {
                 Halt::Clear => draft
                     .adopting
@@ -863,6 +886,31 @@ impl DraftSession {
         for image in images {
             draft.adopt(image);
         }
+    }
+
+    pub(crate) fn offer_rival(
+        &mut self,
+        slot: BesideSlot,
+        recovery: KeptDraft,
+        images: Vec<PendingUpload>,
+        damaged: Vec<KeptLostImage>,
+    ) {
+        let State::Open(draft) = &mut self.state else {
+            unreachable!(
+                "invariant: draft {} is offered drafts kept beside it as it opens, before it can be removed",
+                self.scope
+            );
+        };
+        let body = match recovery.post {
+            Some(post) => fold_back(&post.sent, recovery.body),
+            None => recovery.body,
+        };
+        draft.rivals.push(Rival {
+            slot,
+            body,
+            lost: recovery.lost.into_iter().chain(damaged).collect(),
+            images,
+        });
     }
 
     pub(crate) fn kept(&self) -> KeptDraft {
@@ -1073,8 +1121,11 @@ impl DraftSession {
         }
     }
 
-    pub fn keep_local(&mut self) {
+    pub fn keep_local(&mut self) -> Option<BesideSlot> {
         if let State::Open(draft) = &mut self.state {
+            if !draft.rivals.is_empty() {
+                return Some(draft.rivals.remove(0).slot);
+            }
             draft.halt = match std::mem::replace(&mut draft.halt, Halt::Clear) {
                 Halt::Conflict {
                     failed: Some(failure),
@@ -1082,12 +1133,31 @@ impl DraftSession {
                 Halt::Clear | Halt::Failed(_) | Halt::Conflict { failed: None } => Halt::Clear,
             };
         }
+        None
     }
 
-    pub fn use_remote(&mut self) {
+    pub fn use_remote(&mut self) -> Option<BesideSlot> {
         let State::Open(draft) = &mut self.state else {
-            return;
+            return None;
         };
+        if !draft.rivals.is_empty() {
+            let rival = draft.rivals.remove(0);
+            draft.body = rival.body;
+            draft.edits.edit();
+            draft.adopting.clear();
+            draft.lost.clear();
+            if draft.outgoing().is_some() {
+                draft.send = Send::Idle;
+            }
+            for lost in rival.lost {
+                draft.lose(lost.name, lost.reason);
+            }
+            for image in rival.images {
+                draft.adopt(image);
+            }
+            self.replaced();
+            return Some(rival.slot);
+        }
         draft.body = draft
             .snapshot()
             .map_or_else(DraftBody::default, |snapshot| snapshot.body.shown());
@@ -1098,6 +1168,7 @@ impl DraftSession {
             draft.send = Send::Idle;
         }
         self.replaced();
+        None
     }
 
     pub fn remove(&mut self) {

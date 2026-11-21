@@ -4,7 +4,10 @@ use super::draft_session::{
     AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptDraft, KeptLostImage, LostKey,
     Operation, PostMessageError, SAVE_DELAY, Submission, Unrecovered,
 };
-use super::spool::{DraftSpool, Holder, KeepSpooledDraftError, Placed, TakeSpooledDraftError};
+use super::spool::{
+    BesideSlot, DraftSpool, Holder, KeepSpooledDraftError, Slot, SpooledDraft,
+    TakeSpooledDraftError,
+};
 use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use std::{
@@ -27,9 +30,18 @@ pub enum SessionEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kept {
     Nothing,
-    Recovered,
-    Written,
-    Unforgotten,
+    Recovered(Slot),
+    Written(Slot),
+    Unforgotten(Slot),
+}
+
+impl Kept {
+    const fn slot(self) -> Option<Slot> {
+        match self {
+            Self::Nothing => None,
+            Self::Recovered(slot) | Self::Written(slot) | Self::Unforgotten(slot) => Some(slot),
+        }
+    }
 }
 
 struct Shared {
@@ -66,10 +78,7 @@ impl Keeping {
             scope: state.scope().to_owned(),
             draft: state.kept(),
             images: state.unacknowledged_images(),
-            holder: match shared.kept {
-                Kept::Nothing => Holder::Newcomer,
-                Kept::Recovered | Kept::Written | Kept::Unforgotten => Holder::Owner,
-            },
+            holder: shared.kept.slot().map_or(Holder::Newcomer, Holder::Owner),
         })
     }
 }
@@ -402,6 +411,7 @@ impl DraftSessions {
             return Err(DraftsFull { host, scope });
         }
         let mut state = DraftSession::new(scope.clone());
+        let mut beside = self.kept_beside(&host, &scope).into_iter();
         let recovered = match self
             .take_back(&host, &scope)
             .and_then(|held| held.hand_over())
@@ -416,8 +426,33 @@ impl DraftSessions {
                 state.recover(draft, images, Vec::new());
                 kept
             }
-            None => self.recover_spooled(&host, &scope, &mut state),
+            None => match self.recover_spooled(&host, &scope, &mut state) {
+                Kept::Nothing => beside.next().map_or(Kept::Nothing, |(slot, spooled)| {
+                    let (draft, images, damaged) = unspool(&host, &scope, spooled);
+                    tracing::info!(
+                        host = %host,
+                        %scope,
+                        images = images.len(),
+                        damaged = damaged.len(),
+                        "recovered a draft kept beside another on this device"
+                    );
+                    state.recover(draft, images, damaged);
+                    Kept::Recovered(Slot::Beside(slot))
+                }),
+                kept @ (Kept::Recovered(_) | Kept::Written(_) | Kept::Unforgotten(_)) => kept,
+            },
         };
+        for (slot, spooled) in
+            beside.filter(|(slot, _)| recovered.slot() != Some(Slot::Beside(*slot)))
+        {
+            let (draft, images, damaged) = unspool(&host, &scope, spooled);
+            tracing::info!(
+                host = %host,
+                %scope,
+                "offering a draft kept beside this one on this device"
+            );
+            state.offer_rival(slot, draft, images, damaged);
+        }
         let (changed, _) = watch::channel(0);
         let session = DraftHandle(Arc::new(Inner {
             host,
@@ -440,28 +475,29 @@ impl DraftSessions {
         Ok(lease)
     }
 
+    fn kept_beside(&self, host: &HostId, scope: &str) -> Vec<(BesideSlot, SpooledDraft)> {
+        self.spool
+            .kept_beside(host, scope)
+            .into_iter()
+            .filter_map(|beside| match beside {
+                Ok(beside) => Some((beside.slot, beside.spooled)),
+                Err(error) => {
+                    tracing::error!(
+                        host = %host,
+                        %scope,
+                        error = %::diagnostics::chain(&error),
+                        "a draft kept beside another on this device can't be offered"
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
     fn recover_spooled(&self, host: &HostId, scope: &str, state: &mut DraftSession) -> Kept {
         match self.spool.take(host, scope) {
             Ok(Some(spooled)) => {
-                let mut images = Vec::new();
-                let mut damaged = Vec::new();
-                for image in spooled.images {
-                    match image {
-                        Ok(bytes) => images.push(PendingUpload::kept(bytes)),
-                        Err(error) => {
-                            tracing::error!(
-                                host = %host,
-                                %scope,
-                                error = %::diagnostics::chain(&error),
-                                "an image kept with a draft on this device is unreadable; keeping the rest of the draft"
-                            );
-                            damaged.push(KeptLostImage {
-                                name: PendingUpload::KEPT_NAME.to_owned(),
-                                reason: ::diagnostics::chain(&error),
-                            });
-                        }
-                    }
-                }
+                let (draft, images, damaged) = unspool(host, scope, spooled);
                 tracing::info!(
                     host = %host,
                     %scope,
@@ -469,8 +505,8 @@ impl DraftSessions {
                     damaged = damaged.len(),
                     "recovered a draft kept locally at shutdown"
                 );
-                state.recover(spooled.draft, images, damaged);
-                Kept::Recovered
+                state.recover(draft, images, damaged);
+                Kept::Recovered(Slot::Record)
             }
             Ok(None) => Kept::Nothing,
             Err(error) => {
@@ -526,6 +562,33 @@ impl DraftSessions {
             self.hold(session, error);
         }
     }
+}
+
+fn unspool(
+    host: &HostId,
+    scope: &str,
+    spooled: SpooledDraft,
+) -> (KeptDraft, Vec<PendingUpload>, Vec<KeptLostImage>) {
+    let mut images = Vec::new();
+    let mut damaged = Vec::new();
+    for image in spooled.images {
+        match image {
+            Ok(bytes) => images.push(PendingUpload::kept(bytes)),
+            Err(error) => {
+                tracing::error!(
+                    host = %host,
+                    %scope,
+                    error = %::diagnostics::chain(&error),
+                    "an image kept with a draft on this device is unreadable; keeping the rest of the draft"
+                );
+                damaged.push(KeptLostImage {
+                    name: PendingUpload::KEPT_NAME.to_owned(),
+                    reason: ::diagnostics::chain(&error),
+                });
+            }
+        }
+    }
+    (spooled.draft, images, damaged)
 }
 
 impl DraftHandle {
@@ -593,21 +656,24 @@ impl DraftHandle {
             .keep(&self.0.host, &scope, draft, &images, holder)
             .map_err(KeepLocallyError::Spool);
         match &kept {
-            Ok(Placed::Record) => {
+            Ok(slot) => {
                 let mut shared = self.0.shared();
                 if shared.kept == Kept::Nothing {
-                    shared.kept = Kept::Written;
+                    shared.kept = Kept::Written(*slot);
                 }
                 drop(shared);
-                tracing::warn!(host = %self.0.host, %scope, "kept an unsaved draft on this device until Forge can take it");
-            }
-            Ok(Placed::Beside(path)) => {
-                tracing::warn!(
-                    host = %self.0.host,
-                    %scope,
-                    path = %path.display(),
-                    "kept an unsaved draft on this device beside another draft kept for the same thread"
-                );
+                match slot {
+                    Slot::Record => tracing::warn!(
+                        host = %self.0.host,
+                        %scope,
+                        "kept an unsaved draft on this device until Forge can take it"
+                    ),
+                    Slot::Beside(_) => tracing::warn!(
+                        host = %self.0.host,
+                        %scope,
+                        "kept an unsaved draft on this device beside another draft kept for the same thread"
+                    ),
+                }
             }
             Err(error) => {
                 tracing::error!(
@@ -622,7 +688,7 @@ impl DraftHandle {
     }
 
     fn forget_recovered(&self, shared: &mut Shared) {
-        if matches!(shared.kept, Kept::Recovered | Kept::Written) {
+        if matches!(shared.kept, Kept::Recovered(_) | Kept::Written(_)) {
             self.forget_acknowledged(shared);
         }
     }
@@ -635,11 +701,14 @@ impl DraftHandle {
     }
 
     fn forget_acknowledged(&self, shared: &mut Shared) {
+        let Some(slot) = shared.kept.slot() else {
+            return;
+        };
         if !shared.state.settled_with_forge() {
             return;
         }
         let scope = shared.state.scope();
-        match self.0.spool.forget(&self.0.host, scope) {
+        match self.0.spool.forget(&self.0.host, scope, slot) {
             Ok(()) => shared.kept = Kept::Nothing,
             Err(error) => {
                 tracing::error!(
@@ -648,7 +717,7 @@ impl DraftHandle {
                     error = %::diagnostics::chain(&error),
                     "couldn't remove a recovered draft that Forge has saved; trying again when the Editor closes"
                 );
-                shared.kept = Kept::Unforgotten;
+                shared.kept = Kept::Unforgotten(slot);
             }
         }
     }
@@ -815,12 +884,46 @@ impl DraftHandle {
     }
 
     pub(crate) fn keep_local(&self) {
-        self.mutate(|shared| shared.state.keep_local());
+        self.mutate(|shared| {
+            if let Some(rejected) = shared.state.keep_local() {
+                self.forget_slot(
+                    Slot::Beside(rejected),
+                    "the draft the user chose not to keep",
+                );
+            }
+        });
         self.flush();
     }
 
     pub(crate) fn use_remote(&self) {
-        self.mutate(|shared| shared.state.use_remote());
+        let mut took_rival = false;
+        self.mutate(|shared| {
+            if let Some(chosen) = shared.state.use_remote() {
+                if let Some(rejected) = shared.kept.slot() {
+                    self.forget_slot(
+                        rejected,
+                        "the draft the user replaced with the one kept beside it",
+                    );
+                }
+                shared.kept = Kept::Recovered(Slot::Beside(chosen));
+                took_rival = true;
+            }
+        });
+        if took_rival {
+            self.flush();
+        }
+    }
+
+    fn forget_slot(&self, slot: Slot, which: &'static str) {
+        if let Err(error) = self.0.spool.forget(&self.0.host, &self.0.scope, slot) {
+            tracing::error!(
+                host = %self.0.host,
+                scope = %self.0.scope,
+                which,
+                error = %::diagnostics::chain(&error),
+                "couldn't remove a draft kept on this device after the user chose between two; it is offered again next time"
+            );
+        }
     }
 
     fn pump(&self) {

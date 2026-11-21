@@ -33,7 +33,7 @@ fn drafts_whose_host_and_scope_join_alike_are_kept_apart() {
             "new",
             kept("on the first Forge"),
             &[],
-            Holder::Owner,
+            Holder::Owner(Slot::Record),
         )
         .unwrap();
     spool
@@ -42,14 +42,14 @@ fn drafts_whose_host_and_scope_join_alike_are_kept_apart() {
             "a-new",
             kept("on the second Forge"),
             &[std::sync::Arc::from(&b"image"[..])],
-            Holder::Owner,
+            Holder::Owner(Slot::Record),
         )
         .unwrap();
 
     let taken = spool.take(&first, "new").unwrap().unwrap();
     assert_eq!(taken.draft, kept("on the first Forge"));
     assert!(taken.images.is_empty(), "the first draft has no images");
-    spool.forget(&first, "new").unwrap();
+    spool.forget(&first, "new", Slot::Record).unwrap();
     let taken = spool.take(&second, "a-new").unwrap().unwrap();
     assert_eq!(
         (taken.draft.body.text.as_str(), images(&taken)),
@@ -72,7 +72,7 @@ fn a_missing_or_damaged_image_still_brings_back_the_drafts_text() {
                 std::sync::Arc::from(&b"first"[..]),
                 std::sync::Arc::from(&b"second"[..]),
             ],
-            Holder::Owner,
+            Holder::Owner(Slot::Record),
         )
         .unwrap();
     let mut stored: Vec<_> = std::fs::read_dir(directory.path().join("drafts"))
@@ -114,7 +114,7 @@ fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
             "new",
             kept("an older draft"),
             &[std::sync::Arc::from(&b"image"[..])],
-            Holder::Owner,
+            Holder::Owner(Slot::Record),
         )
         .unwrap();
     let record = directory.path().join("drafts").join("forge-new.json");
@@ -124,7 +124,13 @@ fn an_unreadable_kept_draft_is_moved_aside_instead_of_being_overwritten() {
         panic!("expected the unreadable draft to be moved aside");
     };
     spool
-        .keep(&host, "new", kept("a newer draft"), &[], Holder::Owner)
+        .keep(
+            &host,
+            "new",
+            kept("a newer draft"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
         .unwrap();
     assert_eq!(
         std::fs::read(&set_aside).unwrap(),
@@ -151,7 +157,13 @@ fn an_unreadable_kept_draft_that_cannot_be_moved_aside_is_reported_where_it_stil
     let host = HostId("forge".into());
     let scope = "s".repeat(239);
     spool
-        .keep(&host, &scope, kept("an older draft"), &[], Holder::Owner)
+        .keep(
+            &host,
+            &scope,
+            kept("an older draft"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
         .unwrap();
     let record = directory
         .path()
@@ -183,7 +195,7 @@ fn an_unreadable_kept_draft_is_moved_aside_with_images_whose_names_are_long() {
             &scope,
             kept("an older draft"),
             &[std::sync::Arc::from(&b"image"[..])],
-            Holder::Owner,
+            Holder::Owner(Slot::Record),
         )
         .unwrap();
     let record = directory
@@ -214,11 +226,11 @@ fn a_draft_that_did_not_recover_the_record_is_kept_beside_it_instead_of_over_it(
             "new",
             kept("the newer draft"),
             &[std::sync::Arc::from(&b"newer image"[..])],
-            Holder::Owner,
+            Holder::Owner(Slot::Record),
         )
         .unwrap();
 
-    let Placed::Beside(beside) = spool
+    let Slot::Beside(slot) = spool
         .keep(
             &host,
             "new",
@@ -234,15 +246,65 @@ fn a_draft_that_did_not_recover_the_record_is_kept_beside_it_instead_of_over_it(
     let recovered = spool.take(&host, "new").unwrap().unwrap();
     assert_eq!(recovered.draft, kept("the newer draft"));
     assert!(matches!(&recovered.images[..], [Ok(bytes)] if bytes == b"newer image"));
+    let beside = spool.kept_beside(&host, "new");
+    let [Ok(beside)] = &beside[..] else {
+        panic!("expected one draft kept beside the record: {beside:?}");
+    };
+    assert_eq!(beside.slot, slot);
+    assert_eq!(beside.spooled.draft, kept("an older draft"));
     assert!(
-        std::fs::read_to_string(&beside)
-            .unwrap()
-            .contains("an older draft")
+        matches!(&beside.spooled.images[..], [Ok(bytes)] if bytes == b"older image"),
+        "its image is kept beside it"
     );
-    let images: Vec<_> = std::fs::read_dir(beside.parent().unwrap())
-        .unwrap()
-        .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
-        .filter(|bytes| bytes == b"older image")
-        .collect();
-    assert_eq!(images.len(), 1, "its image is kept beside it");
+}
+
+#[test]
+fn a_draft_kept_beside_again_rewrites_its_own_slot_and_drops_images_it_no_longer_holds() {
+    let directory = tempfile::tempdir().unwrap();
+    let spool = DraftSpool::new(directory.path());
+    let host = HostId("forge".into());
+    spool
+        .keep(
+            &host,
+            "new",
+            kept("the record"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    let slot = spool
+        .keep(
+            &host,
+            "new",
+            kept("first keep"),
+            &[std::sync::Arc::from(&b"first image"[..])],
+            Holder::Newcomer,
+        )
+        .unwrap();
+
+    assert_eq!(
+        spool
+            .keep(
+                &host,
+                "new",
+                kept("second keep"),
+                &[std::sync::Arc::from(&b"second image"[..])],
+                Holder::Owner(slot),
+            )
+            .unwrap(),
+        slot
+    );
+
+    let beside = spool.kept_beside(&host, "new");
+    let [Ok(beside)] = &beside[..] else {
+        panic!("expected one draft kept beside the record: {beside:?}");
+    };
+    assert_eq!(beside.spooled.draft, kept("second keep"));
+    assert!(matches!(&beside.spooled.images[..], [Ok(bytes)] if bytes == b"second image"));
+    let folder = directory.path().join("drafts").join("forge-new.kept-1");
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+
+    spool.forget(&host, "new", slot).unwrap();
+    assert!(!folder.exists());
+    assert!(spool.kept_beside(&host, "new").is_empty());
 }
