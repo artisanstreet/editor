@@ -592,8 +592,9 @@ fn retiring_reads_a_pasted_image_outside_the_draft_and_keeps_what_was_typed_mean
 }
 
 fn beside_an_unreadable_record(device: &Device) -> std::path::PathBuf {
-    std::fs::create_dir_all(device.drafts()).unwrap();
-    std::fs::write(device.drafts().join("recovering-new.json"), b"{ not json").unwrap();
+    let record = device.drafts().join("recovering-new").join("record.1");
+    std::fs::create_dir_all(&record).unwrap();
+    std::fs::write(record.join("record.json"), b"{ not json").unwrap();
     drop(device.disk.arm(Rule::Refuse, named("unreadable-")));
     device.drafts().join("recovering-new")
 }
@@ -996,18 +997,6 @@ fn an_unreadable_draft_kept_beside_is_moved_aside_and_reported_once() {
         device.reopen().take_unrecovered().is_empty(),
         "opening again doesn't report it again"
     );
-}
-
-#[test]
-fn an_empty_folder_left_for_a_draft_kept_beside_is_removed_on_opening() {
-    let device = Device::new();
-    let beside = device.drafts().join("recovering-new.kept-1");
-    std::fs::create_dir_all(&beside).unwrap();
-
-    let lease = device.reopen();
-
-    assert!(!beside.exists());
-    assert!(lease.take_unrecovered().is_empty());
 }
 
 #[test]

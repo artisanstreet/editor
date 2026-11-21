@@ -2538,7 +2538,9 @@ fn the_notice_about_an_unreadable_kept_draft_shows_once() {
         let host = connect_host(&mut core, &listener, &pin, "notice");
         let drafts = directory.path().join("drafts");
         std::fs::create_dir_all(&drafts).unwrap();
-        std::fs::write(drafts.join("notice-new_3aproject.json"), b"{ not json").unwrap();
+        let record = drafts.join("notice-new_3aproject").join("record.1");
+        std::fs::create_dir_all(&record).unwrap();
+        std::fs::write(record.join("record.json"), b"{ not json").unwrap();
         let target = ComposerTarget::NewThread {
             host: host.clone(),
             project: Some(artisan_api::ProjectId::from("project")),
@@ -2586,7 +2588,9 @@ fn a_refused_send_clears_once_its_cause_is_fixed_and_leaves_the_recovery_notice_
         let host = connect_host(&mut core, &listener, &pin, "notice");
         let drafts = directory.path().join("drafts");
         std::fs::create_dir_all(&drafts).unwrap();
-        std::fs::write(drafts.join("notice-new_3aproject.json"), b"{ not json").unwrap();
+        let record = drafts.join("notice-new_3aproject").join("record.1");
+        std::fs::create_dir_all(&record).unwrap();
+        std::fs::write(record.join("record.json"), b"{ not json").unwrap();
         let mut sessions = DraftSessions::with_spool(spool);
         let owner = editor_aqua::composer::view::ComposerOwner::new(
             &core,
@@ -2689,8 +2693,9 @@ fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_remov
             project: Some(artisan_api::ProjectId::from("project")),
         };
         let scope = target.scope();
-        let drafts = directory.path().join("drafts");
-        let beside = drafts.join("rivals-new_3aproject.kept-1");
+        let root = directory.path().join("drafts").join("rivals-new_3aproject");
+        let (unit, beside) = (root.join("record.1"), root.join("kept-1.1"));
+        std::fs::create_dir_all(&unit).unwrap();
         std::fs::create_dir_all(&beside).unwrap();
         let record = |draft: Value| {
             let mut record = json!({"host": "rivals", "scope": scope});
@@ -2701,12 +2706,12 @@ fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_remov
             serde_json::to_vec(&record).unwrap()
         };
         std::fs::write(
-            drafts.join("rivals-new_3aproject.json"),
+            unit.join("record.json"),
             record(json!({"body": {"text": "mine"}})),
         )
         .unwrap();
         std::fs::write(
-            beside.join("rivals-new_3aproject.json"),
+            beside.join("record.json"),
             record(json!({
                 "body": {"text": "sent beside"},
                 "post": {
@@ -2753,7 +2758,6 @@ fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_remov
             Value::Null,
             "finishing it doesn't clear the draft the user kept"
         );
-        let root = drafts.join("rivals-new_3aproject");
         let kept = kept_record(&root);
         assert_eq!(
             kept["set_aside"][0]["message"]["id"], "beside-message",

@@ -60,7 +60,6 @@ struct Order {
     issued: u64,
     serving: u64,
     abandoned: BTreeSet<u64>,
-    migrated: bool,
 }
 
 impl Order {
@@ -289,48 +288,6 @@ impl ForgetSpooledDraftError {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum MigrateError {
-    #[error("list the drafts kept in {path}")]
-    List {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("create the folder {path} for drafts kept in the old layout")]
-    CreateFolder {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("copy {from} to {to}")]
-    Copy {
-        from: PathBuf,
-        to: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("flush the folder {path} to disk")]
-    Sync {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("move the copied draft {from} to {to}")]
-    Publish {
-        from: PathBuf,
-        to: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("remove {path}")]
-    Remove {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 struct ImageDigest(String);
@@ -428,37 +385,6 @@ impl Unit {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Legacy {
-    Record,
-    Image(ImageDigest),
-    Beside(BesideSlot),
-    Tombstone,
-}
-
-impl Legacy {
-    fn of(stem: &str, name: &str) -> Option<Self> {
-        let rest = name.strip_prefix(stem)?.strip_prefix('.')?;
-        match rest {
-            "json" => Some(Self::Record),
-            rest => {
-                if let Some(digest) = rest.strip_suffix(".image") {
-                    return ImageDigest::try_from(digest.to_owned())
-                        .ok()
-                        .map(Self::Image);
-                }
-                if let Some(number) = rest.strip_prefix("kept-") {
-                    return number
-                        .parse()
-                        .ok()
-                        .map(|number| Self::Beside(BesideSlot(number)));
-                }
-                rest.strip_prefix("rejected-").map(|_| Self::Tombstone)
-            }
-        }
-    }
-}
-
 fn owners() -> MutexGuard<'static, HashMap<PathBuf, Weak<Owner>>> {
     static OWNERS: OnceLock<Mutex<HashMap<PathBuf, Weak<Owner>>>> = OnceLock::new();
     OWNERS
@@ -513,7 +439,6 @@ impl DraftSpool {
                             issued: 0,
                             serving: 1,
                             abandoned: BTreeSet::new(),
-                            migrated: false,
                         }),
                         served: Condvar::new(),
                     })
@@ -554,22 +479,9 @@ impl Turn {
                 .wait(order)
                 .unwrap_or_else(PoisonError::into_inner);
         }
-        let migrated = order.migrated;
         drop(order);
         self.served = true;
-        let serving = Serving { turn: self };
-        if !migrated {
-            match serving.migrate() {
-                Ok(()) => serving.turn.queue.order().migrated = true,
-                Err(error) => tracing::error!(
-                    host = %serving.turn.host,
-                    scope = %serving.turn.scope,
-                    error = %::diagnostics::chain(&error),
-                    "couldn't move drafts kept in the old layout into the new one; trying again on the next save"
-                ),
-            }
-        }
-        serving
+        Serving { turn: self }
     }
 }
 
@@ -936,142 +848,6 @@ impl Serving {
         }
         Ok(folder.join(RECORD))
     }
-
-    fn migrate(&self) -> Result<(), MigrateError> {
-        let dir = &self.turn.owner.dir;
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(source) => {
-                return Err(MigrateError::List {
-                    path: dir.clone(),
-                    source,
-                });
-            }
-        };
-        let listed = |source| MigrateError::List {
-            path: dir.clone(),
-            source,
-        };
-        let mut legacy = Vec::new();
-        for entry in entries {
-            let path = entry.map_err(listed)?.path();
-            if let Some(found) = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| Legacy::of(&self.turn.stem, name))
-            {
-                legacy.push((found, path));
-            }
-        }
-        if legacy.is_empty() {
-            return Ok(());
-        }
-        let root = self.root();
-        std::fs::create_dir_all(&root).map_err(|source| MigrateError::CreateFolder {
-            path: root.clone(),
-            source,
-        })?;
-        let units = self.units().map_err(|source| MigrateError::List {
-            path: root.clone(),
-            source,
-        })?;
-        let images: Vec<(PathBuf, String)> = legacy
-            .iter()
-            .filter_map(|(found, path)| match found {
-                Legacy::Image(digest) if path.is_file() => Some((path.clone(), digest.file_name())),
-                Legacy::Image(_) | Legacy::Record | Legacy::Beside(_) | Legacy::Tombstone => None,
-            })
-            .collect();
-        for (found, path) in &legacy {
-            match found {
-                Legacy::Record if path.is_file() => {
-                    if Self::current(&units, Slot::Record).is_none() {
-                        let mut files = images.clone();
-                        files.push((path.clone(), RECORD.to_owned()));
-                        self.publish_copy(Slot::Record, &files)?;
-                    }
-                    remove_file(path)?;
-                    for (image, _) in &images {
-                        remove_file(image)?;
-                    }
-                }
-                Legacy::Beside(slot) if path.is_dir() => {
-                    let record = path.join(format!("{}.json", self.turn.stem));
-                    if record.is_file() && Self::current(&units, Slot::Beside(*slot)).is_none() {
-                        let mut files = Vec::new();
-                        for entry in std::fs::read_dir(path).map_err(listed)? {
-                            let image = entry.map_err(listed)?.path();
-                            if let Some(Legacy::Image(digest)) = image
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .and_then(|name| Legacy::of(&self.turn.stem, name))
-                            {
-                                files.push((image, digest.file_name()));
-                            }
-                        }
-                        files.push((record, RECORD.to_owned()));
-                        self.publish_copy(Slot::Beside(*slot), &files)?;
-                    }
-                    std::fs::remove_dir_all(path).map_err(|source| MigrateError::Remove {
-                        path: path.clone(),
-                        source,
-                    })?;
-                }
-                Legacy::Tombstone => {
-                    if let Err(error) = self.remove_tree(path) {
-                        tracing::warn!(
-                            error = %::diagnostics::chain(&error),
-                            "couldn't remove a draft discarded in the old layout"
-                        );
-                    }
-                }
-                Legacy::Record | Legacy::Image(_) | Legacy::Beside(_) => {}
-            }
-        }
-        sync_folder(dir).map_err(|source| MigrateError::Sync {
-            path: dir.clone(),
-            source,
-        })
-    }
-
-    fn publish_copy(&self, slot: Slot, files: &[(PathBuf, String)]) -> Result<(), MigrateError> {
-        let root = self.root();
-        let staging = tempfile::Builder::new()
-            .prefix("staging-")
-            .tempdir_in(&root)
-            .map_err(|source| MigrateError::CreateFolder {
-                path: root.clone(),
-                source,
-            })?;
-        for (from, name) in files {
-            let to = staging.path().join(name);
-            std::fs::hard_link(from, &to)
-                .or_else(|_| std::fs::copy(from, &to).map(drop))
-                .map_err(|source| MigrateError::Copy {
-                    from: from.clone(),
-                    to: to.clone(),
-                    source,
-                })?;
-        }
-        sync_folder(staging.path()).map_err(|source| MigrateError::Sync {
-            path: staging.path().to_owned(),
-            source,
-        })?;
-        let to = self.unit_path(Unit {
-            slot,
-            generation: 1,
-        });
-        self.disk()
-            .rename(staging.path(), &to)
-            .map_err(|source| MigrateError::Publish {
-                from: staging.path().to_owned(),
-                to,
-                source,
-            })?;
-        drop(staging.keep());
-        sync_folder(&root).map_err(|source| MigrateError::Sync { path: root, source })
-    }
 }
 
 fn read_record(
@@ -1121,17 +897,6 @@ fn removed(path: &Path, removal: std::io::Result<()>) -> Result<(), ForgetSpoole
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(ForgetSpooledDraftError::Remove {
-            path: path.to_owned(),
-            source,
-        }),
-    }
-}
-
-fn remove_file(path: &Path) -> Result<(), MigrateError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(MigrateError::Remove {
             path: path.to_owned(),
             source,
         }),
