@@ -108,3 +108,38 @@ fn a_copy_the_clipboard_refuses_is_explained_and_replaces_an_earlier_notice() {
         "the copy failure replaces the earlier link notice: {texts:?}"
     );
 }
+
+#[test]
+fn drafts_the_device_could_not_keep_are_explained_and_offer_trying_again_once_per_failure() {
+    use editor_aqua::composer::persistence::UnkeptDrafts;
+    use editor_aqua::shell::action_failure::KEEP_DRAFTS;
+
+    let mut ui = workspace();
+    let theme = ArtisanTheme::resolved();
+    let mut failure = ActionFailureDialog::default();
+    let unkept = UnkeptDrafts {
+        count: 1,
+        generation: 1,
+        problem: editor_aqua::core::Problem::caused_by(
+            "An unsaved draft couldn't be kept on this device. It stays open in the Editor until it can be written.",
+            &std::io::Error::other("the disk is full"),
+        ),
+    };
+    failure.offer_drafts(Some(unkept.clone()));
+    failure.mount(&mut ui, &theme);
+    ui.build_frame().unwrap();
+    assert_on_screen(&ui, &["Couldn't keep unsaved drafts", "Try again"]);
+    assert_explained(&ui, &failure, "the disk is full");
+
+    click(&mut ui, KEEP_DRAFTS);
+    assert_eq!(failure.drain(&mut ui), Some(Effect::KeepDrafts));
+    failure.offer_drafts(Some(unkept.clone()));
+    assert!(
+        failure.failure().is_none(),
+        "a failure already shown doesn't reopen on its own"
+    );
+    failure.retried_drafts(Some(unkept));
+    failure.mount(&mut ui, &theme);
+    ui.build_frame().unwrap();
+    assert_on_screen(&ui, &["Couldn't keep unsaved drafts"]);
+}

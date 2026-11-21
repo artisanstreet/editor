@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftSpool {
     dir: PathBuf,
 }

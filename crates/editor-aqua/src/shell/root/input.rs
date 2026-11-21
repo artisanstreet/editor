@@ -244,6 +244,10 @@ impl RootViews {
             | self.dispatch_resource(shell, ui, ctx)
             | self.dispatch_conversation(shell, ui, ctx, window)
             | self.sync_sidebar(shell, ui, ctx, window);
+        let spool = crate::composer::spool::DraftSpool::new(&shell.core.files().dir);
+        shell
+            .failures
+            .offer_drafts(crate::composer::persistence::unkept_drafts(&spool));
         let link_changed = match shell.failures.drain(ui) {
             Some(crate::shell::action_failure::Effect::CopyUrl(url)) => {
                 if let Err(error) = ctx.clipboard().set_text(url) {
@@ -251,6 +255,12 @@ impl RootViews {
                         .failures
                         .copy(crate::shell::action_failure::CopySubject::Link, &error);
                 }
+                true
+            }
+            Some(crate::shell::action_failure::Effect::KeepDrafts) => {
+                shell
+                    .failures
+                    .retried_drafts(crate::composer::persistence::keep_unkept(&spool));
                 true
             }
             None => false,

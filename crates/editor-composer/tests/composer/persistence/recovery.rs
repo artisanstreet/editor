@@ -321,6 +321,59 @@ fn a_send_that_fails_before_the_pairing_is_removed_keeps_the_text_typed_after_it
     );
 }
 
+#[test]
+fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
+    let mut device = Device::new();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    type_into(&lease, "only copy of this text");
+    std::fs::write(device.drafts(), b"not a folder").unwrap();
+
+    device.core.remove_host(&device.host).unwrap();
+    sessions.retain_hosts(&device.core);
+    drop(sessions);
+
+    assert!(
+        !lease.read(DraftSession::removed),
+        "a draft that couldn't be written is not thrown away"
+    );
+    assert_eq!(
+        lease.read(|state| state.body().text.clone()),
+        "only copy of this text"
+    );
+    let unkept = unkept_drafts(&device.spool()).expect("the failed write is reported");
+    assert_eq!(unkept.count, 1);
+    assert!(
+        unkept
+            .problem
+            .headline()
+            .starts_with("An unsaved draft couldn't be kept"),
+        "{unkept:?}"
+    );
+    assert!(
+        keep_unkept(&device.spool()).is_some(),
+        "trying again while the folder is still blocked keeps reporting it"
+    );
+
+    std::fs::remove_file(device.drafts()).unwrap();
+    assert_eq!(keep_unkept(&device.spool()), None);
+    assert!(lease.read(DraftSession::removed));
+    let kept = device
+        .spool()
+        .take(&device.host, "new")
+        .unwrap()
+        .expect("trying again keeps the draft on this device");
+    assert_eq!(kept.draft.body.text, "only copy of this text");
+}
+
 fn saved_by_forge(device: &Device) -> DraftHandle {
     let mut state = DraftSession::new("new".into());
     assert!(matches!(state.next_operation(), Some(Operation::Load)));

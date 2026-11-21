@@ -71,8 +71,95 @@ impl Keeping {
 enum KeepLocallyError {
     #[error("read an image that Forge has not acknowledged")]
     Image(#[source] ReadImageError),
+    #[error("this Editor has no folder to keep drafts in")]
+    NoSpool,
     #[error("write the draft to this device")]
     Spool(#[source] KeepSpooledDraftError),
+}
+
+struct Unkept {
+    session: DraftHandle,
+    error: KeepLocallyError,
+}
+
+#[derive(Default)]
+struct UnkeptDraftsState {
+    held: Vec<Unkept>,
+    generation: u64,
+}
+
+fn unkept() -> MutexGuard<'static, UnkeptDraftsState> {
+    static UNKEPT: OnceLock<Mutex<UnkeptDraftsState>> = OnceLock::new();
+    UNKEPT
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnkeptDrafts {
+    pub count: usize,
+    pub generation: u64,
+    pub problem: editor_core::Problem,
+}
+
+fn hold(session: DraftHandle, error: KeepLocallyError) {
+    let mut unkept = unkept();
+    unkept.generation = unkept.generation.wrapping_add(1);
+    unkept
+        .held
+        .retain(|held| !Arc::ptr_eq(&held.session.0, &session.0));
+    unkept.held.push(Unkept { session, error });
+}
+
+fn held_by(state: &UnkeptDraftsState, spool: &DraftSpool) -> Option<UnkeptDrafts> {
+    let mut held = state
+        .held
+        .iter()
+        .filter(|held| held.session.0.spool.as_ref() == Some(spool));
+    let first = held.next()?;
+    let count = 1 + held.count();
+    let headline = if count == 1 {
+        "An unsaved draft couldn't be kept on this device. It stays open in the Editor until it can be written.".to_owned()
+    } else {
+        format!(
+            "{count} unsaved drafts couldn't be kept on this device. They stay open in the Editor until they can be written."
+        )
+    };
+    Some(UnkeptDrafts {
+        count,
+        generation: state.generation,
+        problem: editor_core::Problem::caused_by(headline, &first.error),
+    })
+}
+
+#[must_use]
+pub fn unkept_drafts(spool: &DraftSpool) -> Option<UnkeptDrafts> {
+    held_by(&unkept(), spool)
+}
+
+pub fn keep_unkept(spool: &DraftSpool) -> Option<UnkeptDrafts> {
+    keep_held(|session| session.0.spool.as_ref() == Some(spool));
+    unkept_drafts(spool)
+}
+
+fn keep_held(retrying: impl Fn(&DraftHandle) -> bool) -> usize {
+    let retried: Vec<DraftHandle> = {
+        let mut unkept = unkept();
+        let (retried, others): (Vec<Unkept>, Vec<Unkept>) = std::mem::take(&mut unkept.held)
+            .into_iter()
+            .partition(|held| retrying(&held.session));
+        unkept.held = others;
+        retried.into_iter().map(|held| held.session).collect()
+    };
+    let mut kept = 0;
+    for session in retried {
+        match session.retire() {
+            Ok(()) => kept += 1,
+            Err(error) => hold(session, error),
+        }
+    }
+    kept
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -247,10 +334,12 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
                 break;
             }
         }
-        if session.keep_locally() {
+        if matches!(session.keep_locally(), Ok(true)) {
             kept_locally += 1;
         }
     }
+    kept_locally += keep_held(|_| true);
+    failed += unkept().held.len();
     match (failed, timed_out) {
         (0, 0) => ShutdownOutcome::Saved,
         _ => ShutdownOutcome::Incomplete {
@@ -404,7 +493,9 @@ impl DraftSessions {
     pub fn retire(&mut self) {
         for (_, session) in self.sessions.drain() {
             session.forget_unforgotten();
-            session.retire();
+            if let Err(error) = session.retire() {
+                hold(session, error);
+            }
         }
     }
 
@@ -413,7 +504,9 @@ impl DraftSessions {
             if core.host_if_instance(id, *instance).is_some() {
                 return true;
             }
-            session.retire();
+            if let Err(error) = session.retire() {
+                hold(session.clone(), error);
+            }
             false
         });
     }
@@ -439,19 +532,21 @@ impl DraftHandle {
         })
     }
 
-    fn keep_locally(&self) -> bool {
-        self.read(Keeping::of)
-            .is_some_and(|keeping| self.keep(keeping))
+    fn keep_locally(&self) -> Result<bool, KeepLocallyError> {
+        match self.read(Keeping::of) {
+            Some(keeping) => self.keep(keeping).map(|()| true),
+            None => Ok(false),
+        }
     }
 
-    fn keep(&self, keeping: Keeping) -> bool {
+    fn keep(&self, keeping: Keeping) -> Result<(), KeepLocallyError> {
         let Keeping {
             scope,
             mut draft,
             images,
         } = keeping;
         let Some(spool) = self.0.spool.as_ref() else {
-            return false;
+            return Err(KeepLocallyError::NoSpool);
         };
         let images = images
             .into_iter()
@@ -480,21 +575,20 @@ impl DraftHandle {
         let kept = spool
             .keep(&self.0.host, &scope, draft, &images)
             .map_err(KeepLocallyError::Spool);
-        match kept {
+        match &kept {
             Ok(()) => {
                 tracing::warn!(host = %self.0.host, %scope, "kept an unsaved draft on this device until Forge can take it");
-                true
             }
             Err(error) => {
                 tracing::error!(
                     host = %self.0.host,
                     %scope,
-                    error = %::diagnostics::chain(&error),
-                    "couldn't keep an unsaved draft on this device"
+                    error = %::diagnostics::chain(error),
+                    "couldn't keep an unsaved draft on this device; holding it in memory"
                 );
-                false
             }
         }
+        kept
     }
 
     fn forget_recovered(&self, shared: &mut Shared) {
@@ -592,19 +686,24 @@ impl DraftHandle {
         }
     }
 
-    fn retire(&self) {
-        let mut keeping = None;
+    fn retire(&self) -> Result<(), KeepLocallyError> {
+        let mut kept = Ok(());
         self.mutate(|shared| {
             if let Some(timer) = shared.timer.take() {
                 timer.abort();
             }
             self.0.cancelled.cancel();
-            keeping = Keeping::of(&shared.state);
-            shared.state.remove();
+            if let Some(keeping) = Keeping::of(&shared.state) {
+                kept = match self.keep(keeping) {
+                    Err(KeepLocallyError::NoSpool) => Ok(()),
+                    kept => kept,
+                };
+            }
+            if kept.is_ok() {
+                shared.state.remove();
+            }
         });
-        if let Some(keeping) = keeping {
-            self.keep(keeping);
-        }
+        kept
     }
 
     pub(crate) fn take_unrecovered(&self) -> Option<Unrecovered> {

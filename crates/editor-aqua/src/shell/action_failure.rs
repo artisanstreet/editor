@@ -8,6 +8,8 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 pub const COPY: &str = "link-failure-copy";
 
+pub const KEEP_DRAFTS: &str = "unkept-drafts-retry";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopySubject {
     Code,
@@ -53,6 +55,9 @@ pub enum ActionFailure {
     Notices {
         problem: Problem,
     },
+    Drafts {
+        problem: Problem,
+    },
 }
 
 impl ActionFailure {
@@ -62,6 +67,7 @@ impl ActionFailure {
             Self::Copy { .. } => "Couldn't copy to the clipboard",
             Self::Search { .. } => "Couldn't search in the browser",
             Self::Notices { .. } => "Couldn't open the third-party notices",
+            Self::Drafts { .. } => "Couldn't keep unsaved drafts",
         }
     }
 
@@ -71,7 +77,8 @@ impl ActionFailure {
             Self::Link { problem, .. }
             | Self::Copy { problem, .. }
             | Self::Search { problem }
-            | Self::Notices { problem } => problem,
+            | Self::Notices { problem }
+            | Self::Drafts { problem } => problem,
         }
     }
 }
@@ -79,12 +86,14 @@ impl ActionFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Event {
     Copy,
+    KeepDrafts,
     Dismiss,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     CopyUrl(String),
+    KeepDrafts,
 }
 
 struct Shown {
@@ -95,6 +104,7 @@ struct Shown {
 #[derive(Default)]
 pub struct ActionFailureDialog {
     failure: Option<ActionFailure>,
+    drafts_seen: u64,
     shown: Option<Shown>,
     events: Rc<RefCell<VecDeque<Event>>>,
 }
@@ -139,6 +149,25 @@ impl ActionFailureDialog {
         self.failure = Some(ActionFailure::Notices { problem });
     }
 
+    pub fn offer_drafts(&mut self, unkept: Option<crate::composer::persistence::UnkeptDrafts>) {
+        if let Some(unkept) = unkept.filter(|unkept| unkept.generation != self.drafts_seen) {
+            self.show_drafts(unkept);
+        }
+    }
+
+    pub fn retried_drafts(&mut self, unkept: Option<crate::composer::persistence::UnkeptDrafts>) {
+        if let Some(unkept) = unkept {
+            self.show_drafts(unkept);
+        }
+    }
+
+    fn show_drafts(&mut self, unkept: crate::composer::persistence::UnkeptDrafts) {
+        self.drafts_seen = unkept.generation;
+        self.failure = Some(ActionFailure::Drafts {
+            problem: unkept.problem,
+        });
+    }
+
     #[must_use]
     pub const fn failure(&self) -> Option<&ActionFailure> {
         self.failure.as_ref()
@@ -152,10 +181,23 @@ impl ActionFailureDialog {
                 (Event::Copy, Some(ActionFailure::Link { url, .. })) => {
                     effect = Some(Effect::CopyUrl(url));
                 }
+                (Event::KeepDrafts, Some(ActionFailure::Drafts { .. })) => {
+                    effect = Some(Effect::KeepDrafts);
+                }
                 (
                     Event::Copy,
                     Some(
                         ActionFailure::Copy { .. }
+                        | ActionFailure::Search { .. }
+                        | ActionFailure::Notices { .. }
+                        | ActionFailure::Drafts { .. },
+                    ),
+                )
+                | (
+                    Event::KeepDrafts,
+                    Some(
+                        ActionFailure::Link { .. }
+                        | ActionFailure::Copy { .. }
                         | ActionFailure::Search { .. }
                         | ActionFailure::Notices { .. },
                     ),
@@ -229,6 +271,13 @@ fn content(
             .child(
                 Button::text(COPY, *theme, ButtonTone::Primary, "Copy link")
                     .on_activate(move |_| events.borrow_mut().push_back(Event::Copy))
+                    .build(),
+            )
+            .build(),
+        ActionFailure::Drafts { .. } => column
+            .child(
+                Button::text(KEEP_DRAFTS, *theme, ButtonTone::Primary, "Try again")
+                    .on_activate(move |_| events.borrow_mut().push_back(Event::KeepDrafts))
                     .build(),
             )
             .build(),
