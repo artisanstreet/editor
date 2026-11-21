@@ -1,6 +1,6 @@
 # SVGL and brand-mark logos — licensing position
 
-Scope: `crates/editor-assets/svg/svgl/*` (claude-ai, deepseek, git, github,
+Scope: `crates/editor-assets/svg/svgl/*` (antigravity, claude-ai, deepseek, git, github,
 gitlab, meta, microsoft-azure, openai, qwen) and
 `crates/editor-assets/svg/brands/*` (kimi, opencode, opencode-light,
 reflection, zai).
@@ -24,7 +24,7 @@ reflection, zai).
 
 Each svgl/brand asset is treated as `LicenseRef-Brand-Mark`.
 This records precisely what is known: these are the trademarked brand marks of
-their respective owners (GitHub, GitLab, Git, Microsoft Azure, Anthropic
+their respective owners (Google Antigravity, GitHub, GitLab, Git, Microsoft Azure, Anthropic
 Claude, DeepSeek, Meta, OpenAI, Alibaba Qwen, Moonshot AI Kimi, OpenCode,
 Reflection AI, Z.ai). Use to identify the
 corresponding product/service (nominative use) is how the legacy frontend used
