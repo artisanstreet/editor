@@ -1,4 +1,6 @@
 use super::*;
+use crate::ui::markdown::DiagramInks;
+use crate::ui::theme::{Contrast, ThemeMode};
 use aqua_core::{PointerEvent, PointerKind, ScrollDelta, Size};
 use aqua_reactive::Runtime;
 use aqua_ui::binding::View;
@@ -8,8 +10,12 @@ use aqua_ui::tree::{UiTree, hash_key};
 
 fn diagram(width: f32, height: f32) -> Arc<DiagramSvg> {
     Arc::new(DiagramSvg {
-        source: Arc::from(""),
-        light_source: Arc::from(""),
+        inks: DiagramInks {
+            dark: Arc::from(""),
+            light: Arc::from(""),
+            dark_high: Arc::from(""),
+            light_high: Arc::from(""),
+        },
         width_bits: width.to_bits(),
         height_bits: height.to_bits(),
         summary: Arc::from(""),
@@ -28,10 +34,10 @@ fn viewport() -> Rect {
 #[test]
 fn fit_centers_the_diagram_and_never_upscales() {
     let state = DiagramState::new();
-    let small = state.destination(viewport(), &diagram(100.0, 50.0));
+    let small = state.destination(viewport(), &diagram(100.0, 50.0), 1.0);
     assert_eq!((small.w, small.h), (100.0, 50.0));
     assert_eq!((small.x, small.y), (160.0, 95.0));
-    let large = state.destination(viewport(), &diagram(800.0, 200.0));
+    let large = state.destination(viewport(), &diagram(800.0, 200.0), 1.0);
     assert_eq!((large.w, large.h), (400.0, 100.0));
 }
 
@@ -56,14 +62,14 @@ fn pan_is_preserved_at_fit_and_when_zoomed_and_reset_restores_the_fit() {
     let mut state = DiagramState::new();
     let diagram = diagram(400.0, 200.0);
     state.pan = Point { x: 500.0, y: 500.0 };
-    let fitted = state.destination(viewport(), &diagram);
+    let fitted = state.destination(viewport(), &diagram, 1.0);
     assert_eq!((fitted.x, fitted.y), (510.0, 520.0));
     state.zoom_by(2.0);
     state.pan = Point {
         x: 500.0,
         y: -500.0,
     };
-    let zoomed = state.destination(viewport(), &diagram);
+    let zoomed = state.destination(viewport(), &diagram, 1.0);
     assert_eq!((zoomed.x, zoomed.y), (310.0, -580.0));
     state.reset();
     assert_eq!((state.zoom, state.pan.x, state.pan.y), (1.0, 0.0, 0.0));
@@ -168,7 +174,7 @@ fn drag_captures_pointer_pans_at_fit_and_releases_outside_diagram() {
     assert!(outcome.handled && outcome.default_prevented);
     let destination = state
         .borrow_mut()
-        .destination(viewport(), &diagram(400.0, 200.0));
+        .destination(viewport(), &diagram(400.0, 200.0), 1.0);
     assert_eq!((destination.x, destination.y), (360.0, 270.0));
     route_input(
         &mut tree,
@@ -263,5 +269,70 @@ fn the_viewport_shows_a_focus_ring_when_tab_reaches_it() {
     assert!(
         painted(&mut app) > resting,
         "keyboard focus paints an indicator around the viewport"
+    );
+}
+
+fn painted(theme: &ArtisanTheme, diagram: &Arc<DiagramSvg>) -> (Arc<str>, Rect, Rect) {
+    use aqua_text::{SharedFonts, SharedRuns};
+    let state = Rc::new(RefCell::new(DiagramState::new()));
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
+    let element = view(theme, "diagram", diagram, &state, &invalidate);
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(move |_| element).unwrap();
+    app.set_viewport(1200.0, 1200.0, 1.0);
+    app.build_frame().unwrap();
+    let viewport = app
+        .tree()
+        .sole_node_with_key(hash_key(aqua_ui::element::Key::from("diagram-viewport")))
+        .and_then(|node| app.tree().rect(node))
+        .unwrap();
+    let (source, bounds) = app
+        .tree_mut()
+        .emit_scene()
+        .into_iter()
+        .find_map(|(_, item)| {
+            let DisplayItem::GpuiSvg { source, bounds, .. } = item else {
+                return None;
+            };
+            Some((source, bounds))
+        })
+        .expect("the diagram paints its SVG");
+    (source, viewport, bounds)
+}
+
+#[test]
+fn high_contrast_paints_the_diagram_in_high_contrast_ink() {
+    let diagram = Arc::new(crate::ui::markdown::diagram::render("flowchart LR\nA --> B").unwrap());
+    for mode in [ThemeMode::Dark, ThemeMode::Light] {
+        let (standard, ..) = painted(
+            ArtisanTheme::for_mode_and_contrast(mode, Contrast::Standard),
+            &diagram,
+        );
+        let (high, ..) = painted(
+            ArtisanTheme::for_mode_and_contrast(mode, Contrast::High),
+            &diagram,
+        );
+        assert_ne!(
+            standard, high,
+            "{mode:?} high contrast paints the standard diagram"
+        );
+    }
+}
+
+#[test]
+fn a_larger_text_size_draws_the_diagram_larger() {
+    let diagram = Arc::new(crate::ui::markdown::diagram::render("flowchart LR\nA --> B").unwrap());
+    let standard = ArtisanTheme::resolved();
+    let mut larger = standard;
+    larger.typography = larger.typography.scaled(2.25);
+    let (_, standard_viewport, standard_drawn) = painted(&standard, &diagram);
+    let (_, larger_viewport, larger_drawn) = painted(&larger, &diagram);
+    assert!(
+        larger_drawn.w > standard_drawn.w * 1.5,
+        "the diagram grew from {standard_drawn:?} to only {larger_drawn:?}"
+    );
+    assert!(
+        larger_viewport.h > standard_viewport.h,
+        "the viewport stayed {standard_viewport:?} at 225%"
     );
 }

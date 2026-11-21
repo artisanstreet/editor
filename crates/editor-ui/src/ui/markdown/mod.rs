@@ -6,6 +6,7 @@
 pub(crate) const MAX_MARKDOWN_SOURCE_BYTES: usize = 256 * 1024;
 
 use crate::ui::text::slice::slice;
+use crate::ui::theme::{ArtisanTheme, Contrast, ThemeMode};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::str::FromStr;
@@ -83,9 +84,35 @@ pub struct CodeToken {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DiagramInks {
+    dark: Arc<str>,
+    light: Arc<str>,
+    dark_high: Arc<str>,
+    light_high: Arc<str>,
+}
+
+impl DiagramInks {
+    const fn for_theme(&self, theme: &ArtisanTheme) -> &Arc<str> {
+        match (theme.colors.mode, theme.colors.contrast) {
+            (ThemeMode::Dark, Contrast::Standard) => &self.dark,
+            (ThemeMode::Light, Contrast::Standard) => &self.light,
+            (ThemeMode::Dark, Contrast::High) => &self.dark_high,
+            (ThemeMode::Light, Contrast::High) => &self.light_high,
+        }
+    }
+
+    fn all(&self) -> [&Arc<str>; 4] {
+        [&self.dark, &self.light, &self.dark_high, &self.light_high]
+    }
+
+    fn bytes(&self) -> usize {
+        self.all().iter().map(|svg| svg.len()).sum()
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DiagramSvg {
-    source: Arc<str>,
-    light_source: Arc<str>,
+    inks: DiagramInks,
     width_bits: u32,
     height_bits: u32,
     summary: Arc<str>,
@@ -224,10 +251,7 @@ impl MarkdownDocument {
                             spans_bytes(spans)
                         }
                         Block::Code(fence) => {
-                            fence
-                                .diagram
-                                .as_ref()
-                                .map_or(0, |svg| svg.source.len() + svg.light_source.len())
+                            fence.diagram.as_ref().map_or(0, |svg| svg.inks.bytes())
                                 + fence.source.capacity()
                                 + fence.language.as_ref().map_or(0, String::capacity)
                                 + fence

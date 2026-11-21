@@ -46,7 +46,7 @@ fn mermaid_diagrams_outline_labels_in_both_themes() {
         "classDiagram\nAnimal <|-- Duck",
     ] {
         let diagram = render(source).unwrap();
-        for svg in [&diagram.source, &diagram.light_source] {
+        for svg in diagram.inks.all() {
             assert!(!svg.contains("<text"), "{source}");
             assert!(svg.contains("<path"), "{source}");
         }

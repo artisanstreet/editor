@@ -9,8 +9,8 @@ use mermaid_rs_renderer::{
 
 use aqua_fonts_system::{FaceBytes, FontDatabase, Query, Stretch, Style, Weight};
 
-use super::DiagramSvg;
-use crate::ui::theme::{ArtisanTheme, Oklch, ThemeMode};
+use super::{DiagramInks, DiagramSvg};
+use crate::ui::theme::{ArtisanTheme, Contrast, Oklch, ThemeMode};
 
 pub(super) mod view;
 
@@ -118,12 +118,7 @@ impl DiagramCache {
             || self
                 .entries
                 .iter()
-                .map(|(key, svgs)| {
-                    key.len()
-                        + svgs
-                            .as_ref()
-                            .map_or(0, |svg| svg.source.len() + svg.light_source.len())
-                })
+                .map(|(key, svgs)| key.len() + svgs.as_ref().map_or(0, |svg| svg.inks.bytes()))
                 .sum::<usize>()
                 > MAX_MEMO_BYTES
         {
@@ -144,29 +139,43 @@ fn render(source: &str) -> Option<DiagramSvg> {
     {
         return None;
     }
-    let themes =
-        [ThemeMode::Dark, ThemeMode::Light].map(|mode| diagram_theme(ArtisanTheme::for_mode(mode)));
-    let ([dark, light], width, height, summary) = match layout_svg(source, &themes) {
-        Ok(laid_out) => laid_out,
-        Err(error) => {
-            match &error {
-                LayoutError::Panicked { .. } => tracing::error!(
-                    bytes = source.len(),
-                    error = %diagnostics::chain(&error),
-                    "the diagram shows as its source"
-                ),
-                LayoutError::Parse(_) | LayoutError::TooLarge { .. } | LayoutError::Outline(_) => {
-                    tracing::debug!(
+    let themes = [
+        (ThemeMode::Dark, Contrast::Standard),
+        (ThemeMode::Light, Contrast::Standard),
+        (ThemeMode::Dark, Contrast::High),
+        (ThemeMode::Light, Contrast::High),
+    ]
+    .map(|(mode, contrast)| diagram_theme(ArtisanTheme::for_mode_and_contrast(mode, contrast)));
+    let ([dark, light, dark_high, light_high], width, height, summary) =
+        match layout_svg(source, &themes) {
+            Ok(laid_out) => laid_out,
+            Err(error) => {
+                match &error {
+                    LayoutError::Panicked { .. } => tracing::error!(
                         bytes = source.len(),
                         error = %diagnostics::chain(&error),
                         "the diagram shows as its source"
-                    );
+                    ),
+                    LayoutError::Parse(_)
+                    | LayoutError::TooLarge { .. }
+                    | LayoutError::Outline(_) => {
+                        tracing::debug!(
+                            bytes = source.len(),
+                            error = %diagnostics::chain(&error),
+                            "the diagram shows as its source"
+                        );
+                    }
                 }
+                return None;
             }
-            return None;
-        }
+        };
+    let inks = DiagramInks {
+        dark: Arc::from(dark),
+        light: Arc::from(light),
+        dark_high: Arc::from(dark_high),
+        light_high: Arc::from(light_high),
     };
-    (dark.len().max(light.len()) <= MAX_SVG_BYTES
+    (inks.all().iter().all(|svg| svg.len() <= MAX_SVG_BYTES)
         && width.is_finite()
         && height.is_finite()
         && width >= 1.0
@@ -174,8 +183,7 @@ fn render(source: &str) -> Option<DiagramSvg> {
         && width <= MAX_EDGE_PX
         && height <= MAX_EDGE_PX)
         .then(|| DiagramSvg {
-            source: Arc::from(dark),
-            light_source: Arc::from(light),
+            inks,
             width_bits: width.to_bits(),
             height_bits: height.to_bits(),
             summary: Arc::from(summary),
@@ -184,8 +192,8 @@ fn render(source: &str) -> Option<DiagramSvg> {
 
 fn layout_svg(
     source: &str,
-    themes: &[Theme; 2],
-) -> Result<([String; 2], f32, f32, String), LayoutError> {
+    themes: &[Theme; 4],
+) -> Result<([String; 4], f32, f32, String), LayoutError> {
     diagnostics::crash::catch(AssertUnwindSafe(|| {
         let parsed = parse_mermaid_strict(source)
             .map_err(|error| LayoutError::Parse(ParseFailure::from(&error)))?;
@@ -206,10 +214,10 @@ fn layout_svg(
         };
         let layout = compute_layout(&parsed.graph, &themes[0], &config);
         let size = measure_svg_dimensions(&layout, &config, None);
-        let svgs = [
-            outline_text(&render_svg(&layout, &themes[0], &config))?,
-            outline_text(&render_svg(&layout, &themes[1], &config))?,
-        ];
+        let mut svgs: [String; 4] = Default::default();
+        for (svg, theme) in svgs.iter_mut().zip(themes) {
+            *svg = outline_text(&render_svg(&layout, theme, &config))?;
+        }
         Ok((svgs, size.width, size.height, summary(&parsed.graph)))
     }))
     .map_err(|caught| LayoutError::Panicked {

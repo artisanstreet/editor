@@ -18,7 +18,7 @@ use editor_assets::AssetId;
 use crate::ui::kit::{Button, ButtonTone, Finish, IconButton, IconButtonSize, Space, Spaced};
 use crate::ui::markdown::DiagramSvg;
 use crate::ui::rich::narrative::callout::text;
-use crate::ui::theme::{ArtisanTheme, ThemeMode};
+use crate::ui::theme::ArtisanTheme;
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
@@ -75,14 +75,10 @@ impl DiagramState {
         self.drag = None;
     }
 
-    fn destination(&self, bounds: Rect, diagram: &DiagramSvg) -> Rect {
-        let fit = (bounds.w / diagram.width())
-            .min(bounds.h / diagram.height())
-            .min(1.0);
-        let displayed = (
-            diagram.width() * fit * self.zoom,
-            diagram.height() * fit * self.zoom,
-        );
+    fn destination(&self, bounds: Rect, diagram: &DiagramSvg, scale: f32) -> Rect {
+        let (width, height) = (diagram.width() * scale, diagram.height() * scale);
+        let fit = (bounds.w / width).min(bounds.h / height).min(1.0);
+        let displayed = (width * fit * self.zoom, height * fit * self.zoom);
         Rect {
             x: bounds.x + (bounds.w - displayed.0) / 2.0 + self.pan.x,
             y: bounds.y + (bounds.h - displayed.1) / 2.0 + self.pan.y,
@@ -150,17 +146,17 @@ pub(crate) fn view(
         let state = state.borrow();
         (state.zoom, state.drag.is_some())
     };
-    let source = match theme.colors.mode {
-        ThemeMode::Dark => Arc::clone(&diagram.source),
-        ThemeMode::Light => Arc::clone(&diagram.light_source),
-    };
+    let source = Arc::clone(diagram.inks.for_theme(theme));
+    let scale = theme.typography.scale;
     let paint_state = Rc::clone(state);
     let paint_diagram = Arc::clone(diagram);
     let canvas = ui::Canvas::new()
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
         .on_paint(move |bounds| {
-            let destination = paint_state.borrow_mut().destination(bounds, &paint_diagram);
+            let destination = paint_state
+                .borrow_mut()
+                .destination(bounds, &paint_diagram, scale);
             vec![DisplayItem::GpuiSvg {
                 bounds: destination,
                 source: Arc::clone(&source),
@@ -181,7 +177,7 @@ pub(crate) fn view(
     let key_invalidate = Rc::clone(invalidate);
     let viewport = ui::Box::new()
         .width(Length::Pct(100.0))
-        .height(diagram.height().clamp(MIN_VIEWPORT_PX, MAX_VIEWPORT_PX))
+        .height((diagram.height() * scale).clamp(MIN_VIEWPORT_PX, MAX_VIEWPORT_PX))
         .clip(true)
         .child(canvas)
         .build()
