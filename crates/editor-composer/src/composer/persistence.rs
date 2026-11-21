@@ -45,22 +45,6 @@ impl Kept {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Persisted {
-    kept: Kept,
-    committed: u64,
-}
-
-impl Persisted {
-    const fn recovered(kept: Kept) -> Self {
-        Self { kept, committed: 0 }
-    }
-
-    const fn stale(self, serving: &Serving) -> bool {
-        serving.number() < self.committed
-    }
-}
-
 struct Shared {
     state: DraftSession,
     viewers: Vec<Weak<Viewer>>,
@@ -74,7 +58,7 @@ struct Inner {
     scope: String,
     client: ForgeClient,
     spool: DraftSpool,
-    persisted: Mutex<Persisted>,
+    kept: Mutex<Kept>,
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
     cancelled: CancellationToken,
@@ -157,8 +141,8 @@ pub struct DraftsFull {
 }
 
 impl Inner {
-    fn persisted(&self) -> MutexGuard<'_, Persisted> {
-        self.persisted.lock().unwrap_or_else(|poisoned| {
+    fn kept(&self) -> MutexGuard<'_, Kept> {
+        self.kept.lock().unwrap_or_else(|poisoned| {
             panic!(
                 "invariant: what draft {} on Forge {} keeps on this device is not left half-updated by a panic: {poisoned}",
                 self.scope, self.host
@@ -506,7 +490,7 @@ impl DraftSessions {
             .take_back(&host, &scope)
             .and_then(|held| held.hand_over())
         {
-            Some((draft, images, persisted)) => {
+            Some((draft, images, kept)) => {
                 tracing::info!(
                     host = %host,
                     %scope,
@@ -514,29 +498,27 @@ impl DraftSessions {
                     "took back a draft this device couldn't keep"
                 );
                 state.recover(draft, images, Vec::new());
-                persisted
+                kept
             }
-            None => {
-                Persisted::recovered(match recover_spooled(&serving, &host, &scope, &mut state) {
-                    Kept::Nothing => beside.next().map_or(Kept::Nothing, |(slot, spooled)| {
-                        let (draft, images, damaged) = unspool(&host, &scope, spooled);
-                        tracing::info!(
-                            host = %host,
-                            %scope,
-                            images = images.len(),
-                            damaged = damaged.len(),
-                            "recovered a draft kept beside another on this device"
-                        );
-                        state.recover(draft, images, damaged);
-                        Kept::Recovered(Slot::Beside(slot))
-                    }),
-                    kept @ (Kept::Recovered(_) | Kept::Written(_) | Kept::Unforgotten(_)) => kept,
-                })
-            }
+            None => match recover_spooled(&serving, &host, &scope, &mut state) {
+                Kept::Nothing => beside.next().map_or(Kept::Nothing, |(slot, spooled)| {
+                    let (draft, images, damaged) = unspool(&host, &scope, spooled);
+                    tracing::info!(
+                        host = %host,
+                        %scope,
+                        images = images.len(),
+                        damaged = damaged.len(),
+                        "recovered a draft kept beside another on this device"
+                    );
+                    state.recover(draft, images, damaged);
+                    Kept::Recovered(Slot::Beside(slot))
+                }),
+                kept @ (Kept::Recovered(_) | Kept::Written(_) | Kept::Unforgotten(_)) => kept,
+            },
         };
         drop(serving);
         for (slot, spooled) in
-            beside.filter(|(slot, _)| recovered.kept.slot() != Some(Slot::Beside(*slot)))
+            beside.filter(|(slot, _)| recovered.slot() != Some(Slot::Beside(*slot)))
         {
             let (draft, images, damaged) = unspool(&host, &scope, spooled);
             tracing::info!(
@@ -552,7 +534,7 @@ impl DraftSessions {
             scope,
             client,
             spool: self.spool.clone(),
-            persisted: Mutex::new(recovered),
+            kept: Mutex::new(recovered),
             shared: Mutex::new(Shared {
                 state,
                 viewers: Vec::new(),
@@ -778,30 +760,14 @@ impl DraftHandle {
         serving: &Serving,
         (draft, images): (KeptDraft, Vec<Arc<[u8]>>),
     ) -> Result<(), KeepLocallyError> {
-        let persisted = *self.0.persisted();
+        let kept = *self.0.kept();
         let scope = &self.0.scope;
-        if persisted.stale(serving) {
-            tracing::info!(
-                host = %self.0.host,
-                %scope,
-                "a newer version of this draft is already kept on this device; not keeping the older one"
-            );
-            return Ok(());
-        }
-        let holder = persisted
-            .kept
-            .slot()
-            .map_or(Holder::Newcomer, Holder::Owner);
+        let holder = kept.slot().map_or(Holder::Newcomer, Holder::Owner);
         match serving.keep(draft, &images, holder) {
             Ok(slot) => {
-                *self.0.persisted() = Persisted {
-                    kept: match persisted.kept {
-                        Kept::Nothing => Kept::Written(slot),
-                        kept @ (Kept::Recovered(_) | Kept::Written(_) | Kept::Unforgotten(_)) => {
-                            kept
-                        }
-                    },
-                    committed: serving.number(),
+                *self.0.kept() = match kept {
+                    Kept::Nothing => Kept::Written(slot),
+                    kept @ (Kept::Recovered(_) | Kept::Written(_) | Kept::Unforgotten(_)) => kept,
                 };
                 match slot {
                     Slot::Record => tracing::warn!(
@@ -831,7 +797,7 @@ impl DraftHandle {
     }
 
     fn rekeep(&self) {
-        if self.0.persisted().kept == Kept::Nothing {
+        if *self.0.kept() == Kept::Nothing {
             return;
         }
         let Some(keeping) = Keeping::of(&self.0, &self.0.shared()) else {
@@ -842,7 +808,7 @@ impl DraftHandle {
     }
 
     fn forget_recovered(&self, shared: &mut Shared) {
-        let kept = self.0.persisted().kept;
+        let kept = *self.0.kept();
         if shared.forgetting
             || !matches!(kept, Kept::Recovered(_) | Kept::Written(_))
             || !shared.state.settled_with_forge()
@@ -861,7 +827,7 @@ impl DraftHandle {
     fn forget_unforgotten(&self) {
         let turn = {
             let shared = self.0.shared();
-            if self.0.persisted().kept == Kept::Nothing || !shared.state.settled_with_forge() {
+            if *self.0.kept() == Kept::Nothing || !shared.state.settled_with_forge() {
                 return;
             }
             self.0.spool.turn(&self.0.host, &self.0.scope)
@@ -870,8 +836,7 @@ impl DraftHandle {
     }
 
     fn forget_acknowledged(&self, serving: &Serving) {
-        let persisted = *self.0.persisted();
-        let Some(slot) = persisted.kept.slot().filter(|_| !persisted.stale(serving)) else {
+        let Some(slot) = self.0.kept().slot() else {
             return;
         };
         let scope = &self.0.scope;
@@ -896,10 +861,7 @@ impl DraftHandle {
                 Kept::Unforgotten(slot)
             }
         };
-        *self.0.persisted() = Persisted {
-            kept,
-            committed: serving.number(),
-        };
+        *self.0.kept() = kept;
     }
 
     pub fn adopt_image(&self, upload: PendingUpload) {
@@ -981,13 +943,13 @@ impl DraftHandle {
         }
     }
 
-    fn hand_over(&self) -> Option<(KeptDraft, Vec<PendingUpload>, Persisted)> {
+    fn hand_over(&self) -> Option<(KeptDraft, Vec<PendingUpload>, Kept)> {
         let shared = self.0.shared();
         let snapshot = shared
             .state
             .keepable()
             .then(|| Snapshot::of(&shared.state))?;
-        let persisted = *self.0.persisted();
+        let kept = *self.0.kept();
         self.publish(shared, |shared| shared.state.remove());
         let images = snapshot
             .images
@@ -997,7 +959,7 @@ impl DraftHandle {
                 AdoptedImage::Read(bytes) => PendingUpload::kept(bytes.to_vec()),
             })
             .collect();
-        Some((snapshot.draft, images, persisted))
+        Some((snapshot.draft, images, kept))
     }
 
     pub(crate) fn take_unrecovered(&self) -> Vec<Unrecovered> {
@@ -1102,7 +1064,7 @@ impl DraftHandle {
         runtime().spawn_blocking(move || {
             let images = snapshot.map(|snapshot| read_images(&session.0.host, snapshot));
             let serving = turn.wait();
-            let rejected = session.choose(&serving, choice);
+            let rejected = session.choose(choice);
             let kept = images.map(|images| session.commit(&serving, images));
             match (kept, rejected) {
                 (Some(Err(error)), _) => tracing::error!(
@@ -1121,14 +1083,13 @@ impl DraftHandle {
         });
     }
 
-    fn choose(&self, serving: &Serving, choice: Choice) -> Option<Slot> {
-        let mut persisted = self.0.persisted();
-        persisted.committed = serving.number();
+    fn choose(&self, choice: Choice) -> Option<Slot> {
+        let mut kept = self.0.kept();
         match choice {
             Choice::Discard(slot) => Some(Slot::Beside(slot)),
             Choice::Adopt(slot) => {
-                let replaced = persisted.kept.slot();
-                persisted.kept = Kept::Recovered(Slot::Beside(slot));
+                let replaced = kept.slot();
+                *kept = Kept::Recovered(Slot::Beside(slot));
                 replaced
             }
         }

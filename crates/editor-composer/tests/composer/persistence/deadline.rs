@@ -27,7 +27,7 @@ fn pending_write() -> (DraftHandle, DraftBody, tempfile::TempDir) {
         scope: "new".into(),
         client,
         spool: DraftSpool::new(spool.path()),
-        persisted: Mutex::new(Persisted::recovered(Kept::Nothing)),
+        kept: Mutex::new(Kept::Nothing),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),

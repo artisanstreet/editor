@@ -486,10 +486,6 @@ impl Turn {
 }
 
 impl Serving {
-    pub(crate) const fn number(&self) -> u64 {
-        self.turn.number
-    }
-
     fn root(&self) -> PathBuf {
         self.turn.owner.dir.join(&self.turn.stem)
     }

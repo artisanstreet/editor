@@ -469,7 +469,7 @@ fn saved_by_forge(device: &Device) -> DraftHandle {
         scope: "new".into(),
         client: device.client.clone(),
         spool: device.spool(),
-        persisted: Mutex::new(Persisted::recovered(Kept::Recovered(Slot::Record))),
+        kept: Mutex::new(Kept::Recovered(Slot::Record)),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
@@ -1196,7 +1196,7 @@ fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and
         scope: "new".into(),
         client: device.client.clone(),
         spool: device.spool(),
-        persisted: Mutex::new(Persisted::recovered(Kept::Nothing)),
+        kept: Mutex::new(Kept::Nothing),
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
