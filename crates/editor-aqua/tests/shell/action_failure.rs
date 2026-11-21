@@ -121,11 +121,11 @@ fn drafts_the_device_could_not_keep_are_explained_and_offer_trying_again_once_pe
         count: 1,
         generation: 1,
         problem: editor_aqua::core::Problem::caused_by(
-            "An unsaved draft couldn't be kept on this device. It stays open in the Editor until it can be written.",
+            "Artisan couldn't save your unsent draft to this device. Try again keeps it.",
             &std::io::Error::other("the disk is full"),
         ),
     };
-    failure.offer_drafts(Some(unkept.clone()));
+    failure.offer_drafts(|_| Some(unkept.clone()));
     failure.mount(&mut ui, &theme);
     ui.build_frame().unwrap();
     assert_on_screen(&ui, &["Couldn't keep unsaved drafts", "Try again"]);
@@ -133,7 +133,7 @@ fn drafts_the_device_could_not_keep_are_explained_and_offer_trying_again_once_pe
 
     click(&mut ui, KEEP_DRAFTS);
     assert_eq!(failure.drain(&mut ui), Some(Effect::KeepDrafts));
-    failure.offer_drafts(Some(unkept.clone()));
+    failure.offer_drafts(|_| Some(unkept.clone()));
     assert!(
         failure.failure().is_none(),
         "a failure already shown doesn't reopen on its own"

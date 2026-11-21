@@ -165,8 +165,12 @@ fn type_into(lease: &DraftLease, text: &str) {
 }
 
 fn png() -> Vec<u8> {
+    png_of(1)
+}
+
+fn png_of(edge: u32) -> Vec<u8> {
     let mut bytes = std::io::Cursor::new(Vec::new());
-    image::RgbaImage::new(1, 1)
+    image::RgbaImage::new(edge, edge)
         .write_to(&mut bytes, image::ImageFormat::Png)
         .unwrap();
     bytes.into_inner()
@@ -346,7 +350,6 @@ fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
 
     device.core.remove_host(&device.host).unwrap();
     sessions.retain_hosts(&device.core);
-    drop(sessions);
 
     assert!(
         !lease.read(DraftSession::removed),
@@ -356,22 +359,19 @@ fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
         lease.read(|state| state.body().text.clone()),
         "only copy of this text"
     );
-    let unkept = unkept_drafts(&device.spool()).expect("the failed write is reported");
+    let unkept = sessions.unkept().expect("the failed write is reported");
     assert_eq!(unkept.count, 1);
-    assert!(
-        unkept
-            .problem
-            .headline()
-            .starts_with("An unsaved draft couldn't be kept"),
-        "{unkept:?}"
+    assert_eq!(
+        unkept.problem.headline(),
+        "Artisan couldn't save your unsent draft to this device. Try again keeps it."
     );
     assert!(
-        keep_unkept(&device.spool()).is_some(),
+        sessions.keep_unkept().is_some(),
         "trying again while the folder is still blocked keeps reporting it"
     );
 
     std::fs::remove_file(device.drafts()).unwrap();
-    assert_eq!(keep_unkept(&device.spool()), None);
+    assert_eq!(sessions.keep_unkept(), None);
     assert!(lease.read(DraftSession::removed));
     let kept = device
         .spool()
@@ -379,6 +379,62 @@ fn a_draft_the_device_cannot_keep_stays_held_and_is_kept_when_trying_again() {
         .unwrap()
         .expect("trying again keeps the draft on this device");
     assert_eq!(kept.draft.body.text, "only copy of this text");
+}
+
+#[test]
+fn a_draft_held_across_two_pairings_keeps_both_pairings_images_when_trying_again() {
+    let mut device = Device::new();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let first = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    type_into(&first, "typed before the first removal");
+    first.adopt_image(PendingUpload::kept(png_of(1)));
+    std::fs::write(device.drafts(), b"not a folder").unwrap();
+    let instance = repair(&mut device);
+    sessions.retain_hosts(&device.core);
+    drop(first);
+    assert_eq!(sessions.unkept().map(|unkept| unkept.count), Some(1));
+
+    let second = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    assert_eq!(
+        second.read(|state| state.body().text.clone()),
+        "typed before the first removal",
+        "reopening the thread brings back the draft the device couldn't keep"
+    );
+    assert_eq!(sessions.unkept(), None, "the draft is open again, not held");
+    second.adopt_image(PendingUpload::kept(png_of(2)));
+    repair(&mut device);
+    sessions.retain_hosts(&device.core);
+    drop(second);
+    assert_eq!(sessions.unkept().map(|unkept| unkept.count), Some(1));
+
+    std::fs::remove_file(device.drafts()).unwrap();
+    assert_eq!(sessions.keep_unkept(), None);
+    let kept = device
+        .spool()
+        .take(&device.host, "new")
+        .unwrap()
+        .expect("trying again keeps the draft on this device");
+    assert_eq!(kept.draft.body.text, "typed before the first removal");
+    let mut images: Vec<Vec<u8>> = kept.images.into_iter().map(Result::unwrap).collect();
+    images.sort();
+    let mut expected = vec![png_of(1), png_of(2)];
+    expected.sort();
+    assert_eq!(images, expected, "neither pairing's image is lost");
 }
 
 fn saved_by_forge(device: &Device) -> DraftHandle {

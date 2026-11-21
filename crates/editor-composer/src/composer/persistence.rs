@@ -87,84 +87,11 @@ struct Unkept {
     error: KeepLocallyError,
 }
 
-#[derive(Default)]
-struct UnkeptDraftsState {
-    held: Vec<Unkept>,
-    generation: u64,
-}
-
-fn unkept() -> MutexGuard<'static, UnkeptDraftsState> {
-    static UNKEPT: OnceLock<Mutex<UnkeptDraftsState>> = OnceLock::new();
-    UNKEPT
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnkeptDrafts {
     pub count: usize,
     pub generation: u64,
     pub problem: editor_core::Problem,
-}
-
-fn hold(session: DraftHandle, error: KeepLocallyError) {
-    let mut unkept = unkept();
-    unkept.generation = unkept.generation.wrapping_add(1);
-    unkept
-        .held
-        .retain(|held| !Arc::ptr_eq(&held.session.0, &session.0));
-    unkept.held.push(Unkept { session, error });
-}
-
-fn held_by(state: &UnkeptDraftsState, spool: &DraftSpool) -> Option<UnkeptDrafts> {
-    let mut held = state
-        .held
-        .iter()
-        .filter(|held| held.session.0.spool == *spool);
-    let first = held.next()?;
-    let count = 1 + held.count();
-    let headline = if count == 1 {
-        "An unsaved draft couldn't be kept on this device. It stays open in the Editor until it can be written.".to_owned()
-    } else {
-        format!(
-            "{count} unsaved drafts couldn't be kept on this device. They stay open in the Editor until they can be written."
-        )
-    };
-    Some(UnkeptDrafts {
-        count,
-        generation: state.generation,
-        problem: editor_core::Problem::caused_by(headline, &first.error),
-    })
-}
-
-#[must_use]
-pub fn unkept_drafts(spool: &DraftSpool) -> Option<UnkeptDrafts> {
-    held_by(&unkept(), spool)
-}
-
-pub fn keep_unkept(spool: &DraftSpool) -> Option<UnkeptDrafts> {
-    keep_held(|session| session.0.spool == *spool);
-    unkept_drafts(spool)
-}
-
-fn keep_held(retrying: impl Fn(&DraftHandle) -> bool) -> usize {
-    let retried: Vec<DraftHandle> = {
-        let mut unkept = unkept();
-        let (retried, others): (Vec<Unkept>, Vec<Unkept>) = std::mem::take(&mut unkept.held)
-            .into_iter()
-            .partition(|held| retrying(&held.session));
-        unkept.held = others;
-        retried.into_iter().map(|held| held.session).collect()
-    };
-    let mut kept = 0;
-    for session in retried {
-        match session.retire() {
-            Ok(()) => kept += 1,
-            Err(error) => hold(session, error),
-        }
-    }
-    kept
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -280,10 +207,21 @@ impl Drop for DraftLease {
     }
 }
 
-#[derive(Debug)]
 pub struct DraftSessions {
     sessions: HashMap<(HostId, HostInstance, String), DraftHandle>,
     spool: DraftSpool,
+    held: Vec<Unkept>,
+    generation: u64,
+}
+
+impl std::fmt::Debug for DraftSessions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DraftSessions")
+            .field("sessions", &self.sessions)
+            .field("spool", &self.spool)
+            .field("held", &self.held.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -311,6 +249,14 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
     let mut timed_out = 0;
     let mut kept_locally = 0;
     for session in sessions {
+        if session.0.cancelled.is_cancelled() {
+            match session.keep_locally() {
+                Ok(true) => kept_locally += 1,
+                Ok(false) => {}
+                Err(_) => failed += 1,
+            }
+            continue;
+        }
         let mut changed = session.subscribe();
         loop {
             let (pending, stuck) = session.read(|state| (state.pending(), state.stuck()));
@@ -343,8 +289,6 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
             kept_locally += 1;
         }
     }
-    kept_locally += keep_held(|_| true);
-    failed += unkept().held.len();
     match (failed, timed_out) {
         (0, 0) => ShutdownOutcome::Saved,
         _ => ShutdownOutcome::Incomplete {
@@ -370,6 +314,7 @@ impl Drop for DraftSessions {
                 pending.push(session.clone());
             }
         }
+        pending.extend(self.held.drain(..).map(|held| held.session));
     }
 }
 
@@ -379,7 +324,55 @@ impl DraftSessions {
         Self {
             sessions: HashMap::new(),
             spool,
+            held: Vec::new(),
+            generation: 0,
         }
+    }
+
+    fn hold(&mut self, session: DraftHandle, error: KeepLocallyError) {
+        self.generation = self.generation.wrapping_add(1);
+        self.held.push(Unkept { session, error });
+    }
+
+    #[must_use]
+    pub fn unkept_since(&self, seen: u64) -> Option<UnkeptDrafts> {
+        (self.generation != seen).then(|| self.unkept()).flatten()
+    }
+
+    #[must_use]
+    fn unkept(&self) -> Option<UnkeptDrafts> {
+        let first = self.held.first()?;
+        let count = self.held.len();
+        let headline = if count == 1 {
+            "Artisan couldn't save your unsent draft to this device. Try again keeps it.".to_owned()
+        } else {
+            format!(
+                "Artisan couldn't save {count} unsent drafts to this device. Try again keeps them."
+            )
+        };
+        Some(UnkeptDrafts {
+            count,
+            generation: self.generation,
+            problem: editor_core::Problem::caused_by(headline, &first.error),
+        })
+    }
+
+    pub fn keep_unkept(&mut self) -> Option<UnkeptDrafts> {
+        for Unkept { session, .. } in std::mem::take(&mut self.held) {
+            if let Err(error) = session.retire() {
+                self.hold(session, error);
+            }
+        }
+        self.unkept()
+    }
+
+    fn take_back(&mut self, host: &HostId, scope: &str) -> Option<DraftHandle> {
+        let index = self
+            .held
+            .iter()
+            .position(|held| held.session.0.host == *host && held.session.0.scope == scope)?;
+        self.generation = self.generation.wrapping_add(1);
+        Some(self.held.remove(index).session)
     }
 
     pub fn open(
@@ -409,7 +402,46 @@ impl DraftSessions {
             return Err(DraftsFull { host, scope });
         }
         let mut state = DraftSession::new(scope.clone());
-        let recovered = match self.spool.take(&host, &scope) {
+        let recovered = match self
+            .take_back(&host, &scope)
+            .and_then(|held| held.hand_over())
+        {
+            Some((draft, images, kept)) => {
+                tracing::info!(
+                    host = %host,
+                    %scope,
+                    images = images.len(),
+                    "took back a draft this device couldn't keep"
+                );
+                state.recover(draft, images, Vec::new());
+                kept
+            }
+            None => self.recover_spooled(&host, &scope, &mut state),
+        };
+        let (changed, _) = watch::channel(0);
+        let session = DraftHandle(Arc::new(Inner {
+            host,
+            scope,
+            client,
+            spool: self.spool.clone(),
+            shared: Mutex::new(Shared {
+                state,
+                viewers: Vec::new(),
+                timer: None,
+                version: 0,
+                kept: recovered,
+            }),
+            changed,
+            cancelled: CancellationToken::new(),
+        }));
+        self.sessions.insert(key, session.clone());
+        let lease = DraftLease::new(session.clone());
+        session.pump();
+        Ok(lease)
+    }
+
+    fn recover_spooled(&self, host: &HostId, scope: &str, state: &mut DraftSession) -> Kept {
+        match self.spool.take(host, scope) {
             Ok(Some(spooled)) => {
                 let mut images = Vec::new();
                 let mut damaged = Vec::new();
@@ -466,52 +498,33 @@ impl DraftSessions {
                 }
                 Kept::Nothing
             }
-        };
-        let (changed, _) = watch::channel(0);
-        let session = DraftHandle(Arc::new(Inner {
-            host,
-            scope,
-            client,
-            spool: self.spool.clone(),
-            shared: Mutex::new(Shared {
-                state,
-                viewers: Vec::new(),
-                timer: None,
-                version: 0,
-                kept: recovered,
-            }),
-            changed,
-            cancelled: CancellationToken::new(),
-        }));
-        self.sessions.insert(key, session.clone());
-        let lease = DraftLease::new(session.clone());
-        session.pump();
-        Ok(lease)
+        }
     }
 
-    #[expect(
-        clippy::iter_over_hash_type,
-        reason = "each session keeps itself in its own file, so the order sessions retire in is irrelevant"
-    )]
     pub fn retire(&mut self) {
-        for (_, session) in self.sessions.drain() {
+        let retired: Vec<DraftHandle> = self.sessions.drain().map(|(_, session)| session).collect();
+        for session in retired {
             session.forget_unforgotten();
             if let Err(error) = session.retire() {
-                hold(session, error);
+                self.hold(session, error);
             }
         }
     }
 
     pub fn retain_hosts(&mut self, core: &Core) {
+        let mut unkept = Vec::new();
         self.sessions.retain(|(id, instance, _), session| {
             if core.host_if_instance(id, *instance).is_some() {
                 return true;
             }
             if let Err(error) = session.retire() {
-                hold(session.clone(), error);
+                unkept.push((session.clone(), error));
             }
             false
         });
+        for (session, error) in unkept {
+            self.hold(session, error);
+        }
     }
 }
 
@@ -717,6 +730,22 @@ impl DraftHandle {
                 return Ok(());
             }
         }
+    }
+
+    fn hand_over(&self) -> Option<(KeptDraft, Vec<PendingUpload>, Kept)> {
+        let shared = self.0.shared();
+        let keeping = Keeping::of(&shared)?;
+        let kept = shared.kept;
+        self.publish(shared, |shared| shared.state.remove());
+        let images = keeping
+            .images
+            .into_iter()
+            .map(|(_, image)| match image {
+                AdoptedImage::Unread(upload) => upload,
+                AdoptedImage::Read(bytes) => PendingUpload::kept(bytes.to_vec()),
+            })
+            .collect();
+        Some((keeping.draft, images, kept))
     }
 
     pub(crate) fn take_unrecovered(&self) -> Option<Unrecovered> {

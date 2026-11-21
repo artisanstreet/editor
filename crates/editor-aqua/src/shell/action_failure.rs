@@ -149,8 +149,13 @@ impl ActionFailureDialog {
         self.failure = Some(ActionFailure::Notices { problem });
     }
 
-    pub fn offer_drafts(&mut self, unkept: Option<crate::composer::persistence::UnkeptDrafts>) {
-        if let Some(unkept) = unkept.filter(|unkept| unkept.generation != self.drafts_seen) {
+    pub fn offer_drafts(
+        &mut self,
+        unkept_since: impl FnOnce(u64) -> Option<crate::composer::persistence::UnkeptDrafts>,
+    ) {
+        if let Some(unkept) =
+            unkept_since(self.drafts_seen).filter(|unkept| unkept.generation != self.drafts_seen)
+        {
             self.show_drafts(unkept);
         }
     }

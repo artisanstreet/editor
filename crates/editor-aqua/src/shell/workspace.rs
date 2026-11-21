@@ -321,6 +321,19 @@ impl Workspace {
             .fold(Attention::default(), |total, host| total + host)
     }
 
+    pub(crate) fn unkept_drafts_since(
+        &self,
+        seen: u64,
+    ) -> Option<crate::composer::persistence::UnkeptDrafts> {
+        self.draft_sessions.unkept_since(seen)
+    }
+
+    pub(crate) fn keep_unkept_drafts(
+        &mut self,
+    ) -> Option<crate::composer::persistence::UnkeptDrafts> {
+        self.draft_sessions.keep_unkept()
+    }
+
     pub(crate) fn retire(&mut self) -> NotificationEffects {
         if let Some(composer) = &self.composer {
             composer.controller.borrow_mut().release();
