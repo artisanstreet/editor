@@ -148,6 +148,7 @@ fn sending_while_a_draft_kept_beside_waits_for_a_choice_is_refused_and_keeps_the
         base: None,
         post: None,
         lost: Vec::new(),
+        set_aside: Vec::new(),
     };
     spool
         .keep(

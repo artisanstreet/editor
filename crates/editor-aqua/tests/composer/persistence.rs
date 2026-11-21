@@ -2717,17 +2717,22 @@ fn keeping_mine_over_a_draft_kept_beside_finishes_its_unanswered_send_then_remov
             Value::Null,
             "finishing it doesn't clear the draft the user kept"
         );
-        assert!(
-            beside.exists(),
-            "it stays on this device until Forge has it"
+        let kept: Value = serde_json::from_slice(
+            &std::fs::read(drafts.join("rivals-new_3aproject.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            kept["set_aside"][0]["message"]["id"], "beside-message",
+            "it stays on this device with the kept draft until Forge has it"
         );
+        assert!(!beside.exists(), "the draft the user chose against is gone");
         respond(
             &mut socket,
             accepted_message("beside-message", "sent beside"),
         )
         .await;
         drop(socket);
-        while beside.exists() {
+        while drafts.join("rivals-new_3aproject.json").exists() {
             changed.changed().await.unwrap();
         }
         assert_eq!(session.read(|state| state.body().text.clone()), "mine");

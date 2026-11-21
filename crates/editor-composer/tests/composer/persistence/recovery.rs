@@ -90,6 +90,7 @@ fn kept(text: &str) -> KeptDraft {
         base: None,
         post: None,
         lost: Vec::new(),
+        set_aside: Vec::new(),
     }
 }
 
@@ -677,7 +678,7 @@ fn reopening_beside_an_unreadable_draft_brings_back_the_one_kept_beside_it() {
     assert!(!lease.read(DraftSession::conflict));
 }
 
-fn wait_until(lease: &DraftLease, done: impl Fn() -> bool) {
+fn wait_until(lease: &DraftHandle, done: impl Fn() -> bool) {
     let mut changed = lease.subscribe();
     runtime().block_on(async {
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -690,7 +691,7 @@ fn wait_until(lease: &DraftLease, done: impl Fn() -> bool) {
     });
 }
 
-fn wait_until_removed(lease: &DraftLease, path: &std::path::Path) {
+fn wait_until_removed(lease: &DraftHandle, path: &std::path::Path) {
     wait_until(lease, || !path.exists());
 }
 
@@ -905,8 +906,20 @@ fn loading_the_draft_kept_beside_keeps_the_records_unanswered_send_until_forge_h
         lease.read(|state| state.body().text.clone()),
         "kept beside the record"
     );
-    assert!(
-        device.drafts().join("recovering-new.json").exists(),
+    wait_until(&lease, settled(&lease));
+    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
+    let [Ok(beside)] = &beside[..] else {
+        panic!("expected the chosen draft to be kept beside: {beside:?}");
+    };
+    assert_eq!(
+        beside
+            .spooled
+            .draft
+            .set_aside
+            .iter()
+            .map(|sent| sent.message.id.clone())
+            .collect::<Vec<_>>(),
+        [ItemId("record-message".into())],
         "the message the user already sent stays on this device until Forge answers"
     );
 }
@@ -928,8 +941,20 @@ fn keeping_mine_over_a_draft_kept_beside_with_an_unanswered_send_keeps_it_until_
         lease.read(|state| state.body().text.clone()),
         "kept in the record"
     );
-    assert!(
-        device.drafts().join("recovering-new.kept-1").exists(),
+    wait_until(&lease, settled(&lease));
+    let record = device
+        .spool()
+        .take(&device.host, "new")
+        .unwrap()
+        .expect("the kept draft stays on this device");
+    assert_eq!(
+        record
+            .draft
+            .set_aside
+            .iter()
+            .map(|sent| sent.message.id.clone())
+            .collect::<Vec<_>>(),
+        [ItemId("beside-message".into())],
         "the message the user already sent stays on this device until Forge answers"
     );
 }
@@ -1017,7 +1042,7 @@ fn a_draft_held_after_remounting_shows_as_new_although_the_last_notice_was_dismi
     );
 }
 
-fn settled(lease: &DraftLease) -> impl Fn() -> bool {
+fn settled(lease: &DraftHandle) -> impl Fn() -> bool {
     let rejections = lease.0.rejections.clone();
     move || rejections.lock().is_empty()
 }
@@ -1129,4 +1154,117 @@ fn a_choice_still_being_carried_out_is_honoured_by_the_drafts_that_take_over() {
         device.reopen().read(DraftSession::conflict),
         "drafts that didn't take over know nothing of the choice"
     );
+}
+
+fn beside_slot(device: &Device) -> BesideSlot {
+    kept_beside_a_record(device);
+    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
+    let [Ok(beside)] = &beside[..] else {
+        panic!("expected one draft kept beside the record: {beside:?}");
+    };
+    beside.slot
+}
+
+const SET_ASIDE_FAILED: &str = "Couldn't send a message from the draft you set aside.";
+
+fn set_aside_failed(lease: &DraftHandle) -> impl Fn() -> bool {
+    move || {
+        lease.read(|state| state.error().map(|problem| problem.headline().to_owned()))
+            == Some(SET_ASIDE_FAILED.to_owned())
+    }
+}
+
+#[test]
+fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and_sent_again() {
+    let device = Device::refusing();
+    let slot = beside_slot(&device);
+    std::fs::remove_file(device.drafts().join("recovering-new.json")).unwrap();
+    let mut state = DraftSession::new("new".into());
+    state.offer_rival(slot, kept("kept beside"), Vec::new(), Vec::new());
+    state.submit(sending("sent before choosing", "displaced", None));
+    let (changed, _) = watch::channel(0);
+    let session = DraftHandle(Arc::new(Inner {
+        host: device.host.clone(),
+        scope: "new".into(),
+        client: device.client.clone(),
+        spool: device.spool(),
+        rejections: Rejections::default(),
+        shared: Mutex::new(Shared {
+            state,
+            viewers: Vec::new(),
+            timer: None,
+            version: 0,
+            kept: Kept::Nothing,
+        }),
+        changed,
+        cancelled: CancellationToken::new(),
+    }));
+
+    session.use_remote();
+
+    wait_until(&session, set_aside_failed(&session));
+    let beside = device.spool().kept_beside(&device.host, "new", |_| false);
+    let [Ok(beside)] = &beside[..] else {
+        panic!("expected the chosen draft to be kept beside: {beside:?}");
+    };
+    assert_eq!(
+        beside.spooled.draft.set_aside,
+        [sending("sent before choosing", "displaced", None)],
+        "the failed message is kept on this device"
+    );
+    session.0.cancelled.cancel();
+    drop(session);
+
+    let lease = device.reopen();
+    assert_eq!(
+        lease.read(|state| state.kept().set_aside),
+        [sending("sent before choosing", "displaced", None)],
+        "opening the draft again sends it again under its id"
+    );
+    wait_until(&lease, set_aside_failed(&lease));
+}
+
+#[test]
+fn a_set_aside_message_is_sent_before_the_chosen_drafts_own_and_only_once_it_is_kept() {
+    let device = Device::new();
+    let slot = beside_slot(&device);
+    let mine = sending("sent from mine", "mine", None);
+    let theirs = sending("sent from theirs", "theirs", None);
+    let mut state = DraftSession::new("new".into());
+    state.recover(kept_sending(&mine), Vec::new(), Vec::new());
+    state.offer_rival(slot, kept_sending(&theirs), Vec::new(), Vec::new());
+    assert!(matches!(state.next_operation(), Some(Operation::Load)));
+    state.loaded(Ok(artisan_api::DraftSnapshot::default()));
+
+    assert_eq!(state.use_remote(), Some(slot));
+    let next = |state: &mut DraftSession| loop {
+        match state.next_operation() {
+            Some(Operation::Write { body, .. }) => {
+                state.written(Ok(artisan_api::DraftWriteResult {
+                    saved: true,
+                    current: artisan_api::DraftSnapshot {
+                        revision: 1,
+                        body: body.to_wire(),
+                    },
+                }));
+            }
+            operation => break operation,
+        }
+    };
+    assert!(
+        next(&mut state).is_none(),
+        "nothing is sent until the set-aside message is kept on this device"
+    );
+
+    state.set_aside_kept();
+    let Some(Operation::PostSetAside(first)) = next(&mut state) else {
+        panic!("expected the set-aside message to go first");
+    };
+    assert_eq!(first.message.id, mine.message.id);
+    assert!(state.next_operation().is_none());
+    state.posted_set_aside(Ok(()));
+    let Some(Operation::Post(second)) = next(&mut state) else {
+        panic!("expected the chosen draft's message once the set-aside one is through");
+    };
+    assert_eq!(second.message.id, theirs.message.id);
 }

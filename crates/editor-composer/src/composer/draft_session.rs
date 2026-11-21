@@ -54,6 +54,7 @@ pub enum Operation {
         body: Box<DraftBody>,
     },
     Post(Box<Submission>),
+    PostSetAside(Box<Submission>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,6 +128,12 @@ pub enum DraftFailure {
         #[source]
         source: PostMessageError,
     },
+    #[error("Couldn't send a message from the draft you set aside")]
+    SetAside {
+        scope: String,
+        #[source]
+        source: PostMessageError,
+    },
     #[error("Couldn't upload an image pasted before leaving this draft")]
     Upload {
         scope: String,
@@ -142,7 +149,9 @@ impl DraftFailure {
             Self::Load { source, .. } | Self::Save { source, .. } => {
                 editor_core::Problem::calling_forge(&headline, source)
             }
-            Self::Send { source, .. } => editor_core::Problem::caused_by(headline, source),
+            Self::Send { source, .. } | Self::SetAside { source, .. } => {
+                editor_core::Problem::caused_by(headline, source)
+            }
             Self::Upload { source, .. } => editor_core::Problem::caused_by(headline, source),
         }
     }
@@ -197,6 +206,8 @@ pub struct KeptDraft {
     pub(crate) post: Option<UnsentPost>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) lost: Vec<KeptLostImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) set_aside: Vec<Submission>,
 }
 
 #[derive(Debug)]
@@ -222,6 +233,7 @@ enum Request {
     Loading,
     Writing { body: Box<DraftBody>, edited: u64 },
     Posting,
+    PostingSetAside,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +249,29 @@ struct Outgoing {
     sent: DraftBody,
     stage: Stage,
     edited: u64,
+}
+
+#[derive(Debug)]
+enum SetAsideStage {
+    Keeping,
+    Queued,
+    Running,
+    Failed(DraftFailure),
+}
+
+#[derive(Debug)]
+struct SetAside {
+    request: Submission,
+    stage: SetAsideStage,
+}
+
+impl SetAside {
+    const fn keeping(request: Submission) -> Self {
+        Self {
+            request,
+            stage: SetAsideStage::Keeping,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -293,12 +328,7 @@ struct Rival {
     post: Option<UnsentPost>,
     lost: Vec<KeptLostImage>,
     images: Vec<PendingUpload>,
-}
-
-#[derive(Debug)]
-pub struct RivalChoice {
-    pub(crate) slot: BesideSlot,
-    pub(crate) unsent: Option<Submission>,
+    set_aside: Vec<Submission>,
 }
 
 fn unanswered(mut request: Submission) -> Submission {
@@ -317,6 +347,7 @@ enum Planned {
     Load,
     Write,
     Post,
+    PostSetAside,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -371,6 +402,7 @@ struct Draft {
     request: Request,
     halt: Halt,
     send: Send,
+    set_aside: Vec<SetAside>,
     rivals: Vec<Rival>,
 }
 
@@ -455,6 +487,15 @@ fn keep_parked(earlier: &DraftBody, body: DraftBody) -> DraftBody {
 impl Draft {
     fn halted(&self) -> bool {
         !matches!(self.halt, Halt::Clear) || !self.rivals.is_empty()
+    }
+
+    fn set_aside_failure(&self) -> Option<editor_core::Problem> {
+        self.set_aside
+            .iter()
+            .find_map(|set_aside| match &set_aside.stage {
+                SetAsideStage::Failed(failure) => Some(failure.problem()),
+                SetAsideStage::Keeping | SetAsideStage::Queued | SetAsideStage::Running => None,
+            })
     }
 
     fn outgoing(&self) -> Option<&Outgoing> {
@@ -688,14 +729,23 @@ impl Draft {
     }
 
     fn post_ready(&self, conflicted: bool) -> bool {
-        self.outgoing().is_some_and(|outgoing| {
-            outgoing.stage == Stage::Queued && (conflicted || self.edits.saved >= outgoing.edited)
-        })
+        self.set_aside.is_empty()
+            && self.outgoing().is_some_and(|outgoing| {
+                outgoing.stage == Stage::Queued
+                    && (conflicted || self.edits.saved >= outgoing.edited)
+            })
     }
 
     fn plan(&self) -> Option<Planned> {
         if !matches!(self.request, Request::Idle) {
             return None;
+        }
+        if self
+            .set_aside
+            .first()
+            .is_some_and(|set_aside| matches!(set_aside.stage, SetAsideStage::Queued))
+        {
+            return Some(Planned::PostSetAside);
         }
         let loaded = matches!(self.remote, Remote::Loaded(_));
         if !self.rivals.is_empty() {
@@ -722,12 +772,13 @@ impl Draft {
                 revision: snapshot.revision,
                 written: Some(body.clone()),
             }),
-            (Remote::Loaded(snapshot), Request::Idle | Request::Loading | Request::Posting) => {
-                Some(Base {
-                    revision: snapshot.revision,
-                    written: None,
-                })
-            }
+            (
+                Remote::Loaded(snapshot),
+                Request::Idle | Request::Loading | Request::Posting | Request::PostingSetAside,
+            ) => Some(Base {
+                revision: snapshot.revision,
+                written: None,
+            }),
             (Remote::Ambiguous { snapshot, written }, _) => Some(Base {
                 revision: snapshot.revision,
                 written: Some(written.clone()),
@@ -757,6 +808,7 @@ impl DraftSession {
                 request: Request::Idle,
                 halt: Halt::Clear,
                 send: Send::Idle,
+                set_aside: Vec::new(),
                 rivals: Vec::new(),
             })),
         }
@@ -848,15 +900,19 @@ impl DraftSession {
                 Some(editor_core::Problem::new(RIVAL))
             }
             State::Open(draft) => match &draft.halt {
-                Halt::Clear => draft
-                    .adopting
-                    .iter()
-                    .find_map(|adoption| match &adoption.upload {
-                        Upload::Waiting(failure) => Some(failure.problem()),
-                        Upload::Queued | Upload::Running => None,
-                    }),
-                Halt::Failed(failure) => Some(failure.problem()),
                 Halt::Conflict { .. } => Some(editor_core::Problem::new(CONFLICT)),
+                Halt::Failed(failure) => draft
+                    .set_aside_failure()
+                    .or_else(|| Some(failure.problem())),
+                Halt::Clear => draft.set_aside_failure().or_else(|| {
+                    draft
+                        .adopting
+                        .iter()
+                        .find_map(|adoption| match &adoption.upload {
+                            Upload::Waiting(failure) => Some(failure.problem()),
+                            Upload::Queued | Upload::Running => None,
+                        })
+                }),
             },
         }
     }
@@ -866,6 +922,7 @@ impl DraftSession {
             matches!(draft.request, Request::Idle)
                 && !draft.edits.unsaved()
                 && draft.outgoing().is_none()
+                && draft.set_aside.is_empty()
                 && draft.adopting.is_empty()
                 && draft.lost.is_empty()
         })
@@ -885,8 +942,30 @@ impl DraftSession {
 
     pub fn pending(&self) -> bool {
         self.draft().is_some_and(|draft| {
-            draft.edits.unsaved() || draft.in_flight().is_some() || !draft.adopting.is_empty()
+            draft.edits.unsaved()
+                || draft.in_flight().is_some()
+                || !draft.set_aside.is_empty()
+                || !draft.adopting.is_empty()
         })
+    }
+
+    pub(crate) fn keeping_set_aside(&self) -> bool {
+        self.draft().is_some_and(|draft| {
+            draft
+                .set_aside
+                .iter()
+                .any(|set_aside| matches!(set_aside.stage, SetAsideStage::Keeping))
+        })
+    }
+
+    pub(crate) fn set_aside_kept(&mut self) {
+        if let State::Open(draft) = &mut self.state {
+            for set_aside in &mut draft.set_aside {
+                if matches!(set_aside.stage, SetAsideStage::Keeping) {
+                    set_aside.stage = SetAsideStage::Queued;
+                }
+            }
+        }
     }
 
     pub(crate) fn keepable(&self) -> bool {
@@ -915,6 +994,12 @@ impl DraftSession {
             );
         };
         draft.remote = Remote::Unloaded(recovery.base);
+        draft
+            .set_aside
+            .extend(recovery.set_aside.into_iter().map(|request| SetAside {
+                request,
+                stage: SetAsideStage::Queued,
+            }));
         draft.restore(recovery.body, recovery.post);
         for lost in recovery.lost.into_iter().chain(damaged) {
             draft.lose(lost.name, lost.reason);
@@ -943,6 +1028,7 @@ impl DraftSession {
             post: recovery.post,
             lost: recovery.lost.into_iter().chain(damaged).collect(),
             images,
+            set_aside: recovery.set_aside,
         });
     }
 
@@ -966,6 +1052,13 @@ impl DraftSession {
                         name: lost.name.clone(),
                         reason: lost.reason.clone(),
                     })
+                    .collect()
+            }),
+            set_aside: self.draft().map_or_else(Vec::new, |draft| {
+                draft
+                    .set_aside
+                    .iter()
+                    .map(|set_aside| set_aside.request.clone())
                     .collect()
             }),
         }
@@ -1151,17 +1244,26 @@ impl DraftSession {
         if let State::Open(draft) = &mut self.state {
             draft.clear_failure();
             draft.requeue_waiting();
+            for set_aside in &mut draft.set_aside {
+                if matches!(set_aside.stage, SetAsideStage::Failed(_)) {
+                    set_aside.stage = SetAsideStage::Queued;
+                }
+            }
         }
     }
 
-    pub fn keep_local(&mut self) -> Option<RivalChoice> {
+    pub fn keep_local(&mut self) -> Option<BesideSlot> {
         if let State::Open(draft) = &mut self.state {
             if !draft.rivals.is_empty() {
                 let rival = draft.rivals.remove(0);
-                return Some(RivalChoice {
-                    slot: rival.slot,
-                    unsent: rival.post.and_then(UnsentPost::unanswered),
-                });
+                draft.set_aside.extend(
+                    rival
+                        .set_aside
+                        .into_iter()
+                        .chain(rival.post.and_then(UnsentPost::unanswered))
+                        .map(SetAside::keeping),
+                );
+                return Some(rival.slot);
             }
             draft.halt = match std::mem::replace(&mut draft.halt, Halt::Clear) {
                 Halt::Conflict {
@@ -1173,13 +1275,19 @@ impl DraftSession {
         None
     }
 
-    pub fn use_remote(&mut self) -> Option<RivalChoice> {
+    pub fn use_remote(&mut self) -> Option<BesideSlot> {
         let State::Open(draft) = &mut self.state else {
             return None;
         };
         if !draft.rivals.is_empty() {
             let rival = draft.rivals.remove(0);
             let unsent = draft.set_aside_send();
+            draft.set_aside.extend(
+                unsent
+                    .into_iter()
+                    .chain(rival.set_aside)
+                    .map(SetAside::keeping),
+            );
             draft.adopting.clear();
             draft.lost.clear();
             draft.restore(rival.body, rival.post);
@@ -1190,10 +1298,7 @@ impl DraftSession {
                 draft.adopt(image);
             }
             self.replaced();
-            return Some(RivalChoice {
-                slot: rival.slot,
-                unsent,
-            });
+            return Some(rival.slot);
         }
         draft.body = draft
             .snapshot()
@@ -1220,6 +1325,17 @@ impl DraftSession {
         let planned = draft.plan()?;
         let (request, operation) = match (planned, &draft.remote, &mut draft.send) {
             (Planned::Load, _, _) => (Request::Loading, Operation::Load),
+            (Planned::PostSetAside, _, _) => {
+                let set_aside = draft
+                    .set_aside
+                    .first_mut()
+                    .expect("invariant: a set-aside message is posted only while one is queued");
+                set_aside.stage = SetAsideStage::Running;
+                (
+                    Request::PostingSetAside,
+                    Operation::PostSetAside(Box::new(set_aside.request.clone())),
+                )
+            }
             (Planned::Write, Remote::Loaded(snapshot), _) => (
                 Request::Writing {
                     body: Box::new(draft.body.clone()),
@@ -1345,6 +1461,36 @@ impl DraftSession {
                 if draft.fail(&self.scope, failure) {
                     self.handed_back();
                 }
+            }
+        }
+    }
+
+    pub(crate) fn posted_set_aside(&mut self, result: Result<(), PostMessageError>) {
+        let State::Open(draft) = &mut self.state else {
+            self.dropped("a set-aside message's result");
+            return;
+        };
+        let request = std::mem::replace(&mut draft.request, Request::Idle);
+        assert!(
+            matches!(request, Request::PostingSetAside),
+            "invariant: draft {} finished a set-aside post it did not start",
+            self.scope
+        );
+        match result {
+            Ok(()) => {
+                draft.set_aside.remove(0);
+            }
+            Err(source) => {
+                let failure = DraftFailure::SetAside {
+                    scope: self.scope.clone(),
+                    source,
+                };
+                tracing::warn!(
+                    scope = %self.scope,
+                    error = %diagnostics::chain(&failure),
+                    "a message sent from a draft the user set aside failed; it waits for Try again"
+                );
+                draft.set_aside[0].stage = SetAsideStage::Failed(failure);
             }
         }
     }

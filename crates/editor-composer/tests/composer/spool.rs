@@ -10,6 +10,7 @@ fn kept(text: &str) -> KeptDraft {
         base: None,
         post: None,
         lost: Vec::new(),
+        set_aside: Vec::new(),
     }
 }
 

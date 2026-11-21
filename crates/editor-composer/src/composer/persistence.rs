@@ -2,7 +2,7 @@ use super::attachment::{PendingUpload, ReadImageError, upload_image};
 use super::draft_body::DraftBody;
 use super::draft_session::{
     AdoptImageError, AdoptedImage, AdoptionKey, DraftSession, KeptDraft, KeptLostImage, LostKey,
-    Operation, PostMessageError, RivalChoice, SAVE_DELAY, Submission, Unrecovered,
+    Operation, PostMessageError, SAVE_DELAY, Submission, Unrecovered,
 };
 use super::spool::{
     BesideSlot, DraftSpool, Holder, KeepSpooledDraftError, KeptBesideError, Slot, SpooledDraft,
@@ -1007,10 +1007,9 @@ impl DraftHandle {
     pub(crate) fn keep_local(&self) {
         let mut rejected = None;
         self.mutate(|shared| rejected = shared.state.keep_local());
-        if let Some(RivalChoice { slot, unsent }) = rejected {
+        if let Some(slot) = rejected {
             self.set_aside(
                 Some(Slot::Beside(slot)),
-                unsent,
                 "the draft the user chose not to keep",
             );
         }
@@ -1020,104 +1019,103 @@ impl DraftHandle {
     pub(crate) fn use_remote(&self) {
         let mut replaced = None;
         self.mutate(|shared| {
-            if let Some(RivalChoice { slot, unsent }) = shared.state.use_remote() {
-                replaced = Some((shared.kept.slot(), unsent));
+            if let Some(slot) = shared.state.use_remote() {
+                replaced = Some(shared.kept.slot());
                 shared.kept = Kept::Recovered(Slot::Beside(slot));
             }
         });
-        if let Some((rejected, unsent)) = replaced {
+        if let Some(rejected) = replaced {
             self.set_aside(
                 rejected,
-                unsent,
                 "the draft the user replaced with the one kept beside it",
             );
             self.flush();
         }
     }
 
-    fn set_aside(&self, slot: Option<Slot>, unsent: Option<Submission>, which: &'static str) {
-        match unsent {
-            Some(request) => self.finish_unsent(request, slot, which),
-            None => {
-                if let Some(slot) = slot {
-                    self.forget_slot(slot, which);
-                }
+    fn set_aside(&self, slot: Option<Slot>, which: &'static str) {
+        if !self.read(DraftSession::keeping_set_aside) {
+            if let Some(slot) = slot {
+                self.forget_slot(slot, which);
             }
+            return;
         }
-    }
-
-    fn finish_unsent(&self, request: Submission, slot: Option<Slot>, which: &'static str) {
+        if let Some(slot) = slot {
+            self.reject(slot);
+        }
         let session = self.clone();
-        let span = tracing::info_span!(
-            "send_set_aside_message",
-            host = %session.0.host,
-            thread = %request.thread,
-            message = %request.message.id
-        );
-        runtime().spawn(
-            async move {
-                let cancelled = session.0.cancelled.clone();
-                let result = tokio::select! {
-                    biased;
-                    () = cancelled.cancelled() => return,
-                    result = post(&session.0.client, &request) => result,
-                };
-                match (result, slot) {
-                    (Ok(()), Some(slot)) => session.forget_slot(slot, which),
-                    (Ok(()), None) => {}
-                    (Err(error), _) => tracing::error!(
+        runtime().spawn_blocking(move || {
+            match (session.keep_locally(), slot) {
+                (Ok(_), Some(slot)) => session.discard(slot, which),
+                (Ok(_), None) => {}
+                (Err(error), slot) => {
+                    tracing::error!(
                         host = %session.0.host,
                         scope = %session.0.scope,
                         which,
                         error = %::diagnostics::chain(&error),
-                        "couldn't finish a message sent from a draft the user set aside; it is sent again under the same id when this draft next opens"
-                    ),
+                        "couldn't keep the messages sent from a draft the user set aside on this device; sending them anyway and leaving that draft where it is"
+                    );
+                    if let Some(slot) = slot {
+                        session.unreject(slot);
+                    }
                 }
             }
-            .instrument(span),
-        );
+            session.mutate(|shared| shared.state.set_aside_kept());
+            session.pump();
+        });
     }
 
     fn forget_slot(&self, slot: Slot, which: &'static str) {
+        self.reject(slot);
+        let session = self.clone();
+        runtime().spawn_blocking(move || session.discard(slot, which));
+    }
+
+    fn reject(&self, slot: Slot) {
         let inner = &self.0;
         inner.rejections.lock().push(Rejected {
             host: inner.host.clone(),
             scope: inner.scope.clone(),
             slot,
         });
-        let session = self.clone();
-        runtime().spawn_blocking(move || {
-            let inner = &session.0;
-            let path = inner.spool.slot_path(&inner.host, &inner.scope, slot);
-            match inner.spool.forget(&inner.host, &inner.scope, slot) {
-                Ok(()) => {}
-                Err(error) if error.slot_freed() => tracing::error!(
-                    host = %inner.host,
-                    scope = %inner.scope,
-                    which,
-                    path = %path.display(),
-                    error = %::diagnostics::chain(&error),
-                    "set aside a draft the user chose against but couldn't remove it; removing it when this draft next opens"
-                ),
-                Err(error) => tracing::error!(
-                    host = %inner.host,
-                    scope = %inner.scope,
-                    which,
-                    path = %path.display(),
-                    error = %::diagnostics::chain(&error),
-                    "couldn't set aside a draft the user chose against; it is offered again when this draft next opens"
-                ),
-            }
-            let mut rejected = inner.rejections.lock();
-            if let Some(index) = rejected
-                .iter()
-                .position(|rejected| rejected.slot == slot && rejected.holds(&inner.host, &inner.scope))
-            {
-                rejected.remove(index);
-            }
-            drop(rejected);
-            session.mutate(|_| {});
-        });
+    }
+
+    fn unreject(&self, slot: Slot) {
+        let inner = &self.0;
+        let mut rejected = inner.rejections.lock();
+        if let Some(index) = rejected
+            .iter()
+            .position(|rejected| rejected.slot == slot && rejected.holds(&inner.host, &inner.scope))
+        {
+            rejected.remove(index);
+        }
+    }
+
+    fn discard(&self, slot: Slot, which: &'static str) {
+        let inner = &self.0;
+        let path = inner.spool.slot_path(&inner.host, &inner.scope, slot);
+        match inner.spool.forget(&inner.host, &inner.scope, slot) {
+            Ok(()) => {}
+            Err(error) if error.slot_freed() => tracing::error!(
+                host = %inner.host,
+                scope = %inner.scope,
+                which,
+                path = %path.display(),
+                error = %::diagnostics::chain(&error),
+                "set aside a draft the user chose against but couldn't remove it; removing it when this draft next opens"
+            ),
+            Err(error) => tracing::error!(
+                host = %inner.host,
+                scope = %inner.scope,
+                which,
+                path = %path.display(),
+                error = %::diagnostics::chain(&error),
+                "couldn't set aside a draft the user chose against; it is offered again when this draft next opens"
+            ),
+        }
+        self.unreject(slot);
+        self.mutate(|_| {});
     }
 
     fn sweep_tombstones(&self) {
@@ -1175,6 +1173,15 @@ impl DraftHandle {
                 };
                 let result = client.set_draft(&session.0.scope, &request).await;
                 session.mutate(|shared| shared.state.written(result));
+            }
+            Operation::PostSetAside(request) => {
+                let span = tracing::info_span!(
+                    "send_set_aside_message",
+                    thread = %request.thread,
+                    message = %request.message.id
+                );
+                let result = post(client, &request).instrument(span).await;
+                session.mutate(|shared| shared.state.posted_set_aside(result));
             }
             Operation::Post(request) => {
                 let span = tracing::info_span!(
