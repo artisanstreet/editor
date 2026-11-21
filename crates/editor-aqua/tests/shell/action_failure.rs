@@ -125,7 +125,7 @@ fn drafts_the_device_could_not_keep_are_explained_and_offer_trying_again_once_pe
             &std::io::Error::other("the disk is full"),
         ),
     };
-    failure.offer_drafts(|_| Some(unkept.clone()));
+    failure.offer_drafts(Some(unkept.clone()));
     failure.mount(&mut ui, &theme);
     ui.build_frame().unwrap();
     assert_on_screen(&ui, &["Couldn't keep unsaved drafts", "Try again"]);
@@ -133,7 +133,7 @@ fn drafts_the_device_could_not_keep_are_explained_and_offer_trying_again_once_pe
 
     click(&mut ui, KEEP_DRAFTS);
     assert_eq!(failure.drain(&mut ui), Some(Effect::KeepDrafts));
-    failure.offer_drafts(|_| Some(unkept.clone()));
+    failure.offer_drafts(Some(unkept.clone()));
     assert!(
         failure.failure().is_none(),
         "a failure already shown doesn't reopen on its own"
@@ -142,4 +142,60 @@ fn drafts_the_device_could_not_keep_are_explained_and_offer_trying_again_once_pe
     failure.mount(&mut ui, &theme);
     ui.build_frame().unwrap();
     assert_on_screen(&ui, &["Couldn't keep unsaved drafts"]);
+}
+
+#[test]
+fn the_drafts_notice_closes_once_every_held_draft_is_taken_back_and_stays_closed_until_a_new_one_is_held()
+ {
+    use editor_aqua::composer::persistence::UnkeptDrafts;
+
+    let mut ui = workspace();
+    let theme = ArtisanTheme::resolved();
+    let mut failure = ActionFailureDialog::default();
+    let held = |count: usize, generation: u64| UnkeptDrafts {
+        count,
+        generation,
+        problem: editor_aqua::core::Problem::caused_by(
+            format!("{count} held"),
+            &std::io::Error::other("the disk is full"),
+        ),
+    };
+    failure.offer_drafts(Some(held(2, 2)));
+    failure.offer_drafts(Some(held(1, 2)));
+    assert_eq!(
+        failure
+            .failure()
+            .map(|failure| failure.problem().headline()),
+        Some("1 held"),
+        "taking one draft back updates the notice to the drafts still held"
+    );
+
+    failure.offer_drafts(None);
+    failure.mount(&mut ui, &theme);
+    ui.build_frame().unwrap();
+    assert!(
+        failure.failure().is_none(),
+        "the notice closes once no draft is held"
+    );
+    assert!(
+        !painted_texts(&ui)
+            .iter()
+            .any(|text| text == "Couldn't keep unsaved drafts")
+    );
+
+    failure.offer_drafts(Some(held(1, 3)));
+    failure.mount(&mut ui, &theme);
+    ui.build_frame().unwrap();
+    click(&mut ui, editor_aqua::shell::action_failure::KEEP_DRAFTS);
+    assert_eq!(failure.drain(&mut ui), Some(Effect::KeepDrafts));
+    failure.offer_drafts(Some(held(1, 3)));
+    assert!(
+        failure.failure().is_none(),
+        "a dismissed notice doesn't come back for the same drafts"
+    );
+    failure.offer_drafts(Some(held(2, 4)));
+    assert!(
+        failure.failure().is_some(),
+        "a newly held draft shows the notice again"
+    );
 }

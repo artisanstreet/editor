@@ -758,3 +758,36 @@ fn loading_the_draft_kept_beside_replaces_the_record_and_keeps_it_until_forge_ha
     assert_eq!(beside.spooled.draft.body.text, "kept beside the record");
     assert!(device.spool().take(&device.host, "new").unwrap().is_none());
 }
+
+#[test]
+fn taking_a_held_draft_back_does_not_count_as_a_new_draft_the_device_could_not_keep() {
+    let device = Device::new();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    for scope in ["first", "second"] {
+        let lease = sessions
+            .open(
+                device.host.clone(),
+                instance,
+                scope.into(),
+                device.client.clone(),
+            )
+            .unwrap();
+        type_into(&lease, scope);
+    }
+    std::fs::write(device.drafts(), b"not a folder").unwrap();
+    sessions.retire();
+    let held = sessions.unkept().expect("both drafts are held");
+    assert_eq!(held.count, 2);
+
+    let _first = sessions
+        .open(device.host.clone(), instance, "first".into(), device.client)
+        .unwrap();
+
+    let still = sessions.unkept().expect("the other draft is still held");
+    assert_eq!(still.count, 1);
+    assert_eq!(
+        still.generation, held.generation,
+        "a notice the user dismissed isn't brought back by taking a draft back"
+    );
+}

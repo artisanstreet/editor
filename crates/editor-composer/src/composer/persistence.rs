@@ -385,12 +385,7 @@ impl DraftSessions {
     }
 
     #[must_use]
-    pub fn unkept_since(&self, seen: u64) -> Option<UnkeptDrafts> {
-        (self.generation != seen).then(|| self.unkept()).flatten()
-    }
-
-    #[must_use]
-    fn unkept(&self) -> Option<UnkeptDrafts> {
+    pub fn unkept(&self) -> Option<UnkeptDrafts> {
         let first = self.held.first()?;
         let count = self.held.len();
         let headline = if count == 1 {
@@ -421,7 +416,6 @@ impl DraftSessions {
             .held
             .iter()
             .position(|held| held.session.0.host == *host && held.session.0.scope == scope)?;
-        self.generation = self.generation.wrapping_add(1);
         Some(self.held.remove(index).session)
     }
 

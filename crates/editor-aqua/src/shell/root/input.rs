@@ -245,9 +245,7 @@ impl RootViews {
             | self.dispatch_conversation(shell, ui, ctx, window)
             | self.sync_sidebar(shell, ui, ctx, window);
         if let Some(workspace) = shell.entry.workspace() {
-            shell
-                .failures
-                .offer_drafts(|seen| workspace.unkept_drafts_since(seen));
+            shell.failures.offer_drafts(workspace.unkept_drafts());
         }
         let link_changed = match shell.failures.drain(ui) {
             Some(crate::shell::action_failure::Effect::CopyUrl(url)) => {

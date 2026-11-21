@@ -321,11 +321,8 @@ impl Workspace {
             .fold(Attention::default(), |total, host| total + host)
     }
 
-    pub(crate) fn unkept_drafts_since(
-        &self,
-        seen: u64,
-    ) -> Option<crate::composer::persistence::UnkeptDrafts> {
-        self.draft_sessions.unkept_since(seen)
+    pub(crate) fn unkept_drafts(&self) -> Option<crate::composer::persistence::UnkeptDrafts> {
+        self.draft_sessions.unkept()
     }
 
     pub(crate) fn keep_unkept_drafts(

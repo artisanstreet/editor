@@ -149,14 +149,21 @@ impl ActionFailureDialog {
         self.failure = Some(ActionFailure::Notices { problem });
     }
 
-    pub fn offer_drafts(
-        &mut self,
-        unkept_since: impl FnOnce(u64) -> Option<crate::composer::persistence::UnkeptDrafts>,
-    ) {
-        if let Some(unkept) =
-            unkept_since(self.drafts_seen).filter(|unkept| unkept.generation != self.drafts_seen)
-        {
-            self.show_drafts(unkept);
+    pub fn offer_drafts(&mut self, held: Option<crate::composer::persistence::UnkeptDrafts>) {
+        match (held, &mut self.failure) {
+            (None, Some(ActionFailure::Drafts { .. })) => self.failure = None,
+            (Some(unkept), _) if unkept.generation != self.drafts_seen => self.show_drafts(unkept),
+            (Some(unkept), Some(ActionFailure::Drafts { problem })) => *problem = unkept.problem,
+            (
+                _,
+                None
+                | Some(
+                    ActionFailure::Link { .. }
+                    | ActionFailure::Copy { .. }
+                    | ActionFailure::Search { .. }
+                    | ActionFailure::Notices { .. },
+                ),
+            ) => {}
         }
     }
 
