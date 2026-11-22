@@ -672,3 +672,41 @@ fn a_second_editor_never_reads_or_removes_the_drafts_another_editor_keeps() {
         "once the first window is gone, the second takes over its draft unharmed"
     );
 }
+
+#[test]
+fn keeping_again_after_the_drafts_folder_failed_to_flush_flushes_it_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let disk = Arc::new(ScriptedDisk::default());
+    let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
+    let host = HostId("forge".into());
+    let drafts = directory.path().join("drafts");
+    let keep = || {
+        spool.keep(
+            &host,
+            "new",
+            kept("typed offline"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+    };
+    let refuse_drafts_flush = || {
+        let drafts = drafts.clone();
+        drop(disk.arm(Rule::RefuseSync, move |path| path == drafts));
+    };
+
+    refuse_drafts_flush();
+    assert!(
+        matches!(keep(), Err(KeepSpooledDraftError::Sync { ref path, .. }) if *path == drafts),
+        "a failed flush of the drafts folder is reported as that flush"
+    );
+    refuse_drafts_flush();
+    assert!(
+        matches!(keep(), Err(KeepSpooledDraftError::Sync { .. })),
+        "keeping again flushes the drafts folder again instead of trusting it is on disk"
+    );
+    keep().unwrap();
+    assert_eq!(
+        spool.take(&host, "new").unwrap().unwrap().draft,
+        kept("typed offline")
+    );
+}

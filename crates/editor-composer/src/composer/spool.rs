@@ -672,19 +672,22 @@ impl Serving {
 
     fn create_root(&self) -> Result<(), KeepSpooledDraftError> {
         let root = self.root();
-        if root.is_dir() {
-            return Ok(());
-        }
-        let failed = |path: &Path| {
-            let path = path.to_owned();
-            move |source| KeepSpooledDraftError::CreateDirectory { path, source }
-        };
+        std::fs::create_dir_all(&root).map_err(|source| {
+            KeepSpooledDraftError::CreateDirectory {
+                path: root.clone(),
+                source,
+            }
+        })?;
         let dir = &self.turn.owner.dir;
-        std::fs::create_dir_all(&root).map_err(failed(&root))?;
-        dir.parent()
-            .map_or(Ok(()), |parent| self.disk().sync_folder(parent))
-            .and_then(|()| self.disk().sync_folder(dir))
-            .map_err(failed(&root))
+        for folder in dir.parent().into_iter().chain([dir.as_path()]) {
+            self.disk()
+                .sync_folder(folder)
+                .map_err(|source| KeepSpooledDraftError::Sync {
+                    path: folder.to_owned(),
+                    source,
+                })?;
+        }
+        Ok(())
     }
 
     pub(crate) fn keep(
