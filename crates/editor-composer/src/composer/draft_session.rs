@@ -345,6 +345,7 @@ pub(crate) struct LostImage {
 pub(crate) enum Unrecovered {
     SetAside(PathBuf),
     Left(PathBuf),
+    Unchecked(PathBuf),
 }
 
 #[derive(Debug)]

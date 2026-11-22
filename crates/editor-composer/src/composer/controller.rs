@@ -778,6 +778,10 @@ impl Composer {
                             "A draft kept on this device couldn't be read. It stays at {}, and this draft is kept beside it.",
                             path.display()
                         ),
+                        Unrecovered::Unchecked(path) => format!(
+                            "Artisan couldn't check {} for a draft kept on this device. Open this draft again to check once more.",
+                            path.display()
+                        ),
                     })
                     .collect::<Vec<_>>()
                     .join(" "),

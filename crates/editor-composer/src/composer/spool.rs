@@ -109,16 +109,35 @@ impl Claim {
         }
     }
 
-    fn refusal(&self) -> Option<KeepSpooledDraftError> {
+    fn refusal(&self) -> Option<Refusal> {
         match self {
             Self::Owned(_) => None,
-            Self::Elsewhere { lock } => {
-                Some(KeepSpooledDraftError::OwnedElsewhere { lock: lock.clone() })
-            }
-            Self::Unclaimed { lock, source } => Some(KeepSpooledDraftError::Unclaimed {
+            Self::Elsewhere { lock } => Some(Refusal::Elsewhere { lock: lock.clone() }),
+            Self::Unclaimed { lock, source } => Some(Refusal::Unclaimed {
                 lock: lock.clone(),
                 source: Arc::clone(source),
             }),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Refusal {
+    #[error("another Editor keeps this device's drafts (locked through {lock})")]
+    Elsewhere { lock: PathBuf },
+    #[error("lock this device's drafts folder through {lock}")]
+    Unclaimed {
+        lock: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
+    },
+}
+
+impl From<Refusal> for KeepSpooledDraftError {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::Elsewhere { lock } => Self::OwnedElsewhere { lock },
+            Refusal::Unclaimed { lock, source } => Self::Unclaimed { lock, source },
         }
     }
 }
@@ -165,7 +184,7 @@ struct Queue {
 }
 
 impl Owner {
-    fn claimed(&self) -> Option<KeepSpooledDraftError> {
+    fn claimed(&self) -> Option<Refusal> {
         let mut claim = self.claim.lock().unwrap_or_else(PoisonError::into_inner);
         if matches!(*claim, Claim::Owned(_)) {
             return None;
@@ -176,8 +195,8 @@ impl Owner {
             None => {
                 tracing::info!(lock = %self.lock.display(), "this Editor now keeps this device's drafts");
             }
-            Some(KeepSpooledDraftError::OwnedElsewhere { .. }) => {}
-            Some(error) => {
+            Some(Refusal::Elsewhere { .. }) => {}
+            Some(error @ Refusal::Unclaimed { .. }) => {
                 tracing::error!(error = %diagnostics::chain(error), "drafts are kept only in Forge");
             }
         }
@@ -343,6 +362,12 @@ pub enum TakeSpooledDraftError {
         unreadable: Box<ReadConfigError>,
         #[source]
         source: Box<SetAsideError>,
+    },
+    #[error("lock this device's drafts folder through {lock}")]
+    Unclaimed {
+        lock: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
     },
 }
 
@@ -697,7 +722,7 @@ impl Serving {
         holder: Holder,
     ) -> Result<Slot, KeepSpooledDraftError> {
         if let Some(refused) = self.turn.owner.claimed() {
-            return Err(refused);
+            return Err(refused.into());
         }
         self.create_root()?;
         let root = self.root();
@@ -785,8 +810,12 @@ impl Serving {
     }
 
     pub(crate) fn take(&self) -> Result<Option<SpooledDraft>, TakeSpooledDraftError> {
-        if self.turn.owner.claimed().is_some() {
-            return Ok(None);
+        match self.turn.owner.claimed() {
+            None => {}
+            Some(Refusal::Unclaimed { lock, source }) => {
+                return Err(TakeSpooledDraftError::Unclaimed { lock, source });
+            }
+            Some(Refusal::Elsewhere { .. }) => return Ok(None),
         }
         let units = self.units().map_err(|source| TakeSpooledDraftError::List {
             path: self.root(),

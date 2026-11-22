@@ -41,7 +41,23 @@ impl Device {
     }
 
     fn at(forge: Forge) -> Self {
+        Self::prepared(forge, |_| ()).0
+    }
+
+    fn beside_another_editor() -> (Self, std::fs::File) {
+        Self::prepared(
+            Forge::Silent(test_support::net::SilentListener::bind()),
+            |directory| {
+                let other_editor = std::fs::File::create(directory.join("drafts.lock")).unwrap();
+                other_editor.lock().unwrap();
+                other_editor
+            },
+        )
+    }
+
+    fn prepared<T>(forge: Forge, before: impl FnOnce(&std::path::Path) -> T) -> (Self, T) {
         let directory = tempfile::tempdir().unwrap();
+        let prepared = before(directory.path());
         let mut core = test_support::editor::core::test_core(directory.path());
         let identity = Identity::generate("recovery-test").unwrap();
         let config = HostConfig {
@@ -55,16 +71,19 @@ impl Device {
         test_support::editor::core::connect_client(&mut core, &config, client.clone());
         let disk = Arc::new(ScriptedDisk::default());
         let spool = DraftSpool::new(directory.path(), Arc::<ScriptedDisk>::clone(&disk));
-        Self {
-            _forge: forge,
-            directory,
-            spool,
-            disk,
-            core,
-            host: config.id.clone(),
-            config,
-            client,
-        }
+        (
+            Self {
+                _forge: forge,
+                directory,
+                spool,
+                disk,
+                core,
+                host: config.id.clone(),
+                config,
+                client,
+            },
+            prepared,
+        )
     }
 
     fn spool(&self) -> DraftSpool {
@@ -1655,4 +1674,47 @@ fn a_hand_back_this_device_could_not_keep_is_reported_and_kept_when_trying_again
     assert_eq!(sessions.unkept(), None);
     assert!(kept_on_device(&device).set_aside.is_empty());
     assert!(!session.read(DraftSession::removed));
+}
+
+#[test]
+fn a_draft_retired_while_another_editor_keeps_this_devices_drafts_says_so_and_is_kept_once_it_closes()
+ {
+    let (mut device, other_editor) = Device::beside_another_editor();
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    device.settle();
+    type_into(&lease, "typed in the second window");
+
+    device.core.remove_host(&device.host).unwrap();
+    sessions.retain_hosts(&device.core);
+    device.settle();
+
+    let unkept = sessions.unkept().expect("the draft is held, not dropped");
+    assert_eq!(
+        unkept.problem.headline(),
+        "Another Artisan Editor keeps unsent drafts on this device. Close it, then Try again keeps them here."
+    );
+    assert!(
+        !device.drafts().exists(),
+        "nothing was written beside the other Editor's drafts"
+    );
+
+    drop(other_editor);
+    sessions.keep_unkept();
+    device.settle();
+    assert_eq!(sessions.unkept(), None);
+    let kept = device
+        .spool()
+        .take(&device.host, "new")
+        .unwrap()
+        .expect("once the other Editor closed, trying again keeps the draft here");
+    assert_eq!(kept.draft.body.text, "typed in the second window");
 }

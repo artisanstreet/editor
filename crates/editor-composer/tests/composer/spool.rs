@@ -710,3 +710,25 @@ fn keeping_again_after_the_drafts_folder_failed_to_flush_flushes_it_again() {
         kept("typed offline")
     );
 }
+
+#[test]
+fn a_drafts_lock_that_cannot_be_opened_is_reported_instead_of_looking_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("drafts.lock")).unwrap();
+    let spool = DraftSpool::new(directory.path(), LocalDisk::shared());
+    let host = HostId("forge".into());
+    assert!(matches!(
+        spool.take(&host, "new"),
+        Err(TakeSpooledDraftError::Unclaimed { .. })
+    ));
+    assert!(matches!(
+        spool.keep(
+            &host,
+            "new",
+            kept("typed"),
+            &[],
+            Holder::Owner(Slot::Record)
+        ),
+        Err(KeepSpooledDraftError::Unclaimed { .. })
+    ));
+}

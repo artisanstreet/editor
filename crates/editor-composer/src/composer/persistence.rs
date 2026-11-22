@@ -538,8 +538,17 @@ impl DraftSessions {
             Hold::Keeping(_) => None,
         });
         let first = unkept.next()?;
-        let count = 1 + unkept.count();
-        let headline = if count == 1 {
+        let rest: Vec<_> = unkept.collect();
+        let count = 1 + rest.len();
+        let elsewhere = std::iter::once(first).chain(rest).all(|error| {
+            matches!(
+                error,
+                KeepLocallyError::Spool(KeepSpooledDraftError::OwnedElsewhere { .. })
+            )
+        });
+        let headline = if elsewhere {
+            "Another Artisan Editor keeps unsent drafts on this device. Close it, then Try again keeps them here.".to_owned()
+        } else if count == 1 {
             "Artisan couldn't save your unsent draft to this device. Try again keeps it.".to_owned()
         } else {
             format!(
@@ -786,7 +795,10 @@ fn recover_spooled(
                 "a draft kept locally at shutdown is unreadable"
             );
             match error {
-                TakeSpooledDraftError::List { .. } => {}
+                TakeSpooledDraftError::List { path, .. }
+                | TakeSpooledDraftError::Unclaimed { lock: path, .. } => {
+                    unrecovered.push(Unrecovered::Unchecked(path));
+                }
                 TakeSpooledDraftError::SetAside { set_aside, .. } => {
                     unrecovered.push(Unrecovered::SetAside(set_aside));
                 }
