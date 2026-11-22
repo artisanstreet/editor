@@ -169,14 +169,24 @@ fn meters(
         .collect()
 }
 
-fn token_count(tokens: u64) -> String {
-    let scaled = |unit: u64| f64::from(u32::try_from(tokens / unit).unwrap_or(u32::MAX));
+#[must_use]
+pub fn token_count(tokens: u64) -> String {
+    let tenths = |unit: u64| {
+        let rounded = tokens.saturating_add(unit / 20) / (unit / 10);
+        (
+            rounded,
+            f64::from(u32::try_from(rounded).unwrap_or(u32::MAX)) / 10.0,
+        )
+    };
+    let (thousand_tenths, thousands) = tenths(1_000);
     match tokens {
         0..1_000 => editor_ui::locale::count(tokens, "token", "tokens"),
-        1_000..1_000_000 => format!("{}K tokens", editor_ui::locale::decimal(scaled(1) / 1e3, 1)),
+        _ if thousand_tenths < 10_000 => {
+            format!("{}K tokens", editor_ui::locale::decimal(thousands, 1))
+        }
         _ => format!(
             "{}M tokens",
-            editor_ui::locale::decimal(scaled(1_000) / 1e3, 1)
+            editor_ui::locale::decimal(tenths(1_000_000).1, 1)
         ),
     }
 }
