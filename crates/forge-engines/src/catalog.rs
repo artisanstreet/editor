@@ -64,6 +64,10 @@ pub(crate) enum ListModelsError {
     AntigravitySignedOut,
     #[error("Antigravity listed no models")]
     AntigravityEmpty,
+    #[error(
+        "Antigravity listed only its {hidden} orchestrator models, which Artisan doesn't offer"
+    )]
+    AntigravityOnlyOrchestrators { hidden: usize },
 }
 
 pub(crate) async fn list(
@@ -94,7 +98,7 @@ pub(crate) async fn list(
     Ok(finish(engine, listing))
 }
 
-fn finish(engine: EngineId, mut listing: Listing) -> Listing {
+pub(crate) fn finish(engine: EngineId, mut listing: Listing) -> Listing {
     listing
         .models
         .retain(|model| !model.id.is_empty() && !model.id.contains(char::is_whitespace));
@@ -237,7 +241,8 @@ fn skipped_cache(error: &ReadCacheError) {
 }
 
 fn readable_name(raw: &str) -> String {
-    raw.split(|c: char| c == '-' || c.is_whitespace())
+    let id_like = !raw.trim().contains(char::is_whitespace);
+    raw.split(|c: char| (id_like && c == '-') || c.is_whitespace())
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
@@ -938,13 +943,20 @@ async fn antigravity(program: &Program<'_>) -> Result<Listing, ListModelsError> 
     let probed = crate::antigravity::probe(command, program.home)
         .await
         .map_err(ListModelsError::AntigravityProbe)?;
-    if !probed.signed_in {
-        return Err(ListModelsError::AntigravitySignedOut);
+    match probed {
+        crate::antigravity::Probed::SignedOut => Err(ListModelsError::AntigravitySignedOut),
+        crate::antigravity::Probed::SignedIn(lineup) => listed_antigravity(lineup),
     }
-    if probed.listing.models.is_empty() {
-        return Err(ListModelsError::AntigravityEmpty);
+}
+
+pub(crate) fn listed_antigravity(
+    lineup: crate::antigravity::Lineup,
+) -> Result<Listing, ListModelsError> {
+    match (lineup.listing.models.is_empty(), lineup.hidden) {
+        (false, _) => Ok(lineup.listing),
+        (true, 0) => Err(ListModelsError::AntigravityEmpty),
+        (true, hidden) => Err(ListModelsError::AntigravityOnlyOrchestrators { hidden }),
     }
-    Ok(probed.listing)
 }
 
 async fn opencode(
