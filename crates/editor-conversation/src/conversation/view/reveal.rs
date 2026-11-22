@@ -18,6 +18,7 @@ pub struct MountedReveals {
     scope: Option<PresentationScope>,
     rows: BTreeMap<RowKey, Weak<RefCell<MountedReveal>>>,
     proofs: HashMap<RowKey, ProjectedProof>,
+    retired: Vec<ProjectedProof>,
 }
 
 pub(crate) struct MountedReveal {
@@ -95,6 +96,16 @@ impl MountedReveal {
         prepared.row
     }
 
+    pub(crate) fn clear(owner: &super::row_cache::RowOwner) {
+        if let Some(row) = owner.reveal.borrow().as_ref() {
+            let mut row = row.borrow_mut();
+            row.reveal.mark_presented();
+            row.ready.set(false);
+            row.settled_at.set(None);
+            row.geometry = RevealGeometry::Static;
+        }
+    }
+
     pub(crate) fn record_stored(
         owner: &super::row_cache::RowOwner,
         version: u64,
@@ -139,6 +150,7 @@ impl MountedReveals {
             }
             self.rows.clear();
             self.proofs.clear();
+            self.retired.clear();
             self.scope = scope;
         }
     }
@@ -146,8 +158,13 @@ impl MountedReveals {
     pub(crate) fn activate(&mut self, key: RowKey, owner: &super::row_cache::RowOwner) {
         let slot = owner.reveal.borrow();
         if let Some(row) = slot.as_ref() {
-            if let RevealGeometry::Inline(frame) = &row.borrow().geometry {
-                self.proofs.insert(key.clone(), frame.proof.clone());
+            match &row.borrow().geometry {
+                RevealGeometry::Inline(frame) => {
+                    self.proofs.insert(key.clone(), frame.proof.clone());
+                }
+                RevealGeometry::Static | RevealGeometry::Stored(_) => {
+                    self.retired.extend(self.proofs.remove(&key));
+                }
             }
             self.rows.insert(key, Rc::downgrade(row));
         }
@@ -165,6 +182,9 @@ impl MountedReveals {
         markdown: &MarkdownOwners,
         stored: Option<&crate::conversation::stored::StoredConversation>,
     ) -> RevealSync {
+        for proof in self.retired.drain(..) {
+            markdown.release_projected_reveal(&proof);
+        }
         let Some(scope) = self.scope.as_ref() else {
             return RevealSync::default();
         };

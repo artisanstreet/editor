@@ -26,6 +26,7 @@ struct ProseBody<'a> {
 }
 
 enum Preparation {
+    Empty,
     Ready { count: usize, revision: u64 },
     Failed(Element),
 }
@@ -103,11 +104,15 @@ impl RowFactory {
             Some(engine) => engine,
             absent @ None => absent.insert(editor_ui::markdown::MarkdownEngine::new()?),
         };
+        let shaped = self.shape_counts.contains_key(&body.key);
         let (count, revision) = match self.prepare_prose(&mut owners, engine, body, reveal)? {
+            Preparation::Empty => {
+                drop(owners);
+                return self.empty_prose(cx, body, shaped);
+            }
             Preparation::Ready { count, revision } => (count, revision),
             Preparation::Failed(element) => return Ok(Some(element)),
         };
-        let shaped = self.shape_counts.contains_key(&body.key);
         if (if shaped {
             block + 1 == count
         } else {
@@ -148,6 +153,28 @@ impl RowFactory {
         out.batches = prepared.batches;
         let element = self.reveal_frame(prepared.element, entrance, reveal);
         Ok(Some(self.prose_frame(cx, body, element, count)))
+    }
+
+    fn empty_prose(
+        &self,
+        cx: &RowContext<'_>,
+        body: &ProseBody<'_>,
+        shaped: bool,
+    ) -> Result<Option<Element>, RealizeRowError> {
+        if !shaped
+            && body.block == 0
+            && let Some(binding) = &body.live
+        {
+            self.pending_live.borrow_mut().push((binding.clone(), 0));
+        }
+        if cx.reveal.is_some() {
+            MountedReveal::clear(cx.owner);
+        }
+        if body.key.slot.is_bubble() && body.block == 0 {
+            self.attachments_row(cx, &body.key.item)
+        } else {
+            Ok(None)
+        }
     }
 
     fn prose_frame(
@@ -270,6 +297,7 @@ impl RowFactory {
             source,
             body.item.seq,
         ) {
+            Ok((0, _)) => Ok(Preparation::Empty),
             Ok((count, revision)) => Ok(Preparation::Ready { count, revision }),
             Err(error) => match self.copy.clone() {
                 None => Err(error.into()),
@@ -465,3 +493,7 @@ impl RowFactory {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/conversation/view/factory/prose.rs"]
+mod tests;
