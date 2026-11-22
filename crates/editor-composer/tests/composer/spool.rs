@@ -629,3 +629,46 @@ fn a_drafts_queue_is_let_go_once_no_turn_waits_on_it() {
         "a later turn starts a new queue"
     );
 }
+
+#[test]
+fn a_second_editor_never_reads_or_removes_the_drafts_another_editor_keeps() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = HostId("forge".into());
+    let first = DraftSpool::new(directory.path(), LocalDisk::shared());
+    first
+        .keep(
+            &host,
+            "new",
+            kept("typed offline in the first window"),
+            &[],
+            Holder::Owner(Slot::Record),
+        )
+        .unwrap();
+    drop(first);
+    let other_editor = std::fs::File::open(directory.path().join("drafts.lock")).unwrap();
+    other_editor.lock().unwrap();
+
+    let second = DraftSpool::new(directory.path(), LocalDisk::shared());
+    assert!(
+        second.take(&host, "new").unwrap().is_none(),
+        "the second window doesn't take over the first window's draft"
+    );
+    assert!(matches!(
+        second.keep(
+            &host,
+            "new",
+            kept("an older copy saved from the second window"),
+            &[],
+            Holder::Owner(Slot::Record),
+        ),
+        Err(KeepSpooledDraftError::OwnedElsewhere { .. })
+    ));
+    second.forget(&host, "new", Slot::Record).unwrap();
+    drop(other_editor);
+
+    assert_eq!(
+        second.take(&host, "new").unwrap().unwrap().draft,
+        kept("typed offline in the first window"),
+        "once the first window is gone, the second takes over its draft unharmed"
+    );
+}

@@ -65,7 +65,62 @@ impl SpoolDisk for LocalDisk {
 struct Owner {
     dir: PathBuf,
     disk: Arc<dyn SpoolDisk>,
+    lock: PathBuf,
+    claim: Mutex<Claim>,
     queues: Mutex<HashMap<String, Arc<Queue>>>,
+}
+
+enum Claim {
+    Owned(
+        #[expect(dead_code, reason = "held open so the lock lasts as long as the owner")]
+        std::fs::File,
+    ),
+    Elsewhere {
+        lock: PathBuf,
+    },
+    Unclaimed {
+        lock: PathBuf,
+        source: Arc<std::io::Error>,
+    },
+}
+
+impl Claim {
+    fn take(lock: &Path) -> Self {
+        let opened = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock);
+        match opened {
+            Ok(file) => match file.try_lock() {
+                Ok(()) => Self::Owned(file),
+                Err(std::fs::TryLockError::WouldBlock) => Self::Elsewhere {
+                    lock: lock.to_owned(),
+                },
+                Err(std::fs::TryLockError::Error(source)) => Self::Unclaimed {
+                    lock: lock.to_owned(),
+                    source: Arc::new(source),
+                },
+            },
+            Err(source) => Self::Unclaimed {
+                lock: lock.to_owned(),
+                source: Arc::new(source),
+            },
+        }
+    }
+
+    fn refusal(&self) -> Option<KeepSpooledDraftError> {
+        match self {
+            Self::Owned(_) => None,
+            Self::Elsewhere { lock } => {
+                Some(KeepSpooledDraftError::OwnedElsewhere { lock: lock.clone() })
+            }
+            Self::Unclaimed { lock, source } => Some(KeepSpooledDraftError::Unclaimed {
+                lock: lock.clone(),
+                source: Arc::clone(source),
+            }),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -110,6 +165,25 @@ struct Queue {
 }
 
 impl Owner {
+    fn claimed(&self) -> Option<KeepSpooledDraftError> {
+        let mut claim = self.claim.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*claim, Claim::Owned(_)) {
+            return None;
+        }
+        *claim = Claim::take(&self.lock);
+        let refusal = claim.refusal();
+        match &refusal {
+            None => {
+                tracing::info!(lock = %self.lock.display(), "this Editor now keeps this device's drafts");
+            }
+            Some(KeepSpooledDraftError::OwnedElsewhere { .. }) => {}
+            Some(error) => {
+                tracing::error!(error = %diagnostics::chain(error), "drafts are kept only in Forge");
+            }
+        }
+        refusal
+    }
+
     fn queues(&self) -> MutexGuard<'_, HashMap<String, Arc<Queue>>> {
         self.queues.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -223,6 +297,14 @@ pub(crate) enum KeepSpooledDraftError {
         #[source]
         source: std::io::Error,
     },
+    #[error("another Editor keeps this device's drafts (locked through {lock})")]
+    OwnedElsewhere { lock: PathBuf },
+    #[error("lock this device's drafts folder through {lock}")]
+    Unclaimed {
+        lock: PathBuf,
+        #[source]
+        source: Arc<std::io::Error>,
+    },
 }
 
 impl KeepSpooledDraftError {
@@ -234,7 +316,9 @@ impl KeepSpooledDraftError {
             | Self::WriteImage { .. }
             | Self::Draft(_)
             | Self::Sync { .. }
-            | Self::Publish { .. } => None,
+            | Self::Publish { .. }
+            | Self::OwnedElsewhere { .. }
+            | Self::Unclaimed { .. } => None,
         }
     }
 }
@@ -471,9 +555,16 @@ impl DraftSpool {
             );
             return Self { owner };
         }
+        let lock = editor_dir.join("drafts.lock");
+        let claim = Claim::take(&lock);
+        if let Some(refusal) = claim.refusal() {
+            tracing::info!(error = %diagnostics::chain(&refusal), "drafts are kept only in Forge until this Editor can keep them on this device");
+        }
         let owner = Arc::new(Owner {
             dir: dir.clone(),
             disk,
+            lock,
+            claim: Mutex::new(claim),
             queues: Mutex::default(),
         });
         owners.insert(dir, Arc::downgrade(&owner));
@@ -602,6 +693,9 @@ impl Serving {
         images: &[Arc<[u8]>],
         holder: Holder,
     ) -> Result<Slot, KeepSpooledDraftError> {
+        if let Some(refused) = self.turn.owner.claimed() {
+            return Err(refused);
+        }
         self.create_root()?;
         let root = self.root();
         let units = self.units().map_err(|source| KeepSpooledDraftError::List {
@@ -688,6 +782,9 @@ impl Serving {
     }
 
     pub(crate) fn take(&self) -> Result<Option<SpooledDraft>, TakeSpooledDraftError> {
+        if self.turn.owner.claimed().is_some() {
+            return Ok(None);
+        }
         let units = self.units().map_err(|source| TakeSpooledDraftError::List {
             path: self.root(),
             source,
@@ -713,6 +810,9 @@ impl Serving {
     }
 
     pub(crate) fn kept_beside(&self) -> Vec<Result<BesideDraft, KeptBesideError>> {
+        if self.turn.owner.claimed().is_some() {
+            return Vec::new();
+        }
         let units = match self.units() {
             Ok(units) => units,
             Err(source) => {
@@ -755,6 +855,9 @@ impl Serving {
     }
 
     pub(crate) fn forget(&self, slot: Slot) -> Result<(), ForgetSpooledDraftError> {
+        if self.turn.owner.claimed().is_some() {
+            return Ok(());
+        }
         let root = self.root();
         let entries = self
             .entries()
@@ -805,6 +908,9 @@ impl Serving {
     }
 
     pub(crate) fn sweep_tombstones(&self) -> Result<(), ForgetSpooledDraftError> {
+        if self.turn.owner.claimed().is_some() {
+            return Ok(());
+        }
         let entries = self
             .entries()
             .map_err(|source| ForgetSpooledDraftError::List {
