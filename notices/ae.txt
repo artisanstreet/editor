@@ -4074,7 +4074,7 @@ Used by:
 - find-msvc-tools 0.1.11 <https://github.com/rust-lang/cc-rs>
 - flate2 1.1.10 <https://github.com/rust-lang/flate2-rs>
 - fnv 1.0.7 <https://github.com/servo/rust-fnv>
-- form_urlencoded 1.2.2 <https://github.com/servo/rust-url>
+- form_urlencoded 1.2.3 <https://github.com/servo/rust-url>
 - fs2 0.4.3 <https://github.com/danburkert/fs2-rs>
 - gethostname 1.1.0 <https://codeberg.org/swsnr/gethostname.rs.git>
 - gimli 0.32.3 <https://github.com/gimli-rs/gimli>
@@ -4118,7 +4118,7 @@ Used by:
 - tungstenite 0.30.0 <https://github.com/snapview/tungstenite-rs>
 - unicase 2.9.0 <https://github.com/seanmonstar/unicase>
 - unicode-width 0.2.2 <https://github.com/unicode-rs/unicode-width>
-- url 2.5.8 <https://github.com/servo/rust-url>
+- url 2.5.9 <https://github.com/servo/rust-url>
 - uuid 1.26.0 <https://github.com/uuid-rs/uuid>
 - version_check 0.9.5 <https://github.com/SergioBenitez/version_check>
 - xattr 1.6.1 <https://github.com/Stebalien/xattr>
