@@ -140,13 +140,15 @@ pub(crate) fn prepare_index(conn: &mut Connection) -> Result<IndexState, Prepare
 pub(crate) enum Batch {
     Indexed { items: u64, skipped: u64 },
     Finished { items: u64, skipped: u64 },
-    Abandoned,
+    AlreadyBuilt,
+    Stale,
 }
 
 pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
     let after = match index_state(conn).map_err(BuildIndexError::State)? {
         IndexState::Building { after } => after,
-        IndexState::Built | IndexState::Stale { .. } => return Ok(Batch::Abandoned),
+        IndexState::Built => return Ok(Batch::AlreadyBuilt),
+        IndexState::Stale { .. } => return Ok(Batch::Stale),
     };
     let read = |source| BuildIndexError::Items { after, source };
     let rows: Vec<(i64, String)> = conn
@@ -312,8 +314,12 @@ fn build(
     let (mut items, mut skipped) = (0_u64, 0_u64);
     while !stop_requested(stop) {
         match batch(jobs) {
-            Reply::WriterStopped | Reply::Built(Ok(Batch::Abandoned)) => {
+            Reply::WriterStopped | Reply::Built(Ok(Batch::Stale)) => {
                 return RecallIndex::Incomplete;
+            }
+            Reply::Built(Ok(Batch::AlreadyBuilt)) => {
+                tracing::info!(items, skipped, "another Forge finished the recall index");
+                return RecallIndex::Built;
             }
             Reply::Built(Ok(Batch::Indexed {
                 items: indexed,

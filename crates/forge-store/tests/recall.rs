@@ -516,6 +516,35 @@ async fn forge_starts_with_a_damaged_item_and_still_finds_the_rest() {
     assert_eq!(found.hits.len(), 1, "{found:?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn search_counts_as_complete_when_the_other_forge_of_an_upgrade_finished_the_index() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let notes = thread(&store, EngineId::Claude, "Notes").await;
+    store
+        .upsert_item(said(&notes, "the kestrel hovers over the field"))
+        .await
+        .expect("save a note");
+    drop(store);
+    forget_recall_index(dir.path());
+    let advances = Advances::allowing(0);
+
+    let (store, _lock) = store_counting_advances(dir.path(), &advances, false)
+        .expect("Forge starts and rebuilds the index in the background");
+    advances.refused().await;
+    rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
+        .expect("open the database as the other Forge")
+        .execute_batch(include_str!("recall/finish_index.sql"))
+        .expect("the other Forge finishes the index");
+    advances.lift();
+
+    assert_eq!(
+        index_built(&store).await,
+        forge_store::RecallIndex::Built,
+        "an index the other Forge finished doesn't leave search saying it may miss messages"
+    );
+}
+
 const UNLIMITED: usize = usize::MAX;
 
 struct Advances {
