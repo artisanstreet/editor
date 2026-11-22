@@ -1084,7 +1084,7 @@ async fn a_paired_device_that_stalls_inside_its_request_headers_is_disconnected(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn connections_beyond_the_handshake_bound_are_refused() {
-    use tokio::io::AsyncReadExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let (_dir, address, _store) = forge().await;
     let mut connections = Vec::new();
     for _ in 0..=handshakes::PER_PEER {
@@ -1106,10 +1106,21 @@ async fn connections_beyond_the_handshake_bound_are_refused() {
         matches!(read, Ok(0) | Err(_)),
         "a refused connection is closed: {read:?}"
     );
+    drop(still_waiting);
+    let mut answered = 0;
+    for connection in &mut connections {
+        let mut reply = [0_u8; 64];
+        let served = connection.write_all(b"not a TLS hello\r\n").await.is_ok()
+            && matches!(
+                tokio::time::timeout(Duration::from_secs(5), connection.read(&mut reply)).await,
+                Ok(Ok(read)) if read > 0
+            );
+        answered += usize::from(served);
+    }
     assert_eq!(
-        still_waiting.len(),
+        answered,
         handshakes::PER_PEER,
-        "the connections within the bound keep waiting for their handshake"
+        "every connection within the bound is still served, and only the one past it is refused"
     );
 }
 
