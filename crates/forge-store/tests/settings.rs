@@ -175,3 +175,28 @@ async fn choosing_a_model_keeps_its_remembered_config_that_this_forge_cannot_rea
         "the config a newer Forge remembered for this model is not overwritten"
     );
 }
+
+#[tokio::test]
+async fn a_snapshot_covers_every_setting_it_holds_with_its_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .set_setting("suggestions".into(), serde_json::Value::Bool(true))
+        .await
+        .unwrap();
+    let other_writer = Store::join(dir.path()).unwrap();
+    let committed_elsewhere = other_writer
+        .set_setting("suggestions".into(), serde_json::Value::Bool(false))
+        .await
+        .unwrap();
+    let state = store.state().await.unwrap();
+    assert_eq!(
+        state.settings.get("suggestions"),
+        Some(&serde_json::Value::Bool(false)),
+        "the snapshot reads the newest value"
+    );
+    assert_eq!(
+        state.head, committed_elsewhere,
+        "the snapshot's head is read with its settings, so a client resuming from it does not replace the value with an older acknowledgement"
+    );
+}

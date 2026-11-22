@@ -58,6 +58,10 @@ impl HeldRequest {
         );
     }
 
+    pub fn no_content(self) {
+        self.send(StatusCode::NO_CONTENT.into_response());
+    }
+
     pub fn respond_bytes(self, content_type: &'static str, bytes: Vec<u8>) {
         self.send(([(header::CONTENT_TYPE, content_type)], bytes).into_response());
     }
@@ -254,6 +258,10 @@ impl StubForge {
 
     pub fn fingerprint(&self) -> &str {
         self.server.fingerprint()
+    }
+
+    pub fn head(&self) -> Seq {
+        self.log().state.head
     }
 
     pub fn publish(&self, event: Event) -> Seq {

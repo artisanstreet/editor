@@ -24,7 +24,10 @@ struct HostCompletion {
 }
 
 enum Completion {
-    Setting(SettingRequest, Result<(), SaveSettingError>),
+    Setting(
+        SettingRequest,
+        Result<editor_core::client::SettingAck, SaveSettingError>,
+    ),
     Archive(ArchiveRequest, Result<(), Problem>),
     Mcp(Box<MutationRequest>, Result<(), Problem>),
     Engine(EngineRequest, Result<(), Problem>),
@@ -364,7 +367,7 @@ impl SettingsController {
             instance,
             key,
         };
-        if let Some(request) = self.setting_writes.begin(&mut host.settings, target, value) {
+        if let Some(request) = self.setting_writes.begin(host, target, value) {
             self.send_setting(client, request);
         }
     }
@@ -763,21 +766,10 @@ impl SettingsController {
             }
             match completion.result {
                 Completion::Setting(request, result) => {
-                    if let Err(error) = &result {
-                        tracing::warn!(
-                            instance = ?request.target.instance,
-                            error = %::diagnostics::chain(error),
-                            "saving a Forge setting"
-                        );
-                    }
                     let host =
                         core.host_mut_if_instance(&request.target.host, request.target.instance);
                     let client = host.as_ref().map(|host| host.client.clone());
-                    let next = self.setting_writes.complete(
-                        host.map(|host| &mut host.settings),
-                        &request,
-                        result,
-                    );
+                    let next = self.setting_writes.complete(host, &request, result);
                     if let (Some(next), Some(client)) = (next, client) {
                         self.send_setting(client, next);
                     }

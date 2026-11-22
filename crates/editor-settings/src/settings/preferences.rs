@@ -1,4 +1,5 @@
-use editor_core::{HostId, HostInstance, HostSettings, client::CallError};
+use editor_core::client::{CallError, SettingAck};
+use editor_core::{HostData, HostId, HostInstance, Restaged, Staging};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,8 +50,7 @@ impl PartialEq for SettingFailure {
 
 #[derive(Debug)]
 struct KeyWrite {
-    sent: Value,
-    confirmed: Option<Value>,
+    staging: Staging,
     next: Option<Value>,
 }
 
@@ -63,21 +63,26 @@ pub struct SettingWrites {
 impl SettingWrites {
     pub fn begin(
         &mut self,
-        settings: &mut HostSettings,
+        host: &mut HostData,
         target: SettingKey,
         value: Value,
     ) -> Option<SettingRequest> {
         self.failures.remove(&target);
-        let previous = settings.insert(target.key, value.clone());
         if let Some(write) = self.keys.get_mut(&target) {
+            match write.staging.restage(host, value.clone()) {
+                Restaged::Shown => {}
+                Restaged::Superseded => {
+                    write.staging = host.stage_setting(target.key, value.clone());
+                }
+            }
             write.next = Some(value);
             return None;
         }
+        let staging = host.stage_setting(target.key, value.clone());
         self.keys.insert(
             target.clone(),
             KeyWrite {
-                sent: value.clone(),
-                confirmed: previous,
+                staging,
                 next: None,
             },
         );
@@ -86,17 +91,40 @@ impl SettingWrites {
 
     pub fn complete(
         &mut self,
-        settings: Option<&mut HostSettings>,
+        mut host: Option<&mut HostData>,
         request: &SettingRequest,
-        result: Result<(), SaveSettingError>,
+        result: Result<SettingAck, SaveSettingError>,
     ) -> Option<SettingRequest> {
-        let write = self.keys.remove(&request.target)?;
-        let saved = result.is_ok();
-        match (result, &write.next) {
-            (Ok(()), _) => {
+        let KeyWrite { staging, next } = self.keys.remove(&request.target)?;
+        if let (Ok(ack), Some(host)) = (&result, host.as_deref_mut()) {
+            staging.accepted(host, request.value.clone(), *ack);
+        }
+        if let (Some(next), Some(host)) = (&next, host.as_deref_mut()) {
+            staging.dispatched(host, next.clone());
+        }
+        match (result, next) {
+            (Ok(_), Some(next)) => Some(self.send_next(request, staging, next)),
+            (Err(superseded), Some(next)) => {
+                tracing::debug!(
+                    host = %request.target.host,
+                    key = request.target.key,
+                    error = %::diagnostics::chain(&superseded),
+                    "a newer choice replaces a setting write Forge refused"
+                );
+                Some(self.send_next(request, staging, next))
+            }
+            (Ok(_), None) => {
                 self.failures.remove(&request.target);
+                Self::release(host, staging);
+                None
             }
             (Err(cause), None) => {
+                tracing::warn!(
+                    host = %request.target.host,
+                    key = request.target.key,
+                    error = %::diagnostics::chain(&cause),
+                    "saving a Forge setting"
+                );
                 self.failures.insert(
                     request.target.clone(),
                     SettingFailure {
@@ -104,42 +132,36 @@ impl SettingWrites {
                         cause: Arc::new(cause),
                     },
                 );
-            }
-            (Err(_superseded_by_the_next_write), Some(_)) => {}
-        }
-        let confirmed = if saved {
-            Some(write.sent.clone())
-        } else {
-            write.confirmed
-        };
-        if let Some(next) = write.next {
-            self.keys.insert(
-                request.target.clone(),
-                KeyWrite {
-                    sent: next.clone(),
-                    confirmed,
-                    next: None,
-                },
-            );
-            return Some(SettingRequest {
-                target: request.target.clone(),
-                value: next,
-            });
-        }
-        if !saved
-            && let Some(settings) = settings
-            && settings.get(request.target.key) == Some(&write.sent)
-        {
-            match confirmed {
-                Some(value) => {
-                    settings.insert(request.target.key, value);
-                }
-                None => {
-                    settings.remove(request.target.key);
-                }
+                Self::release(host, staging);
+                None
             }
         }
-        None
+    }
+
+    fn release(host: Option<&mut HostData>, staging: Staging) {
+        match host {
+            Some(host) => staging.release(host),
+            None => drop(staging),
+        }
+    }
+
+    fn send_next(
+        &mut self,
+        request: &SettingRequest,
+        staging: Staging,
+        next: Value,
+    ) -> SettingRequest {
+        self.keys.insert(
+            request.target.clone(),
+            KeyWrite {
+                staging,
+                next: None,
+            },
+        );
+        SettingRequest {
+            target: request.target.clone(),
+            value: next,
+        }
     }
 
     pub(crate) fn retain_instances(&mut self, live: impl Fn(&HostId, HostInstance) -> bool) {

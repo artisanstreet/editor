@@ -71,7 +71,8 @@ pub use search::{SearchCoverage, TextHit, TextSearchPage, TextSearchQuery};
 pub use secret::Secret;
 pub use settings::{
     EditorCall, EditorReply, SETTINGS, SHOW_ALL_MODELS_KEY, SettingDecl, SettingKind, SettingOwner,
-    SettingValueError, Switch, THREAD_RETENTION_DAYS_KEY, choice_values, setting_decl, switch_decl,
+    SettingSaved, SettingValueError, Switch, THREAD_RETENTION_DAYS_KEY, choice_values,
+    setting_decl, switch_decl,
 };
 pub use source_index::{
     SOURCE_INDEX_PAGE_LEAVES, SOURCE_INDEX_VERSION, SourceIndexFormat, SourceIndexHeader,

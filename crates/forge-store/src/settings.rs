@@ -2,7 +2,7 @@ use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
 use crate::writer::WriteFailure;
 use crate::{Store, read};
-use artisan_api::EngineId;
+use artisan_api::{EngineId, Seq};
 use rusqlite::params;
 
 #[derive(Debug, thiserror::Error)]
@@ -96,7 +96,7 @@ impl Store {
         &self,
         key: String,
         value: serde_json::Value,
-    ) -> Result<(), SetSettingError> {
+    ) -> Result<Seq, SetSettingError> {
         let saved = key.clone();
         let bytes = crate::encoded::len(&value);
         self.write_acknowledged_carrying(bytes, move |tx| {
@@ -280,6 +280,7 @@ impl Store {
                 artisan_api::MODEL_GROUPS_KEY.into(),
                 serde_json::Value::Object(groups),
             )
+            .map(drop)
         })
         .await
         .map_err(|cause| SetModelGroupError {
@@ -583,6 +584,7 @@ fn turn_skills(
         .unwrap_or_default();
     turn(&mut disabled);
     tx.save_setting("disabled_skills".into(), read::to_value(&disabled)?)
+        .map(drop)
 }
 
 fn save_prompt(

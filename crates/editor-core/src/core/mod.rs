@@ -35,8 +35,8 @@ pub use host::{
     Attention, BlobImage, DEFAULT_ENGINE_CONFIG_KEY, EditReport, EditThreadError, HandBack,
     HostData, HostEvent, HostInstance, HostSettingError, HostSettings, HostSwitch, LiveSnapshot,
     LoadThreadError, LocalSend, MCP_SERVERS_KEY, McpServersError, NewThread, PostGate,
-    ProjectionLoad, SendAttempt, SendReceipt, SendSettlement, ThreadEdit, ThreadPage,
-    ThreadPageDirection, ThreadSummary, ThreadUnavailable, WslStatus,
+    ProjectionLoad, Restaged, SendAttempt, SendReceipt, SendSettlement, Staging, ThreadEdit,
+    ThreadPage, ThreadPageDirection, ThreadSummary, ThreadUnavailable, WslStatus,
 };
 pub use hosts::{
     DataDirError, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, IdentityError,

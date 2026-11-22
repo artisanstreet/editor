@@ -634,6 +634,7 @@ impl Mcp {
                 serde_json::to_value(&statuses).map_err(McpStoreError::EncodeStatuses)?,
             )
             .await
+            .map(drop)
             .map_err(McpStoreError::RecordStatuses)
     }
 
@@ -688,6 +689,7 @@ impl Mcp {
                 serde_json::to_value(&statuses).map_err(SetAuthError::Encode)?,
             )
             .await
+            .map(drop)
             .map_err(SetAuthError::Save)
     }
 

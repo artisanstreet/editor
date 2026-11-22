@@ -16,6 +16,12 @@ use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tokio_util::task::AbortOnDropHandle;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingAck {
+    Revision(artisan_api::Seq),
+    Unversioned,
+}
+
 #[derive(Debug, Clone)]
 pub struct ForgeClient {
     http: reqwest::Client,
@@ -374,9 +380,25 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<(), CallError> {
-        self.call_empty(self.json(reqwest::Method::PUT, &format!("/settings/{key}"), value))
-            .await
+    pub async fn set_setting(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<SettingAck, CallError> {
+        self.call_decoded(
+            self.json(reqwest::Method::PUT, &format!("/settings/{key}"), value),
+            BodyLimit::ANSWER,
+            None,
+            |bytes| {
+                if bytes.is_empty() {
+                    return Ok(SettingAck::Unversioned);
+                }
+                serde_json::from_slice::<artisan_api::SettingSaved>(&bytes)
+                    .map(|saved| SettingAck::Revision(saved.revision))
+                    .map_err(CallFailure::Decode)
+            },
+        )
+        .await
     }
 
     pub async fn create_project(&self, request: &CreateProject) -> Result<Project, CallError> {

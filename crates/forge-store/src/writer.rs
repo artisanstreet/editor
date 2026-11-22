@@ -883,16 +883,17 @@ impl Tx<'_> {
             artisan_api::MODEL_CONFIGS_KEY.into(),
             serde_json::Value::Object(configs),
         )
+        .map(drop)
     }
 
     pub(crate) fn save_setting(
         &mut self,
         key: String,
         value: serde_json::Value,
-    ) -> Result<(), WriteFailure> {
+    ) -> Result<Seq, WriteFailure> {
         let old = read::setting(self, &key)?;
         if old.as_ref() == Some(&value) {
-            return Ok(());
+            return Ok(self.seq);
         }
         let body = to_body(&value)?;
         let old_bytes = old
@@ -923,7 +924,7 @@ impl Tx<'_> {
             }
         }
         self.emit(seq, Event::Setting { key, value });
-        Ok(())
+        Ok(seq)
     }
 
     pub(crate) fn recover_threads(

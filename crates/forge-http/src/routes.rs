@@ -1168,25 +1168,26 @@ async fn set_setting(
     AppState(app): AppState<App>,
     Path(key): Path<String>,
     Json(value): Json<serde_json::Value>,
-) -> Result<StatusCode> {
+) -> Result<Json<artisan_api::SettingSaved>> {
     if key == artisan_api::TRANSPORT_KEY {
         let Some(transport) = value.as_str().filter(|transport| {
             [artisan_api::CLAUDE_CODE, artisan_api::CLAUDE_AI].contains(transport)
         }) else {
             return Err(Rejected::Transport { key }.into());
         };
-        app.hub
+        let revision = app
+            .hub
             .store()
             .set_setting(key, serde_json::Value::String(transport.to_owned()))
             .await?;
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(Json(artisan_api::SettingSaved { revision }));
     }
     if key == artisan_api::THREAD_RETENTION_DAYS_KEY {
         artisan_api::setting_decl(&key)
             .expect("invariant: thread retention is a declared setting")
             .check(&value)
             .map_err(Rejected::from)?;
-        app.hub.store().set_setting(key, value).await?;
+        let revision = app.hub.store().set_setting(key, value).await?;
         let hub = app.hub.clone();
         app.tasks.spawn(async move {
             if let Err(error) = hub.remove_inactive_threads().await {
@@ -1196,15 +1197,15 @@ async fn set_setting(
                 );
             }
         });
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(Json(artisan_api::SettingSaved { revision }));
     }
     if let Some(switch) = artisan_api::setting_decl(&key).filter(|decl| {
         decl.owner == artisan_api::SettingOwner::Forge
             && matches!(decl.kind, artisan_api::SettingKind::Bool)
     }) {
         switch.check(&value).map_err(Rejected::from)?;
-        app.hub.store().set_setting(key, value).await?;
-        return Ok(StatusCode::NO_CONTENT);
+        let revision = app.hub.store().set_setting(key, value).await?;
+        return Ok(Json(artisan_api::SettingSaved { revision }));
     }
     let route = match key.as_str() {
         "global_prompt" => "PUT /prompt",

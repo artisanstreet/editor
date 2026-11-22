@@ -145,6 +145,7 @@ async fn save_state(store: &forge_store::Store, file: &SyncFile) -> Result<(), S
     store
         .set_setting(forge_store::CONFIG_SYNC_KEY.to_owned(), record)
         .await
+        .map(drop)
         .map_err(SyncStateError::Save)
 }
 
