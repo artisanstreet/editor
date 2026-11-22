@@ -136,6 +136,26 @@ async fn collection_keeps_images_of_messages_parked_in_a_saved_draft() {
     );
 }
 
+#[tokio::test]
+async fn an_image_too_wide_is_refused_for_its_size_not_as_a_broken_webp() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let wide = webp::Encoder::from_rgb(&vec![9_u8; 9000 * 3], 9000, 1)
+        .encode_lossless()
+        .to_vec();
+    let refused = store.put_blob(wide).await.unwrap_err();
+    assert!(
+        matches!(
+            *refused.cause,
+            forge_store::BlobFailure::TooManyPixels {
+                width: 9000,
+                height: 1
+            }
+        ),
+        "a valid WebP over the side limit names its size: {refused}"
+    );
+}
+
 fn image(shade: u8) -> Vec<u8> {
     webp::Encoder::from_rgb(&[shade, shade, shade], 1, 1)
         .encode_lossless()

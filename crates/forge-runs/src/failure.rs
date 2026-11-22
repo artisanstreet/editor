@@ -449,7 +449,9 @@ pub fn source_index(error: &SourceIndexError) -> Failure {
 #[must_use]
 pub fn blob(failure: &BlobFailure) -> Failure {
     match failure {
-        BlobFailure::Rejected(BlobRejected::NotWebp) => Failure::Resource(ResourceFailure::NotWebp),
+        BlobFailure::Rejected(BlobRejected::NotWebp) | BlobFailure::Undecodable { .. } => {
+            Failure::Resource(ResourceFailure::NotWebp)
+        }
         BlobFailure::Rejected(BlobRejected::TooLarge { bytes }) => too_large(
             Limited::Upload,
             wide(*bytes),

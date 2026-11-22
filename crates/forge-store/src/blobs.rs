@@ -15,6 +15,7 @@ pub const MAX_BLOB_BYTES: usize = artisan_api::TUNNEL_BODY_MAX_BYTES;
 pub const MAX_MESSAGE_IMAGES: usize = 128;
 pub const MAX_MESSAGE_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_IMAGE_PIXELS: u64 = 16_777_216;
+const MAX_IMAGE_SIDE: u32 = 8192;
 
 const GC_MIN_AGE: Duration = Duration::from_hours(1);
 
@@ -59,8 +60,14 @@ pub enum BlobFileError {
 pub enum BlobFailure {
     #[error(transparent)]
     Rejected(#[from] BlobRejected),
-    #[error("the image is {width}x{height}; the limit is 16 megapixels")]
+    #[error("the image is {width}x{height}; the limit is 8192 pixels a side and 16 megapixels")]
     TooManyPixels { width: u32, height: u32 },
+    #[error("decode the WebP image: {step}")]
+    Undecodable {
+        step: &'static str,
+        #[source]
+        source: image::ImageError,
+    },
     #[error("read the image")]
     Image(#[source] image::ImageError),
     #[error("start the WebP encoder")]
@@ -188,44 +195,48 @@ fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     if !is_webp(bytes) {
         return Err(BlobRejected::NotWebp.into());
     }
-    let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))
-        .map_err(|_decode_error| BlobRejected::NotWebp)?;
+    let mut decoder =
+        image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).map_err(|source| {
+            BlobFailure::Undecodable {
+                step: "read the header",
+                source,
+            }
+        })?;
+    let (width, height) = decoder.dimensions();
+    if width > MAX_IMAGE_SIDE
+        || height > MAX_IMAGE_SIDE
+        || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS
+    {
+        return Err(BlobFailure::TooManyPixels { width, height });
+    }
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
     limits.max_alloc = Some(64 * 1024 * 1024);
     decoder
         .set_limits(limits)
-        .map_err(|_decode_error| BlobRejected::NotWebp)?;
-    let (width, height) = decoder.dimensions();
-    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
-        return Err(BlobRejected::NotWebp.into());
-    }
+        .map_err(|source| BlobFailure::Undecodable {
+            step: "limit the decoder",
+            source,
+        })?;
     let hash = BlobHash(hex::encode(Sha256::digest(bytes)));
     let blob_ref = BlobRef {
         hash,
         bytes: bytes.len() as u64,
     };
     let target = path(dir, &blob_ref.hash).expect("invariant: a SHA-256 hex digest is a blob hash");
+    let shard = target
+        .parent()
+        .expect("invariant: a blob path sits in its shard folder");
     if target.exists() {
         fs::File::options()
             .write(true)
             .open(&target)
             .and_then(|file| file.set_modified(SystemTime::now()))
             .map_err(io("refresh blob", &target))?;
-        return Ok(blob_ref);
+        return published(shard).map(|()| blob_ref);
     }
-    let shard = target
-        .parent()
-        .expect("invariant: a blob path sits in its shard folder");
-    let new_shard = !shard.is_dir();
     fs::create_dir_all(shard).map_err(io("create blob shard", shard))?;
-    if new_shard {
-        let blobs = shard
-            .parent()
-            .expect("invariant: a blob shard sits in the blob folder");
-        sync_folder(blobs)?;
-    }
 
     let mut temporary =
         tempfile::NamedTempFile::new_in(shard).map_err(io("create a blob file in", shard))?;
@@ -238,8 +249,15 @@ fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(io("write blob", &target)(error.error)),
     }
+    published(shard).map(|()| blob_ref)
+}
+
+fn published(shard: &Path) -> Result<(), BlobFailure> {
+    let blobs = shard
+        .parent()
+        .expect("invariant: a blob shard sits in the blob folder");
     sync_folder(shard)?;
-    Ok(blob_ref)
+    sync_folder(blobs)
 }
 
 #[cfg(unix)]
