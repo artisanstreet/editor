@@ -33,7 +33,7 @@ impl Rail<'_> {
             }
             Ok(Refresh::Rebuild) => true,
             Err(error) => {
-                tracing::warn!(%error, "could not refresh turn navigator");
+                tracing::warn!(error = %diagnostics::chain(&error), "could not refresh turn navigator");
                 true
             }
         }

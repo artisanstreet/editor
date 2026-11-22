@@ -323,6 +323,12 @@ struct BuildContext {
     dispatch: Dispatch,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshNavigatorError {
+    #[error("refresh the turn navigator overlay in place")]
+    Subtree(#[source] aqua::UiAppError),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refresh {
     InPlace,
@@ -428,7 +434,7 @@ impl ThreadNavigation {
         core: &Core,
         viewport: CollectionViewport,
         now: Instant,
-    ) -> Result<Refresh, String> {
+    ) -> Result<Refresh, RefreshNavigatorError> {
         let Some(context) = self.context.clone() else {
             return Ok(Refresh::Rebuild);
         };
@@ -452,7 +458,7 @@ impl ThreadNavigation {
                         Refresh::Rebuild
                     }
                 })
-                .map_err(|error| error.to_string()),
+                .map_err(RefreshNavigatorError::Subtree),
             _ => Ok(Refresh::Rebuild),
         }
     }
