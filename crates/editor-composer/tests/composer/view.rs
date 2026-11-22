@@ -419,3 +419,78 @@ fn a_gated_engine_row_holds_its_reason_and_action_at_the_largest_text_size() {
         "the sign-in link stays inside its row at 225%: {action:?} in {row:?}"
     );
 }
+
+#[test]
+fn a_long_project_list_scrolls_to_the_projects_below_the_fold() {
+    use crate::composer::picker::{Menu, PickerState};
+    use artisan_api::tls::{Identity, fingerprint};
+    use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = test_support::net::SilentListener::bind();
+    let identity = Identity::generate("projects").unwrap();
+    let config = HostConfig {
+        id: HostId("projects".into()),
+        name: "Forge".into(),
+        address: forge.address().to_string(),
+        fingerprint: fingerprint(identity.certificate_der().unwrap().as_ref()),
+        kind: HostKind::Local,
+    };
+    let client = ForgeClient::new(&config.address, &config.fingerprint, &identity).unwrap();
+    test_support::editor::core::connect_client(&mut core, &config, client);
+    let host = core.host_mut(&config.id).unwrap();
+    for index in 0..14_i64 {
+        let id = artisan_api::ProjectId(format!("project-{index}"));
+        host.projects.insert(
+            id.clone(),
+            artisan_api::Project {
+                id,
+                path: format!("/projects/{index}"),
+                name: format!("project {index}"),
+                seq: u64::try_from(index).unwrap(),
+                created_at: 1_000 - index,
+                removed: false,
+            },
+        );
+    }
+    let host = core.host(&config.id).unwrap();
+    let mut picker = PickerState::default();
+    picker.menu = Some(Menu::Project);
+    picker.refresh(host, None);
+    let mut mounted = Mounted::new(|dispatch| {
+        super::project_menu(
+            &ArtisanTheme::resolved(),
+            host,
+            &picker,
+            None,
+            aqua_core::Size::new(420.0, 600.0),
+            &dispatch,
+        )
+    });
+    let scroller = mounted
+        .app
+        .tree()
+        .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+            super::PROJECT_SCROLL,
+        )))
+        .unwrap();
+    let bounds = mounted.app.tree().rect(scroller).unwrap();
+    mounted.app.handle_input(&InputEvent::Scroll {
+        at: aqua_core::Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
+        delta: aqua_core::ScrollDelta { x: 0.0, y: 2_000.0 },
+    });
+    mounted.app.build_frame().unwrap();
+    let last = mounted
+        .app
+        .tree()
+        .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+            "composer-project-project-13",
+        )))
+        .unwrap();
+    let last = mounted.app.tree().visual_rect(last).unwrap();
+    assert!(
+        last.y >= bounds.y - 0.5 && last.y + last.h <= bounds.y + bounds.h + 0.5,
+        "scrolling to the end shows the oldest project inside the list, it sits at {last:?} in a list at {bounds:?}"
+    );
+}
