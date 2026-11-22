@@ -2,12 +2,13 @@ use super::row_cache::RowOwner;
 use crate::conversation::content::{SourceAction, SourceEffect, SourceExport};
 use crate::conversation::presentation::PresentationScope;
 use crate::conversation::questions::QuestionCollectionAction;
+use artisan_api::{Item, ItemId};
 use editor_core::Core;
 use editor_core::host::ScopedSourceProvider;
-use artisan_api::{Item, ItemId};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
+#[derive(Debug)]
 pub enum RowSourceActionKind {
     Content(SourceAction),
     Questions(QuestionCollectionAction),
@@ -28,17 +29,35 @@ pub struct RowSourceAction {
     pub action: RowSourceActionKind,
 }
 
+impl std::fmt::Debug for RowSourceAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowSourceAction").finish_non_exhaustive()
+    }
+}
+
 pub enum RowSourceEffect {
-    SavePath(RowSourceExport),
+    SavePath(Box<RowSourceExport>),
     Clipboard(editor_sources::CopiedSource),
 }
 
+impl std::fmt::Debug for RowSourceEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowSourceEffect").finish_non_exhaustive()
+    }
+}
+
 pub struct RowSourceExport {
-    pub item: ItemId,
-    pub scope: PresentationScope,
-    pub provider: ScopedSourceProvider,
+    item: ItemId,
+    scope: PresentationScope,
+    provider: ScopedSourceProvider,
     owner: Weak<RowOwner>,
     export: ExportKind,
+}
+
+impl std::fmt::Debug for RowSourceExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowSourceExport").finish_non_exhaustive()
+    }
 }
 
 enum ExportKind {
@@ -67,8 +86,7 @@ impl RowSourceAction {
             || self.provider.host() != &scope.host
             || self.provider.instance() != scope.instance
             || core.host_if_instance(&scope.host, scope.instance).is_none()
-            || item.id != self.item
-            || item.seq != self.seq
+            || (&item.id, item.seq) != (&self.item, self.seq)
         {
             return (false, None);
         }
@@ -83,13 +101,15 @@ impl RowSourceAction {
                 let (changed, effect) = owner.sources.borrow_mut().dispatch_changed(core, action);
                 let effect = effect.map(|effect| match effect {
                     SourceEffect::Clipboard(copied) => RowSourceEffect::Clipboard(copied),
-                    SourceEffect::SavePath(export) => RowSourceEffect::SavePath(RowSourceExport {
-                        item: self.item,
-                        scope: self.scope,
-                        provider: self.provider,
-                        owner: Rc::downgrade(&owner),
-                        export: ExportKind::Content(export),
-                    }),
+                    SourceEffect::SavePath(export) => {
+                        RowSourceEffect::SavePath(Box::new(RowSourceExport {
+                            item: self.item,
+                            scope: self.scope,
+                            provider: self.provider,
+                            owner: Rc::downgrade(&owner),
+                            export: ExportKind::Content(export),
+                        }))
+                    }
                 });
                 (changed, effect)
             }
@@ -110,7 +130,7 @@ impl RowSourceAction {
                 if browser.window().source() != &collection {
                     return (false, None);
                 }
-                let Some(detail) = browser.detail.as_mut() else {
+                let Some(detail) = browser.detail_mut() else {
                     return (false, None);
                 };
                 if detail.identity() != identity || detail.window().source() != &source {
@@ -123,7 +143,7 @@ impl RowSourceAction {
                         RowSourceEffect::Clipboard(copied)
                     }
                     editor_sources::ContentEffect::SavePath(generation) => {
-                        RowSourceEffect::SavePath(RowSourceExport {
+                        RowSourceEffect::SavePath(Box::new(RowSourceExport {
                             item: self.item,
                             scope: self.scope,
                             provider: self.provider,
@@ -134,17 +154,27 @@ impl RowSourceAction {
                                 identity,
                                 generation,
                             },
-                        })
+                        }))
                     }
                 });
                 (changed, effect)
             }
-            _ => (false, None),
+            RowSourceActionKind::Content(_)
+            | RowSourceActionKind::Questions(_)
+            | RowSourceActionKind::QuestionDetail { .. } => (false, None),
         }
     }
 }
 
 impl RowSourceExport {
+    pub const fn item(&self) -> &ItemId {
+        &self.item
+    }
+
+    pub const fn scope(&self) -> &PresentationScope {
+        &self.scope
+    }
+
     pub fn is_current(&self, core: &Core, scope: &PresentationScope, item: &Item) -> bool {
         &self.scope == scope
             && item.id == self.item
@@ -172,7 +202,7 @@ impl RowSourceExport {
                                 && owner.questions.borrow().browser().is_some_and(|browser| {
                                     let browser = browser.borrow();
                                     browser.window().source() == collection
-                                        && browser.detail.as_ref().is_some_and(|detail| {
+                                        && browser.detail().is_some_and(|detail| {
                                             detail.identity() == *identity
                                                 && detail.window().source() == source
                                                 && detail.is_export_pending(*generation)
@@ -201,7 +231,7 @@ impl RowSourceExport {
                     .finish_export_result(core, export, result),
                 ExportKind::QuestionDetail { generation, .. } => {
                     if let Some(browser) = owner.questions.borrow().browser()
-                        && let Some(detail) = browser.borrow_mut().detail.as_mut()
+                        && let Some(detail) = browser.borrow_mut().detail_mut()
                     {
                         detail.finish_export_result(core, generation, result);
                     }
@@ -213,14 +243,17 @@ impl RowSourceExport {
 
 impl RowOwner {
     pub fn bind_sources(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
-        for (_, _, content) in self.sources.borrow().iter() {
+        let sources = self.sources.borrow();
+        for (_, _, content) in sources.iter() {
             ctx.bind_mailbox(window, content.action_wake());
             ctx.bind_mailbox(window, content.window().wake_mailbox());
         }
-        if let Some(browser) = self.questions.borrow().browser() {
+        drop(sources);
+        let browser = self.questions.borrow().browser();
+        if let Some(browser) = browser {
             let browser = browser.borrow();
             ctx.bind_mailbox(window, browser.window().wake_mailbox());
-            if let Some(content) = &browser.detail {
+            if let Some(content) = browser.detail() {
                 ctx.bind_mailbox(window, content.action_wake());
                 ctx.bind_mailbox(window, content.window().wake_mailbox());
             }
@@ -250,13 +283,15 @@ impl RowOwner {
             .into_iter()
             .map(|effect| match effect {
                 SourceEffect::Clipboard(copied) => RowSourceEffect::Clipboard(copied),
-                SourceEffect::SavePath(export) => RowSourceEffect::SavePath(RowSourceExport {
-                    item: export.item().clone(),
-                    scope: scope.clone(),
-                    provider: provider.clone(),
-                    owner: Rc::downgrade(self),
-                    export: ExportKind::Content(export),
-                }),
+                SourceEffect::SavePath(export) => {
+                    RowSourceEffect::SavePath(Box::new(RowSourceExport {
+                        item: export.item().clone(),
+                        scope: scope.clone(),
+                        provider: provider.clone(),
+                        owner: Rc::downgrade(self),
+                        export: ExportKind::Content(export),
+                    }))
+                }
             })
             .collect();
         let mut detail_changed = false;
@@ -266,7 +301,7 @@ impl RowOwner {
         };
         if let (Some((item, collection)), Some(browser)) = (identity, browser) {
             let mut browser = browser.borrow_mut();
-            if let Some(detail) = browser.detail.as_mut() {
+            if let Some(detail) = browser.detail_mut() {
                 let source = detail.window().source().clone();
                 let identity = detail.identity();
                 let (changed, effect) = editor_sources::drain_content_changed(detail, core);
@@ -277,7 +312,7 @@ impl RowOwner {
                             RowSourceEffect::Clipboard(copied)
                         }
                         editor_sources::ContentEffect::SavePath(generation) => {
-                            RowSourceEffect::SavePath(RowSourceExport {
+                            RowSourceEffect::SavePath(Box::new(RowSourceExport {
                                 item,
                                 scope: scope.clone(),
                                 provider: provider.clone(),
@@ -288,7 +323,7 @@ impl RowOwner {
                                     identity,
                                     generation,
                                 },
-                            })
+                            }))
                         }
                     });
                 }

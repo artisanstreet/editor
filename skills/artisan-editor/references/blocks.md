@@ -50,16 +50,16 @@ the options). Hovering a column highlights it.
 
 ### code-ref
 
-A pointer into the code. `ref` (required), `excerpt`, `language`, `note`.
+A pointer into the code. `ref` (required), `excerpt`, `note`.
 The excerpt is numbered from the ref's first line; the path opens the file.
 
 ```artisan-code-ref
-{ "ref": "src/dispatch/support.ts:12-16", "language": "ts", "excerpt": "export function ciDispatchMachineSupport(label, machine) {\n  if (machine.os !== 'ubuntu') return false;\n  return machine.cpus < 96;\n}", "note": "The only gate both paths share." }
+{ "ref": "src/dispatch/support.ts:12-16", "excerpt": "export function ciDispatchMachineSupport(label, machine) {\n  if (machine.os !== 'ubuntu') return false;\n  return machine.cpus < 96;\n}", "note": "The only gate both paths share." }
 ```
 
 ### annotated-code
 
-Code with numbered notes under it. `code` (required), `language`, `path`,
+Code with numbered notes under it. `code` (required), `path`,
 `start_line` (default 1), `notes: [{ lines: 4 | "3-5", text }]`. Hovering a
 note highlights its lines.
 
@@ -297,8 +297,9 @@ frame's aspect (default 16:10).
 Audio files the reader can play in place: a rendered sound, a recording, a
 text-to-speech take. Each track is a row with a play button and a seekable
 progress line; one track plays at a time. Local files only (mp3, wav, flac,
-ogg). `src` (required unless `tracks`), `name`; or
-`tracks: [{ src, name? }]`.
+ogg). `src` (required unless `tracks`), `name`, `transcript`; or
+`tracks: [{ src, name?, transcript? }]`. Give spoken audio a `transcript`
+so readers who can't hear it get the same content.
 
 ```artisan-audio
 { "tracks": [{ "src": "out/notify.wav", "name": "Notification, v2" }, { "src": "out/notify-old.wav", "name": "Notification, v1" }] }

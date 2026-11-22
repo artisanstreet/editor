@@ -31,25 +31,27 @@ pub fn request_body_bytes(
                     use base64::Engine as _;
                     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
                         .decode(envelope.b64u.as_bytes())
-                        .map_err(|_decode| BodyDecodeError::InvalidBase64)?;
+                        .map_err(BodyDecodeError::InvalidBase64)?;
                     Ok((envelope.content_type, raw))
                 }
-                Err(_) => Ok(("application/json".into(), body_json_bytes(body))),
+                Err(source) => Err(BodyDecodeError::MalformedEnvelope(source)),
             }
         }
         _ => Ok(("application/json".into(), body_json_bytes(body))),
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum BodyDecodeError {
     #[error("invalid base64url in a $bytes envelope or chunk")]
-    InvalidBase64,
+    InvalidBase64(#[source] base64::DecodeError),
+    #[error("a $bytes envelope without a content type and base64url bytes")]
+    MalformedEnvelope(#[source] serde_json::Error),
 }
 
 fn body_json_bytes(body: Option<&serde_json::Value>) -> Vec<u8> {
     body.map_or_else(Vec::new, |value| {
-        serde_json::to_vec(value).unwrap_or_default()
+        serde_json::to_vec(value).expect("invariant: a JSON value always serializes")
     })
 }
 
@@ -87,126 +89,77 @@ impl TunnelResponse {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelChunk {
-    pub transfer: String,
-    pub index: u32,
-    pub total: u32,
-    pub total_bytes: u64,
-    pub bytes_b64u: String,
+    pub(crate) transfer: String,
+    pub(crate) index: u32,
+    pub(crate) total: u32,
+    pub(crate) total_bytes: u64,
+    pub(crate) bytes_b64u: String,
 }
 
-pub const CHUNK_RAW_BYTES: usize = 40 * 1024;
+pub(crate) const CHUNK_RAW_BYTES: usize = 40 * 1024;
 pub const TUNNEL_PLAINTEXT_BUDGET: usize = 60_000;
-pub const TRANSFER_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const TUNNEL_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
+const MESSAGE_ENVELOPE_BYTES: u64 = 64 * 1024;
+pub const TRANSFER_MAX_BYTES: u64 =
+    (TUNNEL_BODY_MAX_BYTES as u64).div_ceil(3) * 4 + MESSAGE_ENVELOPE_BYTES;
 pub const REASSEMBLY_MAX_BYTES_PER_CONN: u64 = 64 * 1024 * 1024;
-pub const TRANSFER_MAX_PARTS: u32 = 820;
+pub(crate) const TRANSFER_MAX_PARTS: u32 = 1094;
 const _: () = assert!(
     TRANSFER_MAX_PARTS as u64 == TRANSFER_MAX_BYTES.div_ceil(CHUNK_RAW_BYTES as u64),
     "TRANSFER_MAX_PARTS must be the div_ceil part count"
 );
-pub const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
+const _: () = assert!(
+    TRANSFER_MAX_BYTES <= REASSEMBLY_MAX_BYTES_PER_CONN,
+    "a connection must hold one transfer of the largest body"
+);
+pub(crate) const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
 
 #[must_use]
-pub fn chunk_bytes(transfer: &str, bytes: &[u8]) -> Vec<TunnelChunk> {    use base64::Engine as _;
-    if bytes.is_empty() {
-        return vec![TunnelChunk {
-            transfer: transfer.to_owned(),
-            index: 0,
-            total: 1,
-            total_bytes: 0,
-            bytes_b64u: String::new(),
-        }];
+pub const fn chunk_count(bytes: usize) -> usize {
+    if bytes == 0 {
+        1
+    } else {
+        bytes.div_ceil(CHUNK_RAW_BYTES)
     }
-    let total = bytes.len().div_ceil(CHUNK_RAW_BYTES);
-    bytes
-        .chunks(CHUNK_RAW_BYTES)
-        .enumerate()
-        .map(|(index, part)| TunnelChunk {
-            transfer: transfer.to_owned(),
-            index: u32::try_from(index).unwrap_or(u32::MAX),
-            total: u32::try_from(total).unwrap_or(u32::MAX),
-            total_bytes: bytes.len() as u64,
-            bytes_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(part),
-        })
+}
+
+#[must_use]
+pub fn chunk_at(transfer: &str, bytes: &[u8], index: usize) -> TunnelChunk {
+    use base64::Engine as _;
+    let start = index.saturating_mul(CHUNK_RAW_BYTES).min(bytes.len());
+    let end = start.saturating_add(CHUNK_RAW_BYTES).min(bytes.len());
+    TunnelChunk {
+        transfer: transfer.to_owned(),
+        index: u32::try_from(index).unwrap_or(u32::MAX),
+        total: u32::try_from(chunk_count(bytes.len())).unwrap_or(u32::MAX),
+        total_bytes: bytes.len() as u64,
+        bytes_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[start..end]),
+    }
+}
+
+#[must_use]
+pub fn chunk_bytes(transfer: &str, bytes: &[u8]) -> Vec<TunnelChunk> {
+    (0..chunk_count(bytes.len()))
+        .map(|index| chunk_at(transfer, bytes, index))
         .collect()
 }
 
-pub fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDecodeError> {
+pub(crate) fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDecodeError> {
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(chunk.bytes_b64u.as_bytes())
-        .map_err(|_decode| BodyDecodeError::InvalidBase64)
+        .map_err(BodyDecodeError::InvalidBase64)
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chunks_round_trip_and_fit_the_noise_plaintext_cap() {
-        let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
-        let chunks = chunk_bytes("t1", &bytes);
-        assert!(chunks.len() > 1);
-        for (index, chunk) in chunks.iter().enumerate() {
-            assert_eq!(chunk.index as usize, index);
-            assert_eq!(chunk.total as usize, chunks.len());
-            assert_eq!(chunk.total_bytes, bytes.len() as u64);
-            let framed = serde_json::to_vec(chunk).unwrap();
-            assert!(
-                framed.len() <= TUNNEL_PLAINTEXT_BUDGET,
-                "chunk {} serializes to {} bytes, over the Noise cap",
-                index,
-                framed.len()
-            );
-            assert!(decode_chunk_bytes(chunk).unwrap().len() <= CHUNK_RAW_BYTES);
-        }
-        let mut reassembled = Vec::new();
-        for chunk in &chunks {
-            reassembled.extend_from_slice(&decode_chunk_bytes(chunk).unwrap());
-        }
-        assert_eq!(reassembled, bytes);
-    }
-
-    #[test]
-    fn corrupt_envelopes_fail_loudly() {
-        let bad = TunnelChunk {
-            transfer: "t".into(),
-            index: 0,
-            total: 1,
-            total_bytes: 3,
-            bytes_b64u: "!!!not-base64!!!".into(),
-        };
-        assert_eq!(
-            decode_chunk_bytes(&bad).unwrap_err(),
-            BodyDecodeError::InvalidBase64
-        );
-        let body = serde_json::json!({"$bytes": {"content_type": "image/webp", "b64u": "%%%"}});
-        assert_eq!(
-            request_body_bytes(Some(&body)).unwrap_err(),
-            BodyDecodeError::InvalidBase64
-        );
-        let body = serde_json::json!({"$bytes": {"content_type": "image/webp", "b64u": "aGk"}});
-        assert_eq!(
-            request_body_bytes(Some(&body)).unwrap(),
-            ("image/webp".to_owned(), b"hi".to_vec())
-        );
-        let body = serde_json::json!({"text": "hi"});
-        let (content_type, raw) = request_body_bytes(Some(&body)).unwrap();
-        assert_eq!(content_type, "application/json");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&raw).unwrap(), body);
-    }
-}
+#[path = "../tests/tunnel/unit.rs"]
+mod tests;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamStart {
     pub stream: String,
 }
-
-pub const STREAM_START_KEY: &str = "$stream";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -224,6 +177,3 @@ pub const STREAM_EVENT_KEY: &str = "$event";
 
 pub const METHOD_SUBSCRIBE: &str = "SUBSCRIBE";
 pub const METHOD_UNSUBSCRIBE: &str = "UNSUBSCRIBE";
-pub const EVENTS_PATH: &str = "/events";
-
-pub const STREAM_QUEUE_ENVELOPES: usize = 256;

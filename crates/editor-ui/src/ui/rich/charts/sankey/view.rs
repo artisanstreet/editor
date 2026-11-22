@@ -1,13 +1,13 @@
 use super::{Graph, Layout, layout};
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of_count, index_of, percent};
-use crate::ui::rich::charts::scene::Probe;
+use crate::ui::rich::charts::scene::{self, Probe};
 use crate::ui::rich::kit::format_number;
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::geometry::CornerRadii;
 use aqua_core::vector::{FillRule, GpuiPath, GpuiPathStyle, PathCommand};
 use aqua_core::{
-    DisplayItem, GpuiBackground, GpuiHsla, InputEvent, Key, Modifiers, NamedKey, Point, Rect, Role,
-    Transform2D,
+    DisplayItem, GpuiBackground, GpuiHsla, InputEvent, NamedKey, Point, Rect, Transform2D,
 };
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -52,7 +52,7 @@ impl SankeyState {
     fn sync(&self, id: &str, graph: &Arc<Graph>) -> (Option<Hover>, Probe, Rc<Layout>) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            graph: graph.clone(),
+            graph: Arc::clone(graph),
             layout: None,
             hover: None,
             probe: Rc::new(Cell::new(None)),
@@ -62,14 +62,15 @@ impl SankeyState {
                 entry.layout = None;
                 entry.hover = None;
             }
-            entry.graph = graph.clone();
+            entry.graph = Arc::clone(graph);
         }
         let height = (f32_of_count(graph.tallest) * 44.0).clamp(200.0, 380.0);
-        let laid = entry
-            .layout
-            .get_or_insert_with(|| Rc::new(layout(graph, height, NODE_GAP)))
-            .clone();
-        (entry.hover, entry.probe.clone(), laid)
+        let laid = Rc::clone(
+            entry
+                .layout
+                .get_or_insert_with(|| Rc::new(layout(graph, height, NODE_GAP))),
+        );
+        (entry.hover, Rc::clone(&entry.probe), laid)
     }
     fn set(&self, id: &str, hover: Option<Hover>) -> bool {
         let mut entries = self.0.borrow_mut();
@@ -101,7 +102,21 @@ impl SankeyState {
                 Some(current.map_or(0, |n| (n + 1).min(entries_list.len() - 1)))
             }
             NamedKey::Enter if !entries_list.is_empty() => Some(current.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Enter
+            | NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::Left
+            | NamedKey::Right
+            | NamedKey::Up
+            | NamedKey::Down
+            | NamedKey::Home
+            | NamedKey::End
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         state.hover = next.and_then(|index| entries_list.get(index).copied());
         true
@@ -206,17 +221,20 @@ fn hit(laid: &Layout, width: f32, x: f32, y: f32) -> Option<Hover> {
     found.map(Hover::Link)
 }
 
-fn paint(
-    bounds: Rect,
+fn local_items(
+    size: (f32, f32),
     graph: &Graph,
     laid: &Layout,
     nodes: &[GpuiHsla],
     links: &[GpuiHsla],
 ) -> Vec<DisplayItem> {
-    let mut items = vec![DisplayItem::PushClip {
-        bounds,
-        radius: 0.0,
-    }];
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut items = Vec::with_capacity(graph.links.len() + laid.nodes.len());
     for (index, link) in graph.links.iter().enumerate() {
         let (x0, x1) = band_span(laid, (link.from, link.to), bounds.w);
         let middle = f32::midpoint(x0, x1);
@@ -240,7 +258,7 @@ fn paint(
             transformed_window_logical_bounds: bounds,
             path: Arc::new(GpuiPath {
                 commands_local: commands,
-                origin_window_logical: Point::new(bounds.x, bounds.y),
+                origin_window_logical: Point::new(0.0, 0.0),
                 element_transform: Transform2D::IDENTITY,
                 style: GpuiPathStyle::Fill {
                     rule: FillRule::EvenOdd,
@@ -255,8 +273,8 @@ fn paint(
         }
         items.push(DisplayItem::GpuiBackground {
             bounds: Rect {
-                x: bounds.x + node_x(laid, node.rank, bounds.w),
-                y: bounds.y + node.y0,
+                x: node_x(laid, node.rank, bounds.w),
+                y: node.y0,
                 w: NODE_WIDTH,
                 h: node.y1 - node.y0,
             },
@@ -264,26 +282,30 @@ fn paint(
             background: GpuiBackground::Solid(nodes[index]),
         });
     }
-    items.push(DisplayItem::PopClip);
     items
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the sankey view takes its label, readout, empty and navigation factories with its state"
+)]
 pub(crate) fn view(
-    id: String,
+    id: &str,
     theme: &ArtisanTheme,
-    graph: Arc<Graph>,
+    graph: &Arc<Graph>,
     state: SankeyState,
-    label: LabelFactory,
-    readout: ReadoutFactory,
-    empty: EmptyFactory,
-    navigation_frame: NavigationFrame,
+    label: &LabelFactory,
+    readout: &ReadoutFactory,
+    empty: &EmptyFactory,
+    navigation_frame: &NavigationFrame,
     invalidate: Rc<dyn Fn()>,
 ) -> Element {
     if graph.links.is_empty() {
         return empty("No flows to draw");
     }
     let theme = *theme;
-    let (hover, probe, laid) = state.sync(&id, &graph);
+    let (hover, probe, laid) = state.sync(id, graph);
     let height = (f32_of_count(graph.tallest) * 44.0).clamp(200.0, 380.0);
     let width = probe.get().map_or(640.0, |rect| rect.w);
     let node_lit = |node: usize| match hover {
@@ -331,9 +353,13 @@ pub(crate) fn view(
                 .to_reference_paint()
         })
         .collect::<Vec<_>>();
-    let draw_graph = graph.clone();
-    let draw_layout = laid.clone();
-    let draw_probe = probe.clone();
+    let draw_graph = Arc::clone(graph);
+    let draw_layout = Rc::clone(&laid);
+    let draw_probe = Rc::clone(&probe);
+    let plot = scene::Scene::drawn(
+        move |size| local_items(size, &draw_graph, &draw_layout, &nodes, &links),
+        scene::Clip::Bounds,
+    );
     let canvas = ui::Canvas::new()
         .style(
             Style::new()
@@ -343,7 +369,7 @@ pub(crate) fn view(
         )
         .on_paint(move |bounds| {
             draw_probe.set(Some(bounds));
-            paint(bounds, &draw_graph, &draw_layout, &nodes, &links)
+            plot.paint(bounds)
         })
         .build();
     let mut content = ui::Box::new()
@@ -366,7 +392,7 @@ pub(crate) fn view(
             x: if last {
                 NODE_WIDTH + 6.0
             } else {
-                at * width + NODE_WIDTH.mul_add(1.0 - at, 6.0)
+                at.mul_add(width, NODE_WIDTH.mul_add(1.0 - at, 6.0))
             },
             y: f32::midpoint(place.y0, place.y1) - line_height / 2.0,
             max_width: (room - NODE_WIDTH - 12.0).max(0.0),
@@ -428,13 +454,13 @@ pub(crate) fn view(
         content = content.child(readout(at, &heading, rows));
     }
     let moving = state.clone();
-    let moving_id = id.clone();
-    let moving_probe = probe.clone();
-    let moving_layout = laid.clone();
-    let moving_invalidate = invalidate.clone();
+    let moving_id = id.to_owned();
+    let moving_probe = probe;
+    let moving_layout = laid;
+    let moving_invalidate = Rc::clone(&invalidate);
     let leaving = state.clone();
-    let leaving_id = id.clone();
-    let leaving_invalidate = invalidate.clone();
+    let leaving_id = id.to_owned();
+    let leaving_invalidate = Rc::clone(&invalidate);
     let content = content
         .build()
         .with_key(format!("{id}-plot"))
@@ -465,43 +491,26 @@ pub(crate) fn view(
         aria.push(' ');
         aria.push_str(selection);
     }
-    let keyboard = state.clone();
-    let keyboard_id = id.clone();
-    let keyboard_graph = graph.clone();
-    let mut nav = ui::Box::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .child(content)
-        .build()
-        .with_key(format!("{id}-navigation"))
-        .role(Role::Group)
-        .focusable(true)
-        .tab_index(0)
-        .aria_label(aria)
-        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-            let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
-                return InputResponse::default();
-            };
-            let Key::Named(code) = key.key else {
-                return InputResponse::default();
-            };
-            if !keyboard.key(
-                &keyboard_id,
-                &keyboard_graph,
-                code,
-                key.modifiers.contains(Modifiers::ALT),
-            ) {
-                return InputResponse::default();
+    let keyboard = state;
+    let keyboard_id = id.to_owned();
+    let keyboard_graph = Arc::clone(graph);
+    let nav = navigation_group(
+        ui::Box::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
+            .child(content)
+            .build(),
+        id,
+        aria,
+        selection,
+        move |code, alt| {
+            let handled = keyboard.key(&keyboard_id, &keyboard_graph, code, alt);
+            if handled {
+                invalidate();
             }
-            invalidate();
-            InputResponse {
-                stop_propagation: true,
-                ..InputResponse::default()
-            }
-        });
-    if let Some(selection) = selection {
-        nav = nav.aria_value(selection);
-    }
+            handled
+        },
+    );
     let nav = navigation_frame(nav, theme.colors.ring.to_reference_paint());
     ui::Box::new()
         .style(
@@ -513,63 +522,6 @@ pub(crate) fn view(
         .build()
 }
 
-#[cfg(feature = "test-support")]
-pub struct SankeyFixture {
-    graph: Arc<Graph>,
-    state: SankeyState,
-}
-#[cfg(feature = "test-support")]
-impl SankeyFixture {
-    pub fn new(json: &str) -> Self {
-        let value = serde_json::from_str(json).expect("JSON");
-        let graph = Arc::new(super::prepare(&value).expect("sankey"));
-        let state = SankeyState::default();
-        state.sync("test", &graph);
-        Self { graph, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        let value = serde_json::from_str(json).expect("JSON");
-        self.graph = Arc::new(super::prepare(&value).expect("sankey"));
-        self.state.sync("test", &self.graph);
-    }
-    pub fn selected(&self) -> Option<(bool, usize)> {
-        self.state
-            .sync("test", &self.graph)
-            .0
-            .map(|value| match value {
-                Hover::Node(i) => (true, i),
-                Hover::Link(i) => (false, i),
-            })
-    }
-    pub fn key(&self, key: NamedKey, alt: bool) -> bool {
-        self.state.key("test", &self.graph, key, alt)
-    }
-    pub fn hit(&self, width: f32, x: f32, y: f32) -> Option<(bool, usize)> {
-        let laid = self.state.sync("test", &self.graph).2;
-        hit(&laid, width, x, y).map(|value| match value {
-            Hover::Node(i) => (true, i),
-            Hover::Link(i) => (false, i),
-        })
-    }
-    pub fn node_center(&self, index: usize, width: f32) -> (f32, f32) {
-        let laid = self.state.sync("test", &self.graph).2;
-        let place = laid.nodes[index];
-        (
-            node_x(&laid, place.rank, width) + 5.0,
-            f32::midpoint(place.y0, place.y1),
-        )
-    }
-    pub fn link_center(&self, index: usize, width: f32) -> (f32, f32) {
-        let laid = self.state.sync("test", &self.graph).2;
-        let link = self.graph.links[index];
-        let (x0, x1) = band_span(&laid, (link.from, link.to), width);
-        let band = laid.bands[index];
-        (
-            f32::midpoint(x0, x1),
-            f32::midpoint(
-                f32::midpoint(band.source.0, band.source.1),
-                f32::midpoint(band.target.0, band.target.1),
-            ),
-        )
-    }
-}
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/charts/sankey/view.rs"]
+mod tests;

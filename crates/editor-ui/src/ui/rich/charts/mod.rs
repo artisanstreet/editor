@@ -1,30 +1,15 @@
 pub mod chart;
-#[cfg(feature = "test-support")]
-pub use chart::ChartFixture;
 pub(crate) mod concentration;
-#[cfg(feature = "test-support")]
-pub use concentration::ConcentrationFixture;
 pub(crate) mod distribution;
-#[cfg(feature = "test-support")]
-pub use distribution::DistributionFixture;
 pub(crate) mod frame;
 pub(crate) mod funnel;
-#[cfg(feature = "test-support")]
-pub use funnel::FunnelFixture;
 pub(crate) mod heatmap;
-#[cfg(feature = "test-support")]
-pub use heatmap::HeatmapFixture;
 pub(crate) mod hierarchy;
-#[cfg(feature = "test-support")]
-pub use hierarchy::HierarchyFixture;
+pub(crate) mod keyboard;
 pub(crate) mod sankey;
-#[cfg(feature = "test-support")]
-pub use sankey::SankeyFixture;
 pub mod scale;
-pub(crate) mod scene;
+pub mod scene;
 pub(crate) mod spans;
-#[cfg(feature = "test-support")]
-pub use spans::SpansFixture;
 
 #[derive(Debug)]
 pub(crate) enum Prepared {
@@ -111,10 +96,10 @@ fn preparation_budget(value: &serde_json::Value) -> Result<(), String> {
         }
         match value {
             serde_json::Value::Array(values) => {
-                stack.extend(values.iter().map(|value| (value, depth + 1)))
+                stack.extend(values.iter().map(|value| (value, depth + 1)));
             }
             serde_json::Value::Object(fields) => {
-                stack.extend(fields.values().map(|value| (value, depth + 1)))
+                stack.extend(fields.values().map(|value| (value, depth + 1)));
             }
             serde_json::Value::Null
             | serde_json::Value::Bool(_)

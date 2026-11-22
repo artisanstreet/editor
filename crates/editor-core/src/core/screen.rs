@@ -55,7 +55,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     #[must_use]
-    pub const fn parent(self) -> SettingsPage {
+    const fn parent(self) -> SettingsPage {
         match self {
             Self::Appearance | Self::Streaming | Self::Notifications | Self::Performance => {
                 SettingsPage::General
@@ -86,7 +86,7 @@ impl SettingsSection {
     }
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Streaming => "Text Streaming",
@@ -159,7 +159,7 @@ impl SettingsPage {
         }
     }
 
-    pub const ALL: [(Self, &'static str); 8] = [
+    pub(crate) const ALL: [(Self, &'static str); 8] = [
         (Self::General, "general"),
         (Self::Account, "account"),
         (Self::Hosts, "hosts"),
@@ -175,7 +175,7 @@ impl SettingsPage {
         match self {
             Self::General => "General",
             Self::Section(section) => section.label(),
-            Self::Hosts => "Hosts",
+            Self::Hosts => "Forges",
             Self::About => "About",
             Self::Account => "Account",
             Self::Threads => "Threads",
@@ -186,7 +186,7 @@ impl SettingsPage {
     }
 
     #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         let (parent, section) = if let Some(rest) = name.strip_prefix("engines/") {
             match rest.split_once('/') {
                 Some((engine, section)) => (Self::Engine(engine.parse().ok()?), Some(section)),
@@ -232,29 +232,88 @@ impl Screen {
         }
     }
 
-    #[must_use]
-    pub fn from_link(link: &str) -> Option<Self> {
-        let rest = link.strip_prefix("artisan://")?;
-        let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
-        match parts.as_slice() {
-            ["thread", host, thread] => Some(Self::Thread {
-                host: HostId((*host).to_owned()),
-                thread: ThreadId((*thread).to_owned()),
+    pub fn from_link(link: &str) -> Result<Self, DeepLinkError> {
+        if !link.starts_with("artisan:") {
+            return Err(DeepLinkError::NotALink);
+        }
+        let url = url::Url::parse(link).map_err(|source| DeepLinkError::Url {
+            link: link.to_owned(),
+            source,
+        })?;
+        let refused = |reason| DeepLinkError::Refused {
+            link: link.to_owned(),
+            reason,
+        };
+        if url.scheme() != "artisan" {
+            return Err(DeepLinkError::NotALink);
+        }
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(refused("it carries a query or fragment"));
+        }
+        if !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+            return Err(refused("it names a user or port"));
+        }
+        let kind = url
+            .host_str()
+            .ok_or_else(|| refused("it names no screen"))?;
+        let path = url.path();
+        let path = path.strip_prefix('/').unwrap_or(path);
+        let path = path.strip_suffix('/').unwrap_or(path);
+        let parts: Vec<&str> = if path.is_empty() {
+            Vec::new()
+        } else {
+            path.split('/').collect()
+        };
+        let id = |part: &str| {
+            let valid = !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            if valid {
+                Ok(part.to_owned())
+            } else {
+                Err(refused(
+                    "an identifier is empty or holds characters ids never use",
+                ))
+            }
+        };
+        let settings = |name: &str| {
+            SettingsPage::from_name(name)
+                .map(Self::Settings)
+                .ok_or_else(|| refused("there is no such settings page"))
+        };
+        match (kind, parts.as_slice()) {
+            ("thread", [host, thread]) => Ok(Self::Thread {
+                host: HostId(id(host)?),
+                thread: ThreadId(id(thread)?),
             }),
-            ["new", host] => Some(Self::NewThread {
-                host: HostId((*host).to_owned()),
+            ("new", [host]) => Ok(Self::NewThread {
+                host: HostId(id(host)?),
                 project: None,
             }),
-            ["new", host, project] => Some(Self::NewThread {
-                host: HostId((*host).to_owned()),
-                project: Some(ProjectId((*project).to_owned())),
+            ("new", [host, project]) => Ok(Self::NewThread {
+                host: HostId(id(host)?),
+                project: Some(ProjectId(id(project)?)),
             }),
-            ["settings"] => Some(Self::Settings(SettingsPage::General)),
-            ["settings", page] => SettingsPage::from_name(page).map(Self::Settings),
-            ["settings", rest @ ..] => SettingsPage::from_name(&rest.join("/")).map(Self::Settings),
-            ["marketplace"] => Some(Self::Marketplace),
-            ["usage"] => Some(Self::Usage),
-            _ => None,
+            ("settings", []) => Ok(Self::Settings(SettingsPage::General)),
+            ("settings", rest) => settings(&rest.join("/")),
+            ("marketplace", []) => Ok(Self::Marketplace),
+            ("usage", []) => Ok(Self::Usage),
+            _ => Err(refused("it names no screen the Editor has")),
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeepLinkError {
+    #[error("not an artisan:// link")]
+    NotALink,
+    #[error("read the link {link}")]
+    Url {
+        link: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("the link {link} opens nothing because {reason}")]
+    Refused { link: String, reason: &'static str },
 }

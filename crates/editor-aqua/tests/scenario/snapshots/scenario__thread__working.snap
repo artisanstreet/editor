@@ -1,0 +1,40 @@
+---
+source: crates/editor-aqua/tests/scenario/thread.rs
+expression: "editor.settle(\"the turn to start\", |view|\n{\n    view.find(Role::Button, \"Stop\").is_some() &&\n    view.shows(\"Refactor the parser\")\n})"
+---
+Group "Artisan Editor"
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Parser" [selected]
+        Label "Parser"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Parser"
+    Group "Project / Parser"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Parser"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  List
+    ListItem
+      Group "You"
+        Label "Refactor the parser"
+    ListItem
+      Label "Thinking for [duration]"
+    ListItem
+      Label "Thinking"
+  Label "Claude Code is working"
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message" [focused]
+  Button "Stop"

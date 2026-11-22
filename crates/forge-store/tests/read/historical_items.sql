@@ -1,0 +1,1 @@
+WITH RECURSIVE history(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM history WHERE n < 100000) INSERT INTO items(id,thread_id,position,seq,status,body) SELECT 'historical-' || n,'thread',n,n,'done','{}' FROM history;

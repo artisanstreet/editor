@@ -1,16 +1,20 @@
 use std::ops::Range;
+use std::rc::Rc;
 
 use artisan_api::{ContentRange, ContentRef, SourceIndexFormat, SourceIndexRange};
 
-pub const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
-pub const RANGE_BYTES: u32 = 65_536;
-pub const MAX_INDEX_ENTRIES: usize = 48;
-pub const MAX_PREPARED_ENTRIES: usize = 128;
-pub const MAX_PENDING_JOBS: usize = 48;
-pub const PREPARED_BYTES: usize = 32 * 1024 * 1024;
-pub const QUEUE_DEPTH: usize = 8;
+const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+const RANGE_BYTES: u32 = 65_536;
+const MAX_INDEX_ENTRIES: usize = 48;
+pub const PAGE_LEAVES: usize = artisan_api::SOURCE_INDEX_PAGE_LEAVES as usize;
+const PAGES_PER_SOURCE: usize = 8;
+const MAX_CACHED_PAGES: usize = 64;
+const MAX_PREPARED_ENTRIES: usize = 128;
+const MAX_PENDING_JOBS: usize = 48;
+pub(crate) const PREPARED_BYTES: usize = 32 * 1024 * 1024;
+const QUEUE_DEPTH: usize = 8;
 
-pub fn validate_page(
+fn validate_page(
     reference: &ContentRef,
     format: SourceIndexFormat,
     offset: Option<u64>,
@@ -37,18 +41,22 @@ pub fn validate_page(
         return Err("Markdown descriptor page does not match its immutable source".to_owned());
     }
     for (position, leaf) in page.leaves.iter().enumerate() {
-        if leaf.ordinal != page.start + position as u64
-            || leaf.source_start > leaf.source_end
-            || leaf.source_end > reference.bytes
-            || leaf.metadata_start >= leaf.metadata_end
-            || leaf.metadata_end > page.index.metadata.bytes
-        {
+        let source_fits = (leaf.source_start..=reference.bytes).contains(&leaf.source_end);
+        let metadata_fits = leaf.metadata_start < leaf.metadata_end
+            && leaf.metadata_end <= page.index.metadata.bytes;
+        if leaf.ordinal != page.start + position as u64 || !source_fits || !metadata_fits {
             return Err("Markdown descriptor does not match its source or metadata".to_owned());
         }
     }
     Ok(())
 }
 
+fn platform_offset(offset: u64) -> Result<usize, String> {
+    usize::try_from(offset)
+        .map_err(|error| format!("Markdown source offset {offset} exceeds this platform: {error}"))
+}
+
+#[derive(Debug)]
 pub struct RangeCollector {
     reference: ContentRef,
     range: Range<usize>,
@@ -57,7 +65,7 @@ pub struct RangeCollector {
 }
 
 impl RangeCollector {
-    pub fn new(reference: ContentRef, range: Range<usize>) -> Result<Self, String> {
+    pub(crate) fn new(reference: ContentRef, range: Range<usize>) -> Result<Self, String> {
         if range.start > range.end
             || u64::try_from(range.end).map_or(true, |end| end > reference.bytes)
             || range.len() > MAX_SOURCE_BYTES
@@ -65,15 +73,16 @@ impl RangeCollector {
             return Err("Markdown source range exceeds its admission limit".to_owned());
         }
         let cursor = range.start;
+        let text = String::with_capacity(range.len());
         Ok(Self {
             reference,
-            text: String::with_capacity(range.len()),
             range,
             cursor,
+            text,
         })
     }
 
-    pub fn next_request(&self) -> Option<(u64, u32)> {
+    pub(crate) fn next_request(&self) -> Option<(u64, u32)> {
         (self.cursor < self.range.end).then(|| {
             let remaining = self.range.end - self.cursor;
             (
@@ -83,7 +92,7 @@ impl RangeCollector {
         })
     }
 
-    pub fn push(&mut self, page: ContentRange) -> Result<(), String> {
+    pub(crate) fn push(&mut self, page: &ContentRange) -> Result<(), String> {
         let cursor = self.cursor as u64;
         if page.id != self.reference.id
             || page.total != self.reference.bytes
@@ -95,21 +104,18 @@ impl RangeCollector {
         {
             return Err("Markdown source response does not match its immutable range".to_owned());
         }
-        let start = usize::try_from(cursor - page.start)
-            .map_err(|_| "Markdown source offset exceeds this platform")?;
-        let end = usize::try_from(page.end.min(self.range.end as u64) - page.start)
-            .map_err(|_| "Markdown source offset exceeds this platform")?;
+        let start = platform_offset(cursor - page.start)?;
+        let end = platform_offset(page.end.min(self.range.end as u64) - page.start)?;
         let fragment = page
             .text
             .get(start..end)
             .ok_or("Markdown source response splits a UTF-8 boundary")?;
         self.text.push_str(fragment);
-        self.cursor = usize::try_from(page.end.min(self.range.end as u64))
-            .map_err(|_| "Markdown source offset exceeds this platform")?;
+        self.cursor = platform_offset(page.end.min(self.range.end as u64))?;
         Ok(())
     }
 
-    pub fn finish(self) -> Result<String, String> {
+    pub(crate) fn finish(self) -> Result<String, String> {
         if self.cursor != self.range.end {
             return Err("Markdown source range is incomplete".to_owned());
         }
@@ -121,7 +127,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use artisan_api::SourceLeafDescriptor;
+use artisan_api::{SourceIndexHeader, SourceLeafDescriptor};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::AbortHandle;
 
@@ -131,17 +137,25 @@ use editor_core::{delivery::Delivery, host::ScopedSourceProvider, runtime};
 #[derive(Clone)]
 pub struct StoredSource {
     provider: ScopedSourceProvider,
-    page: Arc<SourceIndexRange>,
+    header: Arc<SourceIndexHeader>,
     revision: u64,
     owner: String,
 }
 
+impl std::fmt::Debug for StoredSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredSource").finish_non_exhaustive()
+    }
+}
+
 impl StoredSource {
-    pub fn literal_content_range(
+    pub(crate) fn literal_content_range(
         &self,
         offset: u64,
         limit: u32,
-    ) -> Option<futures::future::BoxFuture<'static, anyhow::Result<ContentRange>>> {
+    ) -> Option<
+        futures::future::BoxFuture<'static, Result<ContentRange, editor_core::client::RangeError>>,
+    > {
         if self.format() != SourceIndexFormat::Literal || limit == 0 || limit > RANGE_BYTES {
             return None;
         }
@@ -150,62 +164,87 @@ impl StoredSource {
     }
 
     pub fn source_ref(&self) -> &ContentRef {
-        &self.page.index.source
+        &self.header.source
     }
     pub fn format(&self) -> SourceIndexFormat {
-        self.page.index.format
+        self.header.format
     }
     pub fn block_count(&self) -> usize {
-        usize::try_from(self.page.index.leaves).unwrap_or(usize::MAX)
+        usize::try_from(self.header.leaves).unwrap_or(usize::MAX)
     }
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    pub fn loaded_range(&self) -> Range<usize> {
-        usize::try_from(self.page.start).unwrap_or(usize::MAX)
-            ..usize::try_from(self.page.end).unwrap_or(usize::MAX)
-    }
-    pub fn descriptor(&self, ordinal: usize) -> Option<&SourceLeafDescriptor> {
-        self.page
-            .leaves
-            .get(ordinal.checked_sub(usize::try_from(self.page.start).ok()?)?)
+    fn holds(&self, provider: &ScopedSourceProvider, page: &SourceIndexRange) -> bool {
+        StoredOwner::same_provider(&self.provider, provider) && page.index == *self.header
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PagePreparation {
+    Pending,
+    Ready(SourceLeafDescriptor),
+    Failed { offset: u64, cause: String },
+}
+
+fn page_start(ordinal: usize) -> u64 {
+    (ordinal - ordinal % PAGE_LEAVES) as u64
+}
+
+#[derive(Debug, Clone)]
 pub enum StoredPreparation {
     Pending,
     Ready(StoredSource),
     Failed(String),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum LeafPreparation {
     Pending,
-    Ready(Arc<StoredLeaf>),
+    Ready(Rc<StoredLeaf>),
     Failed(String),
 }
 
 struct PreparedLease {
-    _permit: Option<OwnedSemaphorePermit>,
+    permit: Option<OwnedSemaphorePermit>,
     wake: aqua::mailbox::Wake,
 }
 
 impl Drop for PreparedLease {
     fn drop(&mut self) {
-        drop(self._permit.take());
+        drop(self.permit.take());
         (self.wake)();
     }
 }
 
 pub struct StoredLeaf {
-    pub descriptor: SourceLeafDescriptor,
-    pub source: Arc<str>,
-    pub context: artisan_markdown_index::LeafContext,
-    pub table_continues: bool,
-    pub content: IndexedLeafContent,
+    pub(crate) descriptor: SourceLeafDescriptor,
+    source: Arc<str>,
+    pub(crate) context: artisan_markdown_index::LeafContext,
+    pub(crate) table_continues: bool,
+    pub(crate) content: IndexedLeafContent,
     proof: LeafProof,
     _capacity: PreparedLease,
+}
+
+impl StoredLeaf {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub const fn context(&self) -> &artisan_markdown_index::LeafContext {
+        &self.context
+    }
+
+    pub const fn content(&self) -> &IndexedLeafContent {
+        &self.content
+    }
+}
+
+impl std::fmt::Debug for StoredLeaf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredLeaf").finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]
@@ -217,8 +256,14 @@ pub struct LeafProof {
     generation: u64,
 }
 
+impl std::fmt::Debug for LeafProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeafProof").finish_non_exhaustive()
+    }
+}
+
 impl LeafProof {
-    pub fn owner(&self) -> &str {
+    pub(crate) fn owner(&self) -> &str {
         &self.owner
     }
 }
@@ -229,25 +274,38 @@ impl StoredLeaf {
     }
 }
 
+struct Task(AbortHandle);
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+enum IndexPhase {
+    Loading { _task: Task },
+    Ready(StoredSource),
+    Failed(String),
+}
+
+enum FetchState {
+    Loading { _task: Task },
+    Failed(String),
+}
+
+struct PageFetch {
+    start: u64,
+    state: FetchState,
+}
+
 struct IndexEntry {
     owner: String,
     provider: ScopedSourceProvider,
     reference: ContentRef,
     format: SourceIndexFormat,
     revision: u64,
-    pending_offset: Option<Option<u64>>,
-    failed_offset: Option<Option<u64>>,
-    current: Option<StoredSource>,
-    error: Option<String>,
-    task: Option<AbortHandle>,
-}
-
-impl Drop for IndexEntry {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
+    phase: IndexPhase,
+    fetches: Vec<PageFetch>,
 }
 
 enum LeafPhase {
@@ -261,7 +319,7 @@ enum LeafPhase {
         source: String,
     },
     Working,
-    Ready(Arc<StoredLeaf>),
+    Ready(Rc<StoredLeaf>),
     Failed(String),
 }
 
@@ -287,6 +345,7 @@ enum Completion {
     Index {
         owner: String,
         revision: u64,
+        offset: Option<u64>,
         result: Result<SourceIndexRange, String>,
     },
     Range {
@@ -320,7 +379,7 @@ pub enum StoredUpdate {
 
 type WorkerJob = Box<dyn FnOnce(&Result<MarkdownEngine, String>) + Send>;
 
-fn preparation_worker() -> Option<tokio::sync::mpsc::Sender<WorkerJob>> {
+fn preparation_worker() -> Result<tokio::sync::mpsc::Sender<WorkerJob>, String> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<WorkerJob>(QUEUE_DEPTH);
     std::thread::Builder::new()
         .name("artisan-markdown-stored".to_owned())
@@ -330,8 +389,8 @@ fn preparation_worker() -> Option<tokio::sync::mpsc::Sender<WorkerJob>> {
                 job(&engine);
             }
         })
-        .ok()?;
-    Some(sender)
+        .map_err(|error| format!("Couldn't start Markdown preparation: {error}"))?;
+    Ok(sender)
 }
 
 pub struct StoredOwner {
@@ -341,8 +400,14 @@ pub struct StoredOwner {
     generation: u64,
     capacity: Arc<Semaphore>,
     prepared_capacity: Arc<Semaphore>,
-    worker: Option<tokio::sync::mpsc::Sender<WorkerJob>>,
+    worker: Result<tokio::sync::mpsc::Sender<WorkerJob>, String>,
     delivery: Delivery<Completion>,
+}
+
+impl std::fmt::Debug for StoredOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredOwner").finish_non_exhaustive()
+    }
 }
 
 impl Default for StoredOwner {
@@ -355,7 +420,12 @@ impl Default for StoredOwner {
             capacity: Arc::new(Semaphore::new(PREPARED_BYTES)),
             prepared_capacity: Arc::new(Semaphore::new(PREPARED_BYTES)),
             worker: preparation_worker(),
-            delivery: Delivery::new(NonZeroUsize::new(MAX_PENDING_JOBS).unwrap()),
+            delivery: Delivery::new(
+                const {
+                    NonZeroUsize::new(MAX_PENDING_JOBS)
+                        .expect("invariant: MAX_PENDING_JOBS is nonzero")
+                },
+            ),
         }
     }
 }
@@ -371,35 +441,32 @@ impl StoredOwner {
     fn same_provider(a: &ScopedSourceProvider, b: &ScopedSourceProvider) -> bool {
         a.is_available() && b.is_available() && a.host() == b.host() && a.instance() == b.instance()
     }
+    fn same_source(
+        provider: &ScopedSourceProvider,
+        page: &SourceIndexRange,
+        other_provider: &ScopedSourceProvider,
+        other: &SourceIndexRange,
+    ) -> bool {
+        Self::same_provider(provider, other_provider)
+            && page.index.source == other.index.source
+            && page.index.format == other.index.format
+    }
     fn remember_page(&mut self, provider: ScopedSourceProvider, page: Arc<SourceIndexRange>) {
         self.pages.retain(|(existing_provider, existing)| {
-            !(Self::same_provider(existing_provider, &provider)
-                && existing.index.source == page.index.source
-                && existing.index.format == page.index.format
+            !(Self::same_source(existing_provider, existing, &provider, &page)
                 && existing.start == page.start)
         });
-        while self
-            .pages
-            .iter()
-            .filter(|(existing_provider, existing)| {
-                Self::same_provider(existing_provider, &provider)
-                    && existing.index.source == page.index.source
-                    && existing.index.format == page.index.format
-            })
-            .count()
-            >= 2
-        {
-            let Some(index) = self.pages.iter().position(|(existing_provider, existing)| {
-                Self::same_provider(existing_provider, &provider)
-                    && existing.index.source == page.index.source
-                    && existing.index.format == page.index.format
-            }) else {
-                break;
+        let same =
+            |(existing_provider, existing): &(ScopedSourceProvider, Arc<SourceIndexRange>)| {
+                Self::same_source(existing_provider, existing, &provider, &page)
             };
-            self.pages.remove(index);
+        if self.pages.iter().filter(|entry| same(entry)).count() >= PAGES_PER_SOURCE
+            && let Some(oldest) = self.pages.iter().position(same)
+        {
+            self.pages.remove(oldest);
         }
         self.pages.push_back((provider, page));
-        while self.pages.len() > MAX_INDEX_ENTRIES {
+        while self.pages.len() > MAX_CACHED_PAGES {
             self.pages.pop_front();
         }
     }
@@ -447,25 +514,84 @@ impl StoredOwner {
             self.leaves.retain(|entry| entry.source.owner != owner);
         }
         while self.indices.len() >= MAX_INDEX_ENTRIES {
-            let Some(index) = self.indices.iter().position(|entry| entry.task.is_none()) else {
+            let Some(index) = self
+                .indices
+                .iter()
+                .position(|entry| !matches!(entry.phase, IndexPhase::Loading { .. }))
+            else {
                 return StoredPreparation::Pending;
             };
             self.indices.remove(index);
         }
         let revision = self.next_generation();
+        let cached = self
+            .pages
+            .iter()
+            .find(|(cached_provider, page)| {
+                Self::same_provider(cached_provider, &provider)
+                    && page.index.source == reference
+                    && page.index.format == format
+                    && page.end == page.index.leaves
+            })
+            .map(|(_, page)| Arc::clone(page));
+        let phase = if let Some(page) = cached {
+            IndexPhase::Ready(StoredSource {
+                provider: provider.clone(),
+                header: Arc::new(page.index.clone()),
+                revision,
+                owner: owner.to_owned(),
+            })
+        } else {
+            let Some(future) = provider.index_range(
+                reference.clone(),
+                format,
+                None,
+                artisan_api::SOURCE_INDEX_PAGE_LEAVES,
+            ) else {
+                return StoredPreparation::Failed("Host disconnected".to_owned());
+            };
+            IndexPhase::Loading {
+                _task: self.spawn_index(owner, revision, None, future),
+            }
+        };
         self.indices.push_back(IndexEntry {
             owner: owner.to_owned(),
             provider,
             reference,
             format,
             revision,
-            pending_offset: None,
-            failed_offset: None,
-            current: None,
-            error: None,
-            task: None,
+            phase,
+            fetches: Vec::new(),
         });
-        self.start_index(owner, None)
+        self.current(owner)
+    }
+    fn spawn_index(
+        &self,
+        owner: &str,
+        revision: u64,
+        offset: Option<u64>,
+        future: futures::future::BoxFuture<
+            'static,
+            Result<SourceIndexRange, editor_core::client::RangeError>,
+        >,
+    ) -> Task {
+        let owner = owner.to_owned();
+        let sender = self.delivery.sender();
+        Task(
+            runtime::runtime()
+                .spawn(async move {
+                    let result = future.await.map_err(|error| error.to_string());
+                    sender
+                        .offer(Completion::Index {
+                            owner,
+                            revision,
+                            offset,
+                            result,
+                        })
+                        .await;
+                })
+                .abort_handle(),
+        )
     }
     pub fn current(&self, owner: &str) -> StoredPreparation {
         let Some(entry) = self
@@ -475,116 +601,127 @@ impl StoredOwner {
         else {
             return StoredPreparation::Pending;
         };
-        if let Some(current) = &entry.current {
-            StoredPreparation::Ready(current.clone())
-        } else if let Some(error) = &entry.error {
-            StoredPreparation::Failed(error.clone())
-        } else {
-            StoredPreparation::Pending
+        match &entry.phase {
+            IndexPhase::Loading { .. } => StoredPreparation::Pending,
+            IndexPhase::Ready(source) => StoredPreparation::Ready(source.clone()),
+            IndexPhase::Failed(error) => StoredPreparation::Failed(error.clone()),
         }
     }
-    pub fn move_window(
-        &mut self,
-        owner: &str,
+    pub fn descriptor(
+        &self,
         source: &StoredSource,
-        offset: u64,
-    ) -> StoredPreparation {
-        if !self.source_is_current(source) || source.owner != owner {
-            return StoredPreparation::Pending;
-        }
-        if source.page.start == offset {
-            return StoredPreparation::Ready(source.clone());
-        }
-        if let Some(entry) = self.indices.iter().find(|entry| entry.owner == owner)
-            && entry.failed_offset == Some(Some(offset))
-            && let Some(error) = &entry.error
-        {
-            return StoredPreparation::Failed(error.clone());
-        }
-        self.start_index(owner, Some(offset))
+        ordinal: usize,
+    ) -> Option<&SourceLeafDescriptor> {
+        let ordinal = u64::try_from(ordinal).ok()?;
+        self.pages
+            .iter()
+            .find(|(provider, page)| {
+                source.holds(provider, page) && (page.start..page.end).contains(&ordinal)
+            })
+            .and_then(|(_, page)| page.leaves.get(usize::try_from(ordinal - page.start).ok()?))
     }
-    fn start_index(&mut self, owner: &str, offset: Option<u64>) -> StoredPreparation {
-        let Some(index) = self.indices.iter().position(|entry| entry.owner == owner) else {
-            return StoredPreparation::Pending;
+    pub fn page(&mut self, source: &StoredSource, ordinal: usize) -> PagePreparation {
+        if !self.source_is_current(source) || ordinal >= source.block_count() {
+            return PagePreparation::Pending;
+        }
+        let wanted = ordinal as u64;
+        if let Some(position) = self.pages.iter().position(|(provider, page)| {
+            source.holds(provider, page) && (page.start..page.end).contains(&wanted)
+        }) {
+            let cached = self
+                .pages
+                .remove(position)
+                .expect("invariant: a found page position is in the cache");
+            let descriptor = cached.1.leaves[usize::try_from(wanted - cached.1.start)
+                .expect("invariant: a page holds at most SOURCE_INDEX_PAGE_LEAVES leaves")]
+            .clone();
+            self.pages.push_back(cached);
+            return PagePreparation::Ready(descriptor);
+        }
+        let start = page_start(ordinal);
+        let index = self
+            .indices
+            .iter()
+            .position(|entry| entry.owner == source.owner)
+            .expect("invariant: a current stored source keeps its index entry");
+        match self.indices[index]
+            .fetches
+            .iter()
+            .find(|fetch| fetch.start == start)
+            .map(|fetch| &fetch.state)
+        {
+            Some(FetchState::Loading { .. }) => PagePreparation::Pending,
+            Some(FetchState::Failed(cause)) => PagePreparation::Failed {
+                offset: start,
+                cause: cause.clone(),
+            },
+            None => self.start_page(index, start),
+        }
+    }
+    pub fn retry_page(&mut self, owner: &str, offset: u64) -> bool {
+        let Some(index) = self.indices.iter().position(|entry| {
+            entry.owner == owner
+                && entry.provider.is_available()
+                && matches!(entry.phase, IndexPhase::Ready(_))
+        }) else {
+            return false;
         };
-        if self.indices[index].pending_offset == Some(offset) {
-            return StoredPreparation::Pending;
+        let fetches = &mut self.indices[index].fetches;
+        let Some(failed) = fetches.iter().position(|fetch| {
+            fetch.start == offset && matches!(fetch.state, FetchState::Failed(_))
+        }) else {
+            return false;
+        };
+        fetches.remove(failed);
+        self.start_page(index, offset);
+        true
+    }
+    fn start_page(&mut self, index: usize, start: u64) -> PagePreparation {
+        let entry = &self.indices[index];
+        if entry
+            .fetches
+            .iter()
+            .filter(|fetch| matches!(fetch.state, FetchState::Loading { .. }))
+            .count()
+            >= PAGES_PER_SOURCE
+        {
+            return PagePreparation::Pending;
         }
-        let cached = self.pages.iter().position(|(provider, page)| {
-            let entry = &self.indices[index];
-            Self::same_provider(provider, &entry.provider)
-                && page.index.source == entry.reference
-                && page.index.format == entry.format
-                && offset.map_or(page.end == page.index.leaves, |offset| {
-                    page.start == offset.min(page.index.leaves)
-                })
-        });
-        if let Some(position) = cached {
-            let (_, page) = self.pages.remove(position).unwrap();
-            let revision = self.next_generation();
-            let entry = &mut self.indices[index];
-            if let Some(task) = entry.task.take() {
-                task.abort();
-            }
-            entry.pending_offset = None;
-            entry.failed_offset = None;
-            entry.error = None;
-            entry.revision = revision;
-            let source = StoredSource {
-                provider: entry.provider.clone(),
-                page: page.clone(),
-                revision,
-                owner: owner.to_owned(),
-            };
-            entry.current = Some(source.clone());
-            self.pages.push_back((entry.provider.clone(), page));
-            return StoredPreparation::Ready(source);
-        }
-        let revision = self.next_generation();
-        let entry = &mut self.indices[index];
-        if let Some(task) = entry.task.take() {
-            task.abort();
-        }
-        let Some(future) = entry.provider.index_range(
+        let state = match entry.provider.index_range(
             entry.reference.clone(),
             entry.format,
-            offset,
+            Some(start),
             artisan_api::SOURCE_INDEX_PAGE_LEAVES,
-        ) else {
-            return StoredPreparation::Failed("Host disconnected".to_owned());
+        ) {
+            Some(future) => FetchState::Loading {
+                _task: self.spawn_index(&entry.owner, entry.revision, Some(start), future),
+            },
+            None => FetchState::Failed("Host disconnected".to_owned()),
         };
-        entry.revision = revision;
-        entry.pending_offset = Some(offset);
-        entry.error = None;
-        entry.failed_offset = None;
-        let owner = owner.to_owned();
-        let sender = self.delivery.sender();
-        entry.task = Some(
-            runtime::runtime()
-                .spawn(async move {
-                    let result = future.await.map_err(|error| error.to_string());
-                    let _ = sender
-                        .send(Completion::Index {
-                            owner,
-                            revision,
-                            result,
-                        })
-                        .await;
-                })
-                .abort_handle(),
-        );
-        StoredPreparation::Pending
+        let fetches = &mut self.indices[index].fetches;
+        if fetches.len() >= PAGES_PER_SOURCE
+            && let Some(oldest) = fetches
+                .iter()
+                .position(|fetch| matches!(fetch.state, FetchState::Failed(_)))
+        {
+            fetches.remove(oldest);
+        }
+        let preparation = match &state {
+            FetchState::Loading { .. } => PagePreparation::Pending,
+            FetchState::Failed(cause) => PagePreparation::Failed {
+                offset: start,
+                cause: cause.clone(),
+            },
+        };
+        fetches.push(PageFetch { start, state });
+        preparation
     }
     pub fn source_is_current(&self, source: &StoredSource) -> bool {
         source.provider.is_available()
             && self.indices.iter().any(|entry| {
                 entry.owner == source.owner
                     && Self::same_provider(&entry.provider, &source.provider)
-                    && entry.current.as_ref().is_some_and(|current| {
-                        current.revision == source.revision
-                            && current.page.index.source == source.page.index.source
-                            && current.page.index.format == source.page.index.format
-                    })
+                    && matches!(&entry.phase, IndexPhase::Ready(current) if current.revision == source.revision && current.header == source.header)
             })
     }
     pub fn leaf_is_current(&self, proof: &LeafProof) -> bool {
@@ -594,9 +731,7 @@ impl StoredOwner {
                     && Self::same_provider(&entry.provider, &proof.provider)
                     && entry.reference == proof.reference
                     && entry.format == SourceIndexFormat::Markdown
-                    && entry.current.as_ref().and_then(|source| {
-                        source.descriptor(usize::try_from(proof.descriptor.ordinal).ok()?)
-                    }) == Some(&proof.descriptor)
+                    && matches!(entry.phase, IndexPhase::Ready(_))
             })
             && self.leaves.iter().any(|entry| {
                 entry.generation == proof.generation
@@ -605,6 +740,10 @@ impl StoredOwner {
                     && matches!(entry.phase, LeafPhase::Ready(_))
             })
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one leaf lookup walking the source, page and preparation states of a stored leaf"
+    )]
     pub fn leaf(&mut self, key: &str, source: &StoredSource, ordinal: usize) -> LeafPreparation {
         if source.format() != SourceIndexFormat::Markdown {
             return LeafPreparation::Failed(
@@ -614,23 +753,30 @@ impl StoredOwner {
         if !self.source_is_current(source) {
             return LeafPreparation::Pending;
         }
-        let Some(descriptor) = source.descriptor(ordinal).cloned() else {
+        let Some(descriptor) = self.descriptor(source, ordinal).cloned() else {
             return LeafPreparation::Pending;
         };
-        if let Some(index) = self.leaves.iter().position(|entry| entry.key == key) {
+        let found = self.leaves.iter().position(|entry| entry.key == key);
+        if let Some(index) = found {
             let same = {
                 let entry = &self.leaves[index];
                 entry.source.owner == source.owner
                     && Self::same_provider(&entry.source.provider, &source.provider)
-                    && entry.source.page.index.source == source.page.index.source
+                    && entry.source.header.source == source.header.source
                     && entry.descriptor == descriptor
             };
             if same {
-                let entry = self.leaves.remove(index).unwrap();
+                let entry = self
+                    .leaves
+                    .remove(index)
+                    .unwrap_or_else(|| panic!("invariant: leaf {key} was found at {index}"));
                 let result = match &entry.phase {
-                    LeafPhase::Ready(leaf) => LeafPreparation::Ready(leaf.clone()),
+                    LeafPhase::Ready(leaf) => LeafPreparation::Ready(Rc::clone(leaf)),
                     LeafPhase::Failed(error) => LeafPreparation::Failed(error.clone()),
-                    _ => LeafPreparation::Pending,
+                    LeafPhase::Metadata(_)
+                    | LeafPhase::Source { .. }
+                    | LeafPhase::WaitingWorker { .. }
+                    | LeafPhase::Working => LeafPreparation::Pending,
                 };
                 self.leaves.push_back(entry);
                 return result;
@@ -672,9 +818,7 @@ impl StoredOwner {
             self.leaves.remove(index);
         }
         let capacity = loop {
-            if let Ok(capacity) = self
-                .capacity
-                .clone()
+            if let Ok(capacity) = Arc::clone(&self.capacity)
                 .try_acquire_many_owned(u32::try_from(bytes).unwrap_or(u32::MAX))
             {
                 break Arc::new(capacity);
@@ -686,29 +830,22 @@ impl StoredOwner {
             };
             self.leaves.remove(index);
         };
-        let metadata_start = match usize::try_from(descriptor.metadata_start) {
-            Ok(value) => value,
-            Err(_) => {
-                return LeafPreparation::Failed(
-                    "Markdown source offset exceeds this platform".to_owned(),
-                );
-            }
+        let Ok(metadata_start) = usize::try_from(descriptor.metadata_start) else {
+            return LeafPreparation::Failed(
+                "Markdown source offset exceeds this platform".to_owned(),
+            );
         };
-        let metadata_end = match usize::try_from(descriptor.metadata_end) {
-            Ok(value) => value,
-            Err(_) => {
-                return LeafPreparation::Failed(
-                    "Markdown source offset exceeds this platform".to_owned(),
-                );
-            }
+        let Ok(metadata_end) = usize::try_from(descriptor.metadata_end) else {
+            return LeafPreparation::Failed(
+                "Markdown source offset exceeds this platform".to_owned(),
+            );
         };
-        let collector = match RangeCollector::new(
-            source.page.index.metadata.clone(),
-            metadata_start..metadata_end,
-        ) {
-            Ok(value) => value,
-            Err(error) => return LeafPreparation::Failed(error),
-        };
+        let collector =
+            match RangeCollector::new(source.header.metadata.clone(), metadata_start..metadata_end)
+            {
+                Ok(value) => value,
+                Err(error) => return LeafPreparation::Failed(error),
+            };
         let generation = self.next_generation();
         self.leaves.push_back(LeafEntry {
             key: key.to_owned(),
@@ -722,6 +859,10 @@ impl StoredOwner {
         self.advance_leaf(key);
         LeafPreparation::Pending
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one step of the stored leaf state machine, issuing the next page or parse request"
+    )]
     fn advance_leaf(&mut self, key: &str) -> bool {
         let Some(index) = self.leaves.iter().position(|entry| entry.key == key) else {
             return false;
@@ -734,7 +875,10 @@ impl StoredOwner {
             LeafPhase::Metadata(collector) | LeafPhase::Source { collector, .. } => collector
                 .next_request()
                 .map(|(offset, limit)| (collector.reference.clone(), offset, limit)),
-            _ => None,
+            LeafPhase::WaitingWorker { .. }
+            | LeafPhase::Working
+            | LeafPhase::Ready(_)
+            | LeafPhase::Failed(_) => None,
         };
         if let Some((reference, offset, limit)) = request {
             let Some(future) = entry
@@ -747,14 +891,16 @@ impl StoredOwner {
             let generation = entry.generation;
             let key = key.to_owned();
             let sender = self.delivery.sender();
-            let capacity = entry.capacity.as_ref().unwrap().clone();
+            let capacity = Arc::clone(entry.capacity.as_ref().unwrap_or_else(|| {
+                panic!("invariant: leaf {key} holds capacity while it collects")
+            }));
             entry.task = Some(
                 runtime::runtime()
                     .spawn(async move {
                         let _capacity = capacity;
                         let result = future.await.map_err(|error| error.to_string());
-                        let _ = sender
-                            .send(Completion::Range {
+                        sender
+                            .offer(Completion::Range {
                                 key,
                                 generation,
                                 result,
@@ -768,15 +914,18 @@ impl StoredOwner {
         let LeafPhase::WaitingWorker { .. } = &entry.phase else {
             return false;
         };
-        let Some(queue) = self.worker.as_ref().cloned() else {
-            entry.phase = LeafPhase::Failed("Couldn't start Markdown preparation".to_owned());
-            entry.capacity = None;
-            return true;
+        let queue = match &self.worker {
+            Ok(queue) => queue.clone(),
+            Err(error) => {
+                entry.phase = LeafPhase::Failed(error.clone());
+                entry.capacity = None;
+                return true;
+            }
         };
         let slot = match queue.try_reserve() {
             Ok(slot) => slot,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => return false,
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => return false,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
                 entry.phase = LeafPhase::Failed("Markdown preparation worker stopped".to_owned());
                 entry.capacity = None;
                 return true;
@@ -791,7 +940,9 @@ impl StoredOwner {
         let generation = entry.generation;
         let key = key.to_owned();
         let sender = self.delivery.sender();
-        let capacity = entry.capacity.as_ref().unwrap().clone();
+        let capacity = Arc::clone(entry.capacity.as_ref().unwrap_or_else(|| {
+            panic!("invariant: leaf {key} holds capacity while it waits for the worker")
+        }));
         let (reply, receiver) = tokio::sync::oneshot::channel();
         let job: WorkerJob = Box::new(move |engine| {
             if reply.is_closed() {
@@ -800,16 +951,20 @@ impl StoredOwner {
             let result = (|| {
                 let record: artisan_markdown_index::LeafRecord =
                     serde_json::from_str(&metadata).map_err(|error| error.to_string())?;
-                let start = usize::try_from(descriptor.source_start)
-                    .map_err(|_| "Markdown source offset exceeds this platform")?;
-                let end = usize::try_from(descriptor.source_end)
-                    .map_err(|_| "Markdown source offset exceeds this platform")?;
+                let start = platform_offset(descriptor.source_start)?;
+                let end = platform_offset(descriptor.source_end)?;
                 if record.leaf.source_range() != (start..end) {
                     return Err("Markdown metadata does not match its descriptor".to_owned());
                 }
                 let engine = engine.as_ref().map_err(Clone::clone)?;
-                let content = normalize_record(&record, start, &source, engine)
-                    .map_err(|error| error.to_string())?;
+                let content = normalize_record(
+                    &record,
+                    start,
+                    &source,
+                    engine,
+                    &mut super::NoFenceTokenMemo,
+                )
+                .map_err(|error| error.to_string())?;
                 let (mut document, table_header) = match content {
                     IndexedLeafContent::Block(block) => (
                         super::MarkdownDocument {
@@ -853,26 +1008,28 @@ impl StoredOwner {
                     },
                     _ => return Err("Markdown metadata does not match its content".to_owned()),
                 };
-                let context = record.context;
-                let context_bytes = context.lists.capacity()
-                    * std::mem::size_of::<artisan_markdown_index::ListLevel>()
-                    + context.table_alignments.capacity()
-                        * std::mem::size_of::<artisan_markdown_index::TableAlignment>()
-                    + context.spacing.capacity()
-                        * std::mem::size_of::<artisan_markdown_index::LeafSpacing>();
+                let leaf_context = record.context;
+                let context_bytes = leaf_context.lists.capacity()
+                    * size_of::<artisan_markdown_index::ListLevel>()
+                    + leaf_context.table_alignments.capacity()
+                        * size_of::<artisan_markdown_index::TableAlignment>()
+                    + leaf_context.spacing.capacity()
+                        * size_of::<artisan_markdown_index::LeafSpacing>();
                 let retained_bytes = syntax_bytes
                     .saturating_add(context_bytes)
                     .saturating_add(source.len())
-                    .saturating_add(std::mem::size_of::<StoredLeaf>());
+                    .saturating_add(size_of::<StoredLeaf>());
                 Ok((
-                    context,
+                    leaf_context,
                     record.table_continues,
                     content,
                     Arc::<str>::from(source),
                     retained_bytes,
                 ))
             })();
-            let _ = reply.send((result, capacity));
+            match reply.send((result, capacity)) {
+                Ok(()) | Err((_, _)) => {}
+            }
         });
         slot.send(job);
         entry.task = Some(
@@ -882,8 +1039,8 @@ impl StoredOwner {
                         Ok((result, capacity)) => (result, None, Some(capacity)),
                         Err(error) => (Err(error.to_string()), None, None),
                     };
-                    let _ = sender
-                        .send(Completion::Prepared {
+                    sender
+                        .offer(Completion::Prepared {
                             key,
                             generation,
                             result,
@@ -896,6 +1053,10 @@ impl StoredOwner {
         );
         false
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match applying every kind of completed index, page and leaf delivery"
+    )]
     pub fn drain(&mut self) -> Vec<StoredUpdate> {
         self.indices.retain(|entry| entry.provider.is_available());
         self.leaves
@@ -907,6 +1068,7 @@ impl StoredOwner {
                 Completion::Index {
                     owner,
                     revision,
+                    offset,
                     result,
                 } => {
                     let Some(entry) = self.indices.iter_mut().find(|entry| {
@@ -916,27 +1078,56 @@ impl StoredOwner {
                     }) else {
                         continue;
                     };
-                    entry.task = None;
-                    let offset = entry.pending_offset.take().unwrap_or(None);
-                    match result.and_then(|page| {
+                    let validated = result.and_then(|page| {
                         validate_page(&entry.reference, entry.format, offset, &page)?;
-                        Ok(page)
-                    }) {
-                        Ok(page) => {
-                            let source = StoredSource {
-                                provider: entry.provider.clone(),
-                                page: Arc::new(page),
+                        Ok(Arc::new(page))
+                    });
+                    let provider = entry.provider.clone();
+                    let remembered = match (offset, validated) {
+                        (None, Ok(page)) => {
+                            entry.phase = IndexPhase::Ready(StoredSource {
+                                provider: provider.clone(),
+                                header: Arc::new(page.index.clone()),
                                 revision,
                                 owner: owner.clone(),
+                            });
+                            Some(page)
+                        }
+                        (None, Err(error)) => {
+                            entry.phase = IndexPhase::Failed(error);
+                            None
+                        }
+                        (Some(start), validated) => {
+                            let Some(fetch) = entry.fetches.iter_mut().find(|fetch| {
+                                fetch.start == start
+                                    && matches!(fetch.state, FetchState::Loading { .. })
+                            }) else {
+                                continue;
                             };
-                            let provider = entry.provider.clone();
-                            entry.current = Some(source.clone());
-                            self.remember_page(provider, source.page);
+                            let IndexPhase::Ready(source) = &entry.phase else {
+                                unreachable!("page {start} of {owner} fetched before its index")
+                            };
+                            match validated {
+                                Ok(page) if source.holds(&provider, &page) => {
+                                    entry.fetches.retain(|fetch| fetch.start != start);
+                                    Some(page)
+                                }
+                                Ok(_) => {
+                                    fetch.state = FetchState::Failed(
+                                        "Markdown descriptor page does not match its immutable source"
+                                            .to_owned(),
+                                    );
+                                    None
+                                }
+                                Err(error) => {
+                                    fetch.state = FetchState::Failed(error);
+                                    None
+                                }
+                            }
                         }
-                        Err(error) => {
-                            entry.failed_offset = Some(offset);
-                            entry.error = Some(error);
-                        }
+                    };
+                    if let Some(page) = remembered {
+                        self.remember_page(provider, page);
                     }
                     updates.push(StoredUpdate::Index { owner, revision });
                 }
@@ -957,24 +1148,18 @@ impl StoredOwner {
                     entry.phase = match (phase, result) {
                         (_, Err(error)) => LeafPhase::Failed(error),
                         (LeafPhase::Metadata(mut collector), Ok(page)) => {
-                            match collector.push(page) {
+                            match collector.push(&page) {
                                 Err(error) => LeafPhase::Failed(error),
                                 Ok(()) if collector.next_request().is_some() => {
                                     LeafPhase::Metadata(collector)
                                 }
                                 Ok(()) => match collector.finish().and_then(|metadata| {
-                                    let start = usize::try_from(entry.descriptor.source_start)
-                                        .map_err(
-                                            |_| "Markdown source offset exceeds this platform",
-                                        )?;
-                                    let end = usize::try_from(entry.descriptor.source_end)
-                                        .map_err(
-                                            |_| "Markdown source offset exceeds this platform",
-                                        )?;
+                                    let start = platform_offset(entry.descriptor.source_start)?;
+                                    let end = platform_offset(entry.descriptor.source_end)?;
                                     Ok((
                                         metadata,
                                         RangeCollector::new(
-                                            entry.source.page.index.source.clone(),
+                                            entry.source.header.source.clone(),
                                             start..end,
                                         )?,
                                     ))
@@ -1001,7 +1186,7 @@ impl StoredOwner {
                                 mut collector,
                             },
                             Ok(page),
-                        ) => match collector.push(page) {
+                        ) => match collector.push(&page) {
                             Err(error) => LeafPhase::Failed(error),
                             Ok(()) if collector.next_request().is_some() => LeafPhase::Source {
                                 metadata,
@@ -1042,7 +1227,7 @@ impl StoredOwner {
                             return Err("Markdown preview exceeds its presentation-memory budget; open the full source".to_owned());
                         }
                         let permit = loop {
-                            if let Ok(permit) = self.prepared_capacity.clone().try_acquire_many_owned(bytes as u32) {
+                            if let Ok(permit) = Arc::clone(&self.prepared_capacity).try_acquire_many_owned(u32::try_from(bytes).unwrap_or_else(|_| panic!("invariant: leaf {key} prepares {bytes} bytes, bounded by PREPARED_BYTES"))) {
                                 break permit;
                             }
                             let Some(oldest) = self.leaves.iter().position(|entry| entry.key != key && matches!(entry.phase, LeafPhase::Ready(_) | LeafPhase::Failed(_))) else {
@@ -1063,22 +1248,22 @@ impl StoredOwner {
                     entry.capacity = None;
                     let ordinal = usize::try_from(entry.descriptor.ordinal).unwrap_or(usize::MAX);
                     entry.phase = match result {
-                        Ok((context, table_continues, content, source, capacity)) => {
-                            LeafPhase::Ready(Arc::new(StoredLeaf {
+                        Ok((leaf_context, table_continues, content, source, capacity)) => {
+                            LeafPhase::Ready(Rc::new(StoredLeaf {
                                 descriptor: entry.descriptor.clone(),
                                 source,
-                                context,
+                                context: leaf_context,
                                 table_continues,
                                 content,
                                 proof: LeafProof {
                                     provider: entry.source.provider.clone(),
                                     owner: entry.source.owner.clone(),
-                                    reference: entry.source.page.index.source.clone(),
+                                    reference: entry.source.header.source.clone(),
                                     descriptor: entry.descriptor.clone(),
                                     generation,
                                 },
                                 _capacity: PreparedLease {
-                                    _permit: Some(capacity),
+                                    permit: Some(capacity),
                                     wake: self.delivery.waker(),
                                 },
                             }))

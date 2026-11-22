@@ -6,6 +6,7 @@ use gltf::{Semantic, buffer::Source, mesh::Mode};
 use std::borrow::Cow;
 
 const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+const OVER_BUDGET: &str = "glTF buffers exceed the 64 MiB preview budget";
 const MAX_ACCESSOR_ELEMENTS: usize = MAX_TRIANGLES * 3;
 const MAX_NODE_VISITS: usize = 4096;
 
@@ -41,7 +42,7 @@ pub(in super::super) fn parse(bytes: &[u8], mesh: &mut MeshBuilder) -> Result<()
             .checked_add(buffer.length())
             .ok_or("glTF buffer size overflow")?;
         if retained > MAX_BUFFER_BYTES {
-            return Err("glTF buffers exceed the64 MiB preview budget".into());
+            return Err(OVER_BUDGET.into());
         }
         let data = match buffer.source() {
             Source::Bin => {
@@ -75,7 +76,7 @@ pub(in super::super) fn parse(bytes: &[u8], mesh: &mut MeshBuilder) -> Result<()
             .checked_add(data.len() - buffer.length())
             .ok_or("glTF buffer size overflow")?;
         if retained > MAX_BUFFER_BYTES {
-            return Err("glTF buffers exceed the64 MiB preview budget".into());
+            return Err(OVER_BUDGET.into());
         }
         buffers.push(data);
     }
@@ -137,15 +138,12 @@ fn primitive_mesh(
         if primitive.get(&Semantic::Positions).is_none() {
             continue;
         }
-        let reader =
-            primitive.reader(|buffer| buffers.get(buffer.index()).map(std::convert::AsRef::as_ref));
+        let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(AsRef::as_ref));
         let positions: Vec<_> = reader
             .read_positions()
             .ok_or("glTF positions cannot be read")?
             .collect();
-        let normals = reader
-            .read_normals()
-            .map(std::iter::Iterator::collect::<Vec<_>>);
+        let normals = reader.read_normals().map(Iterator::collect::<Vec<_>>);
         let colors = reader
             .read_colors(0)
             .map(|colors| colors.into_rgba_f32().collect::<Vec<_>>());

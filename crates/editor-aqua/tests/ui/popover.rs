@@ -56,7 +56,7 @@ fn open(app: &mut UiApp, owner: aqua_core::NodeId, closed: Rc<Cell<usize>>) -> A
 fn disposing_during_entrance_cancels_motion_and_restores_focus() {
     let (mut app, owner) = app();
     let closed = Rc::new(Cell::new(0));
-    let host = open(&mut app, owner, closed.clone());
+    let host = open(&mut app, owner, Rc::clone(&closed));
     assert!(host.is_animating(&app));
     assert_ne!(app.tree().focused(), Some(owner));
     host.dispose(&mut app);
@@ -100,7 +100,13 @@ fn live_content_refresh_survives_entrance_and_exit_frames() {
             aqua_ui::tree::NodeKind::Box(content) => {
                 (content.paint().opacity, content.paint().transform)
             }
-            _ => (node.paint().opacity, node.paint().transform),
+            aqua_ui::tree::NodeKind::Text(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => {
+                (node.paint().opacity, node.paint().transform)
+            }
         }
     };
     let before = frame(&app);
@@ -193,7 +199,7 @@ fn direct_content_is_retained_without_a_factory_during_motion() {
 fn reopening_during_exit_reverses_from_the_displayed_frame() {
     let (mut app, owner) = app();
     let closed = Rc::new(Cell::new(0));
-    let mut host = open(&mut app, owner, closed.clone());
+    let mut host = open(&mut app, owner, Rc::clone(&closed));
     let root = host.root(&app).unwrap();
     host.advance(&mut app, 0.11).unwrap();
     host.begin_close(&mut app, 0.2).unwrap();
@@ -219,13 +225,13 @@ fn reopening_during_exit_reverses_from_the_displayed_frame() {
 fn disposing_stale_host_cannot_close_replacement_overlay() {
     let (mut app, owner) = app();
     let old_closed = Rc::new(Cell::new(0));
-    let old = open(&mut app, owner, old_closed.clone());
+    let old = open(&mut app, owner, Rc::clone(&old_closed));
     let old_root = old.root(&app).unwrap();
     let old_id = app.host().service().topmost().unwrap();
     app.close_popup(old_id);
     assert!(old.root(&app).is_none());
     let new_closed = Rc::new(Cell::new(0));
-    let replacement = open(&mut app, owner, new_closed.clone());
+    let replacement = open(&mut app, owner, Rc::clone(&new_closed));
     let new_id = app.host().service().topmost().unwrap();
     assert_ne!(old_id, new_id);
     assert_ne!(replacement.root(&app), Some(old_root));
@@ -244,7 +250,7 @@ fn disposing_stale_host_cannot_close_replacement_overlay() {
 fn removed_owner_generation_does_not_own_replacement_popup() {
     let (mut app, owner) = app();
     let old_closed = Rc::new(Cell::new(0));
-    let old = open(&mut app, owner, old_closed.clone());
+    let old = open(&mut app, owner, Rc::clone(&old_closed));
     let root = app.tree().root().unwrap();
     assert!(app.tree_mut().remove(owner));
     let mut replacement_owner = None;
@@ -269,7 +275,7 @@ fn removed_owner_generation_does_not_own_replacement_popup() {
     assert_ne!(owner, replacement_owner);
     assert!(app.tree_mut().set_focused(Some(replacement_owner)));
     let new_closed = Rc::new(Cell::new(0));
-    let replacement = open(&mut app, replacement_owner, new_closed.clone());
+    let replacement = open(&mut app, replacement_owner, Rc::clone(&new_closed));
     old.dispose(&mut app);
     assert!(replacement.is_open(&app));
     assert_eq!(old_closed.get(), 1);
@@ -282,7 +288,7 @@ fn removed_owner_generation_does_not_own_replacement_popup() {
 fn menus_keep_their_surface_and_callback_until_the_exit_finishes() {
     let (mut app, owner) = app();
     let closed = Rc::new(Cell::new(0));
-    let capture = closed.clone();
+    let capture = Rc::clone(&closed);
     let mut options = aqua_ui::popup::PopupOptions::menu();
     options.on_close = Some(Rc::new(move |_| capture.set(capture.get() + 1)));
     let mut host =

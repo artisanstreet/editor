@@ -1,8 +1,10 @@
 #![cfg(test)]
 
 use artisan_account::browser::{
-    Arrival, Handoff, Problem, Provider, arrival, bind, done_location, receive, request_target,
+    Arrival, Callback, Handoff, Problem, Provider, ReceiveError, arrival, bind, done_location,
+    receive, request_target,
 };
+use std::time::Duration;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 const RFC_7636_VERIFIER: [u8; 32] = [
@@ -17,8 +19,14 @@ fn handoff() -> Handoff {
 #[test]
 fn the_challenge_is_the_pkce_s256_of_the_verifier() {
     let handoff = handoff();
-    assert_eq!(handoff.verifier(), "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
-    assert_eq!(handoff.challenge(), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    assert_eq!(
+        handoff.verifier(),
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+    );
+    assert_eq!(
+        handoff.challenge(),
+        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    );
     assert_eq!(handoff.state().len(), 43);
 }
 
@@ -42,21 +50,27 @@ fn only_callbacks_carrying_our_state_are_answers() {
     let state = handoff().state().to_owned();
     assert_eq!(
         arrival(&format!("/callback?code=abc&state={state}"), &state),
-        Arrival::Code("abc".to_owned())
+        Arrival::Callback(Callback::Code("abc".to_owned()))
     );
     assert_eq!(
-        arrival(&format!("/callback?state={state}&error=email-taken"), &state),
-        Arrival::Problem(Problem::EmailTaken)
+        arrival(
+            &format!("/callback?state={state}&error=email-taken"),
+            &state
+        ),
+        Arrival::Callback(Callback::Problem(Problem::EmailTaken))
     );
     assert_eq!(
         arrival(&format!("/callback?state={state}&error=whatever"), &state),
-        Arrival::Problem(Problem::Unfinished)
+        Arrival::Callback(Callback::Problem(Problem::Unfinished))
     );
     assert_eq!(
         arrival(&format!("/callback?state={state}&code="), &state),
-        Arrival::Problem(Problem::Unfinished)
+        Arrival::Callback(Callback::Problem(Problem::Unfinished))
     );
-    assert_eq!(arrival("/callback?code=abc&state=forged", &state), Arrival::Unrelated);
+    assert_eq!(
+        arrival("/callback?code=abc&state=forged", &state),
+        Arrival::Unrelated
+    );
     assert_eq!(arrival("/favicon.ico", &state), Arrival::Unrelated);
 }
 
@@ -64,19 +78,24 @@ fn only_callbacks_carrying_our_state_are_answers() {
 fn the_browser_is_sent_back_to_a_done_page_that_names_the_problem() {
     let origin = "https://auth.artisan.st";
     assert_eq!(
-        done_location(origin, &Arrival::Code("abc".to_owned())),
+        done_location(origin, &Callback::Code("abc".to_owned())),
         "https://auth.artisan.st/desktop/done"
     );
     assert_eq!(
-        done_location(origin, &Arrival::Problem(Problem::Denied)),
+        done_location(origin, &Callback::Problem(Problem::Denied)),
         "https://auth.artisan.st/desktop/done?problem=denied"
     );
-    assert_eq!(request_target("GET /callback?x=1 HTTP/1.1\r\nHost: a\r\n\r\n"), Some("/callback?x=1"));
+    assert_eq!(
+        request_target("GET /callback?x=1 HTTP/1.1\r\nHost: a\r\n\r\n"),
+        Some("/callback?x=1")
+    );
     assert_eq!(request_target("POST /callback HTTP/1.1\r\n\r\n"), None);
 }
 
 async fn get(port: u16, target: &str) -> String {
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
     stream
         .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
         .await
@@ -91,13 +110,53 @@ async fn the_loopback_ignores_strays_and_answers_the_real_callback() {
     let handoff = handoff();
     let (listener, port) = bind().unwrap();
     let state = handoff.state().to_owned();
-    let waiting = tokio::spawn(async move { receive(listener, &state, "https://auth.artisan.st").await });
+    let waiting = tokio::spawn(async move {
+        receive(
+            listener,
+            &state,
+            "https://auth.artisan.st",
+            Duration::from_secs(60),
+        )
+        .await
+    });
     let stray = get(port, "/favicon.ico").await;
     assert!(stray.starts_with("HTTP/1.1 404"));
     let forged = get(port, "/callback?code=stolen&state=forged").await;
     assert!(forged.starts_with("HTTP/1.1 404"));
-    let answer = get(port, &format!("/callback?code=granted&state={}", handoff.state())).await;
+    let answer = get(
+        port,
+        &format!("/callback?code=granted&state={}", handoff.state()),
+    )
+    .await;
     assert!(answer.starts_with("HTTP/1.1 303"));
     assert!(answer.contains("Location: https://auth.artisan.st/desktop/done\r\n"));
-    assert_eq!(waiting.await.unwrap().unwrap(), Arrival::Code("granted".to_owned()));
+    assert_eq!(
+        waiting.await.unwrap().unwrap(),
+        Callback::Code("granted".to_owned())
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_browser_that_never_calls_back_ends_the_wait_with_the_reason() {
+    let (listener, _) = bind().unwrap();
+    let within = Duration::from_mins(10);
+    let ended = receive(
+        listener,
+        handoff().state(),
+        "https://auth.artisan.st",
+        within,
+    )
+    .await;
+    assert!(
+        matches!(ended, Err(ReceiveError::TimedOut { after }) if after == within),
+        "{ended:?}"
+    );
+}
+
+#[test]
+fn a_logged_handoff_never_shows_the_verifier() {
+    let handoff = handoff();
+    let logged = format!("{handoff:?}");
+    assert!(!logged.contains(handoff.verifier()), "{logged}");
+    assert!(logged.contains(handoff.challenge()), "{logged}");
 }

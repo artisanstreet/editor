@@ -1,15 +1,6 @@
-//! Where Artisan's apps live. Each app has one folder under the Artisan
-//! Street root, holding its binary and its `data` folder:
-//!
-//! - Windows: `%LOCALAPPDATA%\Artisan Street\{ae,Forge,Editor}`
-//! - macOS: `~/Library/Application Support/Artisan Street/{ae,Forge,Editor}`
-//! - Linux: `$XDG_DATA_HOME/artisan-street/{ae,forge,editor}`
-//!
-//! One version of each app is installed; installing replaces its binary.
-//! A `location` file in that default folder names another folder to use as
-//! the root instead.
+pub mod private;
 
-use std::io::{Error, ErrorKind, Result};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -22,7 +13,6 @@ pub enum App {
 impl App {
     pub const ALL: [Self; 3] = [Self::Ae, Self::Forge, Self::Editor];
 
-    /// The name on the command line and in release artifacts.
     #[must_use]
     pub const fn id(self) -> &'static str {
         match self {
@@ -41,15 +31,11 @@ impl App {
         }
     }
 
-    /// The executable's file name on this OS.
     #[must_use]
     pub fn binary_name(self) -> String {
         self.binary_name_on(std::env::consts::OS)
     }
 
-    /// The executable's file name on `os` (`std::env::consts::OS` naming).
-    /// On Windows the Editor is `Artisan Editor.exe`, the name Task Manager
-    /// and Alt+Tab show; elsewhere it keeps the command-line name.
     #[must_use]
     pub fn binary_name_on(self, os: &str) -> String {
         let windows = os == "windows";
@@ -76,30 +62,99 @@ impl App {
         }
     }
 
-    /// The app's folder.
-    pub fn dir(self) -> Result<PathBuf> {
-        Ok(root()?.join(self.folder()))
+    pub fn dir(self) -> Result<PathBuf, RootError> {
+        Ok(self.dir_under(&root()?))
     }
 
-    /// The installed executable.
-    pub fn binary(self) -> Result<PathBuf> {
+    #[must_use]
+    pub fn dir_under(self, root: &Path) -> PathBuf {
+        root.join(self.folder())
+    }
+
+    pub fn binary(self) -> Result<PathBuf, RootError> {
         Ok(self.dir()?.join(self.binary_name()))
     }
 
-    /// The app's own data (settings, database, logs).
-    pub fn data(self) -> Result<PathBuf> {
+    pub fn data(self) -> Result<PathBuf, RootError> {
         Ok(self.dir()?.join("data"))
     }
 }
 
-const LOCATION: &str = "location";
-
-pub fn root() -> Result<PathBuf> {
-    let default = default_root()?;
-    Ok(chosen_root(&default).unwrap_or(default))
+#[derive(Debug, thiserror::Error)]
+pub enum EnvPathError {
+    #[error("{name} is not set")]
+    Unset { name: &'static str },
+    #[error("{name} is {}, which is not an absolute path", value.display())]
+    Relative { name: &'static str, value: PathBuf },
 }
 
-pub fn default_root() -> Result<PathBuf> {
+#[derive(Debug, thiserror::Error)]
+pub enum RootError {
+    #[error("find the default Artisan Street folder")]
+    Default(#[source] EnvPathError),
+    #[error("read the location pointer {}", pointer.display())]
+    ReadPointer {
+        pointer: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the location pointer {} is not UTF-8", pointer.display())]
+    PointerNotUtf8 {
+        pointer: PathBuf,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+    #[error(
+        "the location pointer {} names {}, which is not an absolute folder",
+        pointer.display(),
+        named.display()
+    )]
+    PointerNotAbsolute { pointer: PathBuf, named: PathBuf },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ChooseRootError {
+    #[error("find the default Artisan Street folder")]
+    Default(#[source] EnvPathError),
+    #[error("{} is not an absolute folder", chosen.display())]
+    NotAbsolute { chosen: PathBuf },
+    #[error("{} is not a UTF-8 path", chosen.display())]
+    NotUtf8 { chosen: PathBuf },
+    #[error("create the default Artisan Street folder {}", default.display())]
+    CreateDefault {
+        default: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write the location pointer {}", pointer.display())]
+    WritePointer {
+        pointer: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove the location pointer {}", pointer.display())]
+    RemovePointer {
+        pointer: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("remove the empty default Artisan Street folder {}", default.display())]
+    RemoveDefault {
+        default: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+const LOCATION: &str = "location";
+const LOCATION_DRAFT: &str = "location.new";
+
+pub fn root() -> Result<PathBuf, RootError> {
+    let default = default_root().map_err(RootError::Default)?;
+    Ok(chosen_root(&default)?.unwrap_or(default))
+}
+
+pub fn default_root() -> Result<PathBuf, EnvPathError> {
     if cfg!(windows) {
         Ok(var("LOCALAPPDATA")?.join("Artisan Street"))
     } else if cfg!(target_os = "macos") {
@@ -109,64 +164,117 @@ pub fn default_root() -> Result<PathBuf> {
     }
 }
 
-fn chosen_root(default: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(default.join(LOCATION)).ok()?;
-    let chosen = PathBuf::from(text.trim_end_matches(['\r', '\n']));
-    chosen.is_absolute().then_some(chosen)
+fn chosen_root(default: &Path) -> Result<Option<PathBuf>, RootError> {
+    let pointer = default.join(LOCATION);
+    let bytes = match std::fs::read(&pointer) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(RootError::ReadPointer { pointer, source }),
+    };
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(source) => return Err(RootError::PointerNotUtf8 { pointer, source }),
+    };
+    let named = PathBuf::from(text.trim_end_matches(['\r', '\n']));
+    if named.is_absolute() {
+        Ok(Some(named))
+    } else {
+        Err(RootError::PointerNotAbsolute { pointer, named })
+    }
 }
 
-fn point(default: &Path, chosen: &Path) -> Result<()> {
+fn point(default: &Path, chosen: &Path) -> Result<(), ChooseRootError> {
     let pointer = default.join(LOCATION);
     if chosen == default {
         return match std::fs::remove_file(&pointer) {
-            Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(ChooseRootError::RemovePointer { pointer, source }),
         };
     }
-    let text = chosen
-        .to_str()
-        .filter(|_| chosen.is_absolute())
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                format!("{} is not an absolute, readable path", chosen.display()),
-            )
-        })?;
-    std::fs::create_dir_all(default)?;
-    std::fs::write(pointer, format!("{text}\n"))
+    if !chosen.is_absolute() {
+        return Err(ChooseRootError::NotAbsolute {
+            chosen: chosen.to_owned(),
+        });
+    }
+    let text = chosen.to_str().ok_or_else(|| ChooseRootError::NotUtf8 {
+        chosen: chosen.to_owned(),
+    })?;
+    std::fs::create_dir_all(default).map_err(|source| ChooseRootError::CreateDefault {
+        default: default.to_owned(),
+        source,
+    })?;
+    let draft = default.join(LOCATION_DRAFT);
+    std::fs::write(&draft, format!("{text}\n")).map_err(|source| {
+        ChooseRootError::WritePointer {
+            pointer: draft.clone(),
+            source,
+        }
+    })?;
+    std::fs::rename(&draft, &pointer)
+        .map_err(|source| ChooseRootError::WritePointer { pointer, source })
 }
 
-pub fn choose_root(chosen: &Path) -> Result<()> {
-    point(&default_root()?, chosen)
+fn forget(default: &Path) -> Result<(), ChooseRootError> {
+    point(default, default)?;
+    match std::fs::remove_dir(default) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(source) => Err(ChooseRootError::RemoveDefault {
+            default: default.to_owned(),
+            source,
+        }),
+    }
 }
 
-pub fn forget_root() -> Result<()> {
-    let default = default_root()?;
-    point(&default, &default)?;
-    std::fs::remove_dir(default).ok();
-    Ok(())
+pub fn root_pointer() -> Result<PathBuf, EnvPathError> {
+    Ok(default_root()?.join(LOCATION))
 }
 
-/// The user's home folder.
-pub fn home() -> Result<PathBuf> {
+pub fn choose_root(chosen: &Path) -> Result<(), ChooseRootError> {
+    point(&default_root().map_err(ChooseRootError::Default)?, chosen)
+}
+
+pub fn forget_root() -> Result<(), ChooseRootError> {
+    forget(&default_root().map_err(ChooseRootError::Default)?)
+}
+
+pub fn home() -> Result<PathBuf, EnvPathError> {
     var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
 }
 
-/// `$XDG_DATA_HOME`, else `~/.local/share`.
-pub fn xdg_data() -> Result<PathBuf> {
-    var("XDG_DATA_HOME").or_else(|_| Ok(home()?.join(".local/share")))
+pub fn xdg_data() -> Result<PathBuf, EnvPathError> {
+    optional_var("XDG_DATA_HOME")?.map_or_else(|| Ok(home()?.join(".local/share")), Ok)
 }
 
-/// `$XDG_CONFIG_HOME`, else `~/.config`.
-pub fn xdg_config() -> Result<PathBuf> {
-    var("XDG_CONFIG_HOME").or_else(|_| Ok(home()?.join(".config")))
+pub fn xdg_config() -> Result<PathBuf, EnvPathError> {
+    optional_var("XDG_CONFIG_HOME")?.map_or_else(|| Ok(home()?.join(".config")), Ok)
 }
 
-fn var(name: &str) -> Result<PathBuf> {
-    std::env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("{name} is not set")))
+fn var(name: &'static str) -> Result<PathBuf, EnvPathError> {
+    optional_var(name)?.ok_or(EnvPathError::Unset { name })
+}
+
+fn optional_var(name: &'static str) -> Result<Option<PathBuf>, EnvPathError> {
+    absolute_var(name, std::env::var_os(name))
+}
+
+fn absolute_var(
+    name: &'static str,
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<PathBuf>, EnvPathError> {
+    match value.filter(|value| !value.is_empty()).map(PathBuf::from) {
+        None => Ok(None),
+        Some(value) if value.is_absolute() => Ok(Some(value)),
+        Some(value) => Err(EnvPathError::Relative { name, value }),
+    }
 }
 
 #[cfg(test)]

@@ -1,27 +1,44 @@
 use super::controller::{Conversation, ScrollAction};
 use super::fold::{self, Row, RowKey, RunSummary};
-use super::thread::ItemUi;
+use super::shared::Shared;
+use super::thread::{AnswerState, ItemAnswer, ItemUi};
 use super::viewport::Input;
-use editor_core::Core;
 use artisan_api::{Answer, Item, ItemId, LiveTarget, RunId, Seq};
-use std::collections::HashMap;
+use editor_core::Core;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Action {
     OpenAgent(ItemId),
-    ToggleWork { run: RunId, open: bool },
-    ToggleChain { id: ItemId, open: bool },
-    ToggleItem { id: ItemId, expanded: bool },
-    Answer { id: ItemId, answer: Answer },
+    ToggleWork {
+        run: RunId,
+        open: bool,
+    },
+    ToggleChain {
+        id: ItemId,
+        open: bool,
+    },
+    ToggleItem {
+        id: ItemId,
+        expanded: bool,
+    },
+    Answer {
+        id: ItemId,
+        answer: Answer,
+    },
     Jump(Seq),
     JumpLatest,
     LoadNewer,
     LoadEarlierWork(Seq),
+    RetryStoredPage {
+        body: super::presentation::BodyKey,
+        offset: u64,
+    },
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ActionScope {
     scope: String,
     instance: editor_core::HostInstance,
@@ -44,6 +61,7 @@ impl ActionScope {
     }
 }
 
+#[derive(Debug)]
 pub struct ScopedAction {
     scope: String,
     instance: editor_core::HostInstance,
@@ -58,6 +76,7 @@ impl ScopedAction {
     pub fn dispatch(
         self,
         conversation: &mut Conversation,
+        stored: &mut super::stored::StoredConversation,
         core: &Core,
         reduce_motion: bool,
         now: Instant,
@@ -115,14 +134,14 @@ impl ScopedAction {
                 let before = conversation
                     .view
                     .as_ref()
-                    .and_then(|view| view.ui.get(&id))
-                    .is_some_and(|ui| ui.sending);
+                    .and_then(|view| view.answers.get(&id))
+                    .is_some_and(ItemAnswer::sending);
                 conversation.answer(core, id.clone(), answer);
                 let after = conversation
                     .view
                     .as_ref()
-                    .and_then(|view| view.ui.get(&id))
-                    .is_some_and(|ui| ui.sending);
+                    .and_then(|view| view.answers.get(&id))
+                    .is_some_and(ItemAnswer::sending);
                 before != after
             }
             Action::Jump(position) => {
@@ -145,26 +164,31 @@ impl ScopedAction {
                 conversation.load_work(core, first);
                 before != conversation.work_reading()
             }
+            Action::RetryStoredPage { body, offset } => stored.retry_page(&body, offset),
         }
     }
 }
 
+#[derive(Debug)]
 pub struct RowModel {
     pub row: Row,
     pub version: u64,
     pub items: HashMap<ItemId, Arc<Item>>,
     pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
     pub ui: HashMap<ItemId, ItemUi>,
+    pub answers: HashMap<ItemId, AnswerState>,
     pub run: Option<RunSummary>,
     pub author: Option<artisan_api::EngineId>,
     pub gap: f32,
     pub end: f32,
 }
 
+#[derive(Debug)]
 pub struct RowSnapshots {
     view: super::thread::ThreadView,
-    rows: Vec<(Row, u64)>,
-    runs: HashMap<RunId, RunSummary>,
+    rows: Shared<Vec<(Row, u64)>>,
+    runs: Shared<BTreeMap<RunId, RunSummary>>,
+    turns: Shared<fold::Turns>,
     agent: bool,
     composer_height: Option<f32>,
 }
@@ -175,21 +199,93 @@ impl RowSnapshots {
             view: conversation.view.as_ref()?.clone(),
             rows: conversation.rows.clone(),
             runs: conversation.runs.clone(),
+            turns: conversation.turns.clone(),
             agent: conversation.agent.is_some(),
             composer_height,
         })
     }
 
-    pub fn model(&self, index: usize) -> Option<RowModel> {
-        row_model_from(
-            &self.view,
-            &self.rows,
-            &self.runs,
-            self.agent,
-            self.composer_height,
-            index,
-        )
+    pub(crate) fn key(&self, index: usize) -> Option<RowKey> {
+        self.rows.get(index).map(|(row, _)| row.key())
     }
+
+    pub(crate) fn layout(&self) -> RowLayout<'_> {
+        RowLayout {
+            view: &self.view,
+            turns: &self.turns,
+            rows: &self.rows,
+            agent: self.agent,
+            composer_height: self.composer_height,
+        }
+    }
+
+    pub(crate) fn run_is_live(&self, run: &RunId) -> bool {
+        self.runs.get(run).is_some_and(RunSummary::live)
+    }
+
+    pub fn model(&self, index: usize) -> Option<RowModel> {
+        row_model_from(&self.layout(), &self.runs, index)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RowLayout<'a> {
+    pub view: &'a super::thread::ThreadView,
+    pub turns: &'a fold::Turns,
+    pub rows: &'a [(Row, u64)],
+    pub agent: bool,
+    pub composer_height: Option<f32>,
+}
+
+impl RowLayout<'_> {
+    pub(crate) fn gap(&self, index: usize) -> f32 {
+        fold::gap(self.view, self.turns, self.rows, index)
+    }
+
+    pub(crate) fn end(&self, index: usize) -> f32 {
+        if index + 1 == self.rows.len() {
+            if self.agent {
+                24.0
+            } else {
+                self.composer_height
+                    .map_or(24.0, |height| 192.0_f32.max(height + 16.0 + 24.0))
+            }
+        } else {
+            0.0
+        }
+    }
+
+    pub(crate) fn states<'b>(
+        &'b self,
+        row: &'b Row,
+    ) -> impl Iterator<Item = (&'b ItemId, Option<&'b ItemUi>, Option<AnswerState>)> {
+        row_ids(row).map(|id| {
+            (
+                id,
+                self.view.ui.get(id),
+                self.view.answers.get(id).map(ItemAnswer::state),
+            )
+        })
+    }
+}
+
+fn row_ids(row: &Row) -> impl Iterator<Item = &ItemId> {
+    let (chain, anchor) = match row {
+        Row::Work { .. } | Row::WorkHeader(_) => (None, None),
+        Row::Chain { ids, .. } => (Some(ids.as_slice()), None),
+        other @ (Row::Projected { .. }
+        | Row::EarlierWork { .. }
+        | Row::WorkEntry { .. }
+        | Row::Text { .. }
+        | Row::Prompt(_)
+        | Row::Compaction(_)
+        | Row::Image(_)
+        | Row::Gap
+        | Row::Status(_)
+        | Row::AgentResult(_)
+        | Row::AgentStatus(..)) => (None, other.anchor()),
+    };
+    chain.into_iter().flatten().chain(anchor)
 }
 
 pub fn row_model(
@@ -197,39 +293,36 @@ pub fn row_model(
     index: usize,
     composer_height: Option<f32>,
 ) -> Option<RowModel> {
-    let view = conversation.view.as_ref()?;
-    row_model_from(
-        view,
-        &conversation.rows,
-        &conversation.runs,
-        conversation.agent.is_some(),
+    let layout = RowLayout {
+        view: conversation.view.as_ref()?,
+        turns: &conversation.turns,
+        rows: &conversation.rows,
+        agent: conversation.agent.is_some(),
         composer_height,
-        index,
-    )
+    };
+    row_model_from(&layout, &conversation.runs, index)
 }
 
 fn row_model_from(
-    view: &super::thread::ThreadView,
-    rows: &[(Row, u64)],
-    runs: &HashMap<RunId, RunSummary>,
-    agent: bool,
-    composer_height: Option<f32>,
+    layout: &RowLayout<'_>,
+    runs: &BTreeMap<RunId, RunSummary>,
     index: usize,
 ) -> Option<RowModel> {
-    let (row, version) = rows.get(index)?;
-    let ids: Vec<ItemId> = match row {
-        Row::Work { .. } => Vec::new(),
-        Row::Chain { ids, .. } => ids.clone(),
-        other => other.anchor().cloned().into_iter().collect(),
-    };
-    let items: HashMap<ItemId, Arc<Item>> = ids
-        .iter()
+    let view = layout.view;
+    let (row, version) = layout.rows.get(index)?;
+    let items: HashMap<ItemId, Arc<Item>> = row_ids(row)
         .filter_map(|id| Some((id.clone(), view.shared_item(id)?)))
         .collect();
-    let ui = ids
-        .iter()
-        .filter_map(|id| Some((id.clone(), view.ui.get(id)?.clone())))
-        .collect();
+    let mut ui = HashMap::new();
+    let mut answers = HashMap::new();
+    for (id, item_ui, answer) in layout.states(row) {
+        if let Some(item_ui) = item_ui {
+            ui.insert(id.clone(), item_ui.clone());
+        }
+        if let Some(answer) = answer {
+            answers.insert(id.clone(), answer);
+        }
+    }
     let run = row.run().and_then(|run| runs.get(run)).cloned();
     let author = row
         .anchor()
@@ -237,16 +330,6 @@ fn row_model_from(
         .and_then(|item| item.run_id.as_ref())
         .and_then(|run| view.runs.get(run))
         .map(|run| run.engine);
-    let gap = fold::gap(view, rows, index);
-    let end = if index + 1 == rows.len() {
-        if agent {
-            24.0
-        } else {
-            composer_height.map_or(24.0, |height| 192.0_f32.max(height + 16.0 + 24.0))
-        }
-    } else {
-        0.0
-    };
     let live = view
         .live
         .iter()
@@ -258,7 +341,7 @@ fn row_model_from(
                 row.run() == Some(run_id)
             }
         })
-        .map(|(target, text)| (target.clone(), Arc::clone(text)))
+        .map(|(target, live)| (target.clone(), Arc::clone(&live.text)))
         .collect();
     Some(RowModel {
         row: row.clone(),
@@ -266,64 +349,62 @@ fn row_model_from(
         items,
         live,
         ui,
+        answers,
         run,
         author,
-        gap,
-        end,
+        gap: layout.gap(index),
+        end: layout.end(index),
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollDirective {
     FollowEnd,
     EaseToEnd,
     ToRow { index: usize, animate: bool },
 }
 
-pub fn scroll_directive(
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScrollResolution {
+    Ready(ScrollDirective),
+    AwaitingRows,
+    Cancelled,
+}
+
+pub fn resolve_scroll(
     conversation: &Conversation,
-    action: ScrollAction,
+    action: &ScrollAction,
     reduce_motion: bool,
-) -> Option<ScrollDirective> {
+) -> ScrollResolution {
     let animate = !reduce_motion && !conversation.is_landing();
     match action {
-        ScrollAction::End if animate => Some(ScrollDirective::EaseToEnd),
-        ScrollAction::End | ScrollAction::Tail => Some(ScrollDirective::FollowEnd),
-        ScrollAction::To(position) => Some(ScrollDirective::ToRow {
-            index: conversation.jump_row(position)?,
-            animate,
-        }),
-        ScrollAction::Row(index) => Some(ScrollDirective::ToRow { index, animate }),
+        ScrollAction::End if animate => ScrollResolution::Ready(ScrollDirective::EaseToEnd),
+        ScrollAction::End | ScrollAction::Tail => {
+            ScrollResolution::Ready(ScrollDirective::FollowEnd)
+        }
+        ScrollAction::To(position) => conversation
+            .jump_row(*position)
+            .map_or(ScrollResolution::AwaitingRows, |index| {
+                ScrollResolution::Ready(ScrollDirective::ToRow { index, animate })
+            }),
+        ScrollAction::Row(key) => conversation
+            .row_position(key)
+            .map_or(ScrollResolution::Cancelled, |index| {
+                ScrollResolution::Ready(ScrollDirective::ToRow { index, animate })
+            }),
     }
-}
-
-pub fn changed_disclosures(
-    conversation: &mut Conversation,
-    now: Instant,
-    reduce_motion: bool,
-) -> super::disclosure::DisclosureFrame {
-    conversation.disclosures.advance_disclosures(
-        &conversation.rows,
-        &conversation.row_heights,
-        conversation.view.as_ref(),
-        now,
-        reduce_motion,
-    )
-}
-
-pub fn row_key(model: &RowModel) -> RowKey {
-    model.row.key()
 }
 
 pub fn sync_questionnaires(
     conversation: &Conversation,
     core: &Core,
     composer: &mut editor_composer::controller::Composer,
-) {
+) -> bool {
     if !conversation.host_is_current(core) {
-        return;
+        return false;
     }
     let Some((host_id, thread)) = conversation.open.as_ref() else {
-        return;
+        return false;
     };
     if composer.target
         != (editor_composer::controller::ComposerTarget::Thread {
@@ -331,15 +412,23 @@ pub fn sync_questionnaires(
             thread: thread.clone(),
         })
     {
-        return;
+        return false;
     }
     let Some(summary) = core
         .host(host_id)
         .and_then(|host| host.thread_summary(thread))
         .and_then(|summary| summary.value.as_ref())
     else {
-        return;
+        return false;
     };
+    if composer.questionnaire.holds(
+        summary
+            .questions
+            .iter()
+            .map(|question| (&question.id, &question.questions)),
+    ) {
+        return false;
+    }
     let questionnaires = summary
         .questions
         .iter()
@@ -354,36 +443,14 @@ pub fn sync_questionnaires(
     composer
         .questionnaire
         .set_questionnaires(questionnaires, &mut text);
-    if composer.editor.borrow().text() != text {
+    let changed = composer.editor.borrow().text() != text;
+    if changed {
         composer.editor.borrow_mut().set_text(&text);
     }
+    changed
 }
 
-pub fn composer_goal(
-    conversation: &Conversation,
-    core: &Core,
-) -> Option<Option<editor_composer::goal_strip::ComposerGoal>> {
-    use editor_composer::goal_strip::{ComposerGoal, ComposerGoalState};
-    use artisan_api::ThreadGoalState;
-    if !conversation.host_is_current(core) {
-        return None;
-    }
-    let (host, thread) = conversation.open.as_ref()?;
-    let summary = core.host(host)?.thread_summary(thread)?.value.as_ref()?;
-    Some(summary.goal.as_ref().map(|goal| ComposerGoal {
-        objective: goal.summary.clone(),
-        state: match goal.state {
-            ThreadGoalState::Active => ComposerGoalState::Active,
-            ThreadGoalState::Paused => ComposerGoalState::Paused,
-            ThreadGoalState::Blocked => ComposerGoalState::Blocked,
-            ThreadGoalState::UsageLimited => ComposerGoalState::UsageLimited,
-            ThreadGoalState::BudgetLimited => ComposerGoalState::BudgetLimited,
-        },
-        detail: None,
-    }))
-}
-
-pub fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId, Seq)> {
+pub(crate) fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId, Seq)> {
     if !conversation.host_is_current(core) {
         return None;
     }
@@ -398,20 +465,7 @@ pub fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId
     let run = core.host(host)?.runs.get(thread)?;
     let ends_run = last.run_id.as_ref() == Some(&run.id)
         || rowed().all(|item| item.run_id.as_ref() != Some(&run.id));
-    (!run.status.is_live() && ends_run && run.seq >= newest).then(|| (last.id.clone(), run.seq))
-}
-
-pub fn restore_anchor(
-    conversation: &Conversation,
-    anchors: &[(RowKey, Option<ItemId>, f32)],
-) -> Option<(usize, f32)> {
-    anchors.iter().find_map(|(key, item, offset)| {
-        conversation
-            .rows
-            .iter()
-            .position(|(row, _)| row.key() == *key && row.anchor() == item.as_ref())
-            .map(|index| (index, *offset))
-    })
+    (!run.status().is_live() && ends_run && run.seq >= newest).then(|| (last.id.clone(), run.seq))
 }
 
 pub fn agent_names(conversation: &Conversation) -> HashMap<ItemId, String> {

@@ -1,12 +1,13 @@
 use super::{Distribution, Mode, Summary, share_at_or_below};
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{
     Domain, f32_of_count, f64_of, index_of, nice_ticks, percent, reading, ticks_within,
 };
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::slider::{Slider, SliderRange, SliderState};
 use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{GpuiBackground, GpuiHsla, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
+use aqua_core::{GpuiBackground, GpuiHsla, InputEvent, Insets, NamedKey};
 use aqua_text::FontWeight;
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
@@ -55,18 +56,16 @@ struct Entry {
     reveal: Option<usize>,
     reset: u64,
 }
+type SyncedDistribution = (Option<(f32, f32)>, Probe, Rc<RefCell<SliderState>>, u64);
+
 #[derive(Clone, Default)]
 pub(crate) struct DistributionState(Rc<RefCell<HashMap<String, Entry>>>);
 impl DistributionState {
-    fn sync(
-        &self,
-        id: &str,
-        model: &Arc<Distribution>,
-    ) -> (Option<(f32, f32)>, Probe, Rc<RefCell<SliderState>>, u64) {
+    fn sync(&self, id: &str, model: &Arc<Distribution>) -> SyncedDistribution {
         let mut entries = self.0.borrow_mut();
         let (domain, step, start) = model.slider();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.clone(),
+            model: Arc::clone(model),
             hover: None,
             probe: Rc::new(Cell::new(None)),
             slider: Rc::new(RefCell::new(SliderState::new(
@@ -86,12 +85,12 @@ impl DistributionState {
                     .borrow_mut()
                     .reset(SliderRange::new(domain.lo, domain.hi, Some(step)), start);
             }
-            entry.model = model.clone();
+            entry.model = Arc::clone(model);
         }
         (
             entry.hover,
-            entry.probe.clone(),
-            entry.slider.clone(),
+            Rc::clone(&entry.probe),
+            Rc::clone(&entry.slider),
             entry.reset,
         )
     }
@@ -127,7 +126,14 @@ impl DistributionState {
                 Some(selected.map_or(0, |n| n.saturating_add(1).min(count - 1)))
             }
             NamedKey::Enter => Some(selected.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.hover = next.map(|index| match mode {
             Mode::Box => (0.5, (f32_of_count(index) + 0.5) / f32_of_count(count)),
@@ -206,7 +212,7 @@ fn box_shapes(summary: &Summary, domain: Domain, color: GpuiHsla, fill: GpuiHsla
     ];
     let mut i = 0;
     while let Some(value) = summary.outliers.get(i) {
-        i += summary.outliers[i..].partition_point(|other| other == value);
+        i += summary.outliers[i..].partition_point(|other| other.to_bits() == value.to_bits());
         let mut c = color;
         c.a *= Opacity::Outlier.alpha();
         shapes.push(Shape::Dot {
@@ -219,7 +225,7 @@ fn box_shapes(summary: &Summary, domain: Domain, color: GpuiHsla, fill: GpuiHsla
     shapes
 }
 fn canvas(shapes: Vec<Shape>, probe: Probe) -> Element {
-    let shapes: Rc<[Shape]> = shapes.into();
+    let scene = scene::Scene::of_shapes(shapes, scene::Clip::Bounds);
     ui::Canvas::new()
         .style(
             Style::new()
@@ -229,7 +235,7 @@ fn canvas(shapes: Vec<Shape>, probe: Probe) -> Element {
         )
         .on_paint(move |bounds| {
             probe.set(Some(bounds));
-            scene::source_scene(bounds, &shapes)
+            scene.paint(bounds)
         })
         .build()
 }
@@ -254,10 +260,14 @@ pub(crate) struct Services {
     pub tick_strip: TickStripFactory,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one distribution view: mode switch, scales, marks, readout and keyboard navigation"
+)]
 pub(crate) fn view(
-    id: String,
+    id: &str,
     theme: &ArtisanTheme,
-    data: Arc<Distribution>,
+    data: &Arc<Distribution>,
     states: DistributionState,
     services: &Services,
     invalidate: Rc<dyn Fn()>,
@@ -266,11 +276,11 @@ pub(crate) fn view(
         return (services.empty)("No values to plot");
     }
     let theme = *theme;
-    let (hover, probe, slider, reset) = states.sync(&id, &data);
+    let (hover, probe, slider, reset) = states.sync(id, data);
     let width = probe.get().map_or(480.0, |bounds| bounds.w);
     if data.mode == Mode::Box {
         return boxes(
-            id, theme, data, states, services, invalidate, hover, probe, reset, width,
+            id, &theme, data, states, services, invalidate, hover, probe, reset, width,
         );
     }
     let domain = data.domain();
@@ -443,7 +453,7 @@ pub(crate) fn view(
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0)),
         )
-        .child(canvas(shapes, probe.clone()))
+        .child(canvas(shapes, Rc::clone(&probe)))
         .child((services.plot_label)(
             at,
             0.0,
@@ -455,12 +465,12 @@ pub(crate) fn view(
         plot = plot.child((services.readout)(readout_x, &heading, readout_rows));
     }
     let moving = states.clone();
-    let moving_id = id.clone();
-    let moving_probe = probe.clone();
-    let moving_invalidate = invalidate.clone();
+    let moving_id = id.to_owned();
+    let moving_probe = probe;
+    let moving_invalidate = Rc::clone(&invalidate);
     let leaving = states.clone();
-    let leaving_id = id.clone();
-    let leaving_invalidate = invalidate.clone();
+    let leaving_id = id.to_owned();
+    let leaving_invalidate = Rc::clone(&invalidate);
     let plot = plot
         .build()
         .with_key(format!("{id}-plot"))
@@ -487,15 +497,15 @@ pub(crate) fn view(
         101
     };
     let nav = navigation(
-        &id,
+        id,
         plot,
         data.mode,
         count,
         selection,
-        states.clone(),
+        states,
         theme.colors.ring.to_reference_paint(),
-        services.navigation.clone(),
-        invalidate.clone(),
+        &services.navigation,
+        Rc::clone(&invalidate),
     );
     let framed = (services.frame)(
         nav,
@@ -530,7 +540,7 @@ pub(crate) fn view(
         ));
     }
     root = root.child(framed);
-    let shares = data
+    let tail_shares = data
         .samples
         .iter()
         .map(|sample| {
@@ -551,7 +561,10 @@ pub(crate) fn view(
         format!("{id}-slider"),
         theme,
         "Threshold",
-        format!("≤ {} · {shares}", reading(threshold, data.unit.as_deref())),
+        format!(
+            "≤ {} · {tail_shares}",
+            reading(threshold, data.unit.as_deref())
+        ),
         slider,
     )
     .on_change(move |_| invalidate())
@@ -559,6 +572,10 @@ pub(crate) fn view(
     root.child(slider).build()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "navigation wraps the plot with its mode, count, selection, state, ring and frame"
+)]
 fn navigation(
     id: &str,
     content: Element,
@@ -567,7 +584,7 @@ fn navigation(
     selection: Option<String>,
     states: DistributionState,
     ring: GpuiHsla,
-    frame: NavigationFrame,
+    frame: &NavigationFrame,
     invalidate: Rc<dyn Fn()>,
 ) -> Element {
     let prefix = if mode == Mode::Box {
@@ -583,46 +600,31 @@ fn navigation(
     if mode != Mode::Box {
         wrapper = wrapper.height(Length::Pct(100.0));
     }
-    let mut element = wrapper
-        .child(content)
-        .build()
-        .with_key(format!("{id}-navigation"))
-        .role(Role::Group)
-        .focusable(true)
-        .tab_index(0)
-        .aria_label(label)
-        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-            let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                return InputResponse::default();
-            };
-            let Key::Named(code) = key_event.key else {
-                return InputResponse::default();
-            };
-            if !states.key(
-                &key,
-                mode,
-                count,
-                code,
-                key_event.modifiers.contains(Modifiers::ALT),
-            ) {
-                return InputResponse::default();
+    let element = navigation_group(
+        wrapper.child(content).build(),
+        id,
+        label,
+        selection,
+        move |code, alt| {
+            let handled = states.key(&key, mode, count, code, alt);
+            if handled {
+                invalidate();
             }
-            invalidate();
-            InputResponse {
-                stop_propagation: true,
-                ..InputResponse::default()
-            }
-        });
-    if let Some(label) = selection {
-        element = element.aria_value(label);
-    }
+            handled
+        },
+    );
     frame(element, ring)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the box plot reads data, state, services, hover, probe, reset and width in one paint"
+)]
 fn boxes(
-    id: String,
-    theme: ArtisanTheme,
-    data: Arc<Distribution>,
+    id: &str,
+    theme: &ArtisanTheme,
+    data: &Arc<Distribution>,
     states: DistributionState,
     services: &Services,
     invalidate: Rc<dyn Fn()>,
@@ -631,6 +633,7 @@ fn boxes(
     reset: u64,
     width: f32,
 ) -> Element {
+    let theme = *theme;
     let count = data.samples.len();
     let selected = hover.map(|(_, y)| index_of(f64::from(y) * f64_of(count)).min(count - 1));
     let budget = index_of(f64::from((width * 0.75 / 96.0).floor().clamp(2.0, 24.0)));
@@ -655,11 +658,11 @@ fn boxes(
             )
         })
         .collect();
-    let model = data.clone();
+    let model = Arc::clone(data);
     let row_states = states.clone();
-    let row_id = id.clone();
-    let row_invalidate = invalidate.clone();
-    let row_text = services.text.clone();
+    let row_id = id.to_owned();
+    let row_invalidate = Rc::clone(&invalidate);
+    let row_text = Rc::clone(&services.text);
     let pitch = theme.density.control_sm;
     let rows = List::new()
         .items(0..count)
@@ -716,7 +719,7 @@ fn boxes(
                 .build();
             let state = row_states.clone();
             let key = row_id.clone();
-            let invalidate = row_invalidate.clone();
+            let invalidate = Rc::clone(&row_invalidate);
             ui::Box::new()
                 .layout("row")
                 .style(
@@ -767,7 +770,7 @@ fn boxes(
                 )
                 .build(),
         );
-    let plot_probe = probe.clone();
+    let plot_probe = probe;
     content = content.child(
         ui::Canvas::new()
             .style(
@@ -809,69 +812,14 @@ fn boxes(
         content = content.child((services.readout)(0.5, &sample.name, rows));
     }
     navigation(
-        &id,
+        id,
         content.build(),
         Mode::Box,
         count,
         selection,
         states,
         theme.colors.ring.to_reference_paint(),
-        services.navigation.clone(),
+        &services.navigation,
         invalidate,
     )
-}
-
-#[cfg(feature = "test-support")]
-pub struct DistributionFixture {
-    model: Arc<Distribution>,
-    state: DistributionState,
-}
-#[cfg(feature = "test-support")]
-impl DistributionFixture {
-    pub fn new(json: &str) -> Self {
-        let value = serde_json::from_str(json).expect("JSON");
-        let model = Arc::new(super::prepare(&value).expect("distribution"));
-        let state = DistributionState::default();
-        state.sync("test", &model);
-        Self { model, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        let value = serde_json::from_str(json).expect("JSON");
-        self.model = Arc::new(super::prepare(&value).expect("distribution"));
-        self.state.sync("test", &self.model);
-    }
-    pub fn hover(&self, x: f32, y: f32) {
-        self.state.set("test", Some((x, y)));
-    }
-    pub fn selected(&self) -> Option<(f32, f32)> {
-        self.state.sync("test", &self.model).0
-    }
-    pub fn generation(&self) -> u64 {
-        self.state.sync("test", &self.model).3
-    }
-    pub fn key(&self, key: NamedKey, alt: bool) -> bool {
-        let count = match self.model.mode {
-            Mode::Box => self.model.samples.len(),
-            Mode::Histogram => self.model.bins.count,
-            Mode::Cdf => 101,
-        };
-        self.state.key("test", self.model.mode, count, key, alt)
-    }
-    pub fn threshold(&self) -> f64 {
-        self.state.sync("test", &self.model).2.borrow().value()
-    }
-    pub fn set_threshold(&self, value: f64) {
-        let (domain, step, _) = self.model.slider();
-        self.state
-            .sync("test", &self.model)
-            .2
-            .borrow_mut()
-            .reset(SliderRange::new(domain.lo, domain.hi, Some(step)), value);
-    }
-    pub fn pending_reveal(&self) -> Option<(String, usize)> {
-        self.state.pending_reveal("test")
-    }
-    pub fn revealed(&self, key: &str, index: usize) {
-        self.state.revealed("test", key, index);
-    }
 }

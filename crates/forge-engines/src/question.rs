@@ -1,7 +1,6 @@
-//! Native values are resolved by opaque choice identity, never displayed labels.
 use artisan_api::{Collection, Question, QuestionAnswer};
 
-pub fn native_answers(
+pub(crate) fn native_answers(
     questions: &[Question],
     answers: &[Option<QuestionAnswer>],
 ) -> Result<Vec<Option<Vec<String>>>, String> {
@@ -13,7 +12,7 @@ pub fn native_answers(
         .zip(answers)
         .map(|(question, answer)| {
             question
-                .validate_answer_structure(answer)
+                .validate_answer_structure(answer.as_ref())
                 .map_err(str::to_owned)?;
             match answer {
                 None => Ok(None),
@@ -50,9 +49,7 @@ pub fn native_answers(
         .collect()
 }
 
-/// Adapters retain native pending prompts until they are answered. A descriptor
-/// cannot stand in for the native question records used to build a reply.
-pub fn native_collection_answers(
+pub(crate) fn native_collection_answers(
     questions: &Collection<Question>,
     answers: &[Option<QuestionAnswer>],
 ) -> Result<Vec<Option<Vec<String>>>, String> {
@@ -64,7 +61,7 @@ pub fn native_collection_answers(
     )
 }
 
-pub fn invalid_answer(key: &str, message: String) -> crate::harness::EngineEvent {
+pub(crate) fn invalid_answer(key: &str, message: String) -> crate::harness::EngineEvent {
     crate::harness::EngineEvent::Item {
         key: format!("answer-error:{key}"),
         parent: None,

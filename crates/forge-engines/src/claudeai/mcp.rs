@@ -1,25 +1,11 @@
-//! An MCP client for the claude.ai transport.
-//!
-//! Claude Code starts the thread's MCP servers itself; the claude.ai
-//! transport has no process, so it speaks to them here. stdio servers are
-//! started with their command, env and args; remote servers speak JSON-RPC
-//! over Streamable HTTP, or over the legacy HTTP+SSE transport. Either way
-//! the transport lists the server's tools, offers them to the model under
-//! unique `mcp__server__tool` names, and runs the calls Forge approves.
-//!
-//! A thread's servers stay connected between its turns ([`for_thread`]):
-//! the next turn with the same servers reuses them, a changed config or
-//! [`IDLE_TIMEOUT`] without a turn shuts them down, and one that died is
-//! started again.
-
+use forge_isolation::Containment;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use anyhow::{Context as _, anyhow, bail};
 use artisan_api::McpServer;
 use base64::Engine as _;
 use futures::StreamExt as _;
@@ -33,98 +19,268 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::process::MAX_LINE_BYTES;
+use crate::process::{MAX_LINE_BYTES, SpawnError};
 
-/// The protocol version the client asks for.
+type UrlError = <reqwest::Url as std::str::FromStr>::Err;
+
+#[derive(Debug, thiserror::Error)]
+enum OpenError {
+    #[error("the header name {name} is not valid")]
+    HeaderName {
+        name: String,
+        #[source]
+        source: reqwest::header::InvalidHeaderName,
+    },
+    #[error("the {name} header's value is not valid")]
+    HeaderValue {
+        name: String,
+        #[source]
+        source: reqwest::header::InvalidHeaderValue,
+    },
+    #[error("building the MCP client")]
+    Client(#[source] reqwest::Error),
+    #[error("the url is not valid")]
+    InvalidUrl(#[source] UrlError),
+    #[error("starting {command}")]
+    Spawn {
+        command: String,
+        #[source]
+        source: SpawnError,
+    },
+    #[error("the server did not open its event stream in time")]
+    StreamTimedOut,
+    #[error("{}", reach_error(.0))]
+    Unreachable(#[source] reqwest::Error),
+    #[error("HTTP {status}")]
+    Status { status: u16 },
+    #[error("the server did not name its endpoint in time")]
+    EndpointTimedOut,
+    #[error("the server's endpoint is not a valid url")]
+    InvalidEndpoint(#[source] UrlError),
+    #[error("the event stream ended before the server named its endpoint")]
+    NoEndpoint,
+    #[error("the server's endpoint is on another origin")]
+    ForeignEndpoint,
+}
+
+impl OpenError {
+    fn reason(&self) -> String {
+        match self {
+            Self::Unreachable(_) | Self::HeaderName { .. } | Self::HeaderValue { .. } => {
+                self.to_string()
+            }
+            Self::Client(_)
+            | Self::InvalidUrl(_)
+            | Self::Spawn { .. }
+            | Self::StreamTimedOut
+            | Self::Status { .. }
+            | Self::EndpointTimedOut
+            | Self::InvalidEndpoint(_)
+            | Self::NoEndpoint
+            | Self::ForeignEndpoint => root_cause(self),
+        }
+    }
+}
+
+fn root_cause(error: &(dyn std::error::Error + 'static)) -> String {
+    std::iter::successors(Some(error), |error| error.source())
+        .last()
+        .map_or_else(String::new, ToString::to_string)
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+enum Closed {
+    #[error("the server closed its input")]
+    Input,
+    #[error("the server closed its output")]
+    Output,
+    #[error("the server's output failed")]
+    OutputFailed(#[source] Arc<std::io::Error>),
+    #[error("the server closed its event stream")]
+    EventStream,
+    #[error(
+        "the server stopped reading while {} of messages waited for it",
+        size(MAX_QUEUED_BYTES)
+    )]
+    Backlogged,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Undelivered {
+    #[error("the server's answer was larger than {}", size(*.limit))]
+    TooLarge { limit: usize },
+    #[error(transparent)]
+    Closed(Closed),
+    #[error("HTTP {status}")]
+    Status { status: u16 },
+    #[error("{}", reach_error(.0))]
+    Unreachable(#[source] reqwest::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RequestError {
+    #[error("the server is no longer running")]
+    Stopped,
+    #[error("the server did not answer {method} within {seconds}s")]
+    TimedOut { method: String, seconds: f32 },
+    #[error(transparent)]
+    Undelivered(Undelivered),
+    #[error(transparent)]
+    Rpc(RpcError),
+    #[error("{}", reach_error(.0))]
+    Unreachable(#[source] reqwest::Error),
+    #[error("HTTP {status}")]
+    Status { status: u16 },
+    #[error("the server's answer to {method} is not JSON")]
+    NotJson {
+        method: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("the server answered nothing for {method}")]
+    NoAnswer { method: String },
+    #[error(transparent)]
+    Body(BodyError),
+    #[error("the server's answer to {method} was larger than {}", size(*.limit))]
+    EventTooLarge { method: String, limit: usize },
+    #[error("the server's answer to {method} broke off")]
+    EventBrokeOff { method: String },
+    #[error("the server closed the stream without answering {method}")]
+    Unanswered { method: String },
+    #[error("the server ended the session")]
+    SessionGone,
+    #[error("starting a new session")]
+    Restart(#[source] Box<Self>),
+    #[error("starting a new session")]
+    RestartNotify(#[source] NotifyError),
+}
+
+impl RequestError {
+    fn reason(&self) -> String {
+        match self {
+            Self::Rpc(refused) => format!("refused (JSON-RPC error {})", refused.code),
+            Self::Stopped
+            | Self::TimedOut { .. }
+            | Self::Undelivered(_)
+            | Self::Unreachable(_)
+            | Self::Status { .. }
+            | Self::NotJson { .. }
+            | Self::NoAnswer { .. }
+            | Self::Body(_)
+            | Self::EventTooLarge { .. }
+            | Self::EventBrokeOff { .. }
+            | Self::Unanswered { .. }
+            | Self::SessionGone
+            | Self::Restart(_)
+            | Self::RestartNotify(_) => self.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum NotifyError {
+    #[error("the server is no longer running")]
+    Stopped,
+    #[error(
+        "the server stopped reading while {} of messages waited for it",
+        size(MAX_QUEUED_BYTES)
+    )]
+    Backlogged,
+    #[error("{}", reach_error(.0))]
+    Unreachable(#[source] reqwest::Error),
+    #[error("HTTP {status}")]
+    Status { status: u16 },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum BodyError {
+    #[error("the server's answer was larger than {}", size(*.limit))]
+    TooLarge { limit: usize },
+    #[error("the server's answer broke off")]
+    BrokeOff(#[source] reqwest::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum StartError {
+    #[error("initialize")]
+    Initialize(#[source] RequestError),
+    #[error("initialize")]
+    Initialized(#[source] NotifyError),
+    #[error("listing its tools")]
+    ListTools(#[source] RequestError),
+}
+
+impl StartError {
+    fn reason(&self) -> String {
+        match self {
+            Self::Initialize(source) | Self::ListTools(source) => source.reason(),
+            Self::Initialized(source) => source.to_string(),
+        }
+    }
+}
+
 const PROTOCOL_VERSION: &str = "2025-06-18";
-/// How long listing a server's tools may take, page by page.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a tool call may take, from the moment it is sent. Progress
-/// notifications do not extend it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
-/// How long starting a server and listing its tools may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long a thread's servers stay connected without a turn.
-pub const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
-/// The most tools all servers together offer.
+const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+const MAX_WARM_THREADS: usize = 8;
 const MAX_TOOLS: usize = 256;
-/// The longest tool name claude.ai takes.
 const MAX_NAME: usize = 64;
-/// The most of a project's `.mcp.json` that is read, and the most servers
-/// it may hold.
 const MAX_MCP_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_PROJECT_SERVERS: usize = 64;
-/// The most `tools/list` pages read.
 const MAX_PAGES: usize = 20;
-/// The largest message a server may send: a stdio line, an SSE event or an
-/// HTTP body.
 const MAX_MESSAGE_BYTES: usize = MAX_LINE_BYTES;
 const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(MAX_MESSAGE_BYTES).unwrap();
-/// The most of a server's stderr kept for a failed start.
 const MAX_STDERR: usize = 8 * 1024;
-/// The largest image a result attaches, and the most one result attaches.
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGES: usize = 8;
-/// Values shorter than this are not redacted from logs: they are flags
-/// (`1`, `true`), not secrets, and redacting them garbles the text.
+const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 const MIN_SECRET_CHARS: usize = 4;
 
-/// Every MCP server one run connected to.
-#[derive(Default)]
-pub struct Servers {
+#[derive(Debug, Default)]
+pub(crate) struct Servers {
     clients: Vec<Arc<Client>>,
-    /// Every tool offered, under its model-facing name.
     tools: Vec<Tool>,
-    /// A model-facing name → its index in `tools`.
     names: HashMap<String, usize>,
     failures: Vec<(String, String)>,
-    /// Images calls returned that have not gone to claude.ai yet.
     images: Mutex<Vec<Image>>,
-    /// The thread whose warm servers these are, and which turn's use.
     warm: Option<(String, u64)>,
 }
 
-/// One connected server.
-pub struct Client {
-    pub server: String,
+#[derive(Debug)]
+pub(crate) struct Client {
+    server: String,
     listed: Vec<Listed>,
     transport: Transport,
 }
 
-/// One tool as its server lists it.
+#[derive(Debug)]
 struct Listed {
     raw: String,
     description: String,
     schema: Value,
 }
 
-/// One tool offered to the model.
 #[derive(Clone, Debug)]
-pub struct Tool {
-    /// The name the model sees: `mcp__server__tool`, shortened with a hash
-    /// when it is too long or two tools would share it.
-    pub name: String,
-    /// The server's name, as configured.
-    pub server: String,
-    /// The tool's name on its server.
-    pub raw: String,
-    pub description: String,
-    pub schema: Value,
-    /// Its client, in [`Servers::clients`].
+pub(crate) struct Tool {
+    name: String,
+    server: String,
+    raw: String,
+    description: String,
+    schema: Value,
     client: usize,
 }
 
-/// An image a tool returned, for the message that carries the results.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Image {
+pub(crate) struct Image {
     pub mime: String,
     pub data: Vec<u8>,
 }
 
 impl Image {
-    /// The file extension claude.ai's upload reads the type from.
     #[must_use]
-    pub fn extension(&self) -> &'static str {
+    pub(crate) fn extension(&self) -> &'static str {
         match self.mime.as_str() {
             "image/jpeg" => "jpg",
             "image/gif" => "gif",
@@ -134,13 +290,9 @@ impl Image {
     }
 }
 
-/// A thread's connected servers, kept between its turns.
 struct Warm {
-    /// The servers' config and working directory they were started with.
-    config: String,
-    clients: Vec<Arc<Client>>,
-    /// Which turn took the set last; an idle timer only ends the set its
-    /// own turn left.
+    context: String,
+    clients: Vec<(String, Arc<Client>)>,
     generation: u64,
 }
 
@@ -148,13 +300,10 @@ static WARM: LazyLock<Mutex<HashMap<String, Warm>>> = LazyLock::new(Mutex::defau
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 tokio::task_local! {
-    /// The thread whose servers [`Servers::connect`] keeps warm.
     static THREAD: String;
 }
 
-/// Runs `future`, which builds a turn's runtime, with the MCP servers it
-/// connects kept warm for `thread`'s next turn.
-pub async fn for_thread<F: Future>(thread: &str, future: F) -> F::Output {
+pub(super) async fn for_thread<F: Future>(thread: &str, future: F) -> F::Output {
     THREAD.scope(thread.to_owned(), future).await
 }
 
@@ -163,11 +312,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Servers {
-    /// Connects to every server at once. A server that fails to start is
-    /// recorded and left out; the run carries on without it. Inside
-    /// [`for_thread`], the thread's servers from its last turn are reused
-    /// when their config is unchanged.
-    pub async fn connect(servers: &[McpServer], cwd: &Path) -> Self {
+    pub(crate) async fn connect(
+        servers: &[McpServer],
+        cwd: &Path,
+        containment: Containment,
+    ) -> Self {
         let thread = THREAD.try_with(Clone::clone).ok();
         let mut seen = HashSet::new();
         let servers: Vec<&McpServer> = servers
@@ -183,37 +332,26 @@ impl Servers {
                 true
             })
             .collect();
-        let config = fingerprint(&servers, cwd);
-        let mut warm: HashMap<String, Arc<Client>> = HashMap::new();
-        if let Some(thread) = &thread {
-            let previous = lock(&WARM).remove(thread);
-            if let Some(previous) = previous {
-                if previous.config == config {
-                    for client in previous.clients {
-                        if client.transport.alive() {
-                            warm.insert(client.server.clone(), client);
-                        } else {
-                            tracing::info!(thread, server = %client.server, "an MCP server stopped since the last turn; starting it again");
-                        }
-                    }
-                } else {
-                    tracing::info!(
-                        thread,
-                        "the thread's MCP servers changed; the old ones shut down"
-                    );
-                }
-            }
-        }
-        let started =
-            futures::future::join_all(
-                servers
-                    .iter()
-                    .filter(|server| !warm.contains_key(&server.name))
-                    .map(|server| async move {
-                        (server.name.clone(), connect_client(server, cwd).await)
-                    }),
-            )
-            .await;
+        let context = context_key(cwd, containment);
+        let keys: HashMap<&str, String> = servers
+            .iter()
+            .map(|server| (server.name.as_str(), server_key(server)))
+            .collect();
+        let mut warm = thread
+            .as_deref()
+            .map_or_else(HashMap::new, |thread| still_warm(thread, &context, &keys));
+        let started = futures::future::join_all(
+            servers
+                .iter()
+                .filter(|server| !warm.contains_key(&server.name))
+                .map(|server| async move {
+                    (
+                        server.name.clone(),
+                        connect_client(server, cwd, containment).await,
+                    )
+                }),
+        )
+        .await;
         let mut started: HashMap<String, Result<Client, String>> = started.into_iter().collect();
         let mut connected = Self::default();
         for server in &servers {
@@ -236,22 +374,35 @@ impl Servers {
         connected.name_tools();
         if let Some(thread) = thread {
             let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
-            let replaced = lock(&WARM).insert(
+            let retired = keep_warm(
                 thread.clone(),
                 Warm {
-                    config,
-                    clients: connected.clients.clone(),
+                    context,
+                    clients: connected
+                        .clients
+                        .iter()
+                        .map(|client| {
+                            let key =
+                                keys.get(client.server.as_str())
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        unreachable!(
+                                            "invariant: connected MCP server {} was asked for",
+                                            client.server
+                                        )
+                                    });
+                            (key, Arc::clone(client))
+                        })
+                        .collect(),
                     generation,
                 },
             );
-            drop(replaced);
+            drop(retired);
             connected.warm = Some((thread, generation));
         }
         connected
     }
 
-    /// Names every tool the model is offered, up to [`MAX_TOOLS`] in the
-    /// servers' order.
     fn name_tools(&mut self) {
         let mut offered = Vec::new();
         'clients: for (index, client) in self.clients.iter().enumerate() {
@@ -291,15 +442,13 @@ impl Servers {
         self.tools = tools;
     }
 
-    /// Whether any server is connected.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
 
-    /// Each connected server, with how many tools it offers.
     #[must_use]
-    pub fn offered(&self) -> Vec<(&str, usize)> {
+    pub(crate) fn offered(&self) -> Vec<(&str, usize)> {
         self.clients
             .iter()
             .enumerate()
@@ -314,16 +463,13 @@ impl Servers {
             .collect()
     }
 
-    /// The servers that could not start, with a short reason fit for the
-    /// model and the user: never their output or a response body.
     #[must_use]
-    pub fn failures(&self) -> &[(String, String)] {
+    pub(crate) fn failures(&self) -> &[(String, String)] {
         &self.failures
     }
 
-    /// Every tool, in the shape claude.ai takes.
     #[must_use]
-    pub fn definitions(&self) -> Vec<Value> {
+    pub(crate) fn definitions(&self) -> Vec<Value> {
         self.tools
             .iter()
             .map(|tool| {
@@ -336,32 +482,23 @@ impl Servers {
             .collect()
     }
 
-    /// The client and tool a model-facing name names.
     #[must_use]
-    pub fn find(&self, name: &str) -> Option<(&Client, &Tool)> {
+    pub(crate) fn find(&self, name: &str) -> Option<(&Client, &Tool)> {
         let tool = &self.tools[*self.names.get(name)?];
         Some((self.clients[tool.client].as_ref(), tool))
     }
 
-    /// The server (as configured) and the tool's own name behind a
-    /// model-facing name, for showing the call.
     #[must_use]
-    pub fn lookup(&self, name: &str) -> Option<(&str, &str)> {
+    pub(crate) fn lookup(&self, name: &str) -> Option<(&str, &str)> {
         self.find(name)
             .map(|(_, tool)| (tool.server.as_str(), tool.raw.as_str()))
     }
 
-    /// The images calls returned since the last take, for the message that
-    /// carries their results.
-    pub fn take_images(&self) -> Vec<Image> {
+    pub(crate) fn take_images(&self) -> Vec<Image> {
         std::mem::take(&mut *lock(&self.images))
     }
 
-    /// Calls a tool and returns what the model is told. `Err` is the
-    /// server's or the transport's error text. Images the tool returned
-    /// wait in [`Self::take_images`]. Dropping the future cancels the call
-    /// on the server.
-    pub async fn call(
+    pub(crate) async fn call(
         &self,
         client: &Client,
         tool: &Tool,
@@ -381,8 +518,9 @@ impl Servers {
             )
             .await
             .map_err(|error| {
-                tracing::warn!(server = %client.server, tool = %tool.raw, "an MCP call failed: {error:#}");
-                format!("The {} MCP server failed: {error:#}", client.server)
+                let reason = diagnostics::chain(&error);
+                tracing::warn!(server = %client.server, tool = %tool.raw, "an MCP call failed: {reason}");
+                format!("The {} MCP server failed: {reason}", client.server)
             })?;
         let rendered = render(&result);
         if !rendered.images.is_empty() {
@@ -408,8 +546,6 @@ impl Drop for Servers {
         let Some((thread, generation)) = self.warm.take() else {
             return;
         };
-        // The servers stay up for the thread's next turn, until they idle
-        // out; a turn that takes them meanwhile moves the generation on.
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             drop(take_warm(&thread, generation));
             return;
@@ -423,7 +559,27 @@ impl Drop for Servers {
     }
 }
 
-/// Takes a thread's warm servers if no turn took them since `generation`.
+fn keep_warm(thread: String, set: Warm) -> Vec<Warm> {
+    let mut warm = lock(&WARM);
+    let mut retired: Vec<Warm> = warm.insert(thread, set).into_iter().collect();
+    while warm.len() > MAX_WARM_THREADS {
+        let Some(oldest) = warm
+            .iter()
+            .min_by_key(|(_, set)| set.generation)
+            .map(|(thread, _)| thread.clone())
+        else {
+            break;
+        };
+        tracing::info!(
+            thread = oldest,
+            limit = MAX_WARM_THREADS,
+            "more threads keep MCP servers warm than allowed; the longest unused set shuts down"
+        );
+        retired.extend(warm.remove(&oldest));
+    }
+    retired
+}
+
 fn take_warm(thread: &str, generation: u64) -> Option<Warm> {
     let mut warm = lock(&WARM);
     if warm
@@ -436,41 +592,71 @@ fn take_warm(thread: &str, generation: u64) -> Option<Warm> {
     }
 }
 
-/// What a set of servers was started from: two turns with the same
-/// fingerprint can share them.
-fn fingerprint(servers: &[&McpServer], cwd: &Path) -> String {
+fn still_warm(
+    thread: &str,
+    context: &str,
+    keys: &HashMap<&str, String>,
+) -> HashMap<String, Arc<Client>> {
+    let mut warm = HashMap::new();
+    let Some(previous) = lock(&WARM).remove(thread) else {
+        return warm;
+    };
+    if previous.context != context {
+        tracing::info!(
+            thread,
+            "the thread's folder or permissions changed; its MCP servers shut down"
+        );
+        return warm;
+    }
+    for (key, client) in previous.clients {
+        let unchanged = keys.get(client.server.as_str()) == Some(&key);
+        if unchanged && client.transport.alive() {
+            warm.insert(client.server.clone(), client);
+        } else if unchanged {
+            tracing::info!(thread, server = %client.server, "an MCP server stopped since the last turn; starting it again");
+        }
+    }
+    warm
+}
+
+fn context_key(cwd: &Path, containment: Containment) -> String {
     let mut hash = Sha256::new();
     hash.update(cwd.to_string_lossy().as_bytes());
-    for server in servers {
-        hash.update([0]);
-        hash.update(serde_json::to_vec(server).unwrap_or_default());
-    }
+    hash.update([u8::from(containment == Containment::OwnCgroup)]);
     hex::encode(hash.finalize())
 }
 
-/// Starts one server and lists its tools. `Err` is the short reason the
-/// model and the user are told; the log has the detail.
-async fn connect_client(server: &McpServer, cwd: &Path) -> Result<Client, String> {
+fn server_key(server: &McpServer) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(server).expect("invariant: an MCP server config serializes"),
+    ))
+}
+
+async fn connect_client(
+    server: &McpServer,
+    cwd: &Path,
+    containment: Containment,
+) -> Result<Client, String> {
     let resolved = resolve(server, &|name| std::env::var(name).ok()).inspect_err(|reason| {
         tracing::warn!(server = %server.name, step = "reading its config", "an MCP server could not start: {reason}");
     })?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
-    let transport = Transport::open(&resolved, cwd, deadline)
+    let transport = Transport::open(&resolved, cwd, deadline, containment)
         .await
         .map_err(|error| {
             tracing::warn!(
                 server = %server.name,
                 step = "starting it",
                 "an MCP server could not start: {}",
-                redact(&format!("{error:#}"), &resolved.secrets)
+                redact(&diagnostics::chain(&error), &resolved.secrets)
             );
-            format!("failed to start: {}", error.root_cause())
+            format!("failed to start: {}", error.reason())
         })?;
     let listed = async {
-        transport.initialize(deadline).await.context("initialize")?;
+        transport.initialize(deadline).await?;
         list_tools(&transport, &server.name, deadline)
             .await
-            .context("listing its tools")
+            .map_err(StartError::ListTools)
     }
     .await;
     match listed {
@@ -486,31 +672,21 @@ async fn connect_client(server: &McpServer, cwd: &Path) -> Result<Client, String
                 step = %error,
                 stderr = %redact(&transport.stderr_tail(), &resolved.secrets),
                 "an MCP server could not start: {}",
-                redact(&format!("{error:#}"), &resolved.secrets)
+                redact(&diagnostics::chain(&error), &resolved.secrets)
             );
             Err(exited.map_or_else(
-                || format!("{error} failed: {}", short_reason(&error)),
+                || format!("{error} failed: {}", error.reason()),
                 |code| format!("failed to start: {code}"),
             ))
         }
     }
 }
 
-/// The cause of a failed step, short and free of what the server said.
-fn short_reason(error: &anyhow::Error) -> String {
-    let cause = error.chain().nth(1).unwrap_or_else(|| error.as_ref());
-    cause.downcast_ref::<RpcError>().map_or_else(
-        || cause.to_string(),
-        |refused| format!("refused (JSON-RPC error {})", refused.code),
-    )
-}
-
-/// The tools a server lists.
 async fn list_tools(
     transport: &Transport,
     server: &str,
     deadline: Instant,
-) -> anyhow::Result<Vec<Listed>> {
+) -> Result<Vec<Listed>, RequestError> {
     let mut tools = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
@@ -565,14 +741,11 @@ async fn list_tools(
     Ok(tools)
 }
 
-/// The plain name the model would see for a server's tool, before it is
-/// made short and unique.
 #[must_use]
-pub fn prefixed_name(server: &str, tool: &str) -> String {
+fn prefixed_name(server: &str, tool: &str) -> String {
     format!("mcp__{}__{}", component(server), component(tool))
 }
 
-/// A name part inside the tool-name grammar.
 fn component(name: &str) -> String {
     let sanitized: String = name
         .chars()
@@ -591,11 +764,6 @@ fn component(name: &str) -> String {
     }
 }
 
-/// The names the model sees, one per `(server, tool)`, each matching
-/// `^[a-zA-Z0-9_-]{1,64}$` and unique across every server. A plain name
-/// that is too long, or that two tools would share (`a.b` and `a_b` both
-/// read `a_b`), is cut short and ends in a hash of its server and tool, so
-/// the same servers always get the same names.
 fn tool_names(tools: &[(&str, &str)]) -> Vec<String> {
     let plain: Vec<String> = tools
         .iter()
@@ -630,7 +798,6 @@ fn tool_names(tools: &[(&str, &str)]) -> Vec<String> {
         .collect()
 }
 
-/// `name` cut to fit, then `_` and eight hex digits of its server and tool.
 fn hashed_name(name: &str, server: &str, tool: &str, salt: u32) -> String {
     let mut hash = Sha256::new();
     hash.update(server.as_bytes());
@@ -638,19 +805,15 @@ fn hashed_name(name: &str, server: &str, tool: &str, salt: u32) -> String {
     hash.update(tool.as_bytes());
     hash.update(salt.to_le_bytes());
     let digest = hex::encode(&hash.finalize()[..4]);
-    // The name is ASCII: every other character became `_`.
-    let keep = name.len().min(MAX_NAME - digest.len() - 1);
-    format!("{}_{digest}", &name[..keep])
+    let (kept, _) = name.split_at(name.floor_char_boundary(MAX_NAME - digest.len() - 1));
+    format!("{kept}_{digest}")
 }
 
-/// A tool result for the model: its text, and the images that go with it.
 struct Rendered {
     text: String,
     images: Vec<Image>,
 }
 
-/// The text of a tool result's content blocks; images are taken out to be
-/// attached, text resources are embedded and links named.
 fn render(result: &Value) -> Rendered {
     let mut parts = Vec::new();
     let mut images = Vec::new();
@@ -684,7 +847,6 @@ fn render(result: &Value) -> Rendered {
     }
 }
 
-/// Takes an image out of a result for attaching, and says where it went.
 fn image(mime: Option<&str>, data: Option<&str>, images: &mut Vec<Image>) -> String {
     let mime = mime.unwrap_or("image/png").to_ascii_lowercase();
     if !matches!(
@@ -718,7 +880,6 @@ fn image(mime: Option<&str>, data: Option<&str>, images: &mut Vec<Image>) -> Str
     note
 }
 
-/// An embedded resource: its text, or what it is when it is binary.
 fn resource(resource: &Value, images: &mut Vec<Image>) -> String {
     let uri = resource["uri"].as_str().unwrap_or("resource");
     if let Some(text) = resource["text"].as_str() {
@@ -736,7 +897,6 @@ fn resource(resource: &Value, images: &mut Vec<Image>) -> String {
     )
 }
 
-/// A link to a resource the model may ask for by name.
 fn link(part: &Value) -> String {
     let uri = part["uri"].as_str().unwrap_or_default();
     let mut text = part["name"]
@@ -754,7 +914,6 @@ fn link(part: &Value) -> String {
     text
 }
 
-/// A size for people: `64 KB`, `32 MB`.
 fn size(bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
         format!("{} MB", bytes / (1024 * 1024))
@@ -763,8 +922,6 @@ fn size(bytes: usize) -> String {
     }
 }
 
-/// A server's config with `${VAR}` and `${VAR:-default}` expanded, as
-/// Claude Code expands `.mcp.json`.
 struct Resolved {
     command: String,
     args: Vec<String>,
@@ -772,12 +929,9 @@ struct Resolved {
     url: Option<String>,
     headers: BTreeMap<String, String>,
     sse: bool,
-    /// What logs never show: env and header values, and whatever the
-    /// expansion put in.
     secrets: Vec<String>,
 }
 
-/// Expands a server's config. `Err` names the variables that are not set.
 fn resolve(
     server: &McpServer,
     lookup: &dyn Fn(&str) -> Option<String>,
@@ -824,7 +978,6 @@ fn resolve(
         .chain(expander.inserted)
         .filter(|value| value.chars().count() >= MIN_SECRET_CHARS)
         .collect();
-    // Longest first, so a secret that contains another is hidden whole.
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     secrets.dedup();
     Ok(Resolved {
@@ -849,14 +1002,16 @@ impl Expander<'_> {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(start) = rest.find("${") {
-            out.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let Some(end) = after.find('}').filter(|&end| end > 0) else {
-                out.push_str(&rest[start..start + 2]);
+            let (before, opened) = rest.split_at(start);
+            out.push_str(before);
+            let (_, after) = opened.split_at("${".len());
+            let Some((inner, closed)) =
+                after.split_once('}').filter(|(inner, _)| !inner.is_empty())
+            else {
+                out.push_str("${");
                 rest = after;
                 continue;
             };
-            let inner = &after[..end];
             let (name, default) = match inner.split_once(":-") {
                 Some((name, default)) => (name, Some(default)),
                 None => (inner, None),
@@ -873,53 +1028,39 @@ impl Expander<'_> {
                     }
                 }
             }
-            rest = &after[end + 1..];
+            rest = closed;
         }
         out.push_str(rest);
         out
     }
 }
 
-/// `text` with every secret replaced.
 fn redact(text: &str, secrets: &[String]) -> String {
     secrets.iter().fold(text.to_owned(), |text, secret| {
         text.replace(secret, "[redacted]")
     })
 }
 
-/// A JSON-RPC error a server answered with.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{message} (code {code})")]
 struct RpcError {
     code: i64,
     message: String,
 }
 
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (code {})", self.message, self.code)
-    }
-}
-
-impl std::error::Error for RpcError {}
-
-/// The `result` of a JSON-RPC reply, or its error.
-fn response_result(reply: &Value) -> anyhow::Result<Value> {
+fn response_result(reply: &Value) -> Result<Value, RequestError> {
     if let Some(error) = reply.get("error") {
-        return Err(RpcError {
+        return Err(RequestError::Rpc(RpcError {
             code: error["code"].as_i64().unwrap_or_default(),
             message: error["message"]
                 .as_str()
                 .unwrap_or("the server failed")
                 .to_owned(),
-        }
-        .into());
+        }));
     }
     Ok(reply["result"].clone())
 }
 
-/// What the client answers a request from the server: an empty result to
-/// `ping`, "not supported" to everything else (sampling, roots,
-/// elicitation). `None` for notifications and replies.
 fn answer_to(message: &Value) -> Option<Value> {
     let method = message.get("method")?.as_str()?;
     let id = message.get("id").filter(|id| !id.is_null())?;
@@ -934,7 +1075,6 @@ fn answer_to(message: &Value) -> Option<Value> {
     })
 }
 
-/// The messages in one JSON-RPC payload: itself, or a batch's members.
 fn batch(value: Value) -> Vec<Value> {
     match value {
         Value::Array(values) => values,
@@ -966,15 +1106,19 @@ fn cancelled(id: u64) -> Value {
     })
 }
 
+#[derive(Debug)]
 enum Transport {
-    /// A stdio server, or a legacy HTTP+SSE one: messages both ways.
     Stream(Stream),
-    /// A Streamable HTTP server: one POST per message.
     Http(Arc<Http>),
 }
 
 impl Transport {
-    async fn open(server: &Resolved, cwd: &Path, deadline: Instant) -> anyhow::Result<Self> {
+    async fn open(
+        server: &Resolved,
+        cwd: &Path,
+        deadline: Instant,
+        containment: Containment,
+    ) -> Result<Self, OpenError> {
         match &server.url {
             Some(url) if server.sse => Ok(Self::Stream(
                 Stream::sse(url, header_map(&server.headers)?, deadline).await?,
@@ -983,15 +1127,22 @@ impl Transport {
                 url,
                 header_map(&server.headers)?,
             )?))),
-            None => Ok(Self::Stream(Stream::stdio(server, cwd, MAX_MESSAGE_BYTES)?)),
+            None => Ok(Self::Stream(Stream::stdio(
+                server,
+                cwd,
+                MAX_MESSAGE_BYTES,
+                containment,
+            )?)),
         }
     }
 
-    /// The MCP handshake, then the server is ready.
-    async fn initialize(&self, deadline: Instant) -> anyhow::Result<()> {
+    async fn initialize(&self, deadline: Instant) -> Result<(), StartError> {
         self.request("initialize", initialize_params(), deadline)
-            .await?;
-        self.notify("notifications/initialized", json!({})).await
+            .await
+            .map_err(StartError::Initialize)?;
+        self.notify("notifications/initialized", json!({}))
+            .await
+            .map_err(StartError::Initialized)
     }
 
     async fn request(
@@ -999,22 +1150,20 @@ impl Transport {
         method: &str,
         params: Value,
         deadline: Instant,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, RequestError> {
         match self {
             Self::Stream(stream) => stream.request(method, params, deadline).await,
             Self::Http(http) => http.request(method, params, deadline).await,
         }
     }
 
-    async fn notify(&self, method: &str, params: Value) -> anyhow::Result<()> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), NotifyError> {
         match self {
             Self::Stream(stream) => stream.notify(method, &params),
             Self::Http(http) => http.notify(method, params).await,
         }
     }
 
-    /// Whether the server may still answer; a dead one starts again next
-    /// turn.
     fn alive(&self) -> bool {
         match self {
             Self::Stream(stream) => stream.rpc.alive.load(Ordering::SeqCst),
@@ -1029,7 +1178,6 @@ impl Transport {
         }
     }
 
-    /// How a stdio server that stopped answering ended, once it has.
     async fn exit_status(&self) -> Option<String> {
         let Self::Stream(Stream {
             child: Some(child), ..
@@ -1037,9 +1185,12 @@ impl Transport {
         else {
             return None;
         };
-        // Its output closes a moment before it is reaped.
         for _ in 0..20 {
-            let status = lock(child).try_wait().ok().flatten();
+            let waited = lock(child).try_wait();
+            let status = match waited {
+                Ok(status) => status,
+                Err(error) => return Some(format!("its exit could not be read: {error}")),
+            };
             if let Some(status) = status {
                 return Some(status.code().map_or_else(
                     || "it was stopped by a signal".to_owned(),
@@ -1052,10 +1203,10 @@ impl Transport {
     }
 }
 
-/// The requests waiting on a message stream's server.
+#[derive(Debug)]
 struct Rpc {
     next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, Undelivered>>>>,
     alive: AtomicBool,
 }
 
@@ -1068,7 +1219,7 @@ impl Rpc {
         }
     }
 
-    fn register(&self) -> (u64, oneshot::Receiver<Result<Value, String>>) {
+    fn register(&self) -> (u64, oneshot::Receiver<Result<Value, Undelivered>>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         lock(&self.pending).insert(id, sender);
@@ -1079,26 +1230,21 @@ impl Rpc {
         lock(&self.pending).remove(&id);
     }
 
-    /// Fails one request: its reply cannot come.
-    fn fail(&self, id: u64, reason: String) {
+    fn fail(&self, id: u64, reason: Undelivered) {
         let waiting = lock(&self.pending).remove(&id);
         if let Some(waiting) = waiting {
-            waiting.send(Err(reason)).ok();
+            let _requester_gone = waiting.send(Err(reason));
         }
     }
 
-    /// The server is gone: every waiting request fails with `reason`.
-    fn close(&self, reason: &str) {
+    fn close(&self, reason: &Closed) {
         self.alive.store(false, Ordering::SeqCst);
         let pending = std::mem::take(&mut *lock(&self.pending));
         for waiting in pending.into_values() {
-            waiting.send(Err(reason.to_owned())).ok();
+            let _requester_gone = waiting.send(Err(Undelivered::Closed(reason.clone())));
         }
     }
 
-    /// Takes in one message from the server and returns what to answer.
-    /// A message with a `method` is the server's own request or
-    /// notification, never a reply to ours, whatever its id.
     fn receive(&self, message: Value) -> Option<Value> {
         if message.get("method").is_some() {
             return answer_to(&message);
@@ -1106,27 +1252,106 @@ impl Rpc {
         let id = message.get("id").and_then(Value::as_u64)?;
         let waiting = lock(&self.pending).remove(&id);
         if let Some(waiting) = waiting {
-            waiting.send(Ok(message)).ok();
+            let _requester_gone = waiting.send(Ok(message));
         }
         None
     }
 }
 
-/// A server that speaks JSON-RPC as a stream of messages both ways: a stdio
-/// server's pipes, or a legacy HTTP+SSE server's event stream and endpoint.
+struct Queued {
+    text: String,
+    request: Option<u64>,
+}
+
+enum Refused {
+    Backlogged,
+    Stopped,
+}
+
+#[derive(Debug, Clone)]
+struct Outbox {
+    sender: mpsc::UnboundedSender<Queued>,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl Outbox {
+    fn new() -> (Self, Inbox) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let bytes = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                sender,
+                bytes: Arc::clone(&bytes),
+            },
+            Inbox { receiver, bytes },
+        )
+    }
+
+    fn send(&self, message: &Value) -> Result<(), Refused> {
+        let text = message.to_string();
+        let request = message
+            .get("method")
+            .and_then(|_| message.get("id"))
+            .and_then(Value::as_u64);
+        let size = text.len();
+        if self.bytes.fetch_add(size, Ordering::AcqRel) + size > MAX_QUEUED_BYTES {
+            self.bytes.fetch_sub(size, Ordering::AcqRel);
+            return Err(Refused::Backlogged);
+        }
+        self.sender
+            .send(Queued { text, request })
+            .map_err(|_closed| {
+                self.bytes.fetch_sub(size, Ordering::AcqRel);
+                Refused::Stopped
+            })
+    }
+}
+
+struct Inbox {
+    receiver: mpsc::UnboundedReceiver<Queued>,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl Inbox {
+    async fn recv(&mut self) -> Option<Queued> {
+        self.receiver.recv().await
+    }
+
+    fn sent(&self, queued: &Queued) {
+        self.bytes.fetch_sub(queued.text.len(), Ordering::AcqRel);
+    }
+}
+
+fn answer(rpc: &Rpc, outgoing: &Outbox, message: &Value) -> bool {
+    match outgoing.send(message) {
+        Ok(()) | Err(Refused::Stopped) => true,
+        Err(Refused::Backlogged) => {
+            tracing::warn!(
+                limit = MAX_QUEUED_BYTES,
+                "an MCP server stopped reading while it kept asking; it is disconnected"
+            );
+            rpc.close(&Closed::Backlogged);
+            false
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Stream {
     rpc: Arc<Rpc>,
-    /// Messages to the server, written in order by the writer task.
-    outgoing: mpsc::UnboundedSender<Value>,
-    /// Held so a stdio server is killed when the client goes.
+    outgoing: Outbox,
     child: Option<Mutex<crate::process::OwnedChild>>,
     stderr: Arc<Mutex<String>>,
-    /// The reader and writer (and stderr) tasks, ended with the client.
     _tasks: Vec<AbortOnDropHandle<()>>,
 }
 
 impl Stream {
-    fn stdio(server: &Resolved, cwd: &Path, max_line: usize) -> anyhow::Result<Self> {
+    fn stdio(
+        server: &Resolved,
+        cwd: &Path,
+        max_line: usize,
+        containment: Containment,
+    ) -> Result<Self, OpenError> {
         let mut command = tokio::process::Command::new(&server.command);
         command
             .args(&server.args)
@@ -1135,12 +1360,23 @@ impl Stream {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::process::owned_command(command)?;
-        let stdin = child.stdin().take().context("the server has no stdin")?;
-        let stdout = child.stdout().take().context("the server has no stdout")?;
+        let mut child = crate::process::owned_command(command, containment).map_err(|source| {
+            OpenError::Spawn {
+                command: server.command.clone(),
+                source,
+            }
+        })?;
+        let stdin = child
+            .stdin()
+            .take()
+            .expect("invariant: a server started with piped stdin has its stdin");
+        let stdout = child
+            .stdout()
+            .take()
+            .expect("invariant: a server started with piped stdout has its stdout");
         let stderr = Arc::new(Mutex::new(String::new()));
         let rpc = Arc::new(Rpc::new());
-        let (outgoing, messages) = mpsc::unbounded_channel();
+        let (outgoing, messages) = Outbox::new();
         let mut tasks = vec![
             AbortOnDropHandle::new(tokio::spawn(write_lines(stdin, messages, Arc::clone(&rpc)))),
             AbortOnDropHandle::new(tokio::spawn(read_lines(
@@ -1165,11 +1401,9 @@ impl Stream {
         })
     }
 
-    /// Opens a legacy HTTP+SSE server: its event stream names the endpoint
-    /// messages are POSTed to, and carries the replies.
-    async fn sse(url: &str, headers: HeaderMap, deadline: Instant) -> anyhow::Result<Self> {
+    async fn sse(url: &str, headers: HeaderMap, deadline: Instant) -> Result<Self, OpenError> {
         let client = http_client()?;
-        let base = reqwest::Url::parse(url).context("the url is not valid")?;
+        let base = reqwest::Url::parse(url).map_err(OpenError::InvalidUrl)?;
         let response = tokio::time::timeout_at(
             deadline,
             client
@@ -1179,33 +1413,33 @@ impl Stream {
                 .send(),
         )
         .await
-        .map_err(|_elapsed| anyhow!("the server did not open its event stream in time"))?
-        .map_err(|error| anyhow!(reach_error(&error)))?;
+        .map_err(|_elapsed| OpenError::StreamTimedOut)?
+        .map_err(|error| OpenError::Unreachable(error.without_url()))?;
         if !response.status().is_success() {
-            bail!("HTTP {}", response.status().as_u16());
+            return Err(OpenError::Status {
+                status: response.status().as_u16(),
+            });
         }
         let mut events = sse_events(response);
         let endpoint = loop {
             let event = tokio::time::timeout_at(deadline, events.next())
                 .await
-                .map_err(|_elapsed| anyhow!("the server did not name its endpoint in time"))?;
+                .map_err(|_elapsed| OpenError::EndpointTimedOut)?;
             match event {
                 Some(Ok(SseEvent::Message(message))) if message.event == "endpoint" => {
                     break base
                         .join(message.data.trim())
-                        .context("the server's endpoint is not a valid url")?;
+                        .map_err(OpenError::InvalidEndpoint)?;
                 }
                 Some(Ok(SseEvent::Message(_) | SseEvent::Retry(_))) => {}
-                Some(Err(_)) | None => {
-                    bail!("the event stream ended before the server named its endpoint")
-                }
+                Some(Err(_)) | None => return Err(OpenError::NoEndpoint),
             }
         };
         if endpoint.origin() != base.origin() {
-            bail!("the server's endpoint is on another origin");
+            return Err(OpenError::ForeignEndpoint);
         }
         let rpc = Arc::new(Rpc::new());
-        let (outgoing, messages) = mpsc::unbounded_channel();
+        let (outgoing, messages) = Outbox::new();
         let tasks = vec![
             AbortOnDropHandle::new(tokio::spawn(read_events(
                 events,
@@ -1229,14 +1463,12 @@ impl Stream {
         })
     }
 
-    /// Sends a request and waits for its reply until `deadline`; messages
-    /// the server sends meanwhile (progress, pings) do not move it.
     async fn request(
         &self,
         method: &str,
         params: Value,
         deadline: Instant,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, RequestError> {
         let limit = deadline.saturating_duration_since(Instant::now());
         let (id, reply) = self.rpc.register();
         let mut pending = Pending {
@@ -1244,37 +1476,52 @@ impl Stream {
             id,
             cancel: method != "initialize",
         };
-        if !self.rpc.alive.load(Ordering::SeqCst)
-            || self
-                .outgoing
-                .send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
-                .is_err()
-        {
+        if !self.rpc.alive.load(Ordering::SeqCst) {
             pending.cancel = false;
-            bail!("the server is no longer running");
+            return Err(RequestError::Stopped);
+        }
+        match self
+            .outgoing
+            .send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+        {
+            Ok(()) => {}
+            Err(Refused::Stopped) => {
+                pending.cancel = false;
+                return Err(RequestError::Stopped);
+            }
+            Err(Refused::Backlogged) => {
+                pending.cancel = false;
+                return Err(RequestError::Undelivered(Undelivered::Closed(
+                    Closed::Backlogged,
+                )));
+            }
         }
         let Ok(answered) = tokio::time::timeout_at(deadline, reply).await else {
-            bail!(
-                "the server did not answer {method} within {}s",
-                limit.as_secs_f32().round()
-            );
+            return Err(RequestError::TimedOut {
+                method: method.to_owned(),
+                seconds: limit.as_secs_f32().round(),
+            });
         };
         pending.cancel = false;
         let reply = answered
-            .unwrap_or_else(|_closed| Err("the server closed its output".to_owned()))
-            .map_err(|reason| anyhow!(reason))?;
+            .unwrap_or(Err(Undelivered::Closed(Closed::Output)))
+            .map_err(RequestError::Undelivered)?;
         response_result(&reply)
     }
 
-    fn notify(&self, method: &str, params: &Value) -> anyhow::Result<()> {
-        self.outgoing
-            .send(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
-            .map_err(|_closed| anyhow!("the server is no longer running"))
+    fn notify(&self, method: &str, params: &Value) -> Result<(), NotifyError> {
+        match self
+            .outgoing
+            .send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+        {
+            Ok(()) => Ok(()),
+            Err(Refused::Stopped) => Err(NotifyError::Stopped),
+            Err(Refused::Backlogged) => Err(NotifyError::Backlogged),
+        }
     }
 }
 
-/// A request in flight. Dropped before its reply came (timed out, or the
-/// turn was stopped), it tells the server to stop working on it.
+#[derive(Debug)]
 struct Pending<'a> {
     stream: &'a Stream,
     id: u64,
@@ -1285,54 +1532,47 @@ impl Drop for Pending<'_> {
     fn drop(&mut self) {
         self.stream.rpc.forget(self.id);
         if self.cancel && self.stream.rpc.alive.load(Ordering::SeqCst) {
-            self.stream.outgoing.send(cancelled(self.id)).ok();
+            answer(&self.stream.rpc, &self.stream.outgoing, &cancelled(self.id));
         }
     }
 }
 
-/// Writes messages to a stdio server, one line each.
-async fn write_lines(
-    mut stdin: tokio::process::ChildStdin,
-    mut messages: mpsc::UnboundedReceiver<Value>,
-    rpc: Arc<Rpc>,
-) {
+async fn write_lines(mut stdin: tokio::process::ChildStdin, mut messages: Inbox, rpc: Arc<Rpc>) {
     while let Some(message) = messages.recv().await {
-        let mut line = message.to_string();
-        line.push('\n');
         let written = async {
-            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(message.text.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
             stdin.flush().await
         }
         .await;
+        messages.sent(&message);
         if let Err(error) = written {
             tracing::debug!("writing to an MCP server: {error}");
-            rpc.close("the server closed its input");
+            rpc.close(&Closed::Input);
             break;
         }
     }
 }
 
-/// Reads a stdio server's output, one message per line. A line over
-/// `max_line` fails the request it answers and is skipped; the next line
-/// reads as usual.
 async fn read_lines(
     stdout: impl AsyncRead + Unpin,
     rpc: Arc<Rpc>,
-    outgoing: mpsc::UnboundedSender<Value>,
+    outgoing: Outbox,
     max_line: usize,
 ) {
     let mut lines = Lines::new(stdout, max_line);
     loop {
         match lines.next().await {
             Ok(Some(Line::Message(line))) => {
-                // Anything else on stdout (a stray log line) is not ours.
-                let Ok(value) = serde_json::from_slice::<Value>(&line) else {
-                    continue;
-                };
-                for message in batch(value) {
-                    if let Some(answer) = rpc.receive(message) {
-                        outgoing.send(answer).ok();
+                let value = match serde_json::from_slice::<Value>(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "an MCP server wrote a line that isn't JSON; it was skipped");
+                        continue;
                     }
+                };
+                if !answer_all(&rpc, &outgoing, value) {
+                    break;
                 }
             }
             Ok(Some(Line::Oversized(id))) => {
@@ -1342,32 +1582,33 @@ async fn read_lines(
                     "an MCP server wrote a message over the limit; it was skipped"
                 );
                 if let Some(id) = id {
-                    rpc.fail(
-                        id,
-                        format!("the server's answer was larger than {}", size(max_line)),
-                    );
+                    rpc.fail(id, Undelivered::TooLarge { limit: max_line });
                 }
             }
             Ok(None) => {
-                rpc.close("the server closed its output");
+                rpc.close(&Closed::Output);
                 break;
             }
             Err(error) => {
                 tracing::debug!("reading an MCP server: {error}");
-                rpc.close("the server's output failed");
+                rpc.close(&Closed::OutputFailed(Arc::new(error)));
                 break;
             }
         }
     }
 }
 
-/// Keeps the last [`MAX_STDERR`] bytes a stdio server wrote to stderr.
 async fn keep_tail(mut pipe: tokio::process::ChildStderr, tail: Arc<Mutex<String>>) {
     let mut buffer = vec![0_u8; 4096];
-    while let Ok(read) = pipe.read(&mut buffer).await {
-        if read == 0 {
-            break;
-        }
+    loop {
+        let read = match pipe.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => {
+                tracing::warn!(%error, "an MCP server's error output stopped being read");
+                break;
+            }
+        };
         let text = String::from_utf8_lossy(&buffer[..read]);
         let mut tail = lock(&tail);
         tail.push_str(&text);
@@ -1378,15 +1619,11 @@ async fn keep_tail(mut pipe: tokio::process::ChildStderr, tail: Arc<Mutex<String
     }
 }
 
-/// One line of a server's output.
 enum Line {
     Message(Vec<u8>),
-    /// A line over the limit, skipped; the request id it answers, when it
-    /// names one at its top level.
     Oversized(Option<u64>),
 }
 
-/// Reads lines without ever holding more than the limit of one.
 struct Lines<R> {
     inner: R,
     buffer: Vec<u8>,
@@ -1406,7 +1643,6 @@ impl<R: AsyncRead + Unpin> Lines<R> {
         }
     }
 
-    /// The next line, or `None` at the end of the output.
     async fn next(&mut self) -> std::io::Result<Option<Line>> {
         let mut line = Vec::new();
         let mut skipped: Option<IdScan> = None;
@@ -1444,8 +1680,6 @@ impl<R: AsyncRead + Unpin> Lines<R> {
     }
 }
 
-/// Finds the top-level numeric `"id"` of a JSON object read in pieces,
-/// without keeping it.
 #[derive(Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -1455,11 +1689,9 @@ struct IdScan {
     depth: u32,
     in_string: bool,
     escaped: bool,
-    /// At the top level, the next string is a key.
     expect_key: bool,
     reading_key: bool,
     key: Vec<u8>,
-    /// The last key read was `id`, and its value comes next.
     id_value_next: bool,
     number: Option<u64>,
     id: Option<u64>,
@@ -1529,7 +1761,6 @@ impl IdScan {
     }
 }
 
-/// The events of an SSE body, too large ones reported and skipped.
 type Events = BoxStream<'static, Result<SseEvent, EventError>>;
 
 enum EventError {
@@ -1550,18 +1781,26 @@ fn sse_events(response: reqwest::Response) -> Events {
         .boxed()
 }
 
-/// Reads a legacy SSE server's event stream: its replies and requests.
-async fn read_events(mut events: Events, rpc: Arc<Rpc>, outgoing: mpsc::UnboundedSender<Value>) {
+fn answer_all(rpc: &Rpc, outgoing: &Outbox, value: Value) -> bool {
+    batch(value)
+        .into_iter()
+        .filter_map(|message| rpc.receive(message))
+        .all(|reply| answer(rpc, outgoing, &reply))
+}
+
+async fn read_events(mut events: Events, rpc: Arc<Rpc>, outgoing: Outbox) {
     while let Some(event) = events.next().await {
         match event {
             Ok(SseEvent::Message(message)) if message.event == "message" => {
-                let Ok(value) = serde_json::from_str::<Value>(&message.data) else {
-                    continue;
-                };
-                for message in batch(value) {
-                    if let Some(answer) = rpc.receive(message) {
-                        outgoing.send(answer).ok();
+                let value = match serde_json::from_str::<Value>(&message.data) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "an MCP server sent an event that isn't JSON; it was skipped");
+                        continue;
                     }
+                };
+                if !answer_all(&rpc, &outgoing, value) {
+                    return;
                 }
             }
             Ok(SseEvent::Message(_) | SseEvent::Retry(_)) => {}
@@ -1571,37 +1810,35 @@ async fn read_events(mut events: Events, rpc: Arc<Rpc>, outgoing: mpsc::Unbounde
             Err(EventError::Broken) => break,
         }
     }
-    rpc.close("the server closed its event stream");
+    rpc.close(&Closed::EventStream);
 }
 
-/// POSTs messages to a legacy SSE server's endpoint, in order.
 async fn post_messages(
     client: reqwest::Client,
     endpoint: reqwest::Url,
     headers: HeaderMap,
-    mut messages: mpsc::UnboundedReceiver<Value>,
+    mut messages: Inbox,
     rpc: Arc<Rpc>,
 ) {
     while let Some(message) = messages.recv().await {
-        // Our own requests carry a method and an id; a refused one fails.
-        let id = message
-            .get("method")
-            .and_then(|_| message.get("id"))
-            .and_then(Value::as_u64);
+        messages.sent(&message);
+        let id = message.request;
         let sent = client
             .post(endpoint.clone())
             .headers(headers.clone())
             .header("content-type", "application/json")
-            .body(message.to_string())
+            .body(message.text)
             .send()
             .await;
         let failure = match sent {
             Ok(response) if response.status().is_success() => None,
-            Ok(response) => Some(format!("HTTP {}", response.status().as_u16())),
+            Ok(response) => Some(Undelivered::Status {
+                status: response.status().as_u16(),
+            }),
             Err(error) => {
-                let reason = reach_error(&error).to_owned();
-                tracing::debug!("posting to an MCP server: {}", error.without_url());
-                Some(reason)
+                let error = error.without_url();
+                tracing::debug!("posting to an MCP server: {error}");
+                Some(Undelivered::Unreachable(error))
             }
         };
         if let (Some(reason), Some(id)) = (failure, id) {
@@ -1610,29 +1847,34 @@ async fn post_messages(
     }
 }
 
-/// The headers a config names, marked sensitive.
-fn header_map(headers: &BTreeMap<String, String>) -> anyhow::Result<HeaderMap> {
+fn header_map(headers: &BTreeMap<String, String>) -> Result<HeaderMap, OpenError> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
-        let header = HeaderName::from_bytes(name.trim().as_bytes())
-            .map_err(|_invalid| anyhow!("the header name {name} is not valid"))?;
-        let mut value = HeaderValue::from_str(value.trim())
-            .map_err(|_invalid| anyhow!("the {name} header's value is not valid"))?;
+        let header = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|source| {
+            OpenError::HeaderName {
+                name: name.clone(),
+                source,
+            }
+        })?;
+        let mut value =
+            HeaderValue::from_str(value.trim()).map_err(|source| OpenError::HeaderValue {
+                name: name.clone(),
+                source,
+            })?;
         value.set_sensitive(true);
         map.insert(header, value);
     }
     Ok(map)
 }
 
-fn http_client() -> anyhow::Result<reqwest::Client> {
+fn http_client() -> Result<reqwest::Client, OpenError> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .user_agent(format!("artisan/{}", env!("CARGO_PKG_VERSION")))
         .build()
-        .context("building the MCP client")
+        .map_err(OpenError::Client)
 }
 
-/// Why a request did not reach the server, without its url.
 fn reach_error(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         "the request timed out"
@@ -1643,19 +1885,7 @@ fn reach_error(error: &reqwest::Error) -> &'static str {
     }
 }
 
-/// The server no longer knows the session the request named.
 #[derive(Debug)]
-struct SessionGone;
-
-impl std::fmt::Display for SessionGone {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the server ended the session")
-    }
-}
-
-impl std::error::Error for SessionGone {}
-
-/// A remote MCP server: JSON-RPC over Streamable HTTP.
 struct Http {
     client: reqwest::Client,
     url: String,
@@ -1667,8 +1897,8 @@ struct Http {
 }
 
 impl Http {
-    fn new(url: &str, headers: HeaderMap) -> anyhow::Result<Self> {
-        reqwest::Url::parse(url).context("the url is not valid")?;
+    fn new(url: &str, headers: HeaderMap) -> Result<Self, OpenError> {
+        reqwest::Url::parse(url).map_err(OpenError::InvalidUrl)?;
         Ok(Self {
             client: http_client()?,
             url: url.to_owned(),
@@ -1680,13 +1910,12 @@ impl Http {
         })
     }
 
-    /// Sends a request and waits for its reply until `deadline`.
     async fn request(
         self: &Arc<Self>,
         method: &str,
         params: Value,
         deadline: Instant,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, RequestError> {
         let limit = deadline.saturating_duration_since(Instant::now());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut pending = HttpPending {
@@ -1696,20 +1925,18 @@ impl Http {
         };
         let Ok(reply) = tokio::time::timeout_at(deadline, self.exchange(id, method, &params)).await
         else {
-            bail!(
-                "the server did not answer {method} within {}s",
-                limit.as_secs_f32().round()
-            );
+            return Err(RequestError::TimedOut {
+                method: method.to_owned(),
+                seconds: limit.as_secs_f32().round(),
+            });
         };
         pending.cancel = false;
         response_result(&reply?)
     }
 
-    /// One request, with a new session and a second try when the server
-    /// forgot the one it gave.
-    async fn exchange(&self, id: u64, method: &str, params: &Value) -> anyhow::Result<Value> {
+    async fn exchange(&self, id: u64, method: &str, params: &Value) -> Result<Value, RequestError> {
         match self.round_trip(id, method, params).await {
-            Err(error) if error.is::<SessionGone>() && method != "initialize" => {
+            Err(RequestError::SessionGone) if method != "initialize" => {
                 tracing::info!(
                     method,
                     "an MCP server ended its session; starting a new one"
@@ -1720,28 +1947,37 @@ impl Http {
                 let started = self
                     .round_trip(start, "initialize", &initialize_params())
                     .await
-                    .context("starting a new session")?;
-                response_result(&started).context("starting a new session")?;
+                    .map_err(|error| RequestError::Restart(Box::new(error)))?;
+                response_result(&started)
+                    .map_err(|error| RequestError::Restart(Box::new(error)))?;
                 self.notify("notifications/initialized", json!({}))
                     .await
-                    .context("starting a new session")?;
+                    .map_err(RequestError::RestartNotify)?;
                 self.round_trip(id, method, params).await
             }
             other => other,
         }
     }
 
-    /// POSTs a request and reads its reply: a JSON body, or the first
-    /// message with its id on an event stream.
-    async fn round_trip(&self, id: u64, method: &str, params: &Value) -> anyhow::Result<Value> {
+    async fn round_trip(
+        &self,
+        id: u64,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, RequestError> {
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let (response, named_session) = self.post(&message).await?;
+        let (response, named_session) = self
+            .post(&message)
+            .await
+            .map_err(RequestError::Unreachable)?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND && named_session {
-            return Err(SessionGone.into());
+            return Err(RequestError::SessionGone);
         }
         if !status.is_success() {
-            bail!("HTTP {}", status.as_u16());
+            return Err(RequestError::Status {
+                status: status.as_u16(),
+            });
         }
         let streamed = response
             .headers()
@@ -1752,13 +1988,20 @@ impl Http {
             self.reply_from_events(sse_events(response), id, method)
                 .await?
         } else {
-            let body = read_body(response, MAX_MESSAGE_BYTES).await?;
-            let value: Value = serde_json::from_slice(&body)
-                .map_err(|_invalid| anyhow!("the server's answer to {method} is not JSON"))?;
+            let body = read_body(response, MAX_MESSAGE_BYTES)
+                .await
+                .map_err(RequestError::Body)?;
+            let value: Value =
+                serde_json::from_slice(&body).map_err(|source| RequestError::NotJson {
+                    method: method.to_owned(),
+                    source,
+                })?;
             batch(value)
                 .into_iter()
                 .find(|reply| reply.get("method").is_none() && reply["id"].as_u64() == Some(id))
-                .with_context(|| format!("the server answered nothing for {method}"))?
+                .ok_or_else(|| RequestError::NoAnswer {
+                    method: method.to_owned(),
+                })?
         };
         if method == "initialize"
             && let Some(version) = reply["result"]["protocolVersion"].as_str()
@@ -1768,24 +2011,26 @@ impl Http {
         Ok(reply)
     }
 
-    /// The reply with `id` on an event stream, as soon as it comes: the
-    /// server may keep the stream open after it.
     async fn reply_from_events(
         &self,
         mut events: Events,
         id: u64,
         method: &str,
-    ) -> anyhow::Result<Value> {
+    ) -> Result<Value, RequestError> {
         while let Some(event) = events.next().await {
             match event {
                 Ok(SseEvent::Message(message)) => {
-                    let Ok(value) = serde_json::from_str::<Value>(&message.data) else {
-                        continue;
+                    let value = match serde_json::from_str::<Value>(&message.data) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            tracing::warn!(%error, "an MCP server answered with an event that isn't JSON; it was skipped");
+                            continue;
+                        }
                     };
                     for message in batch(value) {
                         if let Some(answer) = answer_to(&message) {
                             if let Err(error) = self.post(&answer).await {
-                                tracing::debug!("answering an MCP server's request: {error:#}");
+                                tracing::debug!("answering an MCP server's request: {error}");
                             }
                             continue;
                         }
@@ -1795,18 +2040,25 @@ impl Http {
                     }
                 }
                 Ok(SseEvent::Retry(_)) => {}
-                Err(EventError::TooLarge) => bail!(
-                    "the server's answer to {method} was larger than {}",
-                    size(MAX_MESSAGE_BYTES)
-                ),
-                Err(EventError::Broken) => bail!("the server's answer to {method} broke off"),
+                Err(EventError::TooLarge) => {
+                    return Err(RequestError::EventTooLarge {
+                        method: method.to_owned(),
+                        limit: MAX_MESSAGE_BYTES,
+                    });
+                }
+                Err(EventError::Broken) => {
+                    return Err(RequestError::EventBrokeOff {
+                        method: method.to_owned(),
+                    });
+                }
             }
         }
-        bail!("the server closed the stream without answering {method}")
+        Err(RequestError::Unanswered {
+            method: method.to_owned(),
+        })
     }
 
-    /// POSTs one message; also says whether it named a session.
-    async fn post(&self, message: &Value) -> anyhow::Result<(reqwest::Response, bool)> {
+    async fn post(&self, message: &Value) -> Result<(reqwest::Response, bool), reqwest::Error> {
         let mut request = self
             .client
             .post(&self.url)
@@ -1826,9 +2078,9 @@ impl Http {
             if error.is_connect() {
                 self.alive.store(false, Ordering::SeqCst);
             }
-            let reason = reach_error(&error).to_owned();
-            tracing::debug!("reaching an MCP server: {}", error.without_url());
-            anyhow!(reason)
+            let error = error.without_url();
+            tracing::debug!("reaching an MCP server: {error}");
+            error
         })?;
         if let Some(given) = response
             .headers()
@@ -1840,19 +2092,22 @@ impl Http {
         Ok((response, session.is_some()))
     }
 
-    async fn notify(&self, method: &str, params: Value) -> anyhow::Result<()> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), NotifyError> {
         let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let (response, _) = self.post(&message).await?;
+        let (response, _) = self
+            .post(&message)
+            .await
+            .map_err(NotifyError::Unreachable)?;
         if response.status().is_success() {
             Ok(())
         } else {
-            bail!("HTTP {}", response.status().as_u16())
+            Err(NotifyError::Status {
+                status: response.status().as_u16(),
+            })
         }
     }
 }
 
-/// An HTTP request in flight; dropped before its reply, it tells the
-/// server to stop working on it.
 struct HttpPending {
     http: Arc<Http>,
     id: u64,
@@ -1877,16 +2132,14 @@ impl Drop for HttpPending {
             )
             .await;
             if let Ok(Err(error)) = sent {
-                tracing::debug!("cancelling an MCP call: {error:#}");
+                tracing::debug!("cancelling an MCP call: {}", diagnostics::chain(&error));
             }
         });
     }
 }
 
-/// Reads a whole HTTP body of at most `limit` bytes. A body that breaks off
-/// or runs over is an error, never a shortened answer.
-async fn read_body(response: reqwest::Response, limit: usize) -> anyhow::Result<Vec<u8>> {
-    let too_large = || anyhow!("the server's answer was larger than {}", size(limit));
+async fn read_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, BodyError> {
+    let too_large = || BodyError::TooLarge { limit };
     if response
         .content_length()
         .is_some_and(|length| usize::try_from(length).map_or(true, |length| length > limit))
@@ -1896,10 +2149,7 @@ async fn read_body(response: reqwest::Response, limit: usize) -> anyhow::Result<
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.map_err(|error| {
-            tracing::debug!("reading an MCP server's answer: {}", error.without_url());
-            anyhow!("the server's answer broke off")
-        })?;
+        let chunk = chunk.map_err(|error| BodyError::BrokeOff(error.without_url()))?;
         if body.len() + chunk.len() > limit {
             return Err(too_large());
         }
@@ -1908,12 +2158,8 @@ async fn read_body(response: reqwest::Response, limit: usize) -> anyhow::Result<
     Ok(body)
 }
 
-/// The `.mcp.json` servers of the project, as Claude Code reads them: from
-/// the repository root down to the working directory, with a nearer file's
-/// server of the same name winning. `${VAR}` references stay as written
-/// until the server starts.
 #[must_use]
-pub fn project_servers(cwd: &Path) -> Vec<McpServer> {
+pub(super) fn project_servers(cwd: &Path) -> Vec<McpServer> {
     let mut dirs: Vec<&Path> = cwd.ancestors().collect();
     if let Some(root) = dirs.iter().position(|dir| dir.join(".git").exists()) {
         dirs.truncate(root + 1);
@@ -1922,7 +2168,14 @@ pub fn project_servers(cwd: &Path) -> Vec<McpServer> {
     }
     let mut servers: Vec<McpServer> = Vec::new();
     for dir in dirs.into_iter().rev() {
-        for server in from_file(&dir.join(".mcp.json")) {
+        let found = from_file(&dir.join(".mcp.json")).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "a project's MCP servers are skipped"
+            );
+            Vec::new()
+        });
+        for server in found {
             if servers.len() >= MAX_PROJECT_SERVERS {
                 return servers;
             }
@@ -1936,7 +2189,6 @@ pub fn project_servers(cwd: &Path) -> Vec<McpServer> {
     servers
 }
 
-/// The string values of a JSON object.
 fn strings(value: &Value) -> BTreeMap<String, String> {
     value
         .as_object()
@@ -1946,23 +2198,46 @@ fn strings(value: &Value) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The servers one `.mcp.json` file holds.
-fn from_file(path: &Path) -> Vec<McpServer> {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Vec::new();
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProjectServersError {
+    #[error("read the project MCP config {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the project MCP config {} exceeds {MAX_MCP_JSON_BYTES} bytes", path.display())]
+    TooLarge { path: PathBuf },
+    #[error("parse the project MCP config {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn from_file(path: &Path) -> Result<Vec<McpServer>, ProjectServersError> {
+    let read = |source| ProjectServersError::Read {
+        path: path.to_owned(),
+        source,
+    };
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(read(error)),
     };
     if metadata.len() > MAX_MCP_JSON_BYTES {
-        tracing::warn!(file = %path.display(), "a project .mcp.json is too large to read");
-        return Vec::new();
+        return Err(ProjectServersError::TooLarge {
+            path: path.to_owned(),
+        });
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        tracing::warn!(file = %path.display(), "a project .mcp.json is not valid JSON");
-        return Vec::new();
-    };
-    value["mcpServers"]
+    let text = std::fs::read_to_string(path).map_err(read)?;
+    let value =
+        serde_json::from_str::<Value>(&text).map_err(|source| ProjectServersError::Decode {
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok(value["mcpServers"]
         .as_object()
         .into_iter()
         .flatten()
@@ -1994,128 +2269,13 @@ fn from_file(path: &Path) -> Vec<McpServer> {
                 ..McpServer::default()
             })
         })
-        .collect()
-}
-
-/// Reads one HTTP request off a test socket: its head and body.
-#[cfg(test)]
-async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(String, String)> {
-    let mut data = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = match socket.read(&mut buffer).await {
-            Ok(0) | Err(_) => return None,
-            Ok(read) => read,
-        };
-        data.extend_from_slice(&buffer[..read]);
-        let text = String::from_utf8_lossy(&data);
-        if let Some(end) = text.find("\r\n\r\n") {
-            let length = text[..end]
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")
-                        .map(str::trim)
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            if data.len() >= end + 4 + length {
-                return Some((
-                    text[..end].to_owned(),
-                    text[end + 4..end + 4 + length].to_owned(),
-                ));
-            }
-        }
-    }
-}
-
-/// What the test servers answer: one `search` tool that finds it.
-#[cfg(test)]
-fn fake_reply(value: &Value) -> Value {
-    let result = match value["method"].as_str() {
-        Some("initialize") => json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "serverInfo": { "name": "fake", "version": "1" }
-        }),
-        Some("tools/list") => json!({
-            "tools": [{
-                "name": "search",
-                "description": "Find things",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": { "query": { "type": "string" } }
-                }
-            }]
-        }),
-        Some("tools/call") => json!({
-            "content": [{ "type": "text", "text": "found it" }],
-            "isError": false
-        }),
-        _ => json!({}),
-    };
-    json!({ "jsonrpc": "2.0", "id": value["id"], "result": result })
-}
-
-/// A tiny MCP-over-HTTP server for tests: `initialize`, `tools/list` and
-/// `tools/call`, one JSON-RPC request per connection. Runs until its task
-/// is aborted.
-#[cfg(test)]
-pub async fn fake_server(listener: tokio::net::TcpListener) {
-    loop {
-        let Ok((mut socket, _)) = listener.accept().await else {
-            break;
-        };
-        let Some((_, body)) = read_request(&mut socket).await else {
-            break;
-        };
-        let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-        if value.get("id").is_none() {
-            socket
-                .write_all(
-                    b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                )
-                .await
-                .ok();
-            continue;
-        }
-        let body = fake_reply(&value).to_string();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        socket.write_all(response.as_bytes()).await.ok();
-    }
-}
-
-/// A stdio MCP server for tests: this test binary, running
-/// `tests::fake_stdio_server` with `env` (see there for what it does).
-#[cfg(test)]
-pub fn fake_stdio(name: &str, env: &[(&str, &str)]) -> McpServer {
-    let mut vars: BTreeMap<String, String> = env
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-        .collect();
-    vars.insert("ARTISAN_FAKE_MCP".to_owned(), "1".to_owned());
-    McpServer {
-        name: name.to_owned(),
-        command: std::env::current_exe()
-            .expect("the test binary")
-            .to_string_lossy()
-            .into_owned(),
-        args: [
-            "--exact",
-            "claudeai::mcp::tests::fake_stdio_server",
-            "--nocapture",
-            "--test-threads=1",
-            "--quiet",
-        ]
-        .map(str::to_owned)
-        .to_vec(),
-        env: vars,
-        ..McpServer::default()
-    }
+        .collect())
 }
 
 #[cfg(test)]
+#[path = "../../tests/claudeai/mcp/fakes.rs"]
+pub(super) mod fakes;
+
+#[cfg(test)]
+#[path = "../../tests/claudeai/mcp/unit.rs"]
 mod tests;

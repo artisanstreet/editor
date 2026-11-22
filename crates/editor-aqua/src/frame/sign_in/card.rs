@@ -3,13 +3,13 @@ use crate::frame::sign_in::{
     CODE_PAGE, EMAIL_PAGE, Event, PAGE, REVEAL, SWAP, SignIn, Slot, pattern,
 };
 use crate::ui::chrome::card::{
-    POLAR_BLUE, POLAR_EDGE, POLAR_HAZE, POLAR_HIGHLIGHT, POLAR_INK, POLAR_NAVY, POLAR_SHADE, POLAR_SKY,
-    hex,
+    POLAR_BLUE, POLAR_EDGE, POLAR_HAZE, POLAR_HIGHLIGHT, POLAR_INK, POLAR_NAVY, POLAR_SHADE,
+    POLAR_SKY, hex,
 };
 use crate::ui::kit::surface::{self, Tone, tint};
 use crate::ui::kit::{
-    Divider, HitArea, IconSize, Inset, Key as KitKey, KeyFace, KeySize, Radius, Space, Spaced, Surface,
-    TextRole,
+    Divider, HitArea, IconSize, Inset, Key as KitKey, KeyFace, KeySize, Radius, Space, Spaced,
+    Surface, TextRole,
 };
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_core::{CursorIcon, DisplayItem, ImageRef, Role, Transform2D, image::ImageFit};
@@ -21,7 +21,7 @@ use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 use std::{rc::Rc, sync::Arc, time::Instant};
 
-pub const WIDTH: f32 = 400.0;
+pub(crate) const WIDTH: f32 = 400.0;
 const CARD: Surface = Surface::Card;
 const INNER: Surface = Surface::Inset;
 const FIELD: Surface = Surface::Field;
@@ -52,9 +52,18 @@ pub struct Props<'a> {
     pub emit: Rc<dyn Fn(Event)>,
 }
 
+impl std::fmt::Debug for Props<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Props").finish_non_exhaustive()
+    }
+}
+
 #[must_use]
 pub fn card(theme: &ArtisanTheme, props: Props<'_>) -> Element {
-    let header = header(AlignItems::START, vec![wordmark(theme), artwork(props.sign_in.art())]);
+    let header = header(
+        AlignItems::START,
+        vec![wordmark(theme), artwork(props.sign_in.art())],
+    );
     let inner = vec![pattern_layer(theme), pages(theme, props)];
     UiBox::new()
         .layout("column")
@@ -65,7 +74,7 @@ pub fn card(theme: &ArtisanTheme, props: Props<'_>) -> Element {
 }
 
 #[must_use]
-pub fn header(align: AlignItems, children: Vec<Element>) -> Element {
+pub(crate) fn header(align: AlignItems, children: Vec<Element>) -> Element {
     UiBox::new()
         .layout("row")
         .padded(Space::S16)
@@ -80,7 +89,7 @@ pub fn header(align: AlignItems, children: Vec<Element>) -> Element {
 }
 
 #[must_use]
-pub fn framed(theme: &ArtisanTheme, header: Element, inner: Vec<Element>) -> Element {
+pub(crate) fn framed(theme: &ArtisanTheme, header: Element, inner: Vec<Element>) -> Element {
     let stack = UiBox::new()
         .layout("column")
         .spaced(Space::from(CARD_GAP))
@@ -91,7 +100,7 @@ pub fn framed(theme: &ArtisanTheme, header: Element, inner: Vec<Element>) -> Ele
 }
 
 #[must_use]
-pub fn body(content: Vec<Element>) -> UiBox {
+pub(crate) fn body(content: Vec<Element>) -> UiBox {
     UiBox::new()
         .layout("column")
         .padded(PAGE_PAD)
@@ -99,8 +108,10 @@ pub fn body(content: Vec<Element>) -> UiBox {
 }
 
 #[must_use]
-pub fn wordmark(theme: &ArtisanTheme) -> Element {
-    let source: Arc<str> = editor_assets::get(AssetId::ARTISAN_WORDMARK_STACKED).source.into();
+pub(crate) fn wordmark(theme: &ArtisanTheme) -> Element {
+    let source: Arc<str> = editor_assets::get(AssetId::ARTISAN_WORDMARK_STACKED)
+        .source
+        .into();
     let tint = theme.colors.text.to_reference_paint();
     Canvas::new()
         .style(
@@ -124,15 +135,19 @@ pub fn wordmark(theme: &ArtisanTheme) -> Element {
 
 fn artwork(art: Option<Arc<aqua::images::ImageHandle>>) -> Element {
     let (width, height) = crate::frame::sign_in::ART_BOX;
-    let frame = UiBox::new().width(width).height(height).style(Style::new().absolute_at(
-        None,
-        None,
-        Some(-CARD.padding_px()),
-        Some(-CARD_GAP.px()),
-    ));
+    let frame = UiBox::new()
+        .width(width)
+        .height(height)
+        .style(Style::new().absolute_at(
+            None,
+            None,
+            Some(-CARD.padding_px()),
+            Some(-CARD_GAP.px()),
+        ));
     match art {
         Some(image) => {
-            let lease: Arc<dyn std::any::Any + Send + Sync> = image.clone();
+            let lease: Arc<dyn std::any::Any + Send + Sync> =
+                Arc::<aqua::images::ImageHandle>::clone(&image);
             frame
                 .child(
                     Media::new(ImageRef::with_lease(image.id(), lease))
@@ -185,15 +200,19 @@ fn pattern_layer(theme: &ArtisanTheme) -> Element {
 fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
     let now = props.now;
     let progress = props.sign_in.motion.page.value(now, PAGE);
-    let code_shown = matches!(page_of(props.view), crate::frame::sign_in::model::Page::Code);
+    let code_shown = matches!(
+        page_of(props.view),
+        crate::frame::sign_in::model::Page::Code
+    );
     let feedback = crate::frame::sign_in::model::feedback_of(props.view);
-    let (email_feedback, code_feedback) = match code_shown {
-        true => (Feedback::None, feedback),
-        false => (feedback, Feedback::None),
+    let (email_feedback, code_feedback) = if code_shown {
+        (Feedback::None, feedback)
+    } else {
+        (feedback, Feedback::None)
     };
     let busy_swap = Key {
         swap: props.sign_in.motion.busy.value(now, SWAP),
-        spin: props.sign_in.motion.spin,
+        reduced: props.sign_in.reduced,
     };
     let email_reveal = props.sign_in.motion.email_feedback.value(now, REVEAL);
     let code_reveal = props.sign_in.motion.code_feedback.value(now, REVEAL);
@@ -208,7 +227,7 @@ fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
             busy_swap,
             props.busy,
             crate::frame::sign_in::model::cancellable(props.view),
-            slot(props.sign_in, Slot::Email, email_reveal, &email_feedback),
+            &slot(props.sign_in, Slot::Email, email_reveal, &email_feedback),
             &props.emit,
         ),
     );
@@ -222,7 +241,7 @@ fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
             props.code,
             busy_swap,
             props.busy,
-            slot(props.sign_in, Slot::Code, code_reveal, &code_feedback),
+            &slot(props.sign_in, Slot::Code, code_reveal, &code_feedback),
             &props.emit,
         ),
     );
@@ -239,9 +258,10 @@ fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
 }
 
 fn page(key: &'static str, active: bool, opacity: f32, shift: f32, content: Element) -> Element {
-    let position = match active {
-        true => Style::new(),
-        false => Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), None),
+    let position = if active {
+        Style::new()
+    } else {
+        Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), None)
     };
     let blur = PAGE_BLUR * (1.0 - opacity);
     let mut style = position
@@ -256,9 +276,10 @@ fn page(key: &'static str, active: bool, opacity: f32, shift: f32, content: Elem
         .build()
         .with_key(key)
         .debug_selector(key);
-    match active {
-        true => element,
-        false => element.exclude_from_hit_testing(),
+    if active {
+        element
+    } else {
+        element.exclude_from_hit_testing()
     }
 }
 
@@ -269,7 +290,12 @@ struct FeedbackSlot<'a> {
     height: f32,
 }
 
-fn slot<'a>(sign_in: &'a SignIn, slot: Slot, reveal: f32, current: &'a Feedback) -> FeedbackSlot<'a> {
+fn slot<'a>(
+    sign_in: &'a SignIn,
+    slot: Slot,
+    reveal: f32,
+    current: &'a Feedback,
+) -> FeedbackSlot<'a> {
     FeedbackSlot {
         last: sign_in.last(slot),
         current,
@@ -284,13 +310,14 @@ fn email_page(
     key: Key,
     busy: bool,
     cancellable: bool,
-    feedback: FeedbackSlot<'_>,
+    feedback: &FeedbackSlot<'_>,
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let submit = Rc::clone(emit);
-    let note = match cancellable {
-        true => cancel_text(theme, emit),
-        false => legal(theme, emit),
+    let note = if cancellable {
+        cancel_text(theme, emit)
+    } else {
+        legal(theme, emit)
     };
     let entry = UiBox::new()
         .layout("column")
@@ -298,7 +325,13 @@ fn email_page(
         .child(
             UiBox::new()
                 .layout("column")
-                .child(field(theme, editor, key, busy, Rc::new(move || submit(Event::SubmitEmail))))
+                .child(field(
+                    theme,
+                    editor,
+                    key,
+                    busy,
+                    Rc::new(move || submit(Event::SubmitEmail)),
+                ))
                 .child(feedback_line(theme, "email", feedback))
                 .build(),
         )
@@ -328,14 +361,19 @@ fn code_page(
     editor: Element,
     key: Key,
     busy: bool,
-    feedback: FeedbackSlot<'_>,
+    feedback: &FeedbackSlot<'_>,
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let submit = Rc::clone(emit);
     let heading = UiBox::new()
         .layout("column")
         .spaced(Space::S2)
-        .child(TextRole::Title.text(theme, "Two-step verification").wrap(true).build())
+        .child(
+            TextRole::Title
+                .text(theme, "Two-step verification")
+                .wrap(true)
+                .build(),
+        )
         .child(
             TextRole::Caption
                 .text(theme, "Enter the 6-digit code from your authenticator app.")
@@ -351,7 +389,13 @@ fn code_page(
         .child(
             UiBox::new()
                 .layout("column")
-                .child(field(theme, editor, key, busy, Rc::new(move || submit(Event::SubmitCode))))
+                .child(field(
+                    theme,
+                    editor,
+                    key,
+                    busy,
+                    Rc::new(move || submit(Event::SubmitCode)),
+                ))
                 .child(feedback_line(theme, "code", feedback))
                 .build(),
         )
@@ -366,16 +410,16 @@ fn field(
     busy: bool,
     submit: Rc<dyn Fn()>,
 ) -> Element {
-    keyed_field(theme, editor, continue_key(key, busy, submit))
+    keyed_field(theme, editor, continue_key(theme, key, busy, submit))
 }
 
 #[must_use]
-pub fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) -> Element {
+pub(crate) fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) -> Element {
     let content = UiBox::new()
         .layout("column")
         .style(
             Style::new()
-                .height(Length::Px(KEY.edge() - 2.0 * FIELD.padding_px()))
+                .height(Length::Px(2.0f32.mul_add(-FIELD.padding_px(), KEY.edge())))
                 .justify(JustifyContent::CENTER),
         )
         .child(content)
@@ -403,12 +447,17 @@ pub fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) -> Elem
 #[derive(Clone, Copy)]
 struct Key {
     swap: f32,
-    spin: u32,
+    reduced: bool,
 }
 
-fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> Element {
+fn continue_key(
+    theme: &ArtisanTheme,
+    Key { swap, reduced }: Key,
+    busy: bool,
+    submit: Rc<dyn Fn()>,
+) -> Element {
     let arrow: Arc<str> = continue_arrow().into();
-    let spinner: Arc<str> = continue_spinner(spin).into();
+    let spinner: Arc<str> = continue_spinner().into();
     let glyph = KEY.edge() * 2.0 / 3.0;
     let icon = |source: Arc<str>, visible: f32, key: &'static str| {
         let scale = (1.0 - ICON_START).mul_add(visible, ICON_START);
@@ -425,11 +474,7 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
             style = style.content_blur(ICON_BLUR * (1.0 - visible));
         }
         Canvas::new()
-            .style(
-                style
-                    .width(Length::Px(glyph))
-                    .height(Length::Px(glyph)),
-            )
+            .style(style.width(Length::Px(glyph)).height(Length::Px(glyph)))
             .on_paint(move |bounds| {
                 vec![DisplayItem::GpuiSvg {
                     bounds,
@@ -445,15 +490,20 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
         .width(glyph)
         .height(glyph)
         .child(icon(arrow, 1.0 - swap, "artisan-sign-in-arrow"))
-        .child(icon(spinner, swap, "artisan-sign-in-spinner"))
+        .child(crate::ui::motion::WorkingPulse::default().wrap(
+            icon(spinner, swap, "artisan-sign-in-spinner"),
+            reduced || swap <= 0.0,
+        ))
         .build();
     field_key(
+        theme,
         "artisan-sign-in-continue",
         "Continue",
         KEY,
-        match busy {
-            true => CursorIcon::Progress,
-            false => CursorIcon::Pointer,
+        if busy {
+            CursorIcon::Progress
+        } else {
+            CursorIcon::Pointer
         },
         glyphs,
         Rc::new(move || {
@@ -465,12 +515,13 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
 }
 
 #[must_use]
-pub const fn key_lip(size: KeySize) -> f32 {
+pub(crate) const fn key_lip(size: KeySize) -> f32 {
     size.edge() * 8.0 / 45.0
 }
 
 #[must_use]
-pub fn field_key(
+pub(crate) fn field_key(
+    theme: &ArtisanTheme,
     key: &'static str,
     label: &'static str,
     size: KeySize,
@@ -499,7 +550,7 @@ pub fn field_key(
         })
         .build()
         .exclude_from_hit_testing();
-    let area = HitArea::new(key, Role::Button, label)
+    let area = HitArea::new(key, theme, Role::Button, label)
         .child(
             UiBox::new()
                 .style(
@@ -546,15 +597,19 @@ fn continue_arrow() -> String {
     )
 }
 
-fn continue_spinner(spin: u32) -> String {
+fn continue_spinner() -> String {
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" fill="none" stroke="{ink}" stroke-width="3" stroke-linecap="round"><circle cx="15" cy="15" r="8.5" stroke-opacity="0.18"/><path transform="rotate({angle} 15 15)" d="M15 6.5a8.5 8.5 0 0 1 8.5 8.5"/></svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" fill="none" stroke="{ink}" stroke-width="3" stroke-linecap="round"><circle cx="15" cy="15" r="8.5" stroke-opacity="0.18"/><path d="M15 6.5a8.5 8.5 0 0 1 8.5 8.5"/></svg>"#,
         ink = hex(POLAR_INK),
-        angle = spin * 360 / crate::frame::sign_in::SPIN_STEPS,
     )
 }
 
-fn provider_key(theme: &ArtisanTheme, provider: Provider, busy: bool, emit: &Rc<dyn Fn(Event)>) -> Element {
+fn provider_key(
+    theme: &ArtisanTheme,
+    provider: Provider,
+    busy: bool,
+    emit: &Rc<dyn Fn(Event)>,
+) -> Element {
     let pick = Rc::clone(emit);
     let source = match provider {
         Provider::Google => GOOGLE,
@@ -600,21 +655,25 @@ fn provider_key(theme: &ArtisanTheme, provider: Provider, busy: bool, emit: &Rc<
         .build()
 }
 
-fn feedback_line(theme: &ArtisanTheme, key: &'static str, feedback: FeedbackSlot<'_>) -> Element {
+fn feedback_line(theme: &ArtisanTheme, key: &'static str, feedback: &FeedbackSlot<'_>) -> Element {
     let reveal = feedback.reveal;
     let shown = match feedback.current {
         Feedback::None => feedback.last,
-        current => current,
+        current @ (Feedback::Error(_) | Feedback::Success(_)) => current,
     };
     let (message, color) = match shown {
         Feedback::None => (String::new(), theme.colors.text),
         Feedback::Error(message) => (message.clone(), tint(theme, Tone::Danger)),
         Feedback::Success(message) => (message.clone(), tint(theme, Tone::Success)),
     };
-    let mut words = Style::new()
-        .flex_shrink(0.0)
-        .opacity(reveal)
-        .transform(Transform2D::translate(0.0, -FEEDBACK_SHIFT * (1.0 - reveal)));
+    let mut words =
+        Style::new()
+            .flex_shrink(0.0)
+            .opacity(reveal)
+            .transform(Transform2D::translate(
+                0.0,
+                -FEEDBACK_SHIFT * (1.0 - reveal),
+            ));
     if reveal < 0.99 {
         words = words.content_blur(FEEDBACK_BLUR * (1.0 - reveal));
     }
@@ -678,7 +737,11 @@ fn cancel_text(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
     )
 }
 
-fn linked(theme: &ArtisanTheme, parts: &[(&str, Option<Event>)], emit: Rc<dyn Fn(Event)>) -> Element {
+fn linked(
+    theme: &ArtisanTheme,
+    parts: &[(&str, Option<Event>)],
+    emit: Rc<dyn Fn(Event)>,
+) -> Element {
     let base = TextRole::Caption.style(theme);
     let mut underlined = base.clone();
     underlined.underline = true;
@@ -705,18 +768,28 @@ fn linked(theme: &ArtisanTheme, parts: &[(&str, Option<Event>)], emit: Rc<dyn Fn
         .spans(spans)
         .wrap(true)
         .build()
-        .on_input(InputKind::TextRangeActivated, EventPhase::Bubble, move |routed| {
-            if let RoutedInput::TextRangeActivated { id, .. } = &routed.input {
-                if let Some(event) = usize::try_from(*id).ok().and_then(|at| events.get(at)) {
+        .on_input(
+            InputKind::TextRangeActivated,
+            EventPhase::Bubble,
+            move |routed| {
+                if let RoutedInput::TextRangeActivated { id, .. } = &routed.input {
+                    let at =
+                        usize::try_from(*id).expect("invariant: caption link ids fit in usize");
+                    let event = events.get(at).unwrap_or_else(|| {
+                        panic!(
+                            "invariant: link {id} indexes one of the caption's {} events",
+                            events.len()
+                        )
+                    });
                     emit(*event);
                 }
-            }
-            InputResponse::default()
-        })
+                InputResponse::default()
+            },
+        )
 }
 
 #[must_use]
-pub fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element {
+pub(crate) fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element {
     UiBox::new()
         .layout("column")
         .style(
@@ -737,7 +810,11 @@ pub fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element
                         .justify(JustifyContent::CENTER),
                 )
                 .child(card)
-                .child(UiBox::new().height(crate::ui::chrome::TITLEBAR_HEIGHT).build())
+                .child(
+                    UiBox::new()
+                        .height(crate::ui::chrome::TITLEBAR_HEIGHT)
+                        .build(),
+                )
                 .build(),
         )
         .build()

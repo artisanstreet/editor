@@ -7,7 +7,7 @@ use forge_store::{NewItem, Store};
 
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
-async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
+async fn twenty_mib_source_latest_leaf_reads_only_bounded_ranges() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let project = store
@@ -29,7 +29,6 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         })
         .await
         .unwrap();
-    // 1,280 independent semantic leaves, not one adversarial giant paragraph.
     let paragraph = format!("{}\n\n", "α".repeat(8192));
     let text = paragraph.repeat(1280)
         + "Latest &amp; [reference][definition].\n\n[definition]: https://example.com\n";
@@ -57,11 +56,6 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         panic!("stored source")
     };
     let seq_before = store.head();
-    let mut requests = 0;
-    // This exercises the proposed remote boundary through Store calls. Client/HTTP integration
-    // requires its own request counter. No raw source is downloaded to build topology.
-    requests += 1;
-    let index_started = std::time::Instant::now();
     let page = store
         .source_index(
             &source.id,
@@ -74,12 +68,10 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .await
         .unwrap()
         .unwrap();
-    let index_elapsed = index_started.elapsed();
     assert_eq!(page.leaves.len(), 1);
     assert_eq!(page.end, page.index.leaves);
     assert!(serde_json::to_vec(&page).unwrap().len() < 2048);
     let leaf = &page.leaves[0];
-    requests += 1;
     let metadata = store
         .content_range(
             &page.index.metadata.id,
@@ -92,11 +84,15 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .unwrap()
         .unwrap();
     let record: LeafRecord = serde_json::from_str(
-        &metadata.text[usize::try_from(leaf.metadata_start - metadata.start).unwrap()
-            ..usize::try_from(leaf.metadata_end - metadata.start).unwrap()],
+        metadata
+            .text
+            .get(
+                usize::try_from(leaf.metadata_start - metadata.start).unwrap()
+                    ..usize::try_from(leaf.metadata_end - metadata.start).unwrap(),
+            )
+            .expect("the leaf's metadata lies on character boundaries"),
     )
     .unwrap();
-    requests += 1;
     let raw = store
         .content_range(
             &source.id,
@@ -112,21 +108,10 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .replay(usize::try_from(raw.start).unwrap(), &raw.text)
         .unwrap();
     assert!(events.iter().any(|(event,_)|matches!(event,artisan_markdown_index::Event::Start(artisan_markdown_index::Tag::Link{dest_url,..}) if dest_url.as_ref()=="https://example.com")));
-    eprintln!(
-        "source_index_measurement source_bytes={} index_ms={} descriptor_bytes={} requested_source_bytes={} requested_metadata_bytes={} logical_leaves={} requests={}",
-        source.bytes,
-        index_elapsed.as_millis(),
-        serde_json::to_vec(&page).unwrap().len(),
-        raw.text.len(),
-        metadata.text.len(),
-        page.index.leaves,
-        requests
+    assert!(
+        metadata.text.len() + raw.text.len() < 2 * 65536,
+        "the latest leaf of a 20 MiB source reads two bounded ranges, not the source"
     );
-    assert_eq!(
-        requests, 3,
-        "source size must not multiply remote bootstrap requests"
-    );
-    assert!(metadata.text.len() + raw.text.len() < 2 * 65536);
     assert_eq!(
         store.head(),
         seq_before,
@@ -136,7 +121,7 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
     let metadata_id = page.index.metadata.id.as_str();
     assert_eq!(
         conn.query_row(
-            "SELECT COUNT(*) FROM content_dependencies WHERE parent_id=?1 AND child_id=?2",
+            include_str!("source_index/count_dependency.sql"),
             [source.id.as_str(), metadata_id],
             |row| row.get::<_, u64>(0)
         )
@@ -144,7 +129,7 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         1
     );
     let first_count: u64 = conn
-        .query_row("SELECT COUNT(*) FROM source_index_leaves", [], |row| {
+        .query_row(include_str!("source_index/count_leaves.sql"), [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -161,14 +146,14 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM source_index_leaves", [], |row| row
+        conn.query_row(include_str!("source_index/count_leaves.sql"), [], |row| row
             .get::<_, u64>(0))
             .unwrap(),
         first_count,
         "cached immutable topology is not duplicated"
     );
-    // Item JSON corruption cannot make topology reads deserialize its owner.
-    conn.execute("UPDATE items SET body='{}'", []).unwrap();
+    conn.execute(include_str!("source_index/corrupt_items.sql"), [])
+        .unwrap();
     assert!(
         store
             .source_index(
@@ -183,50 +168,51 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
             .unwrap()
             .is_some()
     );
-    assert!(
-        store
-            .source_index(
-                &source.id,
-                SourceIndexQuery {
-                    format: artisan_api::SourceIndexFormat::Markdown,
-                    offset: Some(page.index.leaves + 1),
-                    limit: Some(1)
-                }
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .source_index(
-                &source.id,
-                SourceIndexQuery {
-                    format: artisan_api::SourceIndexFormat::Markdown,
-                    offset: None,
-                    limit: Some(65)
-                }
-            )
-            .await
-            .is_err()
-    );
-    conn.execute("DELETE FROM items", []).unwrap();
-    conn.execute("DELETE FROM content WHERE id=?1", [source.id.as_str()])
+    store
+        .source_index(
+            &source.id,
+            SourceIndexQuery {
+                format: artisan_api::SourceIndexFormat::Markdown,
+                offset: Some(page.index.leaves + 1),
+                limit: Some(1),
+            },
+        )
+        .await
+        .expect_err("an offset past the last leaf is refused");
+    store
+        .source_index(
+            &source.id,
+            SourceIndexQuery {
+                format: artisan_api::SourceIndexFormat::Markdown,
+                offset: None,
+                limit: Some(65),
+            },
+        )
+        .await
+        .expect_err("a limit over the page cap is refused");
+    conn.execute(include_str!("source_index/delete_items.sql"), [])
         .unwrap();
+    conn.execute(
+        include_str!("source_index/delete_content.sql"),
+        [source.id.as_str()],
+    )
+    .unwrap();
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM source_index_leaves", [], |row| row
+        conn.query_row(include_str!("source_index/count_leaves.sql"), [], |row| row
             .get::<_, u64>(0))
             .unwrap(),
         0
     );
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM source_indexes", [], |row| row
-            .get::<_, u64>(0))
-            .unwrap(),
+        conn.query_row(include_str!("source_index/count_indexes.sql"), [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .unwrap(),
         0
     );
     assert!(
         conn.query_row(
-            "SELECT unreferenced_at FROM content WHERE id=?1",
+            include_str!("source_index/unreferenced_at.sql"),
             [metadata_id],
             |row| row.get::<_, Option<i64>>(0)
         )
@@ -367,19 +353,124 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
             panic!("raw literal event")
         };
         assert_eq!(
-            value.as_ref(),
-            &text[usize::try_from(leaf.source_start).unwrap()
-                ..usize::try_from(leaf.source_end).unwrap()]
+            Some(value.as_ref()),
+            text.get(
+                usize::try_from(leaf.source_start).unwrap()
+                    ..usize::try_from(leaf.source_end).unwrap()
+            )
         );
     }
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
-    // Both interpretations share content chunks and dependency ownership.
     let count: u64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM source_indexes WHERE source_id=?1",
+            include_str!("source_index/count_source_indexes.sql"),
             [source.id.as_str()],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(count, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn other_writes_go_through_while_a_large_source_is_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/staged-index".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let text = "x\n".repeat(100_000);
+    let saved = store
+        .upsert_item(NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id.clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::AssistantMessage {
+                text: text.into(),
+                phase: Phase::Final,
+            },
+        })
+        .await
+        .unwrap();
+    let ItemKind::AssistantMessage {
+        text: TextContent::Stored(source),
+        ..
+    } = saved.kind
+    else {
+        panic!("stored source")
+    };
+    let indexing = tokio::spawn({
+        let store = store.clone();
+        let id = source.id.clone();
+        async move {
+            store
+                .source_index(
+                    &id,
+                    SourceIndexQuery {
+                        format: artisan_api::SourceIndexFormat::Literal,
+                        offset: None,
+                        limit: Some(1),
+                    },
+                )
+                .await
+        }
+    });
+    let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
+    let staged_unpublished = || {
+        let staged: i64 = conn
+            .query_row(include_str!("source_index/count_leaves.sql"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let published: i64 = conn
+            .query_row(
+                include_str!("source_index/count_source_indexes.sql"),
+                [source.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        staged > 0 && published == 0
+    };
+    test_support::wait::wait_until(
+        "a committed part of the index before it is published",
+        std::time::Duration::from_secs(60),
+        staged_unpublished,
+    );
+    store
+        .upsert_item(NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::AssistantMessage {
+                text: "written while indexing".into(),
+                phase: Phase::Final,
+            },
+        })
+        .await
+        .unwrap();
+    let page = indexing.await.unwrap().unwrap().unwrap();
+    assert_eq!(page.index.leaves, 100_001);
+    assert_eq!(page.leaves.len(), 1);
+    assert_eq!(page.leaves[0].ordinal, 100_000);
 }

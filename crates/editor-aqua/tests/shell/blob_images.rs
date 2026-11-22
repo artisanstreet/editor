@@ -1,13 +1,17 @@
 use super::RootViews;
 use crate::{
     conversation::{presentation::PresentationScope, view::factory::BlobAction},
-    core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen},
+    core::{EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen},
     shell::host::{Shell, ShellResources},
 };
 use artisan_api::{BlobHash, Item, ItemId, ItemKind, Status, ThreadId};
 use std::sync::Arc;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one blob-preview scenario walked through each fence in turn"
+)]
 fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
     let directory = tempfile::tempdir().unwrap();
     let files = EditorFiles {
@@ -15,7 +19,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
     };
     let mut resources = ShellResources::new(1.0).unwrap();
     let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
-    shell.core = Core::for_tests(files).unwrap();
+    shell.core = test_support::editor::core::test_core(&files.dir);
     let config = HostConfig {
         id: HostId("blob-host".into()),
         name: "Forge".into(),
@@ -26,10 +30,10 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        shell.core.identity.as_ref().unwrap(),
+        shell.core.identity().unwrap(),
     )
     .unwrap();
-    shell.core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut shell.core, &config, client.clone());
     let thread = ThreadId("blob-thread".into());
     shell.core.navigate(Screen::Thread {
         host: config.id.clone(),
@@ -48,6 +52,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         .as_mut()
         .unwrap()
         .context
+        .make_mut()
         .insert(
             id.clone(),
             Arc::new(Item {
@@ -81,7 +86,7 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         &mut shell,
         &mut resources.ui,
         scope.clone(),
-        id.clone(),
+        &id.clone(),
         2,
         action(hash.clone())
     ));
@@ -89,25 +94,25 @@ fn blob_preview_requires_current_item_revision_hash_and_host_lifetime() {
         &mut shell,
         &mut resources.ui,
         scope.clone(),
-        id.clone(),
+        &id.clone(),
         3,
         action(BlobHash("other".into()))
     ));
-    assert!(root.image_preview.is_none());
+    assert!(root.media_views.image_preview.is_none());
     assert!(root.dispatch_blob(
         &mut shell,
         &mut resources.ui,
         scope.clone(),
-        id.clone(),
+        &id.clone(),
         3,
         action(hash.clone())
     ));
-    let preview = root.image_preview.take().unwrap();
+    let preview = root.media_views.image_preview.take().unwrap();
     assert_eq!(preview.view.opener_key(), Some("image-opener"));
     assert!(preview.owner.is_none());
     shell.core.remove_host(&config.id).unwrap();
-    shell.core.add_test_host(&config, client);
-    assert!(!root.dispatch_blob(&mut shell, &mut resources.ui, scope, id, 3, action(hash)));
-    assert!(root.image_preview.is_none());
+    test_support::editor::core::connect_client(&mut shell.core, &config, client);
+    assert!(!root.dispatch_blob(&mut shell, &mut resources.ui, scope, &id, 3, action(hash)));
+    assert!(root.media_views.image_preview.is_none());
     assert!(!preview.view.is_live(&shell.core));
 }

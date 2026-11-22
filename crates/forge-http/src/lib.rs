@@ -1,14 +1,13 @@
-//! Forge's network API: HTTPS (HTTP/2) with mutual TLS, JSON routes and one
-//! server-sent event stream. Nothing is tied to a connection; a client's
-//! only sync state is the last seq it saw.
-
 mod account_auth;
 mod account_service;
 pub mod core;
 mod events;
 mod extensions;
+#[cfg(unix)]
+mod forwarded;
 mod gateway;
 mod generation;
+mod handshakes;
 mod relay;
 mod repository;
 mod routes;
@@ -17,15 +16,13 @@ pub mod tls;
 #[cfg(unix)]
 pub mod upgrade;
 
-use anyhow::{Context, Result};
 use artisan_api::EngineId;
 use artisan_api::Timestamp;
 use forge_engines::Engines;
 use forge_runs::Hub;
 use forge_store::Store;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,12 +33,25 @@ use tower::Service;
 
 pub use tls::Identity;
 
-/// Forge's port unless `config.json` in its data says otherwise.
-pub const DEFAULT_PORT: u16 = 47_900;
+const DEFAULT_PORT: u16 = 47_900;
 
-/// Where Forge listens: `listen` in `<data>/config.json`, else loopback on
-/// [`DEFAULT_PORT`].
-pub fn configured_listen(data_dir: &Path) -> Result<SocketAddr> {
+#[derive(Debug, thiserror::Error)]
+pub enum ConfiguredListenError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+pub fn configured_listen(data_dir: &Path) -> Result<SocketAddr, ConfiguredListenError> {
     #[derive(Deserialize)]
     struct Config {
         listen: Option<SocketAddr>,
@@ -50,11 +60,14 @@ pub fn configured_listen(data_dir: &Path) -> Result<SocketAddr> {
     let listen = match std::fs::read(&path) {
         Ok(bytes) => {
             serde_json::from_slice::<Config>(&bytes)
-                .with_context(|| format!("read {}", path.display()))?
+                .map_err(|source| ConfiguredListenError::Parse {
+                    path: path.clone(),
+                    source,
+                })?
                 .listen
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        Err(source) => return Err(ConfiguredListenError::Read { path, source }),
     };
     Ok(listen
         .unwrap_or_else(|| SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), DEFAULT_PORT)))
@@ -68,8 +81,6 @@ pub struct ServeConfig {
     pub listen: SocketAddr,
 }
 
-/// What a new Editor needs to pair: Forge's certificate (to pin) and a
-/// one-time code (to prove the user allowed it).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PairInvite {
     pub code: String,
@@ -77,19 +88,176 @@ pub struct PairInvite {
     pub expires_at: Timestamp,
 }
 
-/// Opens the store and engines under `data_dir` and serves until `stop`
-/// resolves. Holds an exclusive lock on the data directory.
-pub async fn serve(config: ServeConfig, stop: impl Future<Output = ()>) -> Result<()> {
-    start(config).await?.run_until(stop).await
-}
-
-/// How long a stopping Forge waits for its runs to settle. Within the
-/// service manager's stop timeout (30 s).
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// A bound, not yet serving Forge.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+const UNPAIRED_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum Origin {
+    Direct,
+    Gateway,
+}
+
+#[cfg(unix)]
+const fn origin(behind_gateway: bool) -> Origin {
+    if behind_gateway {
+        Origin::Gateway
+    } else {
+        Origin::Direct
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum Unadmitted {
+    #[cfg(unix)]
+    #[error(transparent)]
+    Forwarded(#[from] forwarded::ReadPeerError),
+    #[error(transparent)]
+    Refused(#[from] handshakes::Refused),
+}
+
+struct Admitted {
+    socket: tokio::net::TcpStream,
+    peer: SocketAddr,
+    handshake: handshakes::Slot,
+}
+
+#[cfg(unix)]
+async fn admit(
+    mut socket: tokio::net::TcpStream,
+    connected: SocketAddr,
+    origin: Origin,
+    handshakes: &handshakes::Handshakes,
+) -> Result<Admitted, Unadmitted> {
+    let peer = match origin {
+        Origin::Direct => connected,
+        Origin::Gateway => forwarded::read_peer(&mut socket).await?,
+    };
+    Ok(Admitted {
+        socket,
+        peer,
+        handshake: handshakes.admit(peer.ip())?,
+    })
+}
+
+#[cfg(not(unix))]
+fn admit(
+    socket: tokio::net::TcpStream,
+    connected: SocketAddr,
+    handshakes: &handshakes::Handshakes,
+) -> Result<Admitted, Unadmitted> {
+    Ok(Admitted {
+        socket,
+        peer: connected,
+        handshake: handshakes.admit(connected.ip())?,
+    })
+}
+
+enum Standing {
+    Paired,
+    Unpaired {
+        _slot: handshakes::Slot,
+        until: tokio::time::Instant,
+    },
+}
+
+impl Standing {
+    async fn expired(&self) {
+        match self {
+            Self::Paired => std::future::pending().await,
+            Self::Unpaired { until, .. } => tokio::time::sleep_until(*until).await,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error("create the data folder {}", path.display())]
+    CreateDataFolder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Lock(#[from] LockDataError),
+    #[error("open the generation lock {}", path.display())]
+    OpenGenerationLock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "an older Forge still exclusively owns {}; bootstrap the upgrade-capable service first",
+        dir.display()
+    )]
+    OlderForge {
+        dir: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("open the store in {}", dir.display())]
+    Store {
+        dir: PathBuf,
+        #[source]
+        source: Box<forge_store::OpenStoreError>,
+    },
+    #[error(transparent)]
+    Identity(Box<IdentityError>),
+    #[error("configure TLS with Forge's identity")]
+    Tls(#[source] Box<artisan_api::tls::TlsConfigError>),
+    #[error("listen on {address}")]
+    Bind {
+        address: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read the address Forge listens on")]
+    LocalAddr(#[source] std::io::Error),
+    #[error(transparent)]
+    Generation(Box<generation::PrepareGenerationError>),
+    #[error("reconcile the global prompt")]
+    ReconcilePrompt(#[source] Box<forge_runs::GlobalPromptError>),
+    #[error("reconcile the managed skills")]
+    ReconcileSkills(#[source] Box<forge_runs::ReconcileSkillsError>),
+    #[error("ensure the scratch project")]
+    ScratchProject(#[source] Box<forge_runs::EnsureScratchProjectError>),
+    #[error("build the repository observer's HTTP client")]
+    Repositories(#[source] reqwest::Error),
+    #[error(transparent)]
+    Gateway(#[from] gateway::StartGatewayError),
+}
+
+impl From<IdentityError> for StartError {
+    fn from(error: IdentityError) -> Self {
+        Self::Identity(Box::new(error))
+    }
+}
+
+impl From<generation::PrepareGenerationError> for StartError {
+    fn from(error: generation::PrepareGenerationError) -> Self {
+        Self::Generation(Box::new(error))
+    }
+}
+
+impl std::fmt::Debug for Server {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Server")
+            .field("listener", &self.listener)
+            .field("store", &self.store)
+            .field("hub", &self.hub)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct Server {
     listener: TcpListener,
+    #[cfg(unix)]
+    origin: Origin,
     acceptor: tokio_rustls::TlsAcceptor,
     app: axum::Router,
     store: Store,
@@ -97,73 +265,95 @@ pub struct Server {
     shutdown: CancellationToken,
     drain: CancellationToken,
     tasks: TaskTracker,
-    _lock: std::fs::File,
+    _lock: HeldLock,
 }
 
-pub async fn start(config: ServeConfig) -> Result<Server> {
-    start_with_harness(config, std::sync::Arc::new(forge_engines::harness)).await
+pub async fn start(config: ServeConfig) -> Result<Server, StartError> {
+    start_in(config, forge_store::Environment::system()).await
 }
 
-/// [`start`] with the engine adapters swapped, so clients can be tested
-/// against a scripted engine.
-pub async fn start_with_harness(
+pub async fn start_in(
+    config: ServeConfig,
+    environment: forge_store::Environment,
+) -> Result<Server, StartError> {
+    start_with_harness(config, Arc::new(forge_engines::harness), environment).await
+}
+
+async fn start_with_harness(
     config: ServeConfig,
     harness_for: forge_runs::HarnessFor,
-) -> Result<Server> {
-    start_mode(config, harness_for, None).await
+    environment: forge_store::Environment,
+) -> Result<Server, StartError> {
+    start_mode(config, harness_for, None, environment).await
 }
 
 pub async fn start_generation(
     config: ServeConfig,
     registry: forge_runs::runtime::Registry,
-) -> Result<Server> {
-    start_mode(config, Arc::new(forge_engines::harness), Some(registry)).await
+) -> Result<Server, StartError> {
+    start_generation_with_harness(config, registry, Arc::new(forge_engines::harness)).await
 }
 
-pub async fn start_generation_with_harness(
+async fn start_generation_with_harness(
     config: ServeConfig,
     registry: forge_runs::runtime::Registry,
     harness_for: forge_runs::HarnessFor,
-) -> Result<Server> {
-    start_mode(config, harness_for, Some(registry)).await
+) -> Result<Server, StartError> {
+    start_mode(
+        config,
+        harness_for,
+        Some(registry),
+        forge_store::Environment::system(),
+    )
+    .await
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one startup sequence that unwinds the hub on any failure"
+)]
 async fn start_mode(
     config: ServeConfig,
     harness_for: forge_runs::HarnessFor,
     registry: Option<forge_runs::runtime::Registry>,
-) -> Result<Server> {
-    std::fs::create_dir_all(&config.data_dir)
-        .with_context(|| format!("create {}", config.data_dir.display()))?;
-    let lock = if registry.is_some() {
-        lock_generation_dir(&config.data_dir)?
+    environment: forge_store::Environment,
+) -> Result<Server, StartError> {
+    std::fs::create_dir_all(&config.data_dir).map_err(|source| StartError::CreateDataFolder {
+        path: config.data_dir.clone(),
+        source,
+    })?;
+    let (lock, store) = if registry.is_some() {
+        let lock = lock_generation_dir(&config.data_dir)?;
+        (
+            HeldLock::Generation { _shared: lock },
+            Store::join_in(&config.data_dir, environment),
+        )
     } else {
-        lock_data_dir(&config.data_dir)?
+        let lock = lock_data_dir(&config.data_dir)?;
+        let store = Store::open_restoring_in(&lock, environment);
+        (HeldLock::Data { exclusive: lock }, store)
     };
-    let store = if registry.is_some() {
-        Store::join(&config.data_dir)
-    } else {
-        Store::open(&config.data_dir)
-    }
-    .context("open the store")?;
+    let store = store.map_err(|source| StartError::Store {
+        dir: config.data_dir.clone(),
+        source: Box::new(source),
+    })?;
     let identity = identity(&store).await?;
-    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls::server_config(&identity)?));
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(
+        tls::server_config(&identity).map_err(|error| StartError::Tls(Box::new(error)))?,
+    ));
     let shutdown = CancellationToken::new();
     let drain = CancellationToken::new();
     let tasks = TaskTracker::new();
     let engines = Engines::new(&config.data_dir);
-    let inherited = if registry.is_some() {
-        Some(TcpListener::bind(config.listen).await?)
-    } else {
-        None
+    let bind = |source| StartError::Bind {
+        address: config.listen,
+        source,
     };
-    let (hub, control) = if let Some(registry) = &registry {
+    let (hub, control, inherited) = if let Some(registry) = &registry {
+        let listener = TcpListener::bind(config.listen).await.map_err(bind)?;
         let (generation, control) = generation::prepare(
             registry,
-            inherited
-                .as_ref()
-                .context("generation listener missing")?
-                .local_addr()?,
+            listener.local_addr().map_err(StartError::LocalAddr)?,
         )
         .await?;
         (
@@ -175,10 +365,12 @@ async fn start_mode(
                 generation,
             ),
             Some(control),
+            Some(listener),
         )
     } else {
         (
             Hub::with_harness(store.clone(), engines, config.data_dir.clone(), harness_for),
+            None,
             None,
         )
     };
@@ -187,24 +379,31 @@ async fn start_mode(
         if registry.is_none()
             && let Err(error) = store.gc_content().await
         {
-            tracing::warn!("collect unreferenced text sources: {error:#}");
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "collect unreferenced text sources"
+            );
         }
         if registry.is_none()
             && let Err(error) = store.gc_blobs().await
         {
-            tracing::warn!("collect unreferenced blobs: {error:#}");
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "collect unreferenced blobs"
+            );
+        }
+        if let HeldLock::Data { exclusive } = &lock {
+            forge_runs::sweep_leftovers(&config.data_dir, &store, exclusive).await;
         }
         reconcile_startup(&hub).await?;
         let listener = match inherited {
             Some(listener) => listener,
-            None => TcpListener::bind(config.listen)
-                .await
-                .with_context(|| format!("listen on {}", config.listen))?,
+            None => TcpListener::bind(config.listen).await.map_err(bind)?,
         };
-        let address = listener.local_addr()?;
+        let address = listener.local_addr().map_err(StartError::LocalAddr)?;
         let app =
             start_services(&hub, &config.data_dir, control, &shutdown, &drain, &tasks).await?;
-        anyhow::Ok((listener, address, app))
+        Ok::<_, StartError>((listener, address, app))
     }
     .await;
     let (listener, address, app) = match prepared {
@@ -220,6 +419,8 @@ async fn start_mode(
     tracing::info!(%address, data = %config.data_dir.display(), "Forge is serving");
     let server = Server {
         listener,
+        #[cfg(unix)]
+        origin: origin(registry.is_some()),
         acceptor,
         app,
         store,
@@ -233,16 +434,18 @@ async fn start_mode(
     Ok(server)
 }
 
-async fn reconcile_startup(hub: &Hub) -> Result<()> {
-    hub.reconcile_global_prompt()
+async fn reconcile_startup(hub: &Hub) -> Result<(), StartError> {
+    hub.extensions()
+        .reconcile_global_prompt()
         .await
-        .context("reconcile global prompt")?;
-    hub.reconcile_skills()
+        .map_err(|error| StartError::ReconcilePrompt(Box::new(error)))?;
+    hub.extensions()
+        .reconcile_skills()
         .await
-        .context("reconcile managed skills")?;
+        .map_err(|error| StartError::ReconcileSkills(Box::new(error)))?;
     hub.ensure_scratch_project()
         .await
-        .context("ensure the scratch project")?;
+        .map_err(|error| StartError::ScratchProject(Box::new(error)))?;
     Ok(())
 }
 
@@ -271,13 +474,13 @@ async fn start_services(
     shutdown: &CancellationToken,
     drain: &CancellationToken,
     tasks: &TaskTracker,
-) -> Result<axum::Router> {
+) -> Result<axum::Router, StartError> {
     let routes_app = routes::App {
         hub: hub.clone(),
         forge_version: env!("CARGO_PKG_VERSION").to_owned(),
         shutdown: shutdown.clone(),
         tasks: tasks.clone(),
-        repositories: Arc::new(repository::Repositories::new()?),
+        repositories: Arc::new(repository::Repositories::new().map_err(StartError::Repositories)?),
         icons: Arc::default(),
     };
     let app = routes::router(routes_app.clone());
@@ -296,13 +499,27 @@ async fn start_services(
         generation::start_primary_services(data_dir.to_path_buf(), routes_app, shutdown, tasks);
     }
     hub.resume_pending();
+    let traces = forge_engines::trace::folder(data_dir);
+    tasks.spawn_blocking(move || {
+        if let Err(failure) = forge_engines::trace::prune(&traces, std::time::SystemTime::now()) {
+            tracing::warn!(
+                error = diagnostics::chain(&failure),
+                "remove old engine traces"
+            );
+        }
+    });
     let auth = hub.clone();
-    tasks.spawn(async move { auth.check_mcp_auth().await });
+    tasks.spawn(async move { auth.mcp().check_auth().await });
     let agents = hub.clone();
     tasks.spawn(async move { agents.reconcile_agents().await });
-    let servers = hub.clone();
+    let watching = hub.mcp().watch_server_changes();
     let stop = shutdown.clone();
-    tasks.spawn(async move { servers.watch_mcp_servers(stop).await });
+    tasks.spawn(async move {
+        tokio::select! {
+            () = stop.cancelled() => {}
+            () = watching => {}
+        }
+    });
     if hub.generation().is_none() {
         tasks.spawn(remove_inactive_threads(
             hub.clone(),
@@ -314,8 +531,8 @@ async fn start_services(
 }
 
 impl Server {
-    pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.listener.local_addr()?)
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
     }
 
     #[must_use]
@@ -327,14 +544,13 @@ impl Server {
         &self.hub
     }
 
-    pub async fn run(self) -> Result<()> {
-        self.run_until(std::future::pending()).await
+    pub async fn run(self) {
+        self.run_until(std::future::pending()).await;
     }
 
-    /// Serves until `stop` resolves, then stops every run so it ends
-    /// interrupted, and carries on when Forge starts again.
-    pub async fn run_until(self, stop_requested: impl Future<Output = ()>) -> Result<()> {
+    pub async fn run_until(self, stop_requested: impl Future<Output = ()>) {
         let connections = TaskTracker::new();
+        let handshakes = handshakes::Handshakes::new(handshakes::IN_FLIGHT, handshakes::PER_PEER);
         let store = self.store.clone();
         let hub = self.hub.clone();
         let stop = self.shutdown.clone();
@@ -353,14 +569,15 @@ impl Server {
                 {
                     continue;
                 }
-                // Each batch is its own writer transaction. Yield between them,
-                // allowing accepted input and Item writes to use the same owner.
                 while !stop.is_cancelled() {
                     match store.gc_content().await {
                         Ok(0) => break,
                         Ok(_) => tokio::task::yield_now().await,
                         Err(error) => {
-                            tracing::warn!("source collection failed: {error:#}");
+                            tracing::warn!(
+                                error = diagnostics::chain(&error),
+                                "source collection failed"
+                            );
                             break;
                         }
                     }
@@ -374,11 +591,9 @@ impl Server {
                 () = self.drain.cancelled() => break,
                 accepted = self.listener.accept() => accepted,
             };
-            let (socket, peer) = match accepted {
+            let (socket, connected) = match accepted {
                 Ok(accepted) => accepted,
                 Err(error) => {
-                    // Out of descriptors or memory fails every accept until
-                    // a connection closes; pause instead of spinning.
                     tracing::warn!("accept a connection: {error}");
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     continue;
@@ -387,8 +602,28 @@ impl Server {
             let acceptor = self.acceptor.clone();
             let app = self.app.clone();
             let drain = self.drain.clone();
+            let store = self.store.clone();
+            #[cfg(unix)]
+            let origin = self.origin;
+            let handshakes = handshakes.clone();
             connections.spawn(async move {
-                serve_connection(socket, peer, acceptor, app, drain).await;
+                #[cfg(unix)]
+                let admitted = admit(socket, connected, origin, &handshakes).await;
+                #[cfg(not(unix))]
+                let admitted = admit(socket, connected, &handshakes);
+                match admitted {
+                    Ok(Admitted {
+                        socket,
+                        peer,
+                        handshake,
+                    }) => {
+                        serve_connection(socket, peer, acceptor, handshake, app, store, drain)
+                            .await;
+                    }
+                    Err(refused) => {
+                        tracing::debug!(%connected, "refused a connection: {}", diagnostics::chain(&refused));
+                    }
+                }
             });
         }
         tracing::info!("stopping: settling live runs");
@@ -402,20 +637,33 @@ impl Server {
         {
             tracing::warn!("HTTP connections exceeded the drain grace period");
         }
-        Ok(())
     }
 }
 
-async fn serve_connection(
-    socket: tokio::net::TcpStream,
+async fn serve_connection<Socket>(
+    socket: Socket,
     peer: SocketAddr,
     acceptor: tokio_rustls::TlsAcceptor,
+    handshake: handshakes::Slot,
     app: axum::Router,
+    store: Store,
     drain: CancellationToken,
-) {
+) where
+    Socket: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let stream = tokio::select! {
-        ()=drain.cancelled()=>return,
-        result=acceptor.accept(socket)=>match result {Ok(stream)=>stream,Err(error)=>{tracing::debug!(%peer,"TLS handshake failed: {error}");return;}}
+        () = drain.cancelled() => return,
+        result = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(socket)) => match result {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                tracing::debug!(%peer, "TLS handshake failed: {error}");
+                return;
+            }
+            Err(elapsed) => {
+                tracing::debug!(%peer, "TLS handshake failed: {elapsed}");
+                return;
+            }
+        }
     };
     let Some(certificate) = stream
         .get_ref()
@@ -426,21 +674,61 @@ async fn serve_connection(
         return;
     };
     let client = routes::Client {
-        certificate: tls::certificate_id(certificate),
+        certificate: forge_store::DeviceCertificate::from_der(certificate.as_ref()),
     };
+    let mut standing = match store.is_authorized(&client.certificate).await {
+        Ok(Some(_)) => {
+            drop(handshake);
+            Standing::Paired
+        }
+        Ok(None) => Standing::Unpaired {
+            _slot: handshake,
+            until: tokio::time::Instant::now() + UNPAIRED_LIFETIME,
+        },
+        Err(error) => {
+            tracing::warn!(%peer, "check whether the connection's device is paired: {}", diagnostics::chain(&error));
+            return;
+        }
+    };
+    let certificate = client.certificate.clone();
     let service =
         hyper::service::service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
             request.extensions_mut().insert(client.clone());
             app.clone().call(request)
         });
-    let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
     let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
     tokio::pin!(connection);
-    tokio::select! {
-        result=&mut connection=>{if let Err(error)=result {tracing::debug!(%peer,"connection ended: {error}");}}
-        ()=drain.cancelled()=>{
-            connection.as_mut().graceful_shutdown();
-            if let Ok(Err(error))=tokio::time::timeout(STOP_GRACE,connection).await {tracing::debug!(%peer,"connection drain: {error}");}
+    loop {
+        tokio::select! {
+            result = &mut connection => {
+                if let Err(error) = result {
+                    tracing::debug!(%peer, "connection ended: {error}");
+                }
+                return;
+            }
+            () = drain.cancelled() => {
+                connection.as_mut().graceful_shutdown();
+                if let Ok(Err(error)) = tokio::time::timeout(STOP_GRACE, connection).await {
+                    tracing::debug!(%peer, "connection drain: {error}");
+                }
+                return;
+            }
+            () = standing.expired() => match store.is_authorized(&certificate).await {
+                Ok(Some(_)) => standing = Standing::Paired,
+                Ok(None) => {
+                    tracing::debug!(%peer, "closed a connection whose device did not pair within {UNPAIRED_LIFETIME:?}");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%peer, "check whether the connection's device paired: {}", diagnostics::chain(&error));
+                    return;
+                }
+            },
         }
     }
 }
@@ -456,16 +744,28 @@ impl Drop for Server {
 async fn remove_inactive_threads(hub: Hub, store: Store, shutdown: CancellationToken) {
     loop {
         if let Err(error) = hub.remove_inactive_threads().await {
-            tracing::warn!("remove inactive threads: {error:#}");
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "remove inactive threads"
+            );
         }
         if let Err(error) = store.gc_content().await {
-            tracing::warn!("collect unreferenced text sources: {error:#}");
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "collect unreferenced text sources"
+            );
         }
         if let Err(error) = store.gc_blobs().await {
-            tracing::warn!("collect unreferenced blobs: {error:#}");
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "collect unreferenced blobs"
+            );
         }
         if let Err(error) = store.gc_resource_snapshots().await {
-            tracing::warn!("collect resource snapshots of removed threads: {error:#}");
+            tracing::warn!(
+                error = diagnostics::chain(&error),
+                "collect resource snapshots of removed threads"
+            );
         }
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -474,20 +774,63 @@ async fn remove_inactive_threads(hub: Hub, store: Store, shutdown: CancellationT
     }
 }
 
-pub async fn identity(store: &Store) -> Result<Identity> {
-    if let Some(stored) = store.secret(IDENTITY_KEY).await? {
-        return serde_json::from_str(&stored).context("read Forge's identity");
-    }
-    let fresh = serde_json::to_string(&Identity::generate("artisan-forge")?)?;
-    let stored = store.secret_or_insert(IDENTITY_KEY, fresh).await?;
-    serde_json::from_str(&stored).context("read Forge's identity")
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    #[error("read Forge's stored identity")]
+    Read(#[source] forge_store::ReadSecretError),
+    #[error("save Forge's new identity")]
+    Save(#[source] forge_store::SetSecretError),
+    #[error("read Forge's stored identity")]
+    ReadOffline(#[source] forge_store::admin::ReadSecretError),
+    #[error("save Forge's new identity")]
+    SaveOffline(#[source] forge_store::admin::SaveSecretError),
+    #[error("generate Forge's identity")]
+    Generate(#[source] artisan_api::tls::GenerateIdentityError),
+    #[error("encode Forge's identity")]
+    Encode(#[source] serde_json::Error),
+    #[error("decode Forge's identity")]
+    Decode(#[source] serde_json::Error),
 }
 
-/// Makes a one-time pairing code, valid for ten minutes.
-pub async fn invite(store: &Store) -> Result<PairInvite> {
+#[derive(Debug, thiserror::Error)]
+pub enum InviteError {
+    #[error(transparent)]
+    Identity(#[from] IdentityError),
+    #[error("draw a pairing code")]
+    Code(#[source] getrandom::Error),
+    #[error("save the pairing code")]
+    Save(#[source] forge_store::AddPairCodeError),
+    #[error("save the pairing code")]
+    SaveOffline(#[source] forge_store::admin::PairCodeError),
+}
+
+pub async fn identity(store: &Store) -> Result<Identity, IdentityError> {
+    if let Some(stored) = store
+        .secret(IDENTITY_KEY)
+        .await
+        .map_err(IdentityError::Read)?
+    {
+        return serde_json::from_str(&stored).map_err(IdentityError::Decode);
+    }
+    let stored = store
+        .secret_or_insert(IDENTITY_KEY, fresh_identity()?)
+        .await
+        .map_err(IdentityError::Save)?;
+    serde_json::from_str(&stored).map_err(IdentityError::Decode)
+}
+
+fn fresh_identity() -> Result<String, IdentityError> {
+    let identity = Identity::generate("artisan-forge").map_err(IdentityError::Generate)?;
+    serde_json::to_string(&identity).map_err(IdentityError::Encode)
+}
+
+pub async fn invite(store: &Store) -> Result<PairInvite, InviteError> {
     let identity = identity(store).await?;
-    let (code, expires_at) = new_code()?;
-    store.add_pair_code(hash_code(&code), expires_at).await?;
+    let (code, expires_at) = new_code(store.now())?;
+    store
+        .add_pair_code(forge_store::PairCodeHash::of(&code), expires_at)
+        .await
+        .map_err(InviteError::Save)?;
     Ok(PairInvite {
         code,
         forge_certificate: identity.certificate,
@@ -495,19 +838,22 @@ pub async fn invite(store: &Store) -> Result<PairInvite> {
     })
 }
 
-/// [`invite`] without opening the store, so it works while Forge runs on
-/// `data_dir` (opening a `Store` would recover, i.e. cancel, its live runs).
-pub fn invite_offline(data_dir: &Path) -> Result<PairInvite> {
-    let mut admin = forge_store::admin::Admin::open(data_dir)?;
-    let stored = if let Some(stored) = admin.secret(IDENTITY_KEY)? {
+pub fn invite_offline(admin: &forge_store::admin::Admin) -> Result<PairInvite, InviteError> {
+    let stored = if let Some(stored) = admin
+        .secret(IDENTITY_KEY)
+        .map_err(IdentityError::ReadOffline)?
+    {
         stored
     } else {
-        let fresh = serde_json::to_string(&Identity::generate("artisan-forge")?)?;
-        admin.secret_or_insert(IDENTITY_KEY, &fresh)?
+        admin
+            .secret_or_insert(IDENTITY_KEY, &fresh_identity()?)
+            .map_err(IdentityError::SaveOffline)?
     };
-    let identity: Identity = serde_json::from_str(&stored).context("read Forge's identity")?;
-    let (code, expires_at) = new_code()?;
-    admin.add_pair_code(&hash_code(&code), expires_at)?;
+    let identity: Identity = serde_json::from_str(&stored).map_err(IdentityError::Decode)?;
+    let (code, expires_at) = new_code(artisan_api::now())?;
+    admin
+        .add_pair_code(&forge_store::PairCodeHash::of(&code), expires_at)
+        .map_err(InviteError::SaveOffline)?;
     Ok(PairInvite {
         code,
         forge_certificate: identity.certificate,
@@ -515,56 +861,54 @@ pub fn invite_offline(data_dir: &Path) -> Result<PairInvite> {
     })
 }
 
-fn new_code() -> Result<(String, Timestamp)> {
+fn new_code(now: Timestamp) -> Result<(String, Timestamp), InviteError> {
     let mut bytes = [0_u8; 8];
-    getrandom::fill(&mut bytes).map_err(|error| anyhow::anyhow!("random code: {error}"))?;
-    // 32 symbols, so `% 32` is unbiased; no 0/O or 1/I to misread.
+    getrandom::fill(&mut bytes).map_err(InviteError::Code)?;
     let alphabet = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let code = bytes
         .iter()
         .map(|byte| alphabet[usize::from(byte % 32)] as char)
         .collect();
-    Ok((code, artisan_api::now() + PAIR_CODE_LIFETIME_MS))
+    Ok((code, now + PAIR_CODE_LIFETIME_MS))
 }
 
-pub(crate) fn hash_code(code: &str) -> String {
-    let normalised: String = code
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-    hex::encode(Sha256::digest(normalised.as_bytes()))
+pub use forge_store::{DataLock, LockDataError};
+
+#[derive(Debug)]
+enum HeldLock {
+    Generation { _shared: std::fs::File },
+    Data { exclusive: DataLock },
 }
 
-/// One Forge per data directory; anything else that opens the `Store`
-/// (like the legacy import) takes the same lock.
-pub fn lock_data_dir(dir: &Path) -> Result<std::fs::File> {
-    use fs2::FileExt;
+pub fn lock_data_dir(dir: &Path) -> Result<DataLock, LockDataError> {
+    DataLock::acquire(dir)
+}
+
+fn lock_generation_dir(dir: &Path) -> Result<std::fs::File, StartError> {
     let path = dir.join("forge.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    file.try_lock_exclusive()
-        .with_context(|| format!("another Forge is using {}", dir.display()))?;
-    Ok(file)
-}
-
-fn lock_generation_dir(dir: &Path) -> Result<std::fs::File> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(dir.join("forge.lock"))?;
-    fs2::FileExt::try_lock_shared(&file).context("an older Forge still exclusively owns this data directory; bootstrap the upgrade-capable service first")?;
+        .open(&path)
+        .map_err(|source| StartError::OpenGenerationLock { path, source })?;
+    fs2::FileExt::try_lock_shared(&file).map_err(|source| StartError::OlderForge {
+        dir: dir.to_owned(),
+        source,
+    })?;
     Ok(file)
 }
 
 #[cfg(test)]
+#[path = "../tests/events.rs"]
+mod events_tests;
+#[cfg(test)]
 #[path = "../tests/generation.rs"]
 mod generation_tests;
 #[cfg(test)]
+#[path = "../tests/replay.rs"]
+mod replay;
+#[cfg(test)]
+#[path = "../tests/lib/unit.rs"]
 mod tests;

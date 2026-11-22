@@ -1,8 +1,10 @@
+use crate::error::ParseMermaidError;
 use crate::ir::{DiagramKind, Direction, Graph, NodeStyle, Subgraph};
-use anyhow::{Result, bail};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::{HashMap, VecDeque};
+
+type Result<T> = std::result::Result<T, ParseMermaidError>;
 
 type NodeTokenParts = (
     String,
@@ -58,7 +60,7 @@ pub struct ParseOutput {
 pub fn parse_mermaid(input: &str) -> Result<ParseOutput> {
     validate_init_directives(input)?;
     let Some(kind) = detect_diagram_kind(input) else {
-        bail!("unknown or missing Mermaid diagram header");
+        return Err(ParseMermaidError::MissingHeader);
     };
     match kind {
         DiagramKind::Class => parse_class_diagram(input),
@@ -238,16 +240,15 @@ fn parse_init_directive(trimmed_line: &str) -> Result<Option<serde_json::Value>>
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) {
                 return Ok(Some(value));
             }
-            if let Ok(value) = json5::from_str::<serde_json::Value>(json_str) {
-                return Ok(Some(value));
-            }
-            bail!("invalid Mermaid init directive: could not parse JSON/JSON5 config");
+            return json5::from_str::<serde_json::Value>(json_str)
+                .map(Some)
+                .map_err(|source| ParseMermaidError::InitDirectiveConfig { source });
         }
-        bail!("invalid Mermaid init directive: missing config object");
+        return Err(ParseMermaidError::InitDirectiveMissingConfig);
     }
 
     if trimmed_line.starts_with("%%{") && trimmed_line.to_ascii_lowercase().contains("init") {
-        bail!("invalid Mermaid init directive syntax");
+        return Err(ParseMermaidError::InitDirectiveSyntax);
     }
 
     Ok(None)
@@ -419,7 +420,7 @@ fn parse_flowchart(input: &str) -> Result<ParseOutput> {
             }
 
             if has_missing_flowchart_edge_endpoint(&line) {
-                bail!("invalid flowchart edge syntax: {line}");
+                return Err(ParseMermaidError::FlowchartEdge { line });
             }
 
             if let Some(chain_lines) = split_edge_chain(&line) {
@@ -428,7 +429,7 @@ fn parse_flowchart(input: &str) -> Result<ParseOutput> {
                     if add_flowchart_edge(&edge_line, &mut graph, &subgraph_stack) {
                         added = true;
                     } else if looks_like_flowchart_edge_syntax(&edge_line) {
-                        bail!("invalid flowchart edge syntax: {edge_line}");
+                        return Err(ParseMermaidError::FlowchartEdge { line: edge_line });
                     }
                 }
                 if added {
@@ -441,7 +442,7 @@ fn parse_flowchart(input: &str) -> Result<ParseOutput> {
             }
 
             if looks_like_flowchart_edge_syntax(&line) {
-                bail!("invalid flowchart edge syntax: {line}");
+                return Err(ParseMermaidError::FlowchartEdge { line });
             }
 
             if let Some((node_id, node_label, node_shape, node_classes)) = parse_node_only(&line) {
@@ -4611,24 +4612,6 @@ fn parse_xy_axis_categories(rest: &str) -> Vec<String> {
         })
         .filter(|value| !value.is_empty())
         .collect()
-}
-
-#[allow(dead_code)]
-fn parse_xy_series_line(line: &str) -> Option<(String, Vec<String>)> {
-    let mut parts = line.splitn(2, ' ');
-    let series = parts.next()?.trim().to_string();
-    let rest = parts.next()?.trim();
-    let values = rest
-        .trim_matches(|ch| ch == '[' || ch == ']')
-        .split(',')
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    if series.is_empty() {
-        None
-    } else {
-        Some((series, values))
-    }
 }
 
 fn parse_state_diagram(input: &str) -> Result<ParseOutput> {

@@ -1,20 +1,57 @@
-//! JSON-RPC request correlation and bounded stdio for short provider probes.
-//! Provider event normalization remains in each adapter.
-
-use crate::process::{self, EngineProcess};
-use anyhow::{Context, Result, bail};
+use crate::process::{self, EngineProcess, ReadError, SendError, SpawnError};
 use serde_json::{Value, json};
 
-pub struct Session {
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CallError {
+    #[error("start the RPC probe")]
+    Spawn(#[source] SpawnError),
+    #[error("send {method}")]
+    Send {
+        method: String,
+        #[source]
+        source: SendError,
+    },
+    #[error("read the answer to {method}")]
+    Read {
+        method: String,
+        #[source]
+        source: ReadError,
+    },
+    #[error("the answer to {method} is over {MAX_RESPONSE_BYTES} bytes")]
+    Oversized { method: String },
+    #[error("decode the answer to {method}")]
+    Decode {
+        method: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{method} was refused")]
+    Refused {
+        method: String,
+        #[source]
+        refusal: RpcError,
+    },
+    #[error("the answer to {method} has no result")]
+    NoResult { method: String },
+    #[error("the engine closed stdout while answering {method}; {stderr}")]
+    Closed {
+        method: String,
+        stderr: process::StderrWritten,
+    },
+}
+
+pub(crate) struct Session {
     process: EngineProcess,
     next_id: u64,
 }
 impl Session {
-    pub(crate) async fn codex(mut command: tokio::process::Command) -> Result<Self> {
+    pub(crate) async fn codex(mut command: tokio::process::Command) -> Result<Self, CallError> {
         command
             .args(["app-server", "--stdio"])
             .stdin(std::process::Stdio::piped());
-        let process = process::spawn_probe(command)?;
+        let process = process::spawn_probe(command).map_err(CallError::Spawn)?;
         let mut session = Self {
             process,
             next_id: 0,
@@ -31,79 +68,184 @@ impl Session {
         session
             .process
             .send(&json!({ "method": "initialized", "params": {} }))
-            .await?;
+            .await
+            .map_err(|source| CallError::Send {
+                method: "initialized".to_owned(),
+                source,
+            })?;
         Ok(session)
     }
 
-    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
         self.next_id += 1;
         let id = self.next_id;
         self.process
             .send(&json!({ "id": id, "method": method, "params": params }))
-            .await?;
-        while let Some(line) = self.process.next_line().await? {
-            anyhow::ensure!(
-                line.len() <= 4 * 1024 * 1024,
-                "RPC probe response exceeds 4 MiB"
-            );
-            let message: Value = serde_json::from_str(&line).context("decoding RPC response")?;
+            .await
+            .map_err(|source| CallError::Send {
+                method: method.to_owned(),
+                source,
+            })?;
+        loop {
+            let line = self
+                .process
+                .next_line()
+                .await
+                .map_err(|source| CallError::Read {
+                    method: method.to_owned(),
+                    source,
+                })?;
+            let Some(line) = line else {
+                return Err(CallError::Closed {
+                    method: method.to_owned(),
+                    stderr: self.process.stderr(),
+                });
+            };
+            if line.len() > MAX_RESPONSE_BYTES {
+                return Err(CallError::Oversized {
+                    method: method.to_owned(),
+                });
+            }
+            let mut message: Value =
+                serde_json::from_str(&line).map_err(|source| CallError::Decode {
+                    method: method.to_owned(),
+                    source,
+                })?;
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
             if let Some(error) = message.get("error") {
-                bail!("{method}: {error}");
+                return Err(CallError::Refused {
+                    method: method.to_owned(),
+                    refusal: RpcError::refusal(error),
+                });
             }
             return message
-                .get("result")
-                .cloned()
-                .context("RPC response omitted result");
+                .get_mut("result")
+                .map(Value::take)
+                .ok_or_else(|| CallError::NoResult {
+                    method: method.to_owned(),
+                });
         }
-        bail!(
-            "engine closed stdout while awaiting {method}: {}",
-            self.process.stderr_tail()
-        )
     }
 }
 
-/// JSON-RPC's "invalid params": a request Artisan can't read.
-pub const INVALID_PARAMS: i64 = -32602;
-/// JSON-RPC's "method not found": a request Artisan doesn't serve.
-pub const METHOD_NOT_FOUND: i64 = -32601;
+pub(crate) const INVALID_PARAMS: i64 = -32602;
+pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 
 #[derive(Debug)]
-pub struct Response {
+pub(crate) struct Response {
     pub id: u64,
     pub method: String,
     pub result: Result<Value, RpcError>,
 }
 
-/// A JSON-RPC error response: the engine's code, when it gave one, and its
-/// message with any detail it added.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct EngineText(String);
+
+impl std::fmt::Debug for EngineText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes the engine wrote>", self.0.len())
+    }
+}
+
+fn written(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.is_empty())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RpcError {
-    pub code: Option<i64>,
-    pub message: String,
+pub struct RpcError(Answer);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Answer {
+    Refused {
+        code: Option<i64>,
+        said: Option<EngineText>,
+    },
+    WithoutResult,
+}
+
+impl RpcError {
+    pub(crate) fn refusal(error: &Value) -> Self {
+        let message = written(error["message"].as_str());
+        let detail = written(
+            error["data"]["message"]
+                .as_str()
+                .or_else(|| error["data"].as_str()),
+        );
+        let said = match (message, detail) {
+            (Some(message), Some(detail)) if detail.starts_with(message) => Some(detail.to_owned()),
+            (Some(message), Some(detail)) => Some(format!("{message}: {detail}")),
+            (None, Some(said)) | (Some(said), None) => Some(said.to_owned()),
+            (None, None) => None,
+        };
+        Self(Answer::Refused {
+            code: error["code"].as_i64(),
+            said: said.map(EngineText),
+        })
+    }
+
+    const fn without_result() -> Self {
+        Self(Answer::WithoutResult)
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> Option<i64> {
+        match self.0 {
+            Answer::Refused { code, .. } => code,
+            Answer::WithoutResult => None,
+        }
+    }
+
+    #[must_use]
+    pub fn said(&self) -> Option<&str> {
+        match &self.0 {
+            Answer::Refused {
+                said: Some(EngineText(said)),
+                ..
+            } => Some(said),
+            Answer::Refused { said: None, .. } | Answer::WithoutResult => None,
+        }
+    }
 }
 
 impl std::fmt::Display for RpcError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Answer::WithoutResult => f.write_str("the engine answered without a result"),
+            Answer::Refused {
+                code: Some(code), ..
+            } => write!(f, "the engine refused with code {code}"),
+            Answer::Refused { code: None, .. } => f.write_str("the engine refused"),
+        }
     }
 }
 
 impl std::error::Error for RpcError {}
 
-/// Codex's correlation and wire queues; provider semantics stay in its
-/// decoder. No process/task lifecycle is hidden in this value.
+#[must_use]
+pub(crate) fn told(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = diagnostics::chain(error);
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(said) = current.downcast_ref::<RpcError>().and_then(RpcError::said) {
+            text.push_str(". The engine said: ");
+            text.push_str(said);
+        }
+        cause = current.source();
+    }
+    text
+}
+
 #[derive(Default)]
-pub struct State {
-    pub next_id: u64,
+pub(crate) struct State {
+    next_id: u64,
     requests: std::collections::HashMap<u64, String>,
-    pub outbox: Vec<Value>,
-    pub responses: Vec<Response>,
+    pub(crate) outbox: Vec<Value>,
+    pub(crate) responses: Vec<Response>,
 }
 impl State {
-    pub fn request(&mut self, method: &str, params: Value) -> u64 {
+    pub(crate) fn request(&mut self, method: &str, params: Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
         let mut fields = serde_json::Map::new();
@@ -115,19 +257,17 @@ impl State {
         self.outbox.push(message);
         id
     }
-    pub fn sent(&mut self, message: &Value) {
+    fn sent(&mut self, message: &Value) {
         if let (Some(id), Some(method)) = (message["id"].as_u64(), message["method"].as_str()) {
             self.next_id = self.next_id.max(id);
             self.requests.insert(id, method.to_owned());
         }
     }
-    /// Answers the engine's request `rpc`.
-    pub fn reply(&mut self, rpc: Value, result: Value) {
+    pub(crate) fn reply(&mut self, rpc: Value, result: Value) {
         self.answer(rpc, "result", result);
     }
 
-    /// Refuses the engine's request `rpc`.
-    pub fn reply_error(&mut self, rpc: Value, code: i64, message: &str) {
+    pub(crate) fn reply_error(&mut self, rpc: Value, code: i64, message: &str) {
         self.answer(rpc, "error", json!({ "code": code, "message": message }));
     }
 
@@ -138,8 +278,7 @@ impl State {
         self.outbox.push(Value::Object(message));
     }
 
-    /// Correlates a response from its parts.
-    pub fn respond(
+    pub(crate) fn respond(
         &mut self,
         id: &Value,
         result: Option<Value>,
@@ -151,58 +290,13 @@ impl State {
             return None;
         };
         let result = error.map_or_else(
-            || {
-                result.ok_or_else(|| RpcError {
-                    code: None,
-                    message: "engine RPC response omitted result".to_owned(),
-                })
-            },
-            |error| {
-                let message = error["message"].as_str().unwrap_or("engine error");
-                let detail = error["data"]["message"]
-                    .as_str()
-                    .or_else(|| error["data"].as_str());
-                Err(RpcError {
-                    code: error["code"].as_i64(),
-                    message: match detail {
-                        Some(detail) if detail.starts_with(message) => detail.to_owned(),
-                        Some(detail) => format!("{message}: {detail}"),
-                        None => message.to_owned(),
-                    },
-                })
-            },
+            || result.ok_or_else(RpcError::without_result),
+            |error| Err(RpcError::refusal(error)),
         );
         Some(Response { id, method, result })
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn replies_correlate_out_of_order_and_unknown_ids_do_not_consume_requests() {
-        let mut state = State::default();
-        let first = state.request("first", json!({}));
-        let second = state.request("second", json!({}));
-        assert!(state.respond(&json!(999), Some(json!({})), None).is_none());
-        assert_eq!(
-            state
-                .respond(&json!(second), Some(json!({ "ok": true })), None)
-                .unwrap()
-                .method,
-            "second"
-        );
-        let error = json!({ "message": "rejected", "data": { "message": "details" } });
-        assert_eq!(
-            state
-                .respond(&json!(first), None, Some(&error))
-                .unwrap()
-                .result,
-            Err(RpcError {
-                code: None,
-                message: "rejected: details".into()
-            })
-        );
-        assert!(state.requests.is_empty());
-    }
-}
+#[path = "../tests/rpc/unit.rs"]
+mod tests;

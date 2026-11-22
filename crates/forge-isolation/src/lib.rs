@@ -1,13 +1,13 @@
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code, reason = "setiopolicy_np is a C call")]
+#[expect(unsafe_code, reason = "setiopolicy_np is a C call")]
 mod macos;
 #[cfg(unix)]
-#[allow(unsafe_code, reason = "pre_exec runs between fork and exec")]
+#[expect(unsafe_code, reason = "pre_exec runs between fork and exec")]
 mod unix;
 #[cfg(windows)]
-#[allow(unsafe_code, reason = "Win32 process calls")]
+#[expect(unsafe_code, reason = "Win32 process calls")]
 mod windows;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub enum Outcome {
 
 #[cfg(any(target_os = "linux", windows))]
 impl Outcome {
-    pub(crate) fn of<E: std::fmt::Display>(measure: &str, result: Result<(), E>) -> Self {
+    fn of<E: std::fmt::Display>(measure: &str, result: Result<(), E>) -> Self {
         match result {
             Ok(()) => Self::Applied(measure.to_owned()),
             Err(error) => Self::Skipped {
@@ -44,18 +44,104 @@ pub const fn protect_forge() -> Vec<Outcome> {
     Vec::new()
 }
 
+#[cfg(target_os = "linux")]
+pub use linux::{EndRunError, RunGroupError};
+
+#[cfg(not(target_os = "linux"))]
+pub type RunGroupError = std::convert::Infallible;
+
+#[cfg(not(target_os = "linux"))]
+pub type EndRunError = std::convert::Infallible;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Containment {
+    OwnCgroup,
+    Shared,
+}
+
+#[derive(Debug)]
+pub struct EngineTree {
+    #[cfg(target_os = "linux")]
+    cgroup: linux::Cgroup,
+}
+
+impl EngineTree {
+    #[cfg(target_os = "linux")]
+    pub fn new(containment: Containment) -> Result<Self, RunGroupError> {
+        let cgroup = match containment {
+            Containment::OwnCgroup => linux::Cgroup::own()?,
+            Containment::Shared => linux::Cgroup::shared(),
+        };
+        Ok(Self { cgroup })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as Linux, where making the run's cgroup can fail"
+    )]
+    pub const fn new(_containment: Containment) -> Result<Self, RunGroupError> {
+        Ok(Self {})
+    }
+
+    #[cfg(target_os = "linux")]
+    fn membership(&self) -> Option<std::ffi::CString> {
+        self.cgroup.membership()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn kill_switch(&self) -> Option<std::ffi::CString> {
+        self.cgroup.kill_switch()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn end(&self) -> Result<(), EndRunError> {
+        self.cgroup.end()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[expect(
+        clippy::unnecessary_wraps,
+        clippy::unused_self,
+        reason = "the same signature as Linux, where killing the run's cgroup can fail"
+    )]
+    pub const fn end(&self) -> Result<(), EndRunError> {
+        Ok(())
+    }
+}
+
 #[cfg(unix)]
-pub fn contain(command: &mut std::process::Command) {
-    unix::contain(command);
+pub use unix::ContainError;
+
+#[cfg(not(unix))]
+pub type ContainError = std::convert::Infallible;
+
+#[cfg(unix)]
+pub fn contain(command: &mut std::process::Command, tree: &EngineTree) -> Result<(), ContainError> {
+    unix::contain(command, tree)
 }
 
 #[cfg(not(unix))]
-pub const fn contain(_command: &mut std::process::Command) {}
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as Unix, where opening Forge's lifeline pipe can fail"
+)]
+pub const fn contain(
+    _command: &mut std::process::Command,
+    _tree: &EngineTree,
+) -> Result<(), ContainError> {
+    Ok(())
+}
 
 #[cfg(windows)]
-pub fn started(process_id: u32) {
+pub fn started(_tree: &EngineTree, process_id: u32) {
     windows::demote(process_id);
 }
 
-#[cfg(not(windows))]
-pub const fn started(_process_id: u32) {}
+#[cfg(target_os = "linux")]
+pub fn started(tree: &EngineTree, process_id: u32) {
+    linux::started(&tree.cgroup, process_id);
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub const fn started(_tree: &EngineTree, _process_id: u32) {}

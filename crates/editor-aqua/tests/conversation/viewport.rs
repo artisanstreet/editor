@@ -1,9 +1,5 @@
 use editor_aqua::conversation::viewport::{Effect, Fetch, Input, Jump, State, Viewport};
 
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "tests read as a sequence of inputs handed to the viewport"
-)]
 fn send(viewport: &mut Viewport, input: Input) -> Vec<Effect> {
     let mut effects = Vec::new();
     viewport.handle_with_context(&input, &mut effects);

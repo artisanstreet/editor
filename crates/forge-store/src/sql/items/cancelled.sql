@@ -1,0 +1,1 @@
+SELECT body FROM items WHERE run_id=?1 AND status='cancelled' ORDER BY position

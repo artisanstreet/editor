@@ -1,71 +1,272 @@
-//! Spawning an engine and speaking JSON lines over its stdio.
-
 use crate::Turn;
-use crate::trace::{Kind, Trace};
-use anyhow::{Context, Result};
-use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, KillOnDrop};
+use crate::trace::{Kind, Secrets, Trace};
+use artisan_api::EngineId;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 
-/// Longest stdout line we accept. Exceeding this fails the protocol exchange.
-pub const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
-const STDERR_TAIL_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
+const PROBE_STDERR_BYTES: usize = 8 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+pub enum SpawnError {
+    #[error("make the process tree of {}", program.display())]
+    Tree {
+        program: PathBuf,
+        #[source]
+        source: forge_isolation::RunGroupError,
+    },
+    #[error("contain the process tree of {}", program.display())]
+    Contain {
+        program: PathBuf,
+        #[source]
+        source: forge_isolation::ContainError,
+    },
+    #[error("start {}", program.display())]
+    Start {
+        program: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Exit {
+    #[error("exited with code {0}")]
+    Code(i32),
+    #[error("was ended by a signal")]
+    Signal,
+    #[error("couldn't be waited for")]
+    Unreaped(#[source] std::io::Error),
+    #[error("was stopped by Forge after its output closed")]
+    Killed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StderrWritten {
+    bytes: u64,
+    trace: Option<Arc<str>>,
+}
+
+impl StderrWritten {
+    #[must_use]
+    pub(crate) const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl std::fmt::Display for StderrWritten {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.bytes, &self.trace) {
+            (0, _) => write!(f, "nothing on stderr"),
+            (bytes, Some(trace)) => write!(
+                f,
+                "{bytes} bytes on stderr, kept in the engine trace {trace}"
+            ),
+            (bytes, None) => write!(f, "{bytes} bytes on stderr"),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum StderrUse {
+    Traced,
+    Captured(Arc<Mutex<Vec<u8>>>),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    #[error("stdin of {} is closed", program.display())]
+    StdinClosed { program: PathBuf },
+    #[error("encode a message for {}", program.display())]
+    Encode {
+        program: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("write to {}", program.display())]
+    Write {
+        program: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReadError {
+    #[error("read the output of {}", program.display())]
+    Read {
+        program: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} wrote a line over {limit} bytes", program.display())]
+    Oversized { program: PathBuf, limit: usize },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    #[error("start the probe")]
+    Spawn(#[source] SpawnError),
+    #[error("read the output of probe {}", program.display())]
+    Read {
+        program: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("probe {} wrote over {limit} bytes", program.display())]
+    Oversized { program: PathBuf, limit: usize },
+    #[error("wait for probe {}", program.display())]
+    Wait {
+        program: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("probe {} gave no answer in {}s", program.display(), after.as_secs())]
+    TimedOut {
+        program: PathBuf,
+        after: std::time::Duration,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct StdinWriter {
+    program: PathBuf,
+    stdin: ChildStdin,
+    trace: Trace,
+}
+
+impl StdinWriter {
+    pub(crate) async fn send(&mut self, value: &serde_json::Value) -> Result<(), SendError> {
+        let mut bytes = serde_json::to_vec(value).map_err(|source| SendError::Encode {
+            program: self.program.clone(),
+            source,
+        })?;
+        self.trace
+            .record(Kind::In, &String::from_utf8_lossy(&bytes));
+        bytes.push(b'\n');
+        let written = match self.stdin.write_all(&bytes).await {
+            Ok(()) => self.stdin.flush().await,
+            Err(error) => Err(error),
+        };
+        written.map_err(|source| SendError::Write {
+            program: self.program.clone(),
+            source,
+        })
+    }
+}
+
+#[derive(Debug)]
 pub struct EngineProcess {
+    program: PathBuf,
     child: OwnedChild,
-    stdin: Option<ChildStdin>,
+    stdin: Option<StdinWriter>,
     stdout: BufReader<ChildStdout>,
-    stderr_tail: Arc<Mutex<String>>,
+    stderr_bytes: Arc<AtomicU64>,
     line: Vec<u8>,
+    line_limit: usize,
     oversized: bool,
     trace: Trace,
     stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
 }
 
-/// Starts `turn.binary` with `args` in `turn.cwd`, `HOME` set to the
-/// engine home and the launch environment applied. The process dies with
-/// the returned value.
-pub fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess> {
+pub(crate) async fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess, SpawnError> {
     spawn_in(
         turn,
         args,
         &turn.cwd,
         &format!("{}-{}", turn.engine, turn.thread_id),
     )
+    .await
 }
 
-/// [`spawn`] for a process that outlives `turn`: it starts in `cwd` and
-/// traces under `name` rather than the turn's project and thread.
-pub(crate) fn spawn_in(
+pub(crate) async fn spawn_in(
     turn: &Turn,
     args: &[String],
     cwd: &std::path::Path,
     name: &str,
-) -> Result<EngineProcess> {
+) -> Result<EngineProcess, SpawnError> {
+    let turn = turn.clone();
+    let args = args.to_vec();
+    let cwd = cwd.to_path_buf();
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || spawn_now(&turn, &args, &cwd, &name))
+        .await
+        .expect("invariant: preparing and starting an engine process does not panic")
+}
+
+fn spawn_now(
+    turn: &Turn,
+    args: &[String],
+    cwd: &std::path::Path,
+    name: &str,
+) -> Result<EngineProcess, SpawnError> {
+    let gateway = match turn.engine {
+        EngineId::Claude if !turn.launch.gateway_mcp.is_empty() => Some(
+            crate::customise::GatewayConfig::for_claude(&turn.launch.gateway_mcp),
+        ),
+        EngineId::Claude | EngineId::Codex | EngineId::OpenCode => None,
+    };
+    let launch_args = gateway.as_ref().map_or_else(
+        || turn.launch.args.clone(),
+        |gateway| gateway.claude_args(&turn.launch.args),
+    );
     let mut command = crate::account::engine_command(turn.engine, &turn.binary, &turn.home);
     command
         .args(args)
-        .args(&turn.launch.args)
+        .args(&launch_args)
         .current_dir(cwd)
         .envs(turn.launch.env.iter().map(|(key, value)| (key, value)))
+        .envs(
+            gateway
+                .iter()
+                .flat_map(crate::customise::GatewayConfig::env),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let trace = Trace::start(turn.trace_dir.as_deref(), name);
-    spawn_command(command, trace)
-        .with_context(|| format!("starting {} in {}", turn.binary.display(), cwd.display()))
+    let trace = turn
+        .trace_dir
+        .as_deref()
+        .map_or_else(Trace::default, |dir| {
+            let environment = crate::trace::effective_environment(command.as_std());
+            Trace::start(dir, name, Secrets::of(&turn.launch, &environment)).map_or_else(
+                |failure| {
+                    let error: &dyn std::error::Error = &failure;
+                    tracing::warn!(error, "this engine process runs without a diagnostic trace");
+                    Trace::default()
+                },
+                |started| started.trace,
+            )
+        });
+    spawn_command(command, trace, containment(turn), StderrUse::Traced)
 }
 
-pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess> {
-    spawn_command(command, Trace::default())
+pub(crate) const fn containment(turn: &Turn) -> forge_isolation::Containment {
+    match turn.config.permissions {
+        artisan_api::Permissions::Auto => forge_isolation::Containment::OwnCgroup,
+        artisan_api::Permissions::Full => forge_isolation::Containment::Shared,
+    }
 }
 
+pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError> {
+    spawn_command(
+        command,
+        Trace::default(),
+        forge_isolation::Containment::Shared,
+        StderrUse::Traced,
+    )
+}
+
+#[derive(Debug)]
 pub(crate) struct OwnedChild {
     child: Box<dyn ChildWrapper>,
-    armed: bool,
+    teardown: Option<Teardown>,
 }
 impl std::ops::Deref for OwnedChild {
     type Target = dyn ChildWrapper;
@@ -79,94 +280,178 @@ impl std::ops::DerefMut for OwnedChild {
     }
 }
 impl OwnedChild {
-    pub(crate) fn shutdown(&mut self) {
-        if self.armed {
-            // A child that already exited has nothing to kill.
-            self.child.start_kill().ok();
-            self.armed = false;
+    fn start_kill(&mut self) {
+        if let Err(error) = self.child.start_kill() {
+            tracing::debug!(%error, "the engine process had already exited when it was ended");
+        }
+    }
+
+    pub(crate) async fn end(&mut self) {
+        if let Some(teardown) = self.teardown.take() {
+            self.start_kill();
+            tokio::task::spawn_blocking(move || teardown.run())
+                .await
+                .expect("invariant: ending an engine's process tree does not panic");
         }
     }
 }
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        self.shutdown();
+        if let Some(teardown) = self.teardown.take() {
+            self.start_kill();
+            teardown.detach();
+        }
     }
 }
 
 #[derive(Debug)]
-struct Isolated;
+struct Teardown {
+    tree: forge_isolation::EngineTree,
+}
 
-impl CommandWrapper for Isolated {
-    fn pre_spawn(&mut self, command: &mut Command, _core: &CommandWrap) -> std::io::Result<()> {
-        forge_isolation::contain(command.as_std_mut());
-        Ok(())
+impl Teardown {
+    fn run(self) {
+        end_tree(&self.tree);
     }
 
-    fn post_spawn(
-        &mut self,
-        _command: &mut Command,
-        child: &mut tokio::process::Child,
-        _core: &CommandWrap,
-    ) -> std::io::Result<()> {
-        if let Some(process_id) = child.id() {
-            forge_isolation::started(process_id);
+    fn detach(self) {
+        let (handing, handed) = std::sync::mpsc::channel::<Self>();
+        let reaper = std::thread::Builder::new()
+            .name("engine-teardown".to_owned())
+            .spawn(move || {
+                if let Ok(teardown) = handed.recv() {
+                    teardown.run();
+                }
+            });
+        match reaper {
+            Ok(_detached) => {
+                if let Err(std::sync::mpsc::SendError(teardown)) = handing.send(self) {
+                    teardown.run();
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no thread to end an engine's process tree on; ending it here");
+                self.run();
+            }
         }
-        Ok(())
     }
 }
 
-pub(crate) fn owned_command(command: Command) -> Result<OwnedChild> {
+fn end_tree(tree: &forge_isolation::EngineTree) {
+    if let Err(failure) = tree.end() {
+        let error: &dyn std::error::Error = &failure;
+        tracing::warn!(error, "an engine run's processes may outlive it");
+    }
+}
+
+pub(crate) fn owned_command(
+    mut command: Command,
+    containment: forge_isolation::Containment,
+) -> Result<OwnedChild, SpawnError> {
+    let program = PathBuf::from(command.as_std().get_program());
+    let tree =
+        forge_isolation::EngineTree::new(containment).map_err(|source| SpawnError::Tree {
+            program: program.clone(),
+            source,
+        })?;
+    forge_isolation::contain(command.as_std_mut(), &tree).map_err(|source| {
+        SpawnError::Contain {
+            program: program.clone(),
+            source,
+        }
+    })?;
     let mut command = CommandWrap::from(command);
     command.wrap(KillOnDrop);
-    command.wrap(Isolated);
     #[cfg(unix)]
     command.wrap(process_wrap::tokio::ProcessGroup::leader());
     #[cfg(windows)]
     command.wrap(process_wrap::tokio::JobObject);
-    command
-        .spawn()
-        .map(|child| OwnedChild { child, armed: true })
-        .context("starting engine process")
+    match command.spawn() {
+        Ok(child) => {
+            if let Some(process_id) = child.id() {
+                forge_isolation::started(&tree, process_id);
+            }
+            Ok(OwnedChild {
+                child,
+                teardown: Some(Teardown { tree }),
+            })
+        }
+        Err(source) => {
+            Teardown { tree }.detach();
+            Err(SpawnError::Start { program, source })
+        }
+    }
 }
 
-fn spawn_command(command: Command, trace: Trace) -> Result<EngineProcess> {
-    let mut child = owned_command(command)?;
+fn spawn_command(
+    mut command: Command,
+    trace: Trace,
+    containment: forge_isolation::Containment,
+    stderr_use: StderrUse,
+) -> Result<EngineProcess, SpawnError> {
+    let program = PathBuf::from(command.as_std().get_program());
+    command.stdout(Stdio::piped());
+    let mut child = owned_command(command, containment)?;
     trace.record(Kind::Note, &format!("started (pid {:?})", child.id()));
-    let stdin = child.stdin().take();
-    let stdout = BufReader::new(child.stdout().take().context("engine stdout")?);
-    let stderr_tail = Arc::new(Mutex::new(String::new()));
+    let stdin = child.stdin().take().map(|stdin| StdinWriter {
+        program: program.clone(),
+        stdin,
+        trace: trace.clone(),
+    });
+    let stdout = BufReader::new(child.stdout().take().unwrap_or_else(|| {
+        unreachable!(
+            "invariant: {} was spawned with a piped stdout",
+            program.display()
+        )
+    }));
+    let stderr_bytes = Arc::new(AtomicU64::new(0));
+    let captured = match stderr_use {
+        StderrUse::Traced => None,
+        StderrUse::Captured(captured) => Some(captured),
+    };
     let stderr_task = child.stderr().take().map(|mut stderr| {
-        let tail = Arc::clone(&stderr_tail);
+        let counted = Arc::clone(&stderr_bytes);
         let stderr_trace = trace.clone();
+        let reader_program = program.clone();
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let mut buffer = vec![0_u8; 4096];
-            while let Ok(read) = stderr.read(&mut buffer).await {
-                if read == 0 {
-                    break;
-                }
-                let text = String::from_utf8_lossy(&buffer[..read]);
-                tracing::debug!(target: "engine_stderr", "{}", text.trim_end());
-                stderr_trace.record(Kind::Stderr, &text);
-                let mut tail = tail
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                tail.push_str(&text);
-                if tail.len() > STDERR_TAIL_BYTES {
-                    let mut cut = tail.len() - STDERR_TAIL_BYTES;
-                    while !tail.is_char_boundary(cut) {
-                        cut += 1;
+            let mut traced = stderr_trace.stream(Kind::Stderr);
+            loop {
+                let read = match stderr.read(&mut buffer).await {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(error) => {
+                        tracing::debug!(program = %reader_program.display(), %error, "stopped reading the engine's stderr");
+                        break;
                     }
-                    tail.drain(..cut);
+                };
+                counted.fetch_add(read as u64, Ordering::Relaxed);
+                traced.write(&buffer[..read]);
+                if let Some(captured) = &captured {
+                    let mut captured = captured
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    captured.extend_from_slice(&buffer[..read]);
+                    let excess = captured.len().saturating_sub(PROBE_STDERR_BYTES);
+                    captured.drain(..excess);
                 }
             }
+            tracing::debug!(
+                target: "engine_stderr",
+                program = %reader_program.display(),
+                bytes = counted.load(Ordering::Relaxed),
+                "the engine's stderr closed"
+            );
         }))
     });
     Ok(EngineProcess {
+        program,
         child,
         stdin,
         stdout,
-        stderr_tail,
+        stderr_bytes,
         line: Vec::new(),
+        line_limit: MAX_LINE_BYTES,
         oversized: false,
         trace,
         stderr_task,
@@ -174,51 +459,47 @@ fn spawn_command(command: Command, trace: Trace) -> Result<EngineProcess> {
 }
 
 impl EngineProcess {
-    /// Writes one JSON value and a newline.
-    pub async fn send(&mut self, value: &serde_json::Value) -> Result<()> {
-        let stdin = self.stdin.as_mut().context("engine stdin is closed")?;
-        let mut bytes = serde_json::to_vec(value)?;
-        self.trace
-            .record(Kind::In, &String::from_utf8_lossy(&bytes));
-        bytes.push(b'\n');
-        stdin
-            .write_all(&bytes)
-            .await
-            .context("writing to the engine")?;
-        stdin.flush().await.context("writing to the engine")?;
-        Ok(())
+    pub(crate) const fn with_line_limit(mut self, limit: usize) -> Self {
+        self.line_limit = limit;
+        self
     }
 
-    #[must_use]
-    pub const fn stdin_open(&self) -> bool {
-        self.stdin.is_some()
+    pub(crate) async fn send(&mut self, value: &serde_json::Value) -> Result<(), SendError> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(SendError::StdinClosed {
+                program: self.program.clone(),
+            });
+        };
+        stdin.send(value).await
     }
 
-    /// Closes stdin, which tells line-mode CLIs to finish. `why` goes to
-    /// the trace: closing it early is what ends background agents mid-work.
-    pub fn close_stdin(&mut self, why: &str) {
+    pub(crate) fn take_stdin(&mut self) -> Result<StdinWriter, SendError> {
+        self.stdin.take().ok_or_else(|| SendError::StdinClosed {
+            program: self.program.clone(),
+        })
+    }
+
+    pub(crate) fn close_stdin(&mut self, why: &str) {
         self.trace
             .record(Kind::Note, &format!("closing stdin: {why}"));
         self.stdin = None;
     }
 
-    /// Records a decision about this process in its trace.
-    pub fn note(&self, text: &str) {
+    pub(crate) fn note(&self, text: &str) {
         self.trace.record(Kind::Note, text);
     }
 
-    /// The next stdout line, or `None` at end of output.
-    ///
-    /// Cancel-safe: a partly read line stays buffered, so this can sit in a
-    /// `select!` beside the run's inbox.
-    pub async fn next_line(&mut self) -> Result<Option<String>> {
+    pub(crate) async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
         loop {
             loop {
                 let available = self
                     .stdout
                     .fill_buf()
                     .await
-                    .context("reading engine output")?;
+                    .map_err(|source| ReadError::Read {
+                        program: self.program.clone(),
+                        source,
+                    })?;
                 if available.is_empty() {
                     if self.line.is_empty() && !self.oversized {
                         return Ok(None);
@@ -230,7 +511,7 @@ impl EngineProcess {
                     .position(|byte| *byte == b'\n')
                     .map_or((available, false), |index| (&available[..=index], true));
                 let used = chunk.len();
-                if !self.oversized && self.line.len() + used <= MAX_LINE_BYTES {
+                if !self.oversized && self.line.len() + used <= self.line_limit {
                     self.line.extend_from_slice(chunk);
                 } else {
                     self.oversized = true;
@@ -241,84 +522,129 @@ impl EngineProcess {
                     break;
                 }
             }
-            let line = std::mem::take(&mut self.line);
+            let mut line = std::mem::take(&mut self.line);
             if std::mem::take(&mut self.oversized) {
-                anyhow::bail!("engine output line exceeds {MAX_LINE_BYTES} bytes");
+                return Err(ReadError::Oversized {
+                    program: self.program.clone(),
+                    limit: self.line_limit,
+                });
             }
-            let text = String::from_utf8_lossy(&line);
-            let text = text.trim_end_matches(['\n', '\r']);
-            self.trace.record(Kind::Out, text);
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            let text = String::from_utf8(line)
+                .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned());
+            self.trace.record(Kind::Out, &text);
             if text.trim().is_empty() {
+                self.line = text.into_bytes();
+                self.line.clear();
                 continue;
             }
-            return Ok(Some(text.to_owned()));
+            return Ok(Some(text));
         }
     }
 
-    /// The last few KB the engine wrote to stderr, for error messages.
     #[must_use]
-    pub fn stderr_tail(&self) -> String {
-        self.stderr_tail
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .trim()
-            .to_owned()
+    pub(crate) fn stderr(&self) -> StderrWritten {
+        StderrWritten {
+            bytes: self.stderr_bytes.load(Ordering::Relaxed),
+            trace: self.trace.name(),
+        }
     }
 
-    /// Ends the process (and its group on Unix).
-    pub async fn kill(&mut self) {
+    pub(crate) async fn kill(&mut self) {
         self.trace.record(Kind::Note, "killing the process");
-        self.child.shutdown();
-        // Only reaps it; how it ended doesn't matter once killed.
-        self.child.wait().await.ok();
+        self.child.end().await;
+        if let Err(failure) = self.child.wait().await {
+            let error: &dyn std::error::Error = &failure;
+            tracing::debug!(program = %self.program.display(), error, "couldn't reap a killed engine process");
+        }
     }
 
-    /// Waits for the process to exit and returns its exit code.
-    pub async fn wait(&mut self) -> Option<i32> {
+    pub(crate) async fn finish(&mut self) {
+        if let Exit::Unreaped(error) = self.wait().await {
+            tracing::debug!(program = %self.program.display(), %error, "couldn't reap a finished engine process");
+        }
+    }
+
+    pub(crate) async fn wait(&mut self) -> Exit {
         let status = self.child.wait().await;
-        self.child.shutdown();
+        self.child.end().await;
         self.trace
             .record(Kind::Note, &format!("exited: {status:?}"));
-        status.ok().and_then(|status| status.code())
+        match status {
+            Ok(status) => status.code().map_or(Exit::Signal, Exit::Code),
+            Err(error) => Exit::Unreaped(error),
+        }
     }
 }
 
-/// Short CLI probe with bounded output and one timeout. Overflow ends the
-/// process rather than leaving it blocked on an unread pipe.
 pub async fn probe(
     mut command: Command,
     timeout: std::time::Duration,
     limit: usize,
-) -> Result<std::process::Output> {
+) -> Result<std::process::Output, ProbeError> {
     command
         .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut process = spawn_probe(command)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut process = spawn_command(
+        command,
+        Trace::default(),
+        forge_isolation::Containment::Shared,
+        StderrUse::Captured(Arc::clone(&captured)),
+    )
+    .map_err(ProbeError::Spawn)?;
+    let program = process.program.clone();
     let result = tokio::time::timeout(timeout, async {
         let mut stdout = Vec::new();
         (&mut process.stdout)
             .take(limit as u64 + 1)
             .read_to_end(&mut stdout)
-            .await?;
-        anyhow::ensure!(
-            stdout.len() <= limit,
-            "engine probe output exceeds {limit} bytes"
-        );
-        let status = process.child.wait().await?;
-        process.child.shutdown();
-        if let Some(stderr) = process.stderr_task.take() {
-            // Its tail is what matters; a reader that failed left it as is.
-            stderr.await.ok();
+            .await
+            .map_err(|source| ProbeError::Read {
+                program: program.clone(),
+                source,
+            })?;
+        if stdout.len() > limit {
+            return Err(ProbeError::Oversized {
+                program: program.clone(),
+                limit,
+            });
         }
-        Ok::<_, anyhow::Error>(std::process::Output {
+        let status = process
+            .child
+            .wait()
+            .await
+            .map_err(|source| ProbeError::Wait {
+                program: program.clone(),
+                source,
+            })?;
+        process.child.end().await;
+        if let Some(stderr) = process.stderr_task.take()
+            && let Err(failure) = stderr.await
+        {
+            let error: &dyn std::error::Error = &failure;
+            tracing::debug!(program = %program.display(), error, "a probe's stderr reader ended early");
+        }
+        Ok(std::process::Output {
             stdout,
-            stderr: process.stderr_tail().into_bytes(),
+            stderr: std::mem::take(
+                &mut *captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ),
             status,
         })
     })
     .await
-    .context("engine probe timed out")?;
+    .unwrap_or_else(|_elapsed| {
+        Err(ProbeError::TimedOut {
+            program: program.clone(),
+            after: timeout,
+        })
+    });
     if result.is_err() {
         process.kill().await;
     }
@@ -327,97 +653,35 @@ pub async fn probe(
 
 #[cfg(test)]
 #[cfg(unix)]
-mod reform_tests {
-    use super::*;
-    #[tokio::test]
-    async fn dropping_the_owner_closes_pipes_held_by_descendants() {
-        let mut command = Command::new("sh");
-        command
-            .args(["-c", "sleep 30 & echo ready; wait"])
-            .stdout(Stdio::piped());
-        let mut child = owned_command(command).unwrap();
-        let mut pipe = BufReader::new(child.stdout().take().unwrap());
-        let mut ready = String::new();
-        pipe.read_line(&mut ready).await.unwrap();
-        assert_eq!(ready.trim(), "ready");
-        drop(child);
-        let mut rest = Vec::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            pipe.read_to_end(&mut rest),
-        )
-        .await
-        .expect("descendant inherited stdout must close with the owner")
-        .unwrap();
-    }
+#[path = "../tests/process/gateway.rs"]
+mod gateway_tests;
 
-    #[tokio::test]
-    async fn oversized_probe_fails_without_waiting_for_a_blocked_pipe() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "head -c 1048576 /dev/zero; sleep 30"]);
-        let result = probe(command, std::time::Duration::from_secs(2), 4096).await;
-        assert!(result.unwrap_err().to_string().contains("exceeds"));
-    }
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/process/logs.rs"]
+mod log_tests;
 
-    #[tokio::test]
-    async fn oversized_engine_line_is_a_protocol_error() {
-        let home = tempfile::tempdir().unwrap();
-        let turn = Turn {
-            thread_id: artisan_api::ThreadId::from("bounded-output"),
-            engine: artisan_api::EngineId::Codex,
-            binary: "/bin/sh".into(),
-            home: home.path().into(),
-            cwd: home.path().into(),
-            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
-            session_id: None,
-            input: crate::UserInput::default(),
-            launch: crate::Launch::default(),
-            trace_dir: None,
-        };
-        let mut process = spawn(
-            &turn,
-            &[
-                "-c".into(),
-                format!("head -c {} /dev/zero; printf '\\n'", MAX_LINE_BYTES + 1),
-            ],
-        )
-        .unwrap();
-        let error = tokio::time::timeout(std::time::Duration::from_secs(5), process.next_line())
-            .await
-            .unwrap()
-            .unwrap_err();
-        assert!(error.to_string().contains("exceeds"));
-    }
-}
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+#[path = "../tests/process/cgroup.rs"]
+mod cgroup_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/process/containment.rs"]
+mod containment_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/process/reform.rs"]
+mod reform_tests;
 
 #[cfg(test)]
 #[cfg(windows)]
-mod windows_owner_tests {
-    use super::*;
-    #[tokio::test]
-    async fn native_job_drop_closes_pipes_held_by_its_own_descendants() {
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/c ping -n 30 127.0.0.1 >NUL' -NoNewWindow -PassThru; Write-Output 'ready'; Wait-Process -Id $child.Id"])
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = owned_command(command).unwrap();
-        let mut pipe = BufReader::new(child.stdout().take().unwrap());
-        let mut ready = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            pipe.read_line(&mut ready),
-        )
-        .await
-        .expect("owned native parent must start its descendant")
-        .unwrap();
-        assert_eq!(ready.trim(), "ready");
-        drop(child);
-        let mut rest = Vec::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pipe.read_to_end(&mut rest),
-        )
-        .await
-        .expect("native JobObject drop must close descendant stdout")
-        .unwrap();
-    }
-}
+#[path = "../tests/process/windows_owner.rs"]
+mod windows_owner_tests;
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../tests/process/redaction.rs"]
+mod redaction_tests;

@@ -1,9 +1,3 @@
-//! The claude.ai turn, as it came off the wire.
-//!
-//! A recorded turn, so the decoder's shape is pinned: the text is written
-//! out with the message, the provider's recap is published whole, and a
-//! tool the provider ran itself is not the caller's to run.
-
 use forge_engines::claudeai::ClaudeAiDecoder;
 use forge_engines::{EngineEvent, LiveKind};
 

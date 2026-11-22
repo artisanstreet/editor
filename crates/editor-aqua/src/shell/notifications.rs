@@ -1,4 +1,4 @@
-use crate::core::HostId;
+use crate::core::{HostId, HostSwitch};
 use aqua::prelude::Notification;
 use artisan_api::{Run, RunStatus, Thread, ThreadId};
 use std::collections::{HashMap, HashSet};
@@ -10,7 +10,8 @@ pub trait NotificationHost {
     fn run(&self, thread: &ThreadId) -> Option<&Run>;
     fn is_working(&self, thread: &ThreadId) -> bool;
     fn is_waiting(&self, thread: &ThreadId) -> bool;
-    fn setting(&self, key: &str) -> Option<&serde_json::Value>;
+    fn is_deleted(&self, thread: &ThreadId) -> bool;
+    fn switch(&self, switch: HostSwitch) -> bool;
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -22,7 +23,13 @@ struct Mark {
 #[derive(Default)]
 pub struct Notifications {
     marks: HashMap<HostId, Option<HashMap<ThreadId, Mark>>>,
-    posted: HashSet<(HostId, ThreadId)>,
+    posted: HashMap<HostId, HashSet<ThreadId>>,
+}
+
+impl std::fmt::Debug for Notifications {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Notifications").finish_non_exhaustive()
+    }
 }
 
 impl Notifications {
@@ -39,43 +46,52 @@ impl Notifications {
         self.marks.insert(host.id().clone(), baseline);
     }
 
-    pub fn sync_connection(&mut self, host: &impl NotificationHost) {
+    pub(crate) fn sync_connection(&mut self, host: &impl NotificationHost) {
         if !host.is_live() || !matches!(self.marks.get(host.id()), Some(Some(_))) {
             self.reset(host);
         }
     }
 
-    pub fn retain_hosts(&mut self, live: &[HostId]) -> Vec<String> {
+    pub(crate) fn retain_hosts(&mut self, live: &[HostId]) -> Vec<String> {
         self.marks.retain(|id, _| live.contains(id));
         let mut gone = Vec::new();
-        self.posted.retain(|(host, thread)| {
+        self.posted.retain(|host, threads| {
             let keep = live.contains(host);
             if !keep {
-                gone.push(tag(host, thread));
+                gone.extend(threads.iter().map(|thread| tag(host, thread)));
             }
             keep
         });
         gone
     }
 
-    pub fn withdraw(&mut self, host: &impl NotificationHost) -> Vec<String> {
+    fn withdraw(&mut self, host: &impl NotificationHost) -> Vec<String> {
         let mut settled = Vec::new();
-        self.posted.retain(|(id, thread)| {
-            let wanted = id != host.id()
-                || host.is_waiting(thread)
-                || host
-                    .threads()
-                    .get(thread)
-                    .is_none_or(|info| !info.archived && info.is_unread());
-            if !wanted {
-                settled.push(tag(id, thread));
-            }
-            wanted
-        });
+        if let Some(threads) = self.posted.get_mut(host.id()) {
+            threads.retain(|thread| {
+                let wanted = wanted(host, thread);
+                if !wanted {
+                    settled.push(tag(host.id(), thread));
+                }
+                wanted
+            });
+        }
         settled
     }
 
-    pub fn observe(
+    fn withdraw_thread(&mut self, host: &impl NotificationHost, thread: &ThreadId) -> Vec<String> {
+        let posted = self
+            .posted
+            .get_mut(host.id())
+            .is_some_and(|threads| !wanted(host, thread) && threads.remove(thread));
+        if posted {
+            vec![tag(host.id(), thread)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn observe(
         &mut self,
         host: &impl NotificationHost,
         thread: &ThreadId,
@@ -108,16 +124,11 @@ impl Notifications {
         let body = if now.waiting && !previous.waiting {
             format!("{engine} asked you a question.")
         } else if previous.working && !now.working {
-            match host.run(thread).map(|run| run.status) {
+            match host.run(thread).map(Run::status) {
                 Some(RunStatus::Done) => "Finished.".to_owned(),
                 Some(RunStatus::Failed) if info.parked_until.is_some() => return None,
                 Some(RunStatus::Failed) => format!("{engine} ran into an error."),
-                Some(RunStatus::Interrupted)
-                    if host
-                        .setting("continue_after_restart")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true) =>
-                {
+                Some(RunStatus::Interrupted) if host.switch(HostSwitch::ContinueAfterRestart) => {
                     return None;
                 }
                 Some(RunStatus::Interrupted) => "Stopped because Forge shut down.".to_owned(),
@@ -127,7 +138,10 @@ impl Notifications {
         } else {
             return None;
         };
-        self.posted.insert((host.id().clone(), thread.clone()));
+        self.posted
+            .entry(host.id().clone())
+            .or_default()
+            .insert(thread.clone());
         Some(Notification {
             tag: tag(host.id(), thread),
             title: info.title.clone().unwrap_or_else(|| "A thread".into()),
@@ -135,6 +149,15 @@ impl Notifications {
             actions: Vec::new(),
         })
     }
+}
+
+fn wanted(host: &impl NotificationHost, thread: &ThreadId) -> bool {
+    host.is_waiting(thread)
+        || !host.is_deleted(thread)
+            && host
+                .threads()
+                .get(thread)
+                .is_none_or(|info| !info.archived && info.is_unread())
 }
 
 fn mark(host: &impl NotificationHost, thread: &ThreadId) -> Mark {
@@ -148,11 +171,12 @@ pub fn tag(host: &HostId, thread: &ThreadId) -> String {
     format!("{host}|{}", thread.0)
 }
 
-pub fn parse_tag(tag: &str) -> Option<(HostId, ThreadId)> {
+pub(crate) fn parse_tag(tag: &str) -> Option<(HostId, ThreadId)> {
     let (host, thread) = tag.split_once('|')?;
     Some((HostId(host.to_owned()), ThreadId(thread.to_owned())))
 }
 
+#[derive(Debug)]
 pub struct NotificationChanges {
     pub withdraw: Vec<String>,
     pub show: Option<Notification>,
@@ -166,7 +190,7 @@ impl Notifications {
         watching: Option<&ThreadId>,
         enabled: bool,
     ) -> NotificationChanges {
-        let withdraw = self.withdraw(host);
+        let withdraw = self.withdraw_thread(host, thread);
         let notification = self.observe(host, thread, watching);
         NotificationChanges {
             withdraw,
@@ -199,7 +223,13 @@ impl NotificationHost for crate::core::HostData {
     fn is_waiting(&self, thread: &ThreadId) -> bool {
         self.is_waiting(thread)
     }
-    fn setting(&self, key: &str) -> Option<&serde_json::Value> {
-        self.setting(key)
+    fn is_deleted(&self, thread: &ThreadId) -> bool {
+        matches!(
+            self.thread_unavailable(thread),
+            Some(crate::core::ThreadUnavailable::Deleted)
+        )
+    }
+    fn switch(&self, switch: HostSwitch) -> bool {
+        self.switch(switch)
     }
 }

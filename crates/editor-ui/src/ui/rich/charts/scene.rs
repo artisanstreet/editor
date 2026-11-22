@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use aqua_core::{GpuiBackground, GpuiHsla, Point, Rect, Transform2D};
 pub(crate) type Probe = Rc<Cell<Option<Rect>>>;
 
 #[derive(Clone, Debug)]
-pub(crate) enum Shape {
+pub enum Shape {
     Line {
         points: Vec<(f32, f32)>,
         width: f32,
@@ -56,14 +56,143 @@ pub(crate) fn fractions(probe: &Probe, position: Point) -> Option<(f32, f32)> {
 fn at(bounds: Rect, (x, y): (f32, f32)) -> Point {
     let x = if x.is_finite() { x } else { 0.0 };
     let y = if y.is_finite() { y } else { 0.0 };
-    Point::new(bounds.x + bounds.w * x, bounds.y + bounds.h * y)
+    Point::new(bounds.w.mul_add(x, bounds.x), bounds.h.mul_add(y, bounds.y))
 }
 
-pub(crate) fn source_scene(bounds: Rect, shapes: &[Shape]) -> Vec<DisplayItem> {
-    let mut items = vec![DisplayItem::PushClip {
-        bounds,
-        radius: 0.0,
-    }];
+fn local_path(
+    size: (f32, f32),
+    points: &[(f32, f32)],
+    close: bool,
+    style: GpuiPathStyle,
+    color: GpuiHsla,
+    outset: f32,
+) -> DisplayItem {
+    let local = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut commands = Vec::with_capacity(points.len() + usize::from(close));
+    let mut min = Point::new(f32::INFINITY, f32::INFINITY);
+    let mut max = Point::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (index, point) in points.iter().enumerate() {
+        let point = at(local, *point);
+        min = Point::new(min.x.min(point.x), min.y.min(point.y));
+        max = Point::new(max.x.max(point.x), max.y.max(point.y));
+        commands.push(if index == 0 {
+            PathCommand::Move(point)
+        } else {
+            PathCommand::Line(point)
+        });
+    }
+    if close {
+        commands.push(PathCommand::Close);
+    }
+    DisplayItem::GpuiPath {
+        transformed_window_logical_bounds: Rect::from_edges(
+            min.x - outset,
+            min.y - outset,
+            max.x + outset,
+            max.y + outset,
+        ),
+        path: Arc::new(GpuiPath {
+            commands_local: commands,
+            origin_window_logical: Point::new(0.0, 0.0),
+            element_transform: Transform2D::IDENTITY,
+            style,
+            background: GpuiBackground::Solid(color),
+        }),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clip {
+    Bounds,
+    Overflow,
+}
+
+struct Local {
+    size: (u32, u32),
+    items: Vec<DisplayItem>,
+}
+
+pub struct Scene {
+    draw: Box<dyn Fn((f32, f32)) -> Vec<DisplayItem>>,
+    clip: Clip,
+    local: RefCell<Option<Local>>,
+}
+
+impl std::fmt::Debug for Scene {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scene")
+            .field("clip", &self.clip)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Scene {
+    pub fn of_shapes(shapes: impl Into<Rc<[Shape]>>, clip: Clip) -> Self {
+        let shapes = shapes.into();
+        Self::drawn(move |size| shape_items(size, &shapes), clip)
+    }
+
+    pub(crate) fn drawn(
+        draw: impl Fn((f32, f32)) -> Vec<DisplayItem> + 'static,
+        clip: Clip,
+    ) -> Self {
+        Self {
+            draw: Box::new(draw),
+            clip,
+            local: RefCell::new(None),
+        }
+    }
+
+    pub fn paint(&self, bounds: Rect) -> Vec<DisplayItem> {
+        let size = (bounds.w.to_bits(), bounds.h.to_bits());
+        let mut local = self.local.borrow_mut();
+        if local.as_ref().is_none_or(|drawn| drawn.size != size) {
+            *local = Some(Local {
+                size,
+                items: (self.draw)((bounds.w, bounds.h)),
+            });
+        }
+        let items = &local
+            .as_ref()
+            .expect("invariant: the local scene was just drawn")
+            .items;
+        let clipped = self.clip == Clip::Bounds;
+        let mut painted = Vec::with_capacity(items.len() + 4);
+        if clipped {
+            painted.push(DisplayItem::PushClip {
+                bounds,
+                radius: 0.0,
+            });
+        }
+        painted.push(DisplayItem::PushTransform(Transform2D::translate(
+            bounds.x, bounds.y,
+        )));
+        painted.extend(items.iter().cloned());
+        painted.push(DisplayItem::PopTransform);
+        if clipped {
+            painted.push(DisplayItem::PopClip);
+        }
+        painted
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match converting every chart shape kind into local display items"
+)]
+pub(crate) fn shape_items(size: (f32, f32), shapes: &[Shape]) -> Vec<DisplayItem> {
+    let bounds = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut items = Vec::with_capacity(shapes.len());
     for shape in shapes {
         match shape {
             Shape::Line {
@@ -79,24 +208,24 @@ pub(crate) fn source_scene(bounds: Rect, shapes: &[Shape]) -> Vec<DisplayItem> {
                     dash: if *dash { vec![4.0, 3.0] } else { Vec::new() },
                     dash_offset: 0.0,
                 };
-                items.push(path_item(
-                    bounds,
+                items.push(local_path(
+                    size,
                     points,
+                    false,
                     style,
                     *color,
-                    false,
                     width.abs() * 2.0,
                 ));
             }
             Shape::Area { points, color } if points.len() >= 3 => {
-                items.push(path_item(
-                    bounds,
+                items.push(local_path(
+                    size,
                     points,
+                    true,
                     GpuiPathStyle::Fill {
                         rule: FillRule::EvenOdd,
                     },
                     *color,
-                    true,
                     0.0,
                 ));
             }
@@ -133,7 +262,7 @@ pub(crate) fn source_scene(bounds: Rect, shapes: &[Shape]) -> Vec<DisplayItem> {
                 items.push(DisplayItem::GpuiBackground {
                     bounds: band,
                     corners,
-                    background: fill.clone(),
+                    background: *fill,
                 });
                 items.push(DisplayItem::GpuiBorder {
                     bounds: band,
@@ -164,63 +293,5 @@ pub(crate) fn source_scene(bounds: Rect, shapes: &[Shape]) -> Vec<DisplayItem> {
             Shape::Line { .. } | Shape::Area { .. } => {}
         }
     }
-    items.push(DisplayItem::PopClip);
     items
-}
-
-fn path_item(
-    bounds: Rect,
-    points: &[(f32, f32)],
-    style: GpuiPathStyle,
-    color: GpuiHsla,
-    close: bool,
-    outset: f32,
-) -> DisplayItem {
-    let local_bounds = Rect {
-        x: 0.0,
-        y: 0.0,
-        w: bounds.w,
-        h: bounds.h,
-    };
-    let points: Vec<Point> = points
-        .iter()
-        .map(|point| at(local_bounds, *point))
-        .collect();
-    let mut commands = Vec::with_capacity(points.len() + usize::from(close));
-    commands.push(PathCommand::Move(points[0]));
-    commands.extend(points.iter().skip(1).copied().map(PathCommand::Line));
-    if close {
-        commands.push(PathCommand::Close);
-    }
-    let min_x = points
-        .iter()
-        .map(|point| point.x)
-        .fold(f32::INFINITY, f32::min);
-    let max_x = points
-        .iter()
-        .map(|point| point.x)
-        .fold(f32::NEG_INFINITY, f32::max);
-    let min_y = points
-        .iter()
-        .map(|point| point.y)
-        .fold(f32::INFINITY, f32::min);
-    let max_y = points
-        .iter()
-        .map(|point| point.y)
-        .fold(f32::NEG_INFINITY, f32::max);
-    DisplayItem::GpuiPath {
-        transformed_window_logical_bounds: Rect::from_edges(
-            bounds.x + min_x - outset,
-            bounds.y + min_y - outset,
-            bounds.x + max_x + outset,
-            bounds.y + max_y + outset,
-        ),
-        path: Arc::new(GpuiPath {
-            commands_local: commands,
-            origin_window_logical: Point::new(bounds.x, bounds.y),
-            element_transform: Transform2D::IDENTITY,
-            style,
-            background: GpuiBackground::Solid(color),
-        }),
-    }
 }

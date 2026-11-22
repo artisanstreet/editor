@@ -10,15 +10,12 @@ use tokio_util::task::AbortOnDropHandle;
 
 struct Entry {
     hash: Option<BlobHash>,
-    checked: Instant,
+    checked: Option<Instant>,
     failed: bool,
-    image: Option<Arc<ImageHandle>>,
 }
 impl Entry {
     fn expire(&mut self) {
-        self.checked = Instant::now()
-            .checked_sub(Duration::from_secs(300))
-            .unwrap();
+        self.checked = None;
     }
     fn fresh(&self, now: Instant) -> bool {
         let ttl = if self.failed || self.hash.is_none() {
@@ -26,7 +23,8 @@ impl Entry {
         } else {
             Duration::from_secs(300)
         };
-        now.saturating_duration_since(self.checked) < ttl
+        self.checked
+            .is_some_and(|checked| now.saturating_duration_since(checked) < ttl)
     }
 }
 #[derive(Default)]
@@ -52,45 +50,45 @@ impl ProjectIcons {
         self.reading.clear();
         self.entries.retain(|id, _| kept(id));
         self.order.retain(|id| self.entries.contains_key(id));
-        for entry in self.entries.values_mut() {
-            entry.expire();
-        }
+        self.entries.values_mut().for_each(Entry::expire);
     }
 }
 impl HostData {
     pub fn project_icon(&self, project: &ProjectId) -> Option<Arc<ImageHandle>> {
-        let entry = self.project_icons.entries.get(project)?;
-        let hash = entry.hash.as_ref()?;
-        match self.image(hash) {
-            Some(BlobImage::Ready(image)) => Some(image),
-            _ => entry.image.clone(),
+        let hash = self.project_icons.entries.get(project)?.hash.as_ref()?;
+        match self.image(hash)? {
+            BlobImage::Ready(image) => Some(image),
+            BlobImage::Loading | BlobImage::Failed(_) => None,
         }
     }
+    pub(super) fn project_icons_reading(&self) -> bool {
+        !self.project_icons.reading.is_empty()
+    }
+    #[must_use]
+    pub fn project_icon_checked(&self, project: &ProjectId) -> bool {
+        self.project_icons.entries.contains_key(project)
+    }
     pub fn project_icons_failed(&self) -> bool {
-        self.project_icons
-            .entries
-            .values()
-            .any(|entry| entry.failed)
+        self.project_icons.entries.values().any(|entry| {
+            entry.failed
+                || entry
+                    .hash
+                    .as_ref()
+                    .is_some_and(|hash| matches!(self.image(hash), Some(BlobImage::Failed(_))))
+        })
     }
     pub fn load_project_icon(&mut self, project: &ProjectId) {
         if !self.projects.contains_key(project) || !self.is_live() {
             return;
         }
-        let now = Instant::now();
+        let now = self.clock.now();
         let hash = self
             .project_icons
             .entries
             .get(project)
             .and_then(|entry| entry.hash.clone());
         if let Some(hash) = hash {
-            match self.image(&hash) {
-                Some(BlobImage::Ready(image)) => {
-                    if let Some(entry) = self.project_icons.entries.get_mut(project) {
-                        entry.image = Some(image);
-                    }
-                }
-                _ => self.load_image(hash, false),
-            }
+            self.load_image(hash, false);
         }
         if let Some(entry) = self.project_icons.entries.get(project) {
             let fresh = entry.fresh(now);
@@ -107,7 +105,7 @@ impl HostData {
         self.project_icons.generation = self.project_icons.generation.wrapping_add(1);
         let generation = self.project_icons.generation;
         let client = self.client.clone();
-        let sender = self.delivery.sender().map(HostMessage::Completion);
+        let sender = self.delivery.sender().map(HostMessage::completion);
         let project = project.clone();
         let key = project.clone();
         let task_project = project.clone();
@@ -116,8 +114,8 @@ impl HostData {
                 .project_icon(&task_project)
                 .await
                 .map(|blob| blob.map(|blob| blob.hash));
-            let _ = sender
-                .send(HostCompletion::ProjectIcon(key, generation, result))
+            sender
+                .offer(HostCompletion::ProjectIcon(key, generation, result))
                 .await;
         });
         self.project_icons
@@ -125,9 +123,16 @@ impl HostData {
             .insert(project, (generation, AbortOnDropHandle::new(task)));
     }
     pub fn retry_project_icons(&mut self) {
-        for entry in self.project_icons.entries.values_mut() {
+        let mut failed_images = Vec::new();
+        self.project_icons.entries.values_mut().for_each(|entry| {
             if entry.failed {
-                entry.checked = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+                entry.expire();
+            }
+            failed_images.extend(entry.hash.clone());
+        });
+        for hash in failed_images {
+            if matches!(self.image(&hash), Some(BlobImage::Failed(_))) {
+                self.load_image(hash, true);
             }
         }
         self.pending_events.push(HostEvent::Changed);
@@ -136,13 +141,13 @@ impl HostData {
         &mut self,
         project: ProjectId,
         generation: u64,
-        result: anyhow::Result<Option<BlobHash>>,
+        result: Result<Option<BlobHash>, crate::core::client::CallError>,
     ) -> bool {
-        if !self
+        if self
             .project_icons
             .reading
             .get(&project)
-            .is_some_and(|(current, _)| *current == generation)
+            .is_none_or(|(current, _)| *current != generation)
         {
             return false;
         }
@@ -152,20 +157,19 @@ impl HostData {
         let hash = match result {
             Ok(hash) => hash,
             Err(error) => {
-                tracing::debug!(%project, "project icon read failed: {error:#}");
+                tracing::debug!(%project, "project icon read failed: {}", ::diagnostics::chain(&error));
                 last.as_ref().and_then(|entry| entry.hash.clone())
             }
         };
-        let image = last
-            .filter(|last| last.hash == hash)
-            .and_then(|last| last.image);
+        let changed = last
+            .as_ref()
+            .is_none_or(|entry| entry.hash != hash || entry.failed != failed);
         self.project_icons.entries.insert(
             project.clone(),
             Entry {
                 hash: hash.clone(),
-                checked: Instant::now(),
+                checked: Some(self.clock.now()),
                 failed,
-                image,
             },
         );
         self.project_icons.order.retain(|id| id != &project);
@@ -178,6 +182,6 @@ impl HostData {
         if let Some(hash) = hash {
             self.load_image(hash, false);
         }
-        true
+        changed
     }
 }

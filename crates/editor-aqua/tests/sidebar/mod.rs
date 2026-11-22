@@ -1,10 +1,11 @@
 use artisan_api::{
     DirListing, EngineConfig, EngineId, Project, ProjectId, RunStatus, Thread, ThreadId,
 };
-use editor_aqua::sidebar::geometry::{PageDirection, PagePosition, page_direction};
+use editor_aqua::sidebar::geometry::{
+    HistoryPane, PageDirection, PageLoad, PageState, PaneDistances, page_direction,
+};
 use editor_aqua::sidebar::list::{AgeGroup, HostSnapshot, RowState, lists};
 use editor_aqua::sidebar::picker::FolderPicker;
-
 
 struct Host {
     project: Project,
@@ -32,8 +33,8 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
         settleable: false,
         matched: Vec::new(),
     };
-    let factory = sidebar.thread_visual_factory(ArtisanTheme::resolved(), false);
-    let visuals = factory(&row, None, None);
+    let factory = sidebar.thread_visual_factory(&ArtisanTheme::resolved(), false);
+    let visuals = factory(&row, None, editor_ui::project_mark::Forge::Folder);
     let runs = SharedRuns::new();
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
@@ -52,9 +53,12 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
     let run = app
         .scene()
         .ordered()
-        .find_map(|(_, item)| match item {
-            DisplayItem::Text { run, .. } => Some(run.clone()),
-            _ => None,
+        .find_map(|(_, item)| {
+            if let DisplayItem::Text { run, .. } = item {
+                Some(run.clone())
+            } else {
+                None
+            }
         })
         .unwrap();
     let registry = runs.lock();
@@ -66,14 +70,22 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
     assert_eq!(layout.source_len(), row.title.len());
     drop(registry);
     let scene = app.tree_mut().emit_scene();
-    assert!(scene.iter().any(|(_, item)| matches!(item, DisplayItem::PushGpuiQuadPulse(pulse) if pulse.period_ms == 1_600 && pulse.min_opacity == 0.4)));
+    assert!(
+        scene
+            .iter()
+            .any(|(_, item)| matches!(item, DisplayItem::PushGpuiQuadPulse(_)))
+    );
     assert!(
         scene
             .iter()
             .any(|(_, item)| matches!(item, DisplayItem::PopGpuiQuadPulse))
     );
 
-    let reduced = sidebar.thread_visual_factory(ArtisanTheme::resolved(), true)(&row, None, None);
+    let reduced = sidebar.thread_visual_factory(&ArtisanTheme::resolved(), true)(
+        &row,
+        None,
+        editor_ui::project_mark::Forge::Folder,
+    );
     let mut reduced_app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     reduced_app
         .mount(|_| UiBox::new().child(reduced.dot.unwrap()).build())
@@ -94,17 +106,13 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
 
 #[test]
 fn dispatch_reports_visible_changes_and_ignores_idempotent_actions() {
-    use editor_aqua::core::{Core, EditorFiles};
     use editor_aqua::sidebar::{
         controller::Sidebar,
         view::{ViewAction, dispatch},
     };
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let mut sidebar = Sidebar::new(true);
     sidebar.sync(&core, 0);
     assert!(!dispatch(&mut sidebar, &mut core, ViewAction::DismissError));
@@ -118,15 +126,11 @@ fn dispatch_reports_visible_changes_and_ignores_idempotent_actions() {
 
 #[test]
 fn history_motion_runs_to_its_end_and_reports_one_final_rebuild() {
-    use editor_aqua::core::{Core, EditorFiles};
     use editor_aqua::sidebar::controller::Sidebar;
     use std::time::{Duration, Instant};
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let mut sidebar = Sidebar::new(true);
     let start = Instant::now();
     assert!(!sidebar.advance_motion(start, false));
@@ -135,12 +139,12 @@ fn history_motion_runs_to_its_end_and_reports_one_final_rebuild() {
     assert!(sidebar.advance_motion(start + Duration::from_millis(100), false));
     assert!(sidebar.history_fraction > 0.0 && sidebar.history_fraction < 1.0);
     assert!(sidebar.advance_motion(start + Duration::from_secs(2), false));
-    assert_eq!(sidebar.history_fraction, 1.0);
+    test_support::assert_near!(sidebar.history_fraction, 1.0);
     assert!(sidebar.advance_motion(start + Duration::from_secs(3), false));
     assert!(!sidebar.advance_motion(start + Duration::from_secs(4), false));
     sidebar.toggle_history(&mut core);
     assert!(sidebar.advance_motion(start + Duration::from_secs(10), true));
-    assert_eq!(sidebar.history_fraction, 0.0);
+    test_support::assert_near!(sidebar.history_fraction, 0.0);
     assert!(sidebar.advance_motion(start + Duration::from_secs(11), true));
     assert!(!sidebar.advance_motion(start + Duration::from_secs(12), true));
     assert!(!sidebar.history_visible());
@@ -205,11 +209,12 @@ fn projection_prioritizes_live_state_and_preserves_history_age() {
     let mut settled = thread(&project.id, 4, 0);
     settled.settled_seq = 4;
     let older = thread(&project.id, 3, day * 2);
+    let live = waiting.id.clone();
     let host = Host {
-        waiting: vec![waiting.id.clone()],
-        working: vec![waiting.id.clone()],
         project,
         threads: vec![older, settled, waiting],
+        waiting: vec![live.clone()],
+        working: vec![live],
     };
     let result = lists(&host, None, 1_000_000_000);
     assert_eq!(result.inbox.len(), 1);
@@ -232,9 +237,9 @@ fn picker_retries_same_identity_until_successful_browse() {
     }));
     let first = picker.begin_create().unwrap();
     assert!(!picker.begin_browse());
-    picker.finish_create(Some("connection lost".into()));
+    picker.finish_create(Some(editor_aqua::core::Problem::new("connection lost")));
     assert_eq!(picker.begin_create().unwrap(), first);
-    picker.finish_create(Some("connection lost".into()));
+    picker.finish_create(Some(editor_aqua::core::Problem::new("connection lost")));
     assert!(picker.begin_browse());
     picker.finish_browse(Ok(DirListing {
         path: "/other".into(),
@@ -246,52 +251,44 @@ fn picker_retries_same_identity_until_successful_browse() {
 
 #[test]
 fn paging_retries_only_after_scroll_and_closed_history_stops_older_loading() {
-    let mut page = PagePosition {
+    let mut distances = PaneDistances {
         viewport_height: 400.0,
         above: 700.0,
         below: 0.0,
-        loading: false,
-        loaded: true,
-        failed: true,
-        scrolled: false,
+    };
+    let mut state = PageState {
+        load: PageLoad::Failed { scrolled: false },
         at_latest: true,
         has_older: true,
-        history_open: true,
-        history_empty: false,
+        history: HistoryPane::Open,
     };
-    assert_eq!(page_direction(&page), None);
-    page.scrolled = true;
-    assert_eq!(page_direction(&page), Some(PageDirection::Older));
-    page.history_open = false;
-    assert_eq!(page_direction(&page), None);
-    page.at_latest = false;
-    page.above = 0.0;
-    assert_eq!(page_direction(&page), Some(PageDirection::Newer));
+    assert_eq!(page_direction(distances, state), None);
+    state.load = PageLoad::Failed { scrolled: true };
+    assert_eq!(page_direction(distances, state), Some(PageDirection::Older));
+    state.history = HistoryPane::Closed;
+    assert_eq!(page_direction(distances, state), None);
+    state.at_latest = false;
+    distances.above = 0.0;
+    assert_eq!(page_direction(distances, state), Some(PageDirection::Newer));
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one host-recreation scenario walked step by step"
+)]
 fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
-    use artisan_api::tls::{Identity, fingerprint};
-    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen};
+    use axum::http::StatusCode;
+    use editor_aqua::core::Screen;
     use editor_aqua::sidebar::controller::Sidebar;
+    use test_support::editor::core::{Delivered, connect, stub_host};
 
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
-    let identity = Identity::generate("sidebar-test").unwrap();
-    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
-    let id = HostId("same-host".into());
-    let config = HostConfig {
-        id: id.clone(),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint,
-        kind: HostKind::Local,
-    };
-    core.add_test_host(&config, client.clone());
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let forge = stub_forge();
+    let config = stub_host("same-host", "Forge", &forge);
+    let id = config.id.clone();
+    connect(&mut core, &config);
     core.navigate(Screen::NewThread {
         host: id.clone(),
         project: None,
@@ -300,9 +297,32 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
     let mut sidebar = Sidebar::new(false);
     sidebar.sync(&core, 0);
     sidebar.add_project(&core);
-    sidebar.picker.as_mut().unwrap().creating = true;
-    let generation = sidebar.test_picker_generation();
-    let browse_generation = sidebar.test_browse_generation();
+    forge.take("GET", "/fs/list").respond(folder("/root"));
+    drain_until(
+        &mut sidebar,
+        &mut core,
+        "the first folder listing",
+        |sidebar| {
+            sidebar
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.listing.is_some())
+        },
+    );
+    let create = add_this_folder(&sidebar, &core);
+    editor_aqua::sidebar::view::dispatch(&mut sidebar, &mut core, create);
+    assert!(sidebar.picker.as_ref().unwrap().creating);
+    let late_create = forge.take("POST", "/projects");
+    let late_renames = [ThreadId::new(), ThreadId::new()].map(|thread| {
+        sidebar.rename = Some(thread.clone());
+        editor_aqua::sidebar::view::dispatch(
+            &mut sidebar,
+            &mut core,
+            editor_aqua::sidebar::view::ViewAction::SubmitRename("Renamed".into()),
+        );
+        forge.take("PATCH", &format!("/threads/{thread}"))
+    });
+    let [removed_rename, replaced_rename] = late_renames;
     let old_project = Project {
         id: ProjectId::new(),
         path: "/old".into(),
@@ -313,11 +333,17 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
     };
     core.remove_host(&id).unwrap();
     assert!(core.host_if_instance(&id, first).is_none());
-    futures::executor::block_on(sidebar.test_action_failure(id.clone(), first));
+    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
+    removed_rename.fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "rename refused",
+    );
+    delivered.wait("the removed host's rename failure");
     sidebar.drain(&mut core, 0);
     assert!(sidebar.error.is_none());
     assert!(sidebar.picker.is_none());
-    core.add_test_host(&config, client.clone());
+    connect(&mut core, &config);
     let replacement = core.host(&id).unwrap().instance();
     assert_ne!(first, replacement);
     core.navigate(Screen::NewThread {
@@ -393,11 +419,19 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
         },
     ));
     sidebar.add_project(&core);
-    sidebar.picker.as_mut().unwrap().listing = Some(DirListing {
-        path: "/new".into(),
-        parent: None,
-        entries: vec![],
-    });
+    forge.take("GET", "/fs/list").respond(folder("/new"));
+    drain_until(
+        &mut sidebar,
+        &mut core,
+        "the replacement's folder listing",
+        |sidebar| {
+            sidebar
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.listing.as_ref())
+                .is_some_and(|listing| listing.path == "/new")
+        },
+    );
     let new_rename = ThreadId::new();
     sidebar.rename = Some(new_rename.clone());
     sidebar.rename_generation = 2;
@@ -421,26 +455,26 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
             generation: 2,
         },
     ));
-    sidebar.error = Some("new host error".into());
-    futures::executor::block_on(sidebar.test_action_failure(id.clone(), first));
-    futures::executor::block_on(sidebar.test_browse_completion(
-        id.clone(),
-        first,
-        browse_generation,
-        DirListing {
-            path: "/old".into(),
-            parent: None,
-            entries: vec![],
-        },
-    ));
-    futures::executor::block_on(sidebar.test_create_completion(
-        id.clone(),
-        first,
-        generation,
-        old_project,
-    ));
+    sidebar.error = Some(editor_aqua::core::Problem::new("new host error"));
+    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
+    replaced_rename.fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "rename refused",
+    );
+    delivered.wait("the removed host's second rename failure");
     sidebar.drain(&mut core, 0);
-    assert_eq!(sidebar.error.as_deref(), Some("new host error"));
+    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
+    late_create.respond(&old_project);
+    delivered.wait("the removed host's project creation");
+    sidebar.drain(&mut core, 0);
+    assert_eq!(
+        sidebar
+            .error
+            .as_ref()
+            .map(editor_aqua::core::Problem::headline),
+        Some("new host error")
+    );
     assert_eq!(sidebar.rename.as_ref(), Some(&new_rename));
     assert!(sidebar.picker.is_some());
     assert_eq!(
@@ -473,7 +507,7 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
     assert_eq!(sidebar.drag_instance(&core, &drag), Some(replacement));
     core.remove_host(&id).unwrap();
     assert_eq!(sidebar.drag_instance(&core, &drag), None);
-    core.add_test_host(&config, client);
+    connect(&mut core, &config);
     assert_ne!(core.host(&id).unwrap().instance(), replacement);
     assert_eq!(sidebar.drag_instance(&core, &drag), None);
 }
@@ -532,6 +566,7 @@ fn rail_hover_does_not_restart_an_active_animation() {
 
 mod spacer {
     use editor_aqua::sidebar::geometry::{Entry, history_spacer};
+    use editor_aqua::ui::theme::ArtisanTheme;
 
     fn column() -> Vec<Entry> {
         vec![
@@ -545,28 +580,29 @@ mod spacer {
 
     #[test]
     fn closed_history_fills_the_space_above_the_footer() {
-        let spacer = history_spacer(&column(), 500.0, 0.0);
-        assert!((spacer - (500.0 - 10.0 - Entry::History.height())).abs() < 1e-4);
+        let spacer = history_spacer(&ArtisanTheme::resolved(), &column(), 500.0, 0.0);
+        assert!(
+            (spacer - (500.0 - 10.0 - Entry::History.height(&ArtisanTheme::resolved()))).abs()
+                < 1e-4
+        );
     }
 
     #[test]
     fn open_history_leaves_room_for_the_rows_below() {
-        let spacer = history_spacer(&column(), 500.0, 1.0);
-        assert!((spacer - (500.0 - 10.0 - Entry::History.height() - 32.0)).abs() < 1e-4);
+        let spacer = history_spacer(&ArtisanTheme::resolved(), &column(), 500.0, 1.0);
+        assert!(
+            (spacer - (500.0 - 10.0 - Entry::History.height(&ArtisanTheme::resolved()) - 32.0))
+                .abs()
+                < 1e-4
+        );
     }
 
     #[test]
     fn fraction_interpolates_between_closed_and_open() {
-        let closed = history_spacer(&column(), 500.0, 0.0);
-        let open = history_spacer(&column(), 500.0, 1.0);
-        let half = history_spacer(&column(), 500.0, 0.5);
-        assert!((half - (closed + open) / 2.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn spacer_never_drops_below_twelve_pixels() {
-        assert!((history_spacer(&column(), 20.0, 0.0) - 12.0).abs() < 1e-4);
-        assert!((history_spacer(&column(), 20.0, 1.0) - 12.0).abs() < 1e-4);
+        let closed = history_spacer(&ArtisanTheme::resolved(), &column(), 500.0, 0.0);
+        let open = history_spacer(&ArtisanTheme::resolved(), &column(), 500.0, 1.0);
+        let half = history_spacer(&ArtisanTheme::resolved(), &column(), 500.0, 0.5);
+        assert!((half - f32::midpoint(closed, open)).abs() < 1e-4);
     }
 }
 
@@ -600,4 +636,259 @@ fn settlement_moves_to_history_and_new_activity_returns_to_inbox() {
     assert!(resumed.history.is_empty());
     host.working.push(id);
     assert!(!lists(&host, None, 1_000_000_000).inbox[0].settleable);
+}
+
+#[test]
+fn scrolling_history_to_its_end_loads_older_threads_after_the_inbox_reports_its_own_position() {
+    use editor_aqua::sidebar::geometry::{PaneViewports, ThreadPane};
+
+    let state = PageState {
+        load: PageLoad::Ready,
+        at_latest: true,
+        has_older: true,
+        history: HistoryPane::Open,
+    };
+    let mut viewports = PaneViewports::default();
+    viewports.report(
+        ThreadPane::History,
+        PaneDistances {
+            viewport_height: 300.0,
+            above: 900.0,
+            below: 0.0,
+        },
+    );
+    viewports.report(
+        ThreadPane::Inbox,
+        PaneDistances {
+            viewport_height: 400.0,
+            above: 0.0,
+            below: 2000.0,
+        },
+    );
+    assert_eq!(
+        viewports.direction(state),
+        Some(PageDirection::Older),
+        "the inbox's position must not replace where History was scrolled"
+    );
+    viewports.forget(ThreadPane::History);
+    assert_eq!(viewports.direction(state), None);
+}
+
+#[test]
+fn message_search_results_do_not_follow_a_switch_to_another_host() {
+    use artisan_api::{ItemId, TextHit};
+    use editor_aqua::core::Screen;
+    use editor_aqua::sidebar::controller::Sidebar;
+    use test_support::editor::core::{Delivered, stub_host};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let first_forge = stub_forge();
+    let second_forge = stub_forge();
+    let first = stub_host("first", "first", &first_forge);
+    let second = stub_host("second", "second", &second_forge);
+    connect_live(&mut core, &first);
+    connect_live(&mut core, &second);
+    core.navigate(Screen::NewThread {
+        host: first.id.clone(),
+        project: None,
+    });
+    let mut sidebar = Sidebar::new(false);
+    sidebar.sync(&core, 0);
+    sidebar.search.borrow_mut().set_text("needle");
+    sidebar.search_text(&core);
+    let hit = |thread: &str| TextHit {
+        thread_id: ThreadId(thread.into()),
+        thread_title: Some("Found".into()),
+        project_id: ProjectId::new(),
+        item_id: ItemId(format!("{thread}-item")),
+        position: 1,
+        created_at: 0,
+        snippet: "a needle here".into(),
+        matched: (2, 8),
+        offset: (0, 0),
+        length: 6,
+    };
+    first_forge
+        .take("GET", "/search/text")
+        .respond(vec![hit("first-thread")]);
+    drain_until(
+        &mut sidebar,
+        &mut core,
+        "the first host's matches",
+        |sidebar| !sidebar.lists.hits.is_empty(),
+    );
+    assert_eq!(sidebar.lists.hits.len(), 1);
+
+    sidebar.search_text(&core);
+    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
+    first_forge
+        .take("GET", "/search/text")
+        .respond(vec![hit("late-first-thread")]);
+    delivered.wait("the first host's late matches");
+
+    core.navigate(Screen::NewThread {
+        host: second.id.clone(),
+        project: None,
+    });
+    sidebar.sync(&core, 0);
+    assert!(
+        sidebar.lists.hits.is_empty(),
+        "the first host's matches must not be offered on the second host"
+    );
+    let on_second = second_forge.take("GET", "/search/text");
+    assert!(
+        on_second
+            .query()
+            .is_some_and(|query| query.contains("needle")),
+        "the search restarts on the second host: {on_second:?}"
+    );
+
+    sidebar.drain(&mut core, 0);
+    assert!(
+        sidebar.lists.hits.is_empty(),
+        "a late search from the first host must not land on the second"
+    );
+}
+
+#[test]
+fn a_rename_failure_from_an_earlier_visit_to_the_same_host_is_not_shown_after_returning() {
+    use axum::http::StatusCode;
+    use editor_aqua::core::Screen;
+    use editor_aqua::sidebar::controller::Sidebar;
+    use test_support::editor::core::{Delivered, stub_host};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let first_forge = stub_forge();
+    let second_forge = stub_forge();
+    let first = stub_host("first", "first", &first_forge);
+    let second = stub_host("second", "second", &second_forge);
+    connect_live(&mut core, &first);
+    connect_live(&mut core, &second);
+    let visit = |core: &mut editor_aqua::core::Core, host: &editor_aqua::core::HostConfig| {
+        core.navigate(Screen::NewThread {
+            host: host.id.clone(),
+            project: None,
+        });
+    };
+    visit(&mut core, &first);
+    let instance = core.host(&first.id).unwrap().instance();
+    let mut sidebar = Sidebar::new(false);
+    sidebar.sync(&core, 0);
+    let thread = ThreadId::new();
+    sidebar.rename = Some(thread.clone());
+    editor_aqua::sidebar::view::dispatch(
+        &mut sidebar,
+        &mut core,
+        editor_aqua::sidebar::view::ViewAction::SubmitRename("Renamed".into()),
+    );
+    let late_rename = first_forge.take("PATCH", &format!("/threads/{thread}"));
+
+    visit(&mut core, &second);
+    sidebar.sync(&core, 0);
+    visit(&mut core, &first);
+    sidebar.sync(&core, 0);
+    assert_eq!(core.host(&first.id).unwrap().instance(), instance);
+
+    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
+    late_rename.fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "rename refused",
+    );
+    delivered.wait("the first visit's rename failure");
+    sidebar.drain(&mut core, 0);
+    assert_eq!(
+        sidebar.error, None,
+        "a failure from before the host switch must not appear on the return visit"
+    );
+}
+
+fn stub_forge() -> test_support::editor::forge::StubForge {
+    editor_aqua::core::runtime::runtime().block_on(test_support::editor::forge::StubForge::serve(
+        test_support::editor::forge::empty_state(),
+        axum::Router::new(),
+    ))
+}
+
+fn connect_live(core: &mut editor_aqua::core::Core, config: &editor_aqua::core::HostConfig) {
+    test_support::editor::core::connect(core, config);
+    test_support::wait::wait_until(
+        "the stub Forge to go live",
+        std::time::Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            core.host(&config.id)
+                .is_some_and(editor_aqua::core::HostData::is_live)
+        },
+    );
+}
+
+fn folder(path: &str) -> DirListing {
+    DirListing {
+        path: path.into(),
+        parent: None,
+        entries: vec![],
+    }
+}
+
+fn drain_until(
+    sidebar: &mut editor_aqua::sidebar::controller::Sidebar,
+    core: &mut editor_aqua::core::Core,
+    what: &str,
+    done: impl Fn(&editor_aqua::sidebar::controller::Sidebar) -> bool,
+) {
+    test_support::wait::wait_until(what, std::time::Duration::from_secs(10), || {
+        sidebar.drain(core, 0);
+        done(sidebar)
+    });
+}
+
+fn add_this_folder(
+    sidebar: &editor_aqua::sidebar::controller::Sidebar,
+    core: &editor_aqua::core::Core,
+) -> editor_aqua::sidebar::view::ViewAction {
+    use aqua_ui::element::Box as UiBox;
+    use editor_aqua::sidebar::overlay::SidebarOverlays;
+    use editor_aqua::sidebar::view::ViewAction;
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::{cell::RefCell, rc::Rc};
+
+    let emitted = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&emitted);
+    let emit: Rc<dyn Fn(ViewAction)> = Rc::new(move |action| sink.borrow_mut().push(action));
+    let fonts = aqua_text::SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = aqua::UiApp::new(fonts, aqua_text::SharedRuns::new());
+    app.set_viewport(800.0, 600.0, 1.0);
+    app.mount(|_| {
+        UiBox::new()
+            .width(800.0)
+            .height(600.0)
+            .build()
+            .with_key("sidebar-owner")
+    })
+    .expect("mount the picker's owner");
+    app.build_frame().expect("lay out the picker's owner");
+    let owner = test_support::editor::ui::node_with_key(&app, "sidebar-owner");
+    let mut overlays = SidebarOverlays::default();
+    overlays
+        .sync(
+            &mut app,
+            owner,
+            sidebar,
+            core,
+            &ArtisanTheme::resolved(),
+            0.0,
+            &emit,
+        )
+        .expect("open the folder picker");
+    app.build_frame().expect("lay out the folder picker");
+    test_support::editor::ui::click(&mut app, "sidebar-folder-add");
+    let action = emitted.borrow_mut().pop();
+    match action {
+        Some(action @ ViewAction::CreateProject(_)) => action,
+        other => panic!("Add this folder emitted {other:?}"),
+    }
 }

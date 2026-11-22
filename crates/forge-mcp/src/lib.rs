@@ -1,5 +1,6 @@
 mod awareness;
 mod coordination;
+mod forge;
 mod format;
 mod names;
 pub mod server;
@@ -7,11 +8,15 @@ mod tools;
 mod transcript;
 mod validation;
 
-pub use server::{Content, Tool, ToolResult, ToolSet};
+pub use awareness::AwarenessError;
+pub use coordination::{CoordinationError, ListRecordsError};
+pub use forge::ForgeError;
+pub use server::{Content, Failure, StructuredError, Tool, ToolError, ToolResult, ToolSet};
+pub use tools::CallToolError;
+pub use transcript::{RenderError, ResolveError};
 
-use anyhow::Result;
 use artisan_api::ThreadId;
-use forge_runs::Hub;
+use forge_runs::{Hub, Refused};
 use serde_json::Value;
 
 const INSTRUCTIONS: &str = "Artisan is this workspace's collaboration interface. \
@@ -28,7 +33,48 @@ are both discoverable; parent restricts the scope. Administrative tools change o
 asked for. navigate_user is false unless navigation was requested. User questions and approvals \
 can only be answered by the user. Legacy tool names remain callable for existing sessions.";
 
-#[derive(Clone)]
+#[derive(Debug, thiserror::Error)]
+pub enum ArtisanError {
+    #[error(transparent)]
+    Refused(#[from] Refused),
+    #[error("check that thread {thread} still exists")]
+    Caller {
+        thread: ThreadId,
+        #[source]
+        source: forge_store::ReadThreadError,
+    },
+    #[error(transparent)]
+    Awareness(#[from] AwarenessError),
+    #[error(transparent)]
+    Coordination(#[from] CoordinationError),
+    #[error(transparent)]
+    Tool(#[from] CallToolError),
+    #[error(transparent)]
+    Structured(#[from] StructuredError),
+    #[error("{field} is required")]
+    Missing { field: &'static str },
+    #[error("send the message to thread {thread}")]
+    Send {
+        thread: ThreadId,
+        #[source]
+        source: forge_runs::SendAsAgentError,
+    },
+}
+
+impl ToolError for ArtisanError {
+    fn failure(&self) -> Failure<'_> {
+        match self {
+            Self::Refused(refused) => Failure::Refused(refused.to_string()),
+            Self::Send { source, .. } => Failure::classified(source.class(), source),
+            Self::Awareness(error) => error.failure(),
+            Self::Coordination(error) => error.failure(),
+            Self::Tool(error) => error.failure(),
+            Self::Caller { .. } | Self::Structured(_) | Self::Missing { .. } => Failure::Broken,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ArtisanMcp {
     hub: Hub,
 }
@@ -44,15 +90,30 @@ impl ArtisanMcp {
         caller: &ThreadId,
         name: &str,
         mut arguments: Value,
-    ) -> Result<ToolResult> {
+    ) -> Result<ToolResult, ArtisanError> {
+        let found =
+            self.hub
+                .store()
+                .thread(caller)
+                .await
+                .map_err(|source| ArtisanError::Caller {
+                    thread: caller.clone(),
+                    source,
+                })?;
+        if found.is_none() {
+            return Err(Refused(
+                "The thread this MCP address was issued to no longer exists.".to_owned(),
+            )
+            .into());
+        }
         if let Some(value) = awareness::call(&self.hub, caller, name, arguments.clone()).await? {
-            return ToolResult::structured(value);
+            return Ok(ToolResult::structured(value)?);
         }
         let canonical = names::canonical(name);
         if let Some(value) =
             coordination::call(&self.hub, caller, canonical, arguments.clone()).await?
         {
-            return ToolResult::structured(value);
+            return Ok(ToolResult::structured(value)?);
         }
         if matches!(canonical, "read_agent" | "message_agent")
             && !matches!(name, "agent_read" | "agent_message")
@@ -60,22 +121,29 @@ impl ArtisanMcp {
             let agent = arguments
                 .get("agent")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("agent ID is required"))?;
+                .ok_or(ArtisanError::Missing { field: "agent" })?;
             let thread = awareness::resolve_agent(&self.hub, agent).await?;
             if canonical == "message_agent" {
                 let text = arguments
                     .get("text")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("text is required"))?
+                    .ok_or(ArtisanError::Missing { field: "text" })?
                     .to_owned();
-                let item = self.hub.send_as_agent(caller, &thread, text).await?;
-                return ToolResult::structured(
+                let item = self
+                    .hub
+                    .send_as_agent(caller, &thread, text)
+                    .await
+                    .map_err(|source| ArtisanError::Send {
+                        thread: thread.clone(),
+                        source,
+                    })?;
+                return Ok(ToolResult::structured(
                     serde_json::json!({"delivered_item":item.id,"thread":thread,"acknowledged":false}),
-                );
+                )?);
             }
             arguments
                 .as_object_mut()
-                .ok_or_else(|| anyhow::anyhow!("arguments must be an object"))?
+                .expect("invariant: arguments with an agent field are an object")
                 .remove("agent");
             arguments["thread"] = serde_json::json!(thread);
             let text = tools::call(&self.hub, caller, "read_thread", arguments).await?;
@@ -93,6 +161,8 @@ impl ArtisanMcp {
 }
 
 impl ToolSet for ArtisanMcp {
+    type Error = ArtisanError;
+
     fn name(&self) -> &'static str {
         "artisan"
     }
@@ -115,7 +185,12 @@ impl ToolSet for ArtisanMcp {
             .collect()
     }
 
-    async fn call(&self, caller: &ThreadId, name: &str, arguments: Value) -> Result<Vec<Content>> {
+    async fn call(
+        &self,
+        caller: &ThreadId,
+        name: &str,
+        arguments: Value,
+    ) -> Result<Vec<Content>, ArtisanError> {
         Ok(self.invoke(caller, name, arguments).await?.content)
     }
 
@@ -128,7 +203,7 @@ impl ToolSet for ArtisanMcp {
         caller: &ThreadId,
         name: &str,
         arguments: Value,
-    ) -> Result<ToolResult> {
+    ) -> Result<ToolResult, ArtisanError> {
         self.invoke(caller, name, arguments).await
     }
 }

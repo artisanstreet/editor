@@ -1,34 +1,76 @@
-//! Side queries: one question to a fork of a Claude session.
-//!
-//! `--resume <session> --fork-session` copies the session into a new one,
-//! so the thread's own transcript is never touched. The fork launches
-//! exactly as the thread does, so its request starts with the same prefix
-//! and reads the thread's prompt cache: against Claude Code 2.1.296 a fork
-//! in the thread's permission mode read all of it, while one in another
-//! mode, or with a hook added through `--settings`, rewrote about 11k
-//! tokens on every fork.
-//!
-//! So tools stay as they are, and none of them runs: the fork registers a
-//! `PreToolUse` hook over the stream (`initialize`), which the CLI calls
-//! before every tool in every permission mode and which always refuses.
-//! A permission prompt (Auto mode) is refused too. `--max-turns 1` ends the
-//! fork after one reply; a fork that reached for a tool answers nothing.
-
 use super::{SIDE_QUERY_LIMIT, apply_env, config_dir, launch_args};
-use crate::process;
+use crate::process::{self, Exit, ReadError, SendError, SpawnError, StderrWritten};
 use crate::{SideReply, SideUsage, Turn};
-use anyhow::{Context, Result, bail};
 use artisan_api::EngineConfig;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub(super) async fn side_query(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
+#[derive(Debug, thiserror::Error)]
+pub enum SideQueryError {
+    #[error("Claude Code can't resume claude.ai session {session}")]
+    ClaudeAiSession { session: String },
+    #[error("start the Claude fork")]
+    Spawn(#[source] SpawnError),
+    #[error("{step} in the Claude fork")]
+    Send {
+        step: &'static str,
+        #[source]
+        source: SendError,
+    },
+    #[error("read the Claude fork")]
+    Read(#[source] ReadError),
+    #[error("the side query was cancelled")]
+    Cancelled,
+    #[error("the Claude fork gave no answer in {}s", after.as_secs())]
+    TimedOut { after: Duration },
+    #[error("the Claude fork ended without an answer; {stderr}")]
+    Exited {
+        stderr: StderrWritten,
+        #[source]
+        exit: Exit,
+    },
+    #[error("the Claude fork failed: {reason}")]
+    Failed { reason: String },
+    #[error(
+        "the Claude fork's prompt is over the model's context limit ({terminal_reason}): {reason}"
+    )]
+    ContextLimit {
+        terminal_reason: &'static str,
+        reason: String,
+    },
+}
+
+impl SideQueryError {
+    #[must_use]
+    pub(crate) const fn exceeds_context(&self) -> bool {
+        match self {
+            Self::ContextLimit { .. } => true,
+            Self::ClaudeAiSession { .. }
+            | Self::Spawn(_)
+            | Self::Send { .. }
+            | Self::Read(_)
+            | Self::Cancelled
+            | Self::TimedOut { .. }
+            | Self::Exited { .. }
+            | Self::Failed { .. } => false,
+        }
+    }
+}
+
+pub(super) async fn side_query(
+    turn: Turn,
+    cancel: CancellationToken,
+) -> Result<SideReply, SideQueryError> {
     query(turn, cancel, SIDE_QUERY_LIMIT).await
 }
 
-pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
-    query(turn, cancel, std::time::Duration::from_secs(300)).await
+pub(super) async fn compact(
+    turn: Turn,
+    cancel: CancellationToken,
+) -> Result<SideReply, SideQueryError> {
+    query(turn, cancel, Duration::from_secs(300)).await
 }
 
 #[expect(
@@ -38,21 +80,25 @@ pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<Sid
 async fn query(
     mut turn: Turn,
     cancel: CancellationToken,
-    deadline: std::time::Duration,
-) -> Result<SideReply> {
+    deadline: Duration,
+) -> Result<SideReply, SideQueryError> {
     let session = turn.session_id.clone();
-    anyhow::ensure!(
-        !session
-            .as_deref()
-            .is_some_and(|id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX)),
-        "a claude.ai session cannot be resumed by Claude Code"
-    );
+    if let Some(session) = session
+        .as_deref()
+        .filter(|id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX))
+    {
+        return Err(SideQueryError::ClaudeAiSession {
+            session: session.to_owned(),
+        });
+    }
     apply_env(&mut turn);
     let mut engine = process::spawn(
         &turn,
         &side_args(&turn.config, session.as_deref(), &turn.launch.readable),
     )
-    .context("starting the Claude fork")?;
+    .await
+    .map_err(SideQueryError::Spawn)?;
+    let send_error = |step: &'static str| move |source| SideQueryError::Send { step, source };
     engine
         .send(&json!({
             "type": "control_request",
@@ -63,7 +109,7 @@ async fn query(
             },
         }))
         .await
-        .context("registering the Claude fork's tool hook")?;
+        .map_err(send_error("register the tool hook"))?;
     engine
         .send(&json!({
             "type": "user",
@@ -72,32 +118,31 @@ async fn query(
             "session_id": "",
         }))
         .await
-        .context("sending the side query to Claude")?;
+        .map_err(send_error("send the side query"))?;
     let limit = tokio::time::sleep(deadline);
     tokio::pin!(limit);
     let mut fork = None;
     let reply = loop {
         let line = tokio::select! {
-            line = engine.next_line() => line.context("reading the Claude fork")?,
+            line = engine.next_line() => line.map_err(SideQueryError::Read)?,
             () = cancel.cancelled() => {
                 engine.kill().await;
                 discard(&turn, fork.as_deref());
-                bail!("the side query was cancelled");
+                return Err(SideQueryError::Cancelled);
             }
             () = &mut limit => {
                 engine.kill().await;
                 discard(&turn, fork.as_deref());
-                bail!("the Claude fork gave no answer in {}s", deadline.as_secs());
+                return Err(SideQueryError::TimedOut { after: deadline });
             }
         };
         let Some(line) = line else {
-            let code = engine.wait().await;
+            let exit = engine.wait().await;
             discard(&turn, fork.as_deref());
-            bail!(
-                "the Claude fork exited ({}) without an answer: {}",
-                code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")),
-                engine.stderr_tail()
-            );
+            return Err(SideQueryError::Exited {
+                stderr: engine.stderr(),
+                exit,
+            });
         };
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -135,21 +180,19 @@ async fn query(
                         },
                     }))
                     .await
-                    .context("refusing a tool in the Claude fork")?;
+                    .map_err(send_error("refuse a tool"))?;
             }
             Some("result") => break reply_of(&frame),
             _ => {}
         }
     };
     engine.close_stdin("the side query has its answer");
-    engine.wait().await;
+    engine.finish().await;
     discard(&turn, fork.as_deref());
     reply
 }
 
-/// The id of the hook that refuses every tool.
 const REFUSE_TOOLS: &str = "artisan-side-refuse-tools";
-/// What the fork is told when it reaches for a tool.
 const NO_TOOLS: &str = "A side question cannot use tools; answer from the conversation.";
 
 fn side_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf]) -> Vec<String> {
@@ -161,17 +204,25 @@ fn side_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf])
     args
 }
 
-fn reply_of(frame: &Value) -> Result<SideReply> {
-    // Reaching for a tool used up the one turn: there is no answer.
+fn reply_of(frame: &Value) -> Result<SideReply, SideQueryError> {
     let reached_for_a_tool = frame["subtype"] == "error_max_turns";
     if frame["is_error"].as_bool() == Some(true) && !reached_for_a_tool {
-        bail!(
-            "the Claude fork failed: {}",
-            frame["result"]
-                .as_str()
-                .or_else(|| frame["subtype"].as_str())
-                .unwrap_or("no reason given")
-        );
+        let reason = frame["result"]
+            .as_str()
+            .or_else(|| frame["subtype"].as_str())
+            .unwrap_or("no reason given")
+            .to_owned();
+        return Err(match frame["terminal_reason"].as_str() {
+            Some("prompt_too_long") => SideQueryError::ContextLimit {
+                terminal_reason: "prompt_too_long",
+                reason,
+            },
+            Some("blocking_limit") => SideQueryError::ContextLimit {
+                terminal_reason: "blocking_limit",
+                reason,
+            },
+            _ => SideQueryError::Failed { reason },
+        });
     }
     let usage = &frame["usage"];
     let tokens = |key: &str| usage[key].as_u64().unwrap_or(0);
@@ -194,57 +245,96 @@ fn reply_of(frame: &Value) -> Result<SideReply> {
     })
 }
 
-/// Deletes the fork's transcript: it is never resumed.
 fn discard(turn: &Turn, fork: Option<&str>) {
     let Some(fork) = fork else {
         return;
     };
     let directory = config_dir(turn).join("projects").join(project_dir(turn));
-    let transcript = directory.join(format!("{fork}.jsonl"));
-    if let Err(error) = std::fs::remove_file(&transcript)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::debug!(path = %transcript.display(), "removing a Claude fork's transcript: {error}");
-    }
-    let attachments = directory.join(fork);
-    if let Err(error) = std::fs::remove_dir_all(&attachments)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::debug!(path = %attachments.display(), "removing a Claude fork's directory: {error}");
+    for path in [
+        directory.join(format!("{fork}.jsonl")),
+        directory.join(fork),
+    ] {
+        if let Err(error) = remove(&path) {
+            tracing::debug!(path = %path.display(), %error, "couldn't remove a Claude fork's files");
+        }
     }
 }
 
-/// Claude's directory name for the project: the path with every character
-/// that isn't a letter or digit replaced by `-`.
+const MAX_PROJECT_NAME: usize = 200;
+
 pub(super) fn project_dir(turn: &Turn) -> String {
-    turn.cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+    project_name(&engine_cwd(&turn.cwd))
+}
+
+#[cfg(unix)]
+fn engine_cwd(cwd: &Path) -> PathBuf {
+    match std::fs::canonicalize(cwd) {
+        Ok(physical) => physical,
+        Err(error) => {
+            tracing::debug!(cwd = %cwd.display(), "Claude would start in a folder that can't be resolved: {error}");
+            cwd.to_owned()
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn engine_cwd(cwd: &Path) -> PathBuf {
+    cwd.to_owned()
+}
+
+fn project_name(cwd: &Path) -> String {
+    let units: Vec<u16> = cwd.to_string_lossy().encode_utf16().collect();
+    let name: String = units
+        .iter()
+        .map(|unit| match u8::try_from(*unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte),
+            Ok(_) | Err(_) => '-',
+        })
+        .collect();
+    if name.len() <= MAX_PROJECT_NAME {
+        return name;
+    }
+    let hash = units.iter().fold(0_i32, |hash, unit| {
+        hash.wrapping_shl(5)
+            .wrapping_sub(hash)
+            .wrapping_add(i32::from(*unit))
+    });
+    format!(
+        "{}-{}",
+        name.split_at(MAX_PROJECT_NAME).0,
+        base36(hash.unsigned_abs())
+    )
+}
+
+fn base36(mut value: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut digits = Vec::new();
+    loop {
+        digits.push(DIGITS[(value % 36) as usize]);
+        value /= 36;
+        if value == 0 {
+            break;
+        }
+    }
+    digits
+        .iter()
+        .rev()
+        .map(|digit| char::from(*digit))
         .collect()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use artisan_api::Permissions;
+#[path = "../../tests/claude/side.rs"]
+mod tests;
 
-    /// The fork reads the thread's cache only if it launches as the thread
-    /// does, permission mode included.
-    #[test]
-    fn a_fork_launches_as_its_thread_does() {
-        for permissions in [Permissions::Auto, Permissions::Full] {
-            let mut config = EngineConfig::new(artisan_api::EngineId::Claude);
-            config.permissions = permissions;
-            config.model = Some("claude-opus-5-5".to_owned());
-            let readable = [PathBuf::from("/data/blobs")];
-            let thread = launch_args(&config, Some("s1"), &readable);
-            let fork = side_args(&config, Some("s1"), &readable);
-            assert_eq!(fork[..thread.len()], thread[..]);
-            assert_eq!(
-                fork[thread.len()..],
-                ["--fork-session", "--max-turns", "1"].map(str::to_owned)
-            );
-        }
+fn remove(path: &Path) -> std::io::Result<()> {
+    let removed = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) => Err(error),
+    };
+    match removed {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
     }
 }

@@ -1,0 +1,239 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "6c154cf3-7a73-4876-a160-f1f7a2153596",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Item {
+            key: "toolu_01N3HRaSiC1dPzXXPPerTvGA",
+            parent: None,
+            status: Running,
+            kind: Question {
+                blocking: true,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Red",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Blue",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+        Item {
+            key: "toolu_01N3HRaSiC1dPzXXPPerTvGA",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: true,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Red",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Blue",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    25716,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Item {
+            key: "toolu_01N3HRaSiC1dPzXXPPerTvGA",
+            parent: None,
+            status: Done,
+            kind: Question {
+                blocking: true,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Red",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Blue",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+        Item {
+            key: "msg_011Cfv2uS6kmxEMFi1FAChSS:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2uS6kmxEMFi1FAChSS:0",
+            },
+            text: "Red.",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2uS6kmxEMFi1FAChSS:0",
+            },
+            text: "Red.",
+            append: false,
+        },
+        Item {
+            key: "msg_011Cfv2uS6kmxEMFi1FAChSS:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "Red.",
+                ),
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    27898,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 4,
+                output: 132,
+                reasoning: 0,
+                cache_read: 40356,
+                cache_write: Some(
+                    13254,
+                ),
+                context_used: Some(
+                    27898,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.00312076,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Done,
+    ),
+)

@@ -1,12 +1,11 @@
-use crate::ui::kit::{IconSize, Media as Framing, Space, Spaced, Surface, TextRole};
+use crate::ui::kit::{
+    Button, ButtonSize, ButtonTone, IconSize, Media as Framing, Space, Spaced, Surface, TextRole,
+};
 use std::{
     cell::Cell,
     num::NonZeroUsize,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use aqua::images::{ImageHandle, ImageStatus};
@@ -15,8 +14,10 @@ use aqua_ui::{
     element::{Box as UiBox, Media, Text},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
+    tree::AccessibilityRequest,
 };
 
+use super::super::{menu_anchor, opens_context_menu};
 use super::{ImageBlock, gallery_rows};
 use crate::ui::{
     media::{
@@ -41,6 +42,7 @@ pub(crate) enum Action {
         image: ImageHandle,
     },
     Retry(usize),
+    AllowRemote,
     CopyPath {
         index: usize,
         position: aqua_core::Point,
@@ -52,6 +54,7 @@ pub(crate) struct ImageState {
     fetcher: MediaFetcher,
     sources: Vec<MediaSource>,
     loaded: Vec<Loaded>,
+    anchors: Vec<Rc<Cell<Option<aqua_core::Point>>>>,
     waiters: Vec<u64>,
     wake: aqua::mailbox::Mailbox<()>,
 }
@@ -59,15 +62,19 @@ pub(crate) struct ImageState {
 impl ImageState {
     pub(crate) fn new(block: &ImageBlock, fetcher: MediaFetcher, loader: Images) -> Self {
         let sources: Vec<_> = block.images.iter().map(|image| image.src.clone()).collect();
+        let loading = sources.iter().map(|_| Loaded::Loading).collect();
+        let anchors = sources.iter().map(|_| Rc::new(Cell::new(None))).collect();
+        let waiters = sources
+            .iter()
+            .map(|_| NEXT_WAITER.fetch_add(1, Ordering::Relaxed))
+            .collect();
         let mut state = Self {
-            loaded: sources.iter().map(|_| Loaded::Loading).collect(),
-            waiters: sources
-                .iter()
-                .map(|_| NEXT_WAITER.fetch_add(1, Ordering::Relaxed))
-                .collect(),
-            sources,
-            fetcher,
             loader,
+            fetcher,
+            sources,
+            loaded: loading,
+            anchors,
+            waiters,
             wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN),
         };
         state.refresh();
@@ -86,10 +93,7 @@ impl ImageState {
         self.wake.drain();
         let mut changed = false;
         for (index, source) in self.sources.iter().enumerate() {
-            let sender = self.wake.sender();
-            let wake: aqua::mailbox::Wake = Arc::new(move || {
-                let _ = sender.send(());
-            });
+            let wake = crate::ui::media::wake_on(&self.wake);
             let next = match self.loader.request(
                 &self.fetcher,
                 source,
@@ -113,12 +117,16 @@ impl ImageState {
         changed
     }
 
+    pub(crate) fn allow_remote(&mut self) -> bool {
+        self.fetcher.allow_remote();
+        self.refresh()
+    }
+
     pub(crate) fn retry(&mut self, index: usize) -> bool {
         let Some(source) = self.sources.get(index) else {
             return false;
         };
-        if !matches!(self.loaded[index], Loaded::Failed(error) if error != ImageError::Load(MediaLoadError::Invalid))
-        {
+        if !matches!(&self.loaded[index], Loaded::Failed(error) if error.retryable()) {
             return false;
         }
         let key = cache_key(&self.fetcher, source, &format!("image-{index}"));
@@ -128,13 +136,17 @@ impl ImageState {
         true
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one image view across its load, failure and open states"
+    )]
     pub(crate) fn view(
         &self,
         block: &ImageBlock,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         id: &str,
         width: f32,
-        emit: Rc<dyn Fn(Action)>,
+        emit: &Rc<dyn Fn(Action)>,
     ) -> Result<aqua_ui::element::Element, &'static str> {
         if !width.is_finite() || width <= 0.0 {
             return Err("Image gallery needs its measured content width.");
@@ -147,8 +159,11 @@ impl ImageState {
         let mut index = 0;
         for columns in gallery_rows(block.images.len()) {
             let count = usize::from(columns);
-            let tile_width =
-                (width - Space::S8.px() * (f32::from(columns) - 1.0)).max(0.0) / f32::from(columns);
+            let tile_width = Space::S8
+                .px()
+                .mul_add(-(f32::from(columns) - 1.0), width)
+                .max(0.0)
+                / f32::from(columns);
             let mut row = UiBox::new().width(width).spaced(Space::S8);
             for _ in 0..count {
                 let picture = &block.images[index];
@@ -168,12 +183,26 @@ impl ImageState {
                     .alt
                     .as_deref()
                     .filter(|alt| !alt.trim().is_empty())
-                    .unwrap_or(&picture.src.raw);
-                let path = picture.src.raw.clone();
+                    .unwrap_or_else(|| picture.src.raw());
+                let path = picture.src.raw().to_owned();
+                let slot = index;
+                let retry =
+                    matches!(loaded, Loaded::Failed(error) if error.retryable()).then(|| {
+                        let retry = Rc::clone(emit);
+                        Button::text(
+                            format!("{id}-retry-{index}"),
+                            *theme,
+                            ButtonTone::Neutral,
+                            "Try again",
+                        )
+                        .size(ButtonSize::Sm)
+                        .on_activate(move |_| retry(Action::Retry(slot)))
+                        .build()
+                    });
                 let mut frame = Surface::Media(Framing::Frame)
                     .build(
-                        &theme,
-                        vec![content(loaded, &theme, &path, shown_width, height)],
+                        theme,
+                        vec![content(loaded, theme, &path, shown_width, height, retry)],
                     )
                     .style(
                         Style::new()
@@ -183,37 +212,116 @@ impl ImageState {
                     .with_key(format!("{id}-image-{index}"))
                     .role(aqua_core::Role::Image)
                     .aria_label(alt.to_owned());
-                let copied = Rc::clone(&emit);
-                let slot = index;
-                frame = frame.on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
-                    if let RoutedInput::Native(InputEvent::PointerDown(
-                        pointer,
-                        PointerButton::Secondary,
-                    )) = &event.input
-                    {
-                        copied(Action::CopyPath {
-                            index: slot,
-                            position: pointer.position,
+                let activation = match loaded {
+                    Loaded::Ready(image) => Some(Action::Open {
+                        index: slot,
+                        image: image.clone(),
+                    }),
+                    Loaded::Failed(ImageError::NeedsConsent) => Some(Action::AllowRemote),
+                    Loaded::Loading | Loaded::Failed(_) => None,
+                };
+                let opens_on_press = matches!(loaded, Loaded::Ready(_));
+                let pressed = Rc::new(Cell::new(None));
+                let down = Rc::clone(&pressed);
+                let anchor = Rc::clone(&self.anchors[index]);
+                let key_anchor = Rc::clone(&anchor);
+                let entered = Rc::clone(&anchor);
+                let keyed = Rc::clone(emit);
+                let requested = Rc::clone(emit);
+                let copied = Rc::clone(emit);
+                frame =
+                    frame
+                        .on_input(InputKind::PointerEnter, EventPhase::Bubble, move |event| {
+                            entered.set(Some(menu_anchor(event.bounds)));
+                            InputResponse::default()
+                        })
+                        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
+                            let position = menu_anchor(event.bounds);
+                            key_anchor.set(Some(position));
+                            let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
+                                return InputResponse::default();
+                            };
+                            let action = if opens_context_menu(key) {
+                                Some(Action::CopyPath {
+                                    index: slot,
+                                    position,
+                                })
+                            } else if matches!(
+                                key.key,
+                                aqua_core::Key::Char(' ')
+                                    | aqua_core::Key::Named(aqua_core::NamedKey::Enter)
+                            ) {
+                                activation.clone()
+                            } else {
+                                None
+                            };
+                            let Some(action) = action else {
+                                return InputResponse::default();
+                            };
+                            keyed(action);
+                            InputResponse {
+                                stop_propagation: true,
+                                ..InputResponse::handled()
+                            }
+                        })
+                        .on_accessibility_request(move |request| {
+                            if request == AccessibilityRequest::ShowContextMenu {
+                                requested(Action::CopyPath {
+                                    index: slot,
+                                    position: anchor.get().unwrap_or(aqua_core::Point::ZERO),
+                                });
+                            }
+                        })
+                        .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
+                            match &event.input {
+                                RoutedInput::Native(InputEvent::PointerDown(
+                                    pointer,
+                                    PointerButton::Secondary,
+                                )) => {
+                                    copied(Action::CopyPath {
+                                        index: slot,
+                                        position: pointer.position,
+                                    });
+                                    InputResponse {
+                                        stop_propagation: true,
+                                        ..InputResponse::handled()
+                                    }
+                                }
+                                RoutedInput::Native(InputEvent::PointerDown(
+                                    pointer,
+                                    PointerButton::Primary,
+                                )) if opens_on_press => {
+                                    down.set(Some(pointer.contact));
+                                    InputResponse {
+                                        focus: aqua_ui::input::FocusRequest::Focus,
+                                        ..InputResponse::capture()
+                                    }
+                                }
+                                RoutedInput::ClipboardPaste(_)
+                                | RoutedInput::ClipboardCut
+                                | RoutedInput::TextVertical { .. }
+                                | RoutedInput::TextMotion { .. }
+                                | RoutedInput::Native(_)
+                                | RoutedInput::PointerEnter(_)
+                                | RoutedInput::PointerLeave(_)
+                                | RoutedInput::TextPointer { .. }
+                                | RoutedInput::TextContext { .. }
+                                | RoutedInput::TextRangeActivated { .. }
+                                | RoutedInput::FilesDropped { .. }
+                                | RoutedInput::DragEnter { .. }
+                                | RoutedInput::DragOver { .. }
+                                | RoutedInput::DragLeave { .. }
+                                | RoutedInput::Drop { .. }
+                                | RoutedInput::DragEnd { .. } => InputResponse::default(),
+                            }
                         });
-                        InputResponse {
-                            stop_propagation: true,
-                            ..InputResponse::handled()
-                        }
-                    } else {
-                        InputResponse::default()
-                    }
-                });
                 match loaded {
                     Loaded::Ready(image) => {
                         let image = image.clone();
-                        let pressed = Rc::new(Cell::new(None));
-                        let down = Rc::clone(&pressed);
                         let cancelled = Rc::clone(&pressed);
-                        let activate = Rc::clone(&emit);
-                        let access = Rc::clone(&emit);
+                        let activate = Rc::clone(emit);
+                        let access = Rc::clone(emit);
                         let accessible_image = image.clone();
-                        let key_image = image.clone();
-                        let key_emit = Rc::clone(&emit);
                         frame = frame
                             .role(aqua_core::Role::Button)
                             .aria_label(format!("{alt}. Open image preview"))
@@ -223,42 +331,45 @@ impl ImageState {
                                 access(Action::Open {
                                     index: slot,
                                     image: accessible_image.clone(),
-                                })
-                            })
-                            .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
-                                if let RoutedInput::Native(InputEvent::PointerDown(pointer, PointerButton::Primary)) = &event.input {
-                                    down.set(Some(pointer.contact));
-                                    InputResponse { focus: aqua_ui::input::FocusRequest::Focus, ..InputResponse::capture() }
-                                } else { InputResponse::default() }
+                                });
                             })
                             .on_input(InputKind::PointerCancel, EventPhase::Bubble, move |_| {
                                 cancelled.set(None);
-                                InputResponse { pointer_capture: aqua_ui::input::CaptureRequest::Release, ..InputResponse::default() }
-                            })
-                            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                                if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(key)) if matches!(key.key, aqua_core::Key::Char(' ') | aqua_core::Key::Named(aqua_core::NamedKey::Enter))) {
-                                    key_emit(Action::Open { index: slot, image: key_image.clone() });
-                                    InputResponse { stop_propagation: true, ..InputResponse::handled() }
-                                } else { InputResponse::default() }
+                                InputResponse {
+                                    pointer_capture: aqua_ui::input::CaptureRequest::Release,
+                                    ..InputResponse::default()
+                                }
                             })
                             .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
                                 let pressed = pressed.take();
-                                if let RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) = &event.input {
-                                    if pressed == Some(pointer.contact) && event.bounds.contains(pointer.position) {
-                                        activate(Action::Open { index: slot, image: image.clone() });
-                                    }
+                                if let RoutedInput::Native(InputEvent::PointerUp(
+                                    pointer,
+                                    PointerButton::Primary,
+                                )) = &event.input
+                                    && pressed == Some(pointer.contact)
+                                    && event.bounds.contains(pointer.position)
+                                {
+                                    activate(Action::Open {
+                                        index: slot,
+                                        image: image.clone(),
+                                    });
                                 }
-                                InputResponse { pointer_capture: aqua_ui::input::CaptureRequest::Release, ..InputResponse::default() }
+                                InputResponse {
+                                    pointer_capture: aqua_ui::input::CaptureRequest::Release,
+                                    ..InputResponse::default()
+                                }
                             });
                     }
-                    Loaded::Failed(error)
-                        if *error != ImageError::Load(MediaLoadError::Invalid) =>
-                    {
-                        let retry = Rc::clone(&emit);
-                        frame = frame.cursor(aqua_core::CursorIcon::Pointer).on_input(
-                            InputKind::PointerUp,
-                            EventPhase::Bubble,
-                            move |event| {
+                    Loaded::Failed(ImageError::NeedsConsent) => {
+                        let click = Rc::clone(emit);
+                        let access = Rc::clone(emit);
+                        frame = frame
+                            .role(aqua_core::Role::Button)
+                            .aria_label(format!("{alt}. Load remote images"))
+                            .focusable(true)
+                            .cursor(aqua_core::CursorIcon::Pointer)
+                            .on_accessibility_activate(move || access(Action::AllowRemote))
+                            .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
                                 if matches!(
                                     &event.input,
                                     RoutedInput::Native(InputEvent::PointerUp(
@@ -266,15 +377,22 @@ impl ImageState {
                                         PointerButton::Primary
                                     ))
                                 ) {
-                                    retry(Action::Retry(slot));
+                                    click(Action::AllowRemote);
                                     InputResponse::handled()
                                 } else {
                                     InputResponse::default()
                                 }
-                            },
-                        );
+                            });
                     }
-                    _ => {}
+                    Loaded::Failed(
+                        ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode,
+                    ) => {
+                        frame = frame.role(aqua_core::Role::Group);
+                    }
+                    Loaded::Loading
+                    | Loaded::Failed(ImageError::Load(
+                        MediaLoadError::Invalid | MediaLoadError::TooLarge,
+                    )) => {}
                 }
                 let mut column = UiBox::new()
                     .layout("column")
@@ -289,7 +407,7 @@ impl ImageState {
                 {
                     column = column.child(
                         TextRole::Caption
-                            .text(&theme, caption.to_owned())
+                            .text(theme, caption.to_owned())
                             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                             .build(),
                     );
@@ -308,12 +426,12 @@ impl ImageState {
     reason = "image dimensions are bounded by the decoder"
 )]
 fn image_aspect(image: &Loaded, hint: super::super::SizeHint) -> f32 {
-    if let Loaded::Ready(image) = image {
-        if let ImageStatus::Ready { width, height } = image.status() {
-            if width > 0 && height > 0 {
-                return (width as f32 / height as f32).clamp(0.05, 20.0);
-            }
-        }
+    if let Loaded::Ready(image) = image
+        && let ImageStatus::Ready { width, height } = image.status()
+        && width > 0
+        && height > 0
+    {
+        return (width as f32 / height as f32).clamp(0.05, 20.0);
     }
     hint.aspect().unwrap_or(16.0 / 9.0)
 }
@@ -324,6 +442,7 @@ fn content(
     source: &str,
     width: f32,
     height: f32,
+    retry: Option<aqua_ui::element::Element>,
 ) -> aqua_ui::element::Element {
     match image {
         Loaded::Ready(image) => UiBox::new()
@@ -380,29 +499,27 @@ fn content(
                     .build()
             };
             if let Loaded::Failed(error) = image {
-                let title = match error {
-                    ImageError::Load(MediaLoadError::Invalid) => "Not a valid image path",
-                    ImageError::Load(MediaLoadError::Fetch(
-                        crate::ui::media::source::MediaFailure::Missing,
-                    )) => "File not found",
-                    ImageError::Load(MediaLoadError::Fetch(
-                        crate::ui::media::source::MediaFailure::Unreachable,
-                    )) => "The host didn't answer",
-                    ImageError::Load(MediaLoadError::Fetch(
-                        crate::ui::media::source::MediaFailure::Unreadable,
-                    )) => "Couldn't read the file",
-                    ImageError::Decode => "Not a supported image",
+                let title = error.summary();
+                let (icon, hint) = match error {
+                    ImageError::NeedsConsent => (
+                        editor_assets::AssetId::TABLER_WORLD,
+                        Some("Load remote images"),
+                    ),
+                    ImageError::Load(
+                        MediaLoadError::Invalid
+                        | MediaLoadError::TooLarge
+                        | MediaLoadError::Fetch(_),
+                    )
+                    | ImageError::Decode => (editor_assets::AssetId::TABLER_FILE_OFF, None),
                 };
                 panel = panel
-                    .child(IconSize::Lg.glyph(
-                        editor_assets::AssetId::TABLER_FILE_OFF,
-                        theme.colors.text_muted.to_reference_paint(),
-                    ))
+                    .child(IconSize::Lg.glyph(icon, theme.colors.text_muted.to_reference_paint()))
                     .child(text(title.to_owned(), theme.colors.text))
                     .child(text(source.trim().to_owned(), theme.colors.text_muted));
-                if *error != ImageError::Load(MediaLoadError::Invalid) {
-                    panel = panel.child(text("Click to retry".to_owned(), theme.colors.text_muted));
+                if let Some(hint) = hint {
+                    panel = panel.child(text(hint.to_owned(), theme.colors.text_muted));
                 }
+                panel = panel.children(retry);
             } else {
                 panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));
             }

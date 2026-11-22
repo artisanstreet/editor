@@ -8,7 +8,10 @@ fn serialized_leaf_replays_original_reference_resolution_and_entities() {
     let encoded = serde_json::to_string(&index.record(0).unwrap()).unwrap();
     let leaf: LeafRecord = serde_json::from_str(&encoded).unwrap();
     let range = leaf.leaf.source_range();
-    let events = leaf.replay(range.start, &text[range]).unwrap();
+    let source = text
+        .get(range.clone())
+        .expect("the leaf range lies on character boundaries");
+    let events = leaf.replay(range.start, source).unwrap();
     assert!(events.iter().any(|(event,_)|matches!(event,Event::Start(Tag::Link{dest_url,..}) if dest_url.as_ref()=="https://example.com")));
     assert!(
         events
@@ -46,7 +49,7 @@ fn literal_replay_preserves_every_byte_and_has_no_markdown_events() {
             serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
         let events = decoded.replay(start, line).unwrap();
         assert_eq!(events.len(), 1);
-        let artisan_markdown_index::Event::Text(text) = &events[0].0 else {
+        let Event::Text(text) = &events[0].0 else {
             panic!("literal event")
         };
         assert_eq!(text.as_ref(), line);
@@ -57,4 +60,21 @@ fn literal_replay_preserves_every_byte_and_has_no_markdown_events() {
     }
     assert_eq!(joined, source);
     assert_eq!(LeafRecord::literal(0..0).replay(0, "").unwrap().len(), 1);
+}
+
+#[test]
+fn exact_table_membership_survives_sparse_record_replay() {
+    let index = MarkdownIndex::build(
+        "| A | B |\n| --- | --- |\n| one | two |\n| three | four |\n\nafter\n",
+    )
+    .unwrap();
+    assert!(index.record(0).unwrap().table_continues);
+    assert!(index.record(1).unwrap().table_continues);
+    assert!(!index.record(2).unwrap().table_continues);
+    assert!(!index.record(3).unwrap().table_continues);
+    let last = index.record(2).unwrap();
+    let wire = serde_json::to_string(&last).unwrap();
+    let decoded: LeafRecord = serde_json::from_str(&wire).unwrap();
+    assert_eq!(decoded.context, last.context);
+    assert!(!decoded.table_continues);
 }

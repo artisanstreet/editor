@@ -1,16 +1,13 @@
 use super::*;
 use artisan_api::Status;
-use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
+use editor_core::{ForgeClient, HostConfig, HostKind};
 
 const HOST: &str = "switch-host";
 
 fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let directory = tempfile::tempdir().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId(HOST.into()),
         name: "Switch Forge".into(),
@@ -21,10 +18,10 @@ fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id, ThreadId("first".into()));
     (directory, listener, core, conversation)
@@ -57,11 +54,9 @@ fn page(thread: &str) -> ItemsPage {
 }
 
 fn deliver(conversation: &mut Conversation, core: &mut Core, completion: Completion) {
-    assert!(
-        runtime()
-            .block_on(conversation.delivery.sender().send(completion))
-            .is_ok()
-    );
+    runtime()
+        .block_on(conversation.delivery.sender().send(completion))
+        .unwrap();
     assert!(conversation.drain(core));
 }
 
@@ -170,16 +165,14 @@ fn going_back_before_the_page_arrives_cancels_the_switch_and_lands_at_the_latest
     assert!(conversation.pending.is_none());
     assert_eq!(conversation.scroll_actions(), [ScrollAction::Tail]);
     assert!(conversation.landed_at.is_some());
-    assert!(
-        runtime()
-            .block_on(
-                conversation
-                    .delivery
-                    .sender()
-                    .send(page_for(origin, Fetch::Tail, "second"))
-            )
-            .is_ok()
-    );
+    runtime()
+        .block_on(
+            conversation
+                .delivery
+                .sender()
+                .send(page_for(origin, Fetch::Tail, "second")),
+        )
+        .unwrap();
     assert!(!conversation.drain(&mut core));
     assert_eq!(shown(&conversation), "first");
     assert!(holds(&conversation, "first"));
@@ -249,7 +242,7 @@ fn returning_to_a_parked_thread_whose_latest_rows_were_evicted_waits_for_them() 
     conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("first".into()));
 
     assert!(conversation.is_landing());
-    assert_eq!(conversation.reveal(Instant::now()), 0.0);
+    assert!(conversation.reveal(Instant::now()) <= 0.0);
     assert!(conversation.scroll_actions().is_empty());
     let origin = current(&conversation);
     deliver(
@@ -259,8 +252,10 @@ fn returning_to_a_parked_thread_whose_latest_rows_were_evicted_waits_for_them() 
     );
     assert_eq!(conversation.scroll_actions(), [ScrollAction::End]);
     assert!(matches!(
-        super::super::adapter::scroll_directive(&conversation, ScrollAction::End, false),
-        Some(super::super::adapter::ScrollDirective::FollowEnd)
+        super::super::adapter::resolve_scroll(&conversation, &ScrollAction::End, false),
+        super::super::adapter::ScrollResolution::Ready(
+            super::super::adapter::ScrollDirective::FollowEnd
+        )
     ));
 }
 
@@ -383,7 +378,53 @@ fn coming_back_while_the_first_page_loads_keeps_waiting_for_it() {
     let actions = conversation.scroll_actions();
     assert!(!actions.is_empty());
     assert!(actions.iter().all(|action| matches!(
-        super::super::adapter::scroll_directive(&conversation, action.clone(), false),
-        Some(super::super::adapter::ScrollDirective::FollowEnd)
+        super::super::adapter::resolve_scroll(&conversation, action, false),
+        super::super::adapter::ScrollResolution::Ready(
+            super::super::adapter::ScrollDirective::FollowEnd
+        )
     )));
+}
+
+fn answering(conversation: &Conversation, id: &ItemId) -> Option<u64> {
+    match conversation.view.as_ref()?.answers.get(id)? {
+        ItemAnswer::Sending { request, .. } => Some(request.0),
+        ItemAnswer::Failed(_) => None,
+    }
+}
+
+#[test]
+fn an_answer_abandoned_by_leaving_the_thread_can_be_given_again_on_return() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    land(&mut conversation, &mut core, "first");
+    let asked = ItemId("first-item".into());
+    let approve = Answer::Approval {
+        decision: artisan_api::Decision::AllowOnce,
+    };
+    conversation.answer(&core, asked.clone(), approve.clone());
+    let abandoned = answering(&conversation, &asked).expect("the answer is being sent");
+
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("second".into()));
+    let origin = held(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        page_for(origin, Fetch::Tail, "second"),
+    );
+    conversation.landed();
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("first".into()));
+
+    assert_eq!(shown(&conversation), "first");
+    assert!(
+        conversation
+            .view
+            .as_ref()
+            .unwrap()
+            .answers
+            .get(&asked)
+            .is_none(),
+        "the cancelled send leaves the card's controls enabled"
+    );
+    conversation.answer(&core, asked.clone(), approve);
+    let again = answering(&conversation, &asked).expect("the answer is sent again");
+    assert_ne!(again, abandoned, "answering again starts a new send");
 }

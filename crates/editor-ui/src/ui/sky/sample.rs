@@ -1,3 +1,8 @@
+#![expect(
+    clippy::suboptimal_flops,
+    clippy::imprecise_flops,
+    reason = "a CPU port of the sky shader; it keeps the shader's arithmetic so samples match the GPU"
+)]
 fn smooth(low: f32, high: f32, value: f32) -> f32 {
     let t = ((value - low) / (high - low)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -8,9 +13,10 @@ fn mix(a: f32, b: f32, t: f32) -> f32 {
 }
 
 fn srgb(value: f32) -> f32 {
-    match value <= 0.0031308 {
-        true => value * 12.92,
-        false => 1.055 * value.max(0.0).powf(1.0 / 2.4) - 0.055,
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.max(0.0).powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -33,7 +39,7 @@ fn gradient_segment(
     })
 }
 
-pub fn sky_color(p: &[f32], altitude: f32) -> [f32; 3] {
+pub(super) fn sky_color(p: &[f32], altitude: f32) -> [f32; 3] {
     let colors: [[f32; 3]; 5] = std::array::from_fn(|i| std::array::from_fn(|c| p[8 + i * 4 + c]));
     let slope = |a: usize, b: usize, width: f32| {
         std::array::from_fn(|c| (colors[b][c] - colors[a][c]) / width)
@@ -68,7 +74,7 @@ fn lab_srgb(lab: [f32; 3]) -> [f32; 3] {
     [
         4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
         -1.268_438 * l + 2.609_757_4 * m - 0.341_319_38 * s,
-        -0.0041960863 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+        -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
     ]
     .map(|v| srgb(v.max(0.0)))
 }
@@ -81,7 +87,9 @@ fn hash(p: [f32; 2]) -> f32 {
         fract(p[0] * 0.1031),
     ];
     let dot = q[0] * (q[1] + 33.33) + q[1] * (q[2] + 33.33) + q[2] * (q[0] + 33.33);
-    q.iter_mut().for_each(|v| *v += dot);
+    for v in &mut q {
+        *v += dot;
+    }
     fract((q[0] + q[1]) * q[2])
 }
 
@@ -102,9 +110,9 @@ fn noise(p: [f32; 2]) -> f32 {
     )
 }
 
-pub fn dither(pixel: [f32; 2]) -> [f32; 3] {
+pub(super) fn dither(pixel: [f32; 2]) -> [f32; 3] {
     let screen_noise = |x: f32, y: f32| {
-        let a = x * 0.06711056 + y * 0.00583715;
+        let a = x * 0.067_110_56 + y * 0.005_837_15;
         let b = 52.982_918 * (a - a.floor());
         b - b.floor()
     };
@@ -115,7 +123,7 @@ pub fn dither(pixel: [f32; 2]) -> [f32; 3] {
     ]
 }
 
-pub fn shade(p: &[f32], uv: [f32; 2]) -> [f32; 4] {
+pub(super) fn shade(p: &[f32], uv: [f32; 2]) -> [f32; 4] {
     let unit = p[0].min(p[1] * 1.4);
     let x = (uv[0] - 0.5) * p[0] / unit;
     let y = (uv[1] - p[32]) * p[1] / unit;

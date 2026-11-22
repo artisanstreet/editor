@@ -1,11 +1,6 @@
-//! Output through `PulseAudio`'s native protocol, spoken in pure Rust.
-//!
-//! This serves `PulseAudio` itself, `PipeWire`'s pulse server and `WSLg`'s
-//! `PulseServer`, without linking ALSA or any system library. The stream runs
-//! at the track's own rate and layout (the server resamples) with a ~100 ms
-//! buffer, so pause (cork), seek (flush) and the position stay responsive.
-
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -19,32 +14,66 @@ use pulseaudio::protocol::{
 };
 use pulseaudio::{AsPlaybackSource as _, Client};
 
-use super::{Command, Format, control, error_chain};
+use super::{Command, Format, control};
 use crate::state::Shared;
 
-/// Bytes per sample of the `f32` stream.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RunError {
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
+    #[error("No audio output: {channels} channels")]
+    Channels {
+        channels: usize,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
+    #[error("No audio output: PulseAudio refused the stream")]
+    Stream(#[source] pulseaudio::ClientError),
+    #[error("Audio output stopped")]
+    Stopped(#[source] pulseaudio::ClientError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ConnectError {
+    #[error("No audio output: PulseAudio is not running")]
+    NotRunning,
+    #[error("No audio output: couldn't connect to PulseAudio at {}", socket.display())]
+    Socket {
+        socket: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("No audio output: PulseAudio refused the connection")]
+    Refused(#[source] pulseaudio::ClientError),
+    #[error("No audio output: PulseAudio refused the connection (no auth cookie found)")]
+    NoCookie(#[source] pulseaudio::ClientError),
+    #[error(
+        "No audio output: PulseAudio refused the connection without the auth cookie at {}",
+        cookie.display()
+    )]
+    UnreadableCookie {
+        cookie: PathBuf,
+        #[source]
+        source: std::io::Error,
+        refused: pulseaudio::ClientError,
+    },
+}
+
 const SAMPLE_BYTES: usize = 4;
 
-/// The server-side buffer the stream aims for is a second divided by this:
-/// 100 ms.
 const BUFFER_DIVISOR: u32 = 10;
 
-/// Opens a playback stream for the track of `generation` and drives it until
-/// the player drops the output.
-///
-/// # Errors
-///
-/// No server is reachable, it refuses the connection or stream, or a later
-/// cork, uncork or flush fails.
 pub(super) fn run(
     shared: &Arc<Shared>,
     generation: u64,
     format: &Format,
     commands: &Receiver<Command>,
-) -> Result<(), String> {
+) -> Result<(), RunError> {
     let client = connect()?;
-    let channels = u8::try_from(format.channels)
-        .map_err(|_too_many| format!("No audio output: {} channels", format.channels))?;
+    let channels = u8::try_from(format.channels).map_err(|source| RunError::Channels {
+        channels: format.channels,
+        source,
+    })?;
     let frame_bytes = format.channels * SAMPLE_BYTES;
     let target = format.rate.saturating_mul(u32::from(channels) * 4) / BUFFER_DIVISOR;
     let mut params = PlaybackStreamParams {
@@ -69,11 +98,9 @@ pub(super) fn run(
         },
         ..PlaybackStreamParams::default()
     };
-    if let Some(title) = format
-        .title
-        .as_deref()
-        .and_then(|title| CString::new(title).ok())
-    {
+    if let Some(title) = format.title.as_deref().map(|title| {
+        CString::new(title.replace('\0', "")).expect("invariant: NULs were removed from the title")
+    }) {
         params.props.set(Prop::MediaName, title);
     }
 
@@ -85,7 +112,6 @@ pub(super) fn run(
         move |bytes: &mut [u8]| {
             let whole = bytes.len() / frame_bytes * frame_bytes;
             if whole == 0 {
-                // Returning 0 would end the stream for good; pad instead.
                 bytes.fill(0);
                 return bytes.len();
             }
@@ -105,15 +131,9 @@ pub(super) fn run(
         }
     };
     let stream = block_on(client.create_playback_stream(params, source.as_playback_source()))
-        .map_err(|error| {
-            format!(
-                "No audio output: PulseAudio refused the stream ({})",
-                error_chain(&error)
-            )
-        })?;
+        .map_err(RunError::Stream)?;
 
-    let stopped =
-        |error: pulseaudio::ClientError| format!("Audio output stopped: {}", error_chain(&error));
+    let stopped = RunError::Stopped;
     let result = control(
         shared,
         generation,
@@ -128,44 +148,51 @@ pub(super) fn run(
         },
         || block_on(stream.flush()).map_err(stopped),
     );
-    // The stream's drop deletes it on the server; dropping the client first
-    // leaves the connection with no other handle, so it closes once the
-    // server acknowledges the delete.
     drop(client);
     drop(stream);
     result
 }
 
-/// Connects to the sound server of this session.
-fn connect() -> Result<Client, String> {
-    let socket =
-        server_socket().ok_or_else(|| "No audio output: PulseAudio is not running".to_owned())?;
-    let connection = UnixStream::connect(&socket).map_err(|error| {
-        format!(
-            "No audio output: couldn't connect to PulseAudio at {} ({error})",
-            socket.display()
-        )
-    })?;
-    let cookie = pulseaudio::cookie_path_from_env().and_then(|path| std::fs::read(path).ok());
-    let missing_cookie = cookie.is_none();
-    Client::new_unix(c"Artisan Editor", connection, cookie).map_err(|error| {
-        if missing_cookie {
-            "No audio output: PulseAudio refused the connection (no auth cookie found)".to_owned()
-        } else {
-            format!(
-                "No audio output: PulseAudio refused the connection ({})",
-                error_chain(&error)
-            )
-        }
-    })
+enum Cookie {
+    Read(Vec<u8>),
+    Missing,
+    Unreadable(PathBuf, std::io::Error),
 }
 
-/// The server's socket: `$PULSE_SERVER` when it names a local socket, then
-/// the session's runtime directory, then `WSLg`'s shared server.
+fn connect() -> Result<Client, ConnectError> {
+    let socket = server_socket().ok_or(ConnectError::NotRunning)?;
+    let connection =
+        UnixStream::connect(&socket).map_err(|source| ConnectError::Socket { socket, source })?;
+    let cookie = pulseaudio::cookie_path_from_env().map_or(Cookie::Missing, |path| {
+        match std::fs::read(&path) {
+            Ok(bytes) => Cookie::Read(bytes),
+            Err(error) if error.kind() == ErrorKind::NotFound => Cookie::Missing,
+            Err(error) => Cookie::Unreadable(path, error),
+        }
+    });
+    match cookie {
+        Cookie::Read(bytes) => Client::new_unix(c"Artisan Editor", connection, Some(bytes))
+            .map_err(ConnectError::Refused),
+        Cookie::Missing => Client::new_unix(c"Artisan Editor", connection, None::<Vec<u8>>)
+            .map_err(ConnectError::NoCookie),
+        Cookie::Unreadable(cookie, source) => {
+            Client::new_unix(c"Artisan Editor", connection, None::<Vec<u8>>).map_err(|refused| {
+                ConnectError::UnreadableCookie {
+                    cookie,
+                    source,
+                    refused,
+                }
+            })
+        }
+    }
+}
+
 fn server_socket() -> Option<PathBuf> {
-    let configured = std::env::var("PULSE_SERVER").ok().and_then(|server| {
-        let path = server.strip_prefix("unix:").unwrap_or(&server);
-        path.starts_with('/').then(|| PathBuf::from(path))
+    let configured = std::env::var_os("PULSE_SERVER").and_then(|server| {
+        let bytes = server.as_bytes();
+        let path = bytes.strip_prefix(b"unix:").unwrap_or(bytes);
+        path.starts_with(b"/")
+            .then(|| PathBuf::from(OsStr::from_bytes(path)))
     });
     let runtime =
         std::env::var_os("PULSE_RUNTIME_PATH").map(|path| PathBuf::from(path).join("native"));

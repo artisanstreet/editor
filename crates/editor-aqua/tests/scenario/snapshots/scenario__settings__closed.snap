@@ -1,0 +1,32 @@
+---
+source: crates/editor-aqua/tests/scenario/settings.rs
+expression: "editor.settle(\"settings to close\", |view|\n{ view.find(Role::Dialog, \"Settings\").is_none() })"
+---
+Group "Artisan Editor" [focused]
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Greeting" [selected]
+        Label "Greeting"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Greeting"
+    Group "Project / Greeting"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Greeting"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  Label "No messages yet."
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message"
+  Button "Send message" [disabled]

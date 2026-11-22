@@ -15,17 +15,19 @@ impl ReadWatch {
         let thread = conversation.open.clone();
         let host = thread.as_ref().and_then(|(host, _)| core.host(host));
         let id = thread.as_ref().map(|(_, id)| id);
+        let run = host
+            .zip(id)
+            .and_then(|(host, id)| host.runs.get(id))
+            .map(|run| (run.seq, run.status().is_live()));
+        let read = host
+            .zip(id)
+            .and_then(|(host, id)| host.threads.get(id))
+            .map(|thread| (thread.activity_seq, thread.read_seq, thread.marked_unread));
         Self {
             focused,
-            run: host
-                .zip(id)
-                .and_then(|(host, id)| host.runs.get(id))
-                .map(|run| (run.seq, run.status.is_live())),
-            read: host
-                .zip(id)
-                .and_then(|(host, id)| host.threads.get(id))
-                .map(|thread| (thread.activity_seq, thread.read_seq, thread.marked_unread)),
             thread,
+            run,
+            read,
         }
     }
 

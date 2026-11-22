@@ -1,14 +1,86 @@
-use super::payload::{self, Staged};
-use anyhow::{Context as _, Result, bail};
+use super::payload::{self, StageError, Staged, WriteNoticesError};
 use std::io::{BufRead as _, BufReader};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
-fn command(staged: &Staged, arguments: &[String]) -> Result<Command> {
+#[derive(Debug, thiserror::Error)]
+pub enum InstallError {
+    #[error("find this program")]
+    CurrentExe(#[source] std::io::Error),
+    #[error("stage the installer")]
+    Stage(#[source] StageError),
+    #[error("start the installer {}", path.display())]
+    Start {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("wait for the installer")]
+    Wait(#[source] std::io::Error),
+    #[error("{reason}")]
+    Refused { code: Option<i32>, reason: String },
+    #[error("write the third-party notices")]
+    Notices(#[source] WriteNoticesError),
+    #[error("setup was closed before the installer finished")]
+    Cancelled,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct Cancel {
+    requested: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+impl Cancel {
+    pub(super) fn cancel(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        self.kill();
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    fn kill(&self) {
+        if let Some(child) = self
+            .child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            && let Err(error) = child.kill()
+        {
+            tracing::warn!(
+                pid = child.id(),
+                %error,
+                "setup could not stop the installer"
+            );
+        }
+    }
+
+    fn adopt(&self, child: Child) {
+        *self.child.lock().unwrap_or_else(PoisonError::into_inner) = Some(child);
+        if self.requested() {
+            self.kill();
+        }
+    }
+
+    fn release(&self) -> Child {
+        self.child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .expect("invariant: the installer child stays adopted until its run releases it")
+    }
+}
+
+fn command(staged: &Staged, arguments: &[String]) -> Result<Command, InstallError> {
     let mut command = Command::new(&staged.ae);
     command
         .args(arguments)
         .arg("--bundled-editor")
-        .arg(std::env::current_exe().context("find this program")?)
+        .arg(std::env::current_exe().map_err(InstallError::CurrentExe)?)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -24,8 +96,7 @@ fn command(staged: &Staged, arguments: &[String]) -> Result<Command> {
     Ok(command)
 }
 
-#[must_use]
-pub fn failure(lines: &[String]) -> String {
+fn failure(lines: &[String]) -> String {
     lines
         .iter()
         .rev()
@@ -35,13 +106,25 @@ pub fn failure(lines: &[String]) -> String {
         .to_owned()
 }
 
-pub fn run(arguments: &[String], mut progress: impl FnMut(&str)) -> Result<()> {
-    let staged = payload::stage()?;
+pub(super) fn run(
+    arguments: &[String],
+    cancel: &Cancel,
+    mut progress: impl FnMut(&str),
+) -> Result<(), InstallError> {
+    let staged = payload::stage().map_err(InstallError::Stage)?;
+    if cancel.requested() {
+        return Err(InstallError::Cancelled);
+    }
     let mut child = command(&staged, arguments)?
         .spawn()
-        .with_context(|| format!("start {}", staged.ae.display()))?;
+        .map_err(|source| InstallError::Start {
+            path: staged.ae.clone(),
+            source,
+        })?;
+    let stderr = child.stderr.take();
+    cancel.adopt(child);
     let mut lines = Vec::new();
-    if let Some(stderr) = child.stderr.take() {
+    if let Some(stderr) = stderr {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             let line = line.trim().to_owned();
             if !line.is_empty() {
@@ -50,15 +133,25 @@ pub fn run(arguments: &[String], mut progress: impl FnMut(&str)) -> Result<()> {
             }
         }
     }
-    let status = child.wait().context("wait for the installer")?;
-    if !status.success() {
-        bail!(failure(&lines));
+    let status = cancel.release().wait().map_err(InstallError::Wait)?;
+    if cancel.requested() {
+        return Err(InstallError::Cancelled);
     }
-    payload::write_notices()
+    if !status.success() {
+        return Err(InstallError::Refused {
+            code: status.code(),
+            reason: failure(&lines),
+        });
+    }
+    payload::write_notices().map_err(InstallError::Notices)
 }
 
-pub fn headless(arguments: &[String]) -> Result<()> {
+#[expect(
+    clippy::print_stderr,
+    reason = "a headless install reports its progress lines on stderr"
+)]
+pub(super) fn headless(arguments: &[String]) -> Result<(), InstallError> {
     let mut all = vec!["install".to_owned(), "--apply".to_owned()];
     all.extend_from_slice(arguments);
-    run(&all, |line| eprintln!("{line}"))
+    run(&all, &Cancel::default(), |line| eprintln!("{line}"))
 }

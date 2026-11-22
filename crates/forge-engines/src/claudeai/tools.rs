@@ -1,11 +1,3 @@
-//! The tools the claude.ai transport offers the model, and the runner that
-//! executes them on this machine.
-//!
-//! claude.ai calls a client tool and waits for the result, so the transport
-//! needs a tool runtime of its own. The tools carry Claude Code's names and
-//! input shapes, so the model calls them the way it is trained to and the
-//! Editor renders them the way it renders Claude Code's.
-
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
@@ -20,58 +12,41 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
+use super::files::{self, ReadFileError};
 use super::rules::{Rules, Verdict, changes_files, url_host};
 use super::{mcp, shells, skills};
+use forge_isolation::Containment;
 
-/// The most of a tool's output the model is sent.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
-/// The largest file Read, Edit or Grep open, and Write writes.
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
-/// The lines Read returns when the model does not say.
 const DEFAULT_READ_LINES: u64 = 2000;
-/// The longest line Read returns whole.
 const MAX_LINE_CHARS: usize = 2000;
-/// How long a command runs when the model does not say, and the most it may.
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
-/// The most entries a glob or a search walks, and the most it returns.
 const MAX_WALKED: usize = 200_000;
 const MAX_MATCHES: usize = 2_000;
-/// How long WebFetch waits for a page, and the most of it that is read.
 const WEB_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_WEB_BYTES: usize = 2 * 1024 * 1024;
-/// The most redirects WebFetch follows within one site.
 const MAX_REDIRECTS: usize = 10;
 
-/// A tool call the model made.
 #[derive(Clone, Debug)]
 pub struct Call {
-    /// The id claude.ai gave the call.
-    pub id: String,
-    /// The tool's name.
-    pub name: String,
-    /// The tool's arguments.
-    pub input: Value,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) input: Value,
 }
 
-/// What to do with a call.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Plan {
-    /// Run it.
+pub(crate) enum Plan {
     Run,
-    /// Ask the user first.
     Ask(ApprovalRequest),
-    /// Do not run it; the model is told why.
     Refuse(String),
 }
 
-/// What a call answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Answer {
-    /// What the model is told.
-    pub text: String,
-    /// Whether the call failed or was refused.
-    pub is_error: bool,
+pub(crate) struct Answer {
+    pub(crate) text: String,
+    pub(crate) is_error: bool,
 }
 
 impl Answer {
@@ -90,19 +65,22 @@ impl Answer {
     }
 }
 
-/// What a run's tools share: the skills, MCP servers, background shells and
-/// permission rules the turn's machine and settings carry.
-pub struct Runtime {
-    pub skills: Vec<skills::Skill>,
-    pub mcp: mcp::Servers,
-    pub shells: shells::Shells,
-    pub rules: Rules,
+#[derive(Debug)]
+pub(crate) struct Runtime {
+    pub(crate) skills: Vec<skills::Skill>,
+    pub(crate) mcp: mcp::Servers,
+    pub(crate) shells: shells::Shells,
+    pub(crate) rules: Rules,
+    pub(crate) containment: Containment,
 }
 
 impl Runtime {
-    /// Reads the run's skills and rules and connects its MCP servers: the
-    /// launch's (Forge's own included) and the project's `.mcp.json`.
-    pub async fn build(home: &Path, cwd: &Path, servers: &[McpServer]) -> Self {
+    pub(crate) async fn build(
+        home: &Path,
+        cwd: &Path,
+        servers: &[McpServer],
+        containment: Containment,
+    ) -> Self {
         let mut servers = servers.to_vec();
         for project in mcp::project_servers(cwd) {
             if !servers.iter().any(|known| known.name == project.name) {
@@ -111,27 +89,30 @@ impl Runtime {
         }
         Self {
             skills: skills::discover(home, cwd),
-            mcp: mcp::Servers::connect(&servers, cwd).await,
+            mcp: mcp::Servers::connect(&servers, cwd, containment).await,
             shells: shells::Shells::default(),
             rules: Rules::load(home, cwd),
+            containment,
         }
+    }
+
+    pub(crate) async fn release(self) {
+        tokio::task::spawn_blocking(move || drop(self))
+            .await
+            .expect("invariant: releasing a claude.ai run's tools does not panic");
     }
 }
 
-/// The approvals the user gave "always" for, for the rest of the run.
-#[derive(Default)]
-pub struct Allowed {
+#[derive(Debug, Default)]
+pub(crate) struct Allowed {
     file_changes: bool,
     commands: HashSet<String>,
-    /// MCP tools (their `mcp__server__tool` names) the user allowed.
     tools: HashSet<String>,
-    /// Hosts WebFetch may read.
     domains: HashSet<String>,
 }
 
 impl Allowed {
-    /// Remembers an "always" answer to the call.
-    pub fn remember(&mut self, call: &Call, decision: Decision) {
+    pub(crate) fn remember(&mut self, call: &Call, decision: Decision) {
         if decision != Decision::AllowAlways {
             return;
         }
@@ -171,11 +152,8 @@ fn web_host(call: &Call) -> Option<String> {
     url_host(call.input["url"].as_str().unwrap_or_default())
 }
 
-/// The tools Forge offers, in the shape claude.ai takes: Claude Code's,
-/// the run's skills and MCP servers, and claude.ai's own web search, which
-/// claude.ai runs and answers.
 #[must_use]
-pub fn definitions(runtime: &Runtime) -> Vec<Value> {
+pub(super) fn definitions(runtime: &Runtime) -> Vec<Value> {
     let mut tools = vec![
         json!({ "type": "web_search_v0", "name": "web_search" }),
         json!({
@@ -368,9 +346,8 @@ pub fn definitions(runtime: &Runtime) -> Vec<Value> {
     tools
 }
 
-/// The questions a call asks the user.
 #[must_use]
-pub fn questions(call: &Call) -> Vec<artisan_api::Question> {
+pub(super) fn questions(call: &Call) -> Vec<artisan_api::Question> {
     call.input["questions"]
         .as_array()
         .map(|questions| {
@@ -385,9 +362,7 @@ pub fn questions(call: &Call) -> Vec<artisan_api::Question> {
                                 .iter()
                                 .enumerate()
                                 .map(|(option, choice)| artisan_api::QuestionOption {
-                                    id: choice["label"]
-                                        .as_str()
-                                        .map_or_else(|| format!("{index}.{option}"), str::to_owned),
+                                    id: format!("{index}.{option}"),
                                     label: choice["label"].as_str().unwrap_or_default().to_owned(),
                                     description: choice["description"]
                                         .as_str()
@@ -414,9 +389,8 @@ pub fn questions(call: &Call) -> Vec<artisan_api::Question> {
         .unwrap_or_default()
 }
 
-/// Whether the call runs as it is, or the user is asked first.
 #[must_use]
-pub fn plan(
+pub(super) fn plan(
     call: &Call,
     permissions: Permissions,
     allowed: &Allowed,
@@ -429,18 +403,28 @@ pub fn plan(
             "There is no tool called {name} on the user's machine. Use one of: Read, Write, Edit, Glob, Grep, Bash, TodoWrite, WebFetch, Task, Skill, AskUserQuestion."
         ));
     }
+    if let Some(error) = rules.broken() {
+        let mut reason = String::from(
+            "Every tool is refused until the user repairs a Claude Code settings file, because the permission rules in it could not be read: ",
+        );
+        let mut cause: Option<&dyn std::error::Error> = Some(error);
+        while let Some(error) = cause {
+            write!(reason, "{error}").expect("invariant: writing to a String cannot fail");
+            cause = error.source();
+            if cause.is_some() {
+                reason.push_str(": ");
+            }
+        }
+        reason.push_str(". Tell the user; do not retry.");
+        return Plan::Refuse(reason);
+    }
     let verdict = rules.verdict(call);
     if let Some(Verdict::Deny(reason)) = verdict {
         return Plan::Refuse(reason);
     }
-    // Full access runs everything no rule denies, `ask` rules included,
-    // as Claude Code's bypassPermissions does.
     if permissions == Permissions::Full {
         return Plan::Run;
     }
-    // A change to Claude Code's or Forge's own settings could grant the
-    // model more on the next turn (`allow: ["Bash"]`), so it always asks:
-    // no rule, "Allow always" or acceptEdits covers it.
     if rules.protects(call) {
         return Plan::Ask(ApprovalRequest::FileChange);
     }
@@ -455,13 +439,11 @@ pub fn plan(
     match name {
         "Read" | "Glob" | "Grep" | "AskUserQuestion" | "TodoWrite" | "Task" | "Skill"
         | "BashOutput" | "KillShell" => Plan::Run,
-        // acceptEdits covers changes inside the project, not the machine.
         _ if changes_files(name) && rules.accept_edits() && rules.inside_root(call) => Plan::Run,
         _ => Plan::Ask(request_for(call, mcp)),
     }
 }
 
-/// Whether Forge offers a tool of that name.
 fn offered(name: &str) -> bool {
     matches!(
         name,
@@ -481,7 +463,6 @@ fn offered(name: &str) -> bool {
     ) || name.starts_with("mcp__")
 }
 
-/// What the user is shown before a call that asks.
 fn request_for(call: &Call, mcp: &mcp::Servers) -> ApprovalRequest {
     match call.name.as_str() {
         "Bash" => ApprovalRequest::Command {
@@ -497,9 +478,6 @@ fn request_for(call: &Call, mcp: &mcp::Servers) -> ApprovalRequest {
     }
 }
 
-/// The approval a WebFetch asks for: the site it reads, which "Allow
-/// always" then covers for the run. There is no web approval card, so it
-/// is an action card naming the domain and the URL.
 fn web_request(call: &Call) -> ApprovalRequest {
     let url = call.input["url"].as_str().unwrap_or_default().trim();
     let site = web_host(call).unwrap_or_else(|| "an unknown site".to_owned());
@@ -508,9 +486,6 @@ fn web_request(call: &Call) -> ApprovalRequest {
     }
 }
 
-/// The approval an MCP call asks for, naming the server and the tool as
-/// configured: a model-facing name may be shortened or hashed. A tool the
-/// servers do not know is named from the part after the last `__`.
 fn mcp_request(name: &str, known: Option<(&str, &str)>) -> ApprovalRequest {
     let (server, tool) = known.unwrap_or_else(|| {
         name.strip_prefix("mcp__")
@@ -522,11 +497,8 @@ fn mcp_request(name: &str, known: Option<(&str, &str)>) -> ApprovalRequest {
     }
 }
 
-/// The key a call's item goes under. The todo list is one item per run,
-/// replaced in place, as the Claude engine keys it; a subagent's is keyed
-/// under its agent when it is forwarded. Every other call is its own item.
 #[must_use]
-pub fn item_key(call: &Call) -> String {
+pub(super) fn item_key(call: &Call) -> String {
     if call.name == "TodoWrite"
         && crate::claude::tools::validate_input("TodoWrite", &call.input).is_ok()
     {
@@ -536,10 +508,8 @@ pub fn item_key(call: &Call) -> String {
     }
 }
 
-/// The item the Editor shows for a call before it runs: what it will do,
-/// from its input alone.
 #[must_use]
-pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
+fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
     match call.name.as_str() {
         "TodoWrite" => match crate::claude::tools::validate_input("TodoWrite", &call.input) {
             Ok(()) => ItemKind::Plan {
@@ -569,6 +539,7 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
                     | ToolKind::WebFetch { .. }
                     | ToolKind::WebSearch { .. }
                     | ToolKind::ViewImage { .. }
+                    | ToolKind::Workflow { .. }
                     | ToolKind::Other { .. } => {}
                 }
                 ItemKind::Tool {
@@ -583,9 +554,36 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
     }
 }
 
-/// The `Agent` item a `Task` call becomes.
 #[must_use]
-pub fn agent_kind(call: &Call) -> ItemKind {
+pub(super) fn refused(call: &Call, cwd: &Path, mcp: &mcp::Servers, reason: &str) -> ItemKind {
+    let mut item = preview(call, cwd, mcp);
+    if let ItemKind::Agent { result, .. } = &mut item {
+        *result = Some(reason.to_owned().into());
+        return item;
+    }
+    finished(item, &Answer::error(reason), None)
+}
+
+#[must_use]
+pub(super) fn approval_card(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
+    let item = preview(call, cwd, mcp);
+    if !matches!(item, ItemKind::Agent { .. }) {
+        return item;
+    }
+    ItemKind::Tool {
+        tool: ToolKind::Other {
+            name: call.name.clone(),
+            input: Some(call.input.to_string().into()),
+        },
+        title: call.input["description"].as_str().map(str::to_owned),
+        output: None,
+        exit_code: None,
+        approval: None,
+    }
+}
+
+#[must_use]
+pub(super) fn agent_kind(call: &Call) -> ItemKind {
     ItemKind::Agent {
         engine: None,
         thread: None,
@@ -607,9 +605,7 @@ pub fn agent_kind(call: &Call) -> ItemKind {
     }
 }
 
-/// Runs a call and returns what the model is told, and the item the Editor
-/// shows once it ran.
-pub async fn execute(
+pub(super) async fn execute(
     call: &Call,
     cwd: &Path,
     cancel: &CancellationToken,
@@ -620,12 +616,12 @@ pub async fn execute(
         "Write" => write(call, cwd).await,
         "Edit" => edit(call, cwd).await,
         "Glob" => glob(call, cwd, &runtime.rules).await,
-        "Grep" => grep(call, cwd, &runtime.rules).await,
+        "Grep" => grep(call, cwd, &runtime.rules, cancel).await,
         "Bash" if call.input["run_in_background"].as_bool() == Some(true) => {
             let answer = match call.input["command"].as_str() {
                 Some(command) if !command.trim().is_empty() => runtime
                     .shells
-                    .start(command, cwd)
+                    .start(command, cwd, runtime.containment)
                     .map_or_else(Answer::error, |id| {
                         Answer::ok(format!(
                             "Command running in the background with ID {id}. Read it with BashOutput, stop it with KillShell."
@@ -636,7 +632,7 @@ pub async fn execute(
             let item = finished(preview(call, cwd, &runtime.mcp), &answer, None);
             return (answer, item);
         }
-        "Bash" => return bash(call, cwd, cancel, &runtime.mcp).await,
+        "Bash" => return bash(call, cwd, cancel, runtime).await,
         "BashOutput" => call.input["bash_id"].as_str().map_or_else(
             || Answer::error("BashOutput needs the shell's bash_id."),
             |id| {
@@ -688,7 +684,6 @@ pub async fn execute(
     (answer, item)
 }
 
-/// The preview item, finished with what the call did.
 fn finished(item: ItemKind, answer: &Answer, exit_code: Option<i32>) -> ItemKind {
     let ItemKind::Tool { tool, title, .. } = item else {
         return item;
@@ -702,7 +697,6 @@ fn finished(item: ItemKind, answer: &Answer, exit_code: Option<i32>) -> ItemKind
     }
 }
 
-/// The path a call names, resolved against the working directory.
 fn resolve(cwd: &Path, path: &str) -> PathBuf {
     let candidate = Path::new(path);
     if candidate.is_absolute() {
@@ -720,27 +714,31 @@ fn path_input<'a>(call: &'a Call, tool: &str) -> Result<&'a str, Answer> {
         .ok_or_else(|| Answer::error(format!("{tool} needs a file_path.")))
 }
 
-/// Reads a text file no larger than the limit.
 async fn read_text(path: &Path) -> Result<String, Answer> {
-    let metadata = tokio::fs::metadata(path)
+    let owned = path.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || files::read_bounded(&owned, MAX_FILE_BYTES))
         .await
-        .map_err(|error| Answer::error(format!("Could not read {}: {error}", path.display())))?;
-    if metadata.is_dir() {
-        return Err(Answer::error(format!(
-            "{} is a directory; use Glob or Bash `ls` to list it.",
-            path.display()
-        )));
-    }
-    if metadata.len() > MAX_FILE_BYTES {
-        return Err(Answer::error(format!(
-            "{} is {} MB, more than Read takes; read parts of it with Bash (e.g. sed -n).",
-            path.display(),
-            metadata.len() / (1024 * 1024)
-        )));
-    }
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|error| Answer::error(format!("Could not read {}: {error}", path.display())))?;
+        .expect("invariant: reading a file does not panic");
+    let bytes = read.map_err(|error| {
+        Answer::error(match error {
+            ReadFileError::Directory { .. } => format!(
+                "{} is a directory; use Glob or Bash `ls` to list it.",
+                path.display()
+            ),
+            ReadFileError::NotRegular { .. } => format!(
+                "{} is not a regular file (a device, pipe or socket), so it cannot be read.",
+                path.display()
+            ),
+            ReadFileError::TooLarge { limit, .. } => format!(
+                "{} is more than {} MB, more than Read takes; read parts of it with Bash (e.g. sed -n).",
+                path.display(),
+                limit / (1024 * 1024)
+            ),
+            ReadFileError::Open { source, .. } | ReadFileError::Read { source, .. } => {
+                format!("Could not read {}: {source}", path.display())
+            }
+        })
+    })?;
     if bytes.iter().take(8192).any(|byte| *byte == 0) {
         return Err(Answer::error(format!(
             "{} is a binary file.",
@@ -750,7 +748,6 @@ async fn read_text(path: &Path) -> Result<String, Answer> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// Reads a file, numbered like `cat -n`.
 async fn read(call: &Call, cwd: &Path) -> Answer {
     let path = match path_input(call, "Read") {
         Ok(path) => resolve(cwd, path),
@@ -781,7 +778,8 @@ async fn read(call: &Call, cwd: &Path) -> Answer {
         } else {
             line.to_owned()
         };
-        writeln!(out, "{:>6}\t{line}", number + 1).ok();
+        writeln!(out, "{:>6}\t{line}", number + 1)
+            .expect("invariant: writing to a String cannot fail");
     }
     if out.is_empty() {
         return Answer::ok(if total == 0 {
@@ -795,12 +793,12 @@ async fn read(call: &Call, cwd: &Path) -> Answer {
     }
     let shown_to = (offset - 1).saturating_add(limit);
     if usize::try_from(shown_to).is_ok_and(|shown| shown < total) {
-        writeln!(out, "[{total} lines in all; pass offset to read on]").ok();
+        writeln!(out, "[{total} lines in all; pass offset to read on]")
+            .expect("invariant: writing to a String cannot fail");
     }
     Answer::ok(truncate(&out))
 }
 
-/// Writes a file.
 async fn write(call: &Call, cwd: &Path) -> Answer {
     let path = match path_input(call, "Write") {
         Ok(path) => resolve(cwd, path),
@@ -827,7 +825,6 @@ async fn write(call: &Call, cwd: &Path) -> Answer {
     ))
 }
 
-/// Replaces exact text in a file.
 async fn edit(call: &Call, cwd: &Path) -> Answer {
     let path = match path_input(call, "Edit") {
         Ok(path) => resolve(cwd, path),
@@ -878,13 +875,12 @@ async fn edit(call: &Call, cwd: &Path) -> Answer {
     ))
 }
 
-/// The walk Glob and Grep share: .gitignore honoured, hidden files skipped,
-/// bounded.
 fn walk(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(root)
         .max_depth(Some(32))
         .follow_links(false)
         .require_git(false)
+        .sort_by_file_name(Ord::cmp)
         .build()
         .take(MAX_WALKED)
         .filter_map(Result::ok)
@@ -906,7 +902,6 @@ fn matcher(pattern: &str) -> Result<globset::GlobMatcher, Answer> {
         .map_err(|error| Answer::error(format!("That is not a valid glob: {error}")))
 }
 
-/// Lists the files matching a glob.
 async fn glob(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
     let Some(pattern) = call.input["pattern"].as_str() else {
         return Answer::error("Glob needs a pattern.");
@@ -945,13 +940,12 @@ async fn glob(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
             listing,
             "\n[more than {MAX_MATCHES} files; narrow the pattern]"
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     Answer::ok(truncate(&listing))
 }
 
-/// Searches file contents for a pattern.
-async fn grep(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
+async fn grep(call: &Call, cwd: &Path, rules: &Rules, cancel: &CancellationToken) -> Answer {
     let Some(pattern) = call.input["pattern"].as_str() else {
         return Answer::error("Grep needs a pattern.");
     };
@@ -971,9 +965,18 @@ async fn grep(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
         .as_str()
         .map_or_else(|| cwd.to_path_buf(), |path| resolve(cwd, path));
     let rules = rules.clone();
-    let hits = tokio::task::spawn_blocking(move || search(&root, &regex, only.as_ref(), &rules))
-        .await
-        .unwrap_or_default();
+    let stop = cancel.clone();
+    let hits = match tokio::task::spawn_blocking(move || {
+        search(&root, &regex, only.as_ref(), &rules, &stop)
+    })
+    .await
+    {
+        Ok(hits) => hits,
+        Err(error) => return Answer::error(format!("The search failed: {error}")),
+    };
+    if cancel.is_cancelled() {
+        return Answer::error("The search was stopped.");
+    }
     if hits.is_empty() {
         return Answer::ok("Nothing matched.");
     }
@@ -988,7 +991,7 @@ async fn grep(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
             listing,
             "\n[more than {MAX_MATCHES} matches; narrow the search]"
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     Answer::ok(truncate(&listing))
 }
@@ -998,6 +1001,7 @@ fn search(
     regex: &Regex,
     only: Option<&globset::GlobMatcher>,
     rules: &Rules,
+    cancel: &CancellationToken,
 ) -> Vec<String> {
     let mut hits = Vec::new();
     let files: Box<dyn Iterator<Item = PathBuf>> = if root.is_file() {
@@ -1011,14 +1015,14 @@ fn search(
         root
     };
     for path in files {
+        if cancel.is_cancelled() {
+            return hits;
+        }
         let name = relative(base, &path);
         if only.is_some_and(|only| !only.is_match(&name)) || rules.hides("Grep", &path) {
             continue;
         }
-        if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_FILE_BYTES) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(bytes) = files::read_bounded(&path, MAX_FILE_BYTES) else {
             continue;
         };
         if bytes.iter().take(8192).any(|byte| *byte == 0) {
@@ -1038,16 +1042,6 @@ fn search(
     hits
 }
 
-/// Fetches a URL and returns its text, HTML converted to readable text.
-///
-/// Every hop is checked before it is connected to: the domain rules, an
-/// http(s) scheme, and every address the host resolves to being public;
-/// the connection is then pinned to the checked addresses, so a second
-/// lookup cannot swap in a private one. Redirects are followed within a
-/// site; one to another host is handed back, so its fetch is asked for
-/// like any other. Behind the user's HTTP proxy the proxy connects
-/// instead (see [`client_for`]). `local_ok` lets tests reach a server on
-/// loopback; `vars` reads the environment's proxy settings.
 #[expect(
     clippy::too_many_lines,
     reason = "fetch/redirect/proxy in one vetted hop"
@@ -1122,10 +1116,10 @@ async fn web_fetch(
     };
     let status = response.status();
     if !status.is_success() {
-        let body = read_body(&mut response, 4096)
-            .await
-            .map(|(body, _)| String::from_utf8_lossy(&body).into_owned())
-            .unwrap_or_default();
+        let body = match read_body(&mut response, 4096).await {
+            Ok((body, _)) => String::from_utf8_lossy(&body).into_owned(),
+            Err((_, error)) => format!("[the body could not be read: {error}]"),
+        };
         return Answer::error(format!(
             "The server answered {status}{}",
             if body.trim().is_empty() {
@@ -1191,7 +1185,7 @@ async fn web_fetch(
             answer,
             "Requested: {prompt}\nAnswer that from the page below."
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     if cut {
         writeln!(
@@ -1199,14 +1193,13 @@ async fn web_fetch(
             "[truncated: the page is more than {} MB; only its start was read]",
             MAX_WEB_BYTES / (1024 * 1024)
         )
-        .ok();
+        .expect("invariant: writing to a String cannot fail");
     }
     answer.push('\n');
     answer.push_str(text.trim());
     Answer::ok(truncate(&answer))
 }
 
-/// What a fetched body is read as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Body {
     Html,
@@ -1214,14 +1207,12 @@ enum Body {
     Binary,
 }
 
-/// The refusal for a body that is not text.
 fn binary(url: &reqwest::Url, media: &str, size: &str) -> Answer {
     Answer::error(format!(
         "{url} is binary content ({media}, {size}), not shown. WebFetch reads web pages and text."
     ))
 }
 
-/// A Content-Type's media type, lowercased, and its charset.
 fn media_type(content_type: &str) -> (String, Option<String>) {
     let mut parts = content_type.split(';');
     let media = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
@@ -1234,7 +1225,6 @@ fn media_type(content_type: &str) -> (String, Option<String>) {
     (media, charset)
 }
 
-/// How a media type is read; `None` when none was given.
 fn body_kind(media: &str) -> Option<Body> {
     if media.is_empty() {
         return None;
@@ -1262,8 +1252,6 @@ fn body_kind(media: &str) -> Option<Body> {
     Some(if text { Body::Text } else { Body::Binary })
 }
 
-/// Whether a body is binary whatever it was labelled: a NUL early on, or
-/// the magic of a PDF, an image or an archive.
 fn sniffs_binary(bytes: &[u8]) -> bool {
     const MAGIC: &[&[u8]] = &[
         b"%PDF-",
@@ -1284,8 +1272,6 @@ fn looks_like_html(bytes: &[u8]) -> bool {
     head.starts_with("<!doctype html") || head.starts_with("<html")
 }
 
-/// A body decoded from the charset its header names, or for HTML its
-/// `<meta charset>`, else UTF-8 (a byte-order mark wins over both).
 fn decode(bytes: &[u8], charset: Option<&str>, html: bool) -> String {
     let label = charset
         .map(str::to_owned)
@@ -1296,15 +1282,13 @@ fn decode(bytes: &[u8], charset: Option<&str>, html: bool) -> String {
     encoding.decode(bytes).0.into_owned()
 }
 
-/// The charset a page's `<meta>` tags name in its first few KB.
 fn meta_charset(bytes: &[u8]) -> Option<String> {
     let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_ascii_lowercase();
     let mut rest = head.as_str();
-    while let Some(start) = rest.find("<meta") {
-        let tag = &rest[start..];
-        let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
-        if let Some(at) = tag.find("charset=") {
-            let label: String = tag[at + "charset=".len()..]
+    while let Some((_, after)) = rest.split_once("<meta") {
+        let tag = after.split_once('>').map_or(after, |(tag, _)| tag);
+        if let Some((_, value)) = tag.split_once("charset=") {
+            let label: String = value
                 .trim_start_matches(['"', '\'', ' '])
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
@@ -1313,13 +1297,11 @@ fn meta_charset(bytes: &[u8]) -> Option<String> {
                 return Some(label);
             }
         }
-        rest = &rest[start + "<meta".len()..];
+        rest = after;
     }
     None
 }
 
-/// Whether a redirect stays on the site: the same host, give or take
-/// `www.`.
 fn same_site(from: &reqwest::Url, to: &reqwest::Url) -> bool {
     let site = |url: &reqwest::Url| {
         url_host(url.as_str()).map(|host| host.strip_prefix("www.").unwrap_or(&host).to_owned())
@@ -1327,15 +1309,6 @@ fn same_site(from: &reqwest::Url, to: &reqwest::Url) -> bool {
     site(from).is_some() && site(from) == site(to)
 }
 
-/// A client for one hop: its host resolved here, every address checked,
-/// and the connection pinned to those addresses, with no proxy, which
-/// would resolve the name again.
-///
-/// When the environment's proxy applies to the URL (`HTTPS_PROXY`,
-/// `HTTP_PROXY` or `ALL_PROXY`, less `NO_PROXY`), the hop goes through it,
-/// or users behind one could not fetch at all. The proxy resolves the host
-/// and connects, so the connection cannot be pinned; the host is still
-/// checked where it resolves here, and an address literal always is.
 async fn client_for(
     url: &reqwest::Url,
     local_ok: bool,
@@ -1361,7 +1334,6 @@ async fn client_for(
         });
         match tokio::time::timeout(Duration::from_secs(10), lookup).await {
             Ok(Ok(Ok(addresses))) => addresses,
-            // Behind a proxy the name may only resolve on the proxy's side.
             _ if proxy.is_some() => Vec::new(),
             Ok(Ok(Err(error))) => {
                 return Err(Answer::error(format!("Could not resolve {host}: {error}")));
@@ -1398,9 +1370,6 @@ async fn client_for(
         .map_err(|error| Answer::error(format!("Could not fetch: {error}")))
 }
 
-/// The proxy the environment sets for `url`, unless `NO_PROXY` exempts its
-/// host: the scheme's own variable first, then `ALL_PROXY`, each in either
-/// case.
 fn proxy_for(url: &reqwest::Url, vars: &(dyn Fn(&str) -> Option<String> + Sync)) -> Option<String> {
     let var = |names: &[&str]| {
         names
@@ -1422,9 +1391,6 @@ fn proxy_for(url: &reqwest::Url, vars: &(dyn Fn(&str) -> Option<String> + Sync))
     (!exempts(&exempt, &host)).then(|| proxy.trim().to_owned())
 }
 
-/// Whether a `NO_PROXY` list names a host: `*`, the host or a domain it is
-/// under (`example.com`, `.example.com`, `*.example.com`), an address, or
-/// a network holding it (`10.0.0.0/8`).
 fn exempts(list: &str, host: &str) -> bool {
     let address = host.parse::<IpAddr>().ok();
     list.split(',')
@@ -1457,7 +1423,6 @@ fn exempts(list: &str, host: &str) -> bool {
         })
 }
 
-/// Whether `address` is in the network `network/bits`.
 fn in_network(address: IpAddr, network: IpAddr, bits: u32) -> bool {
     match (address, network) {
         (IpAddr::V4(address), IpAddr::V4(network)) if bits <= 32 => {
@@ -1472,9 +1437,6 @@ fn in_network(address: IpAddr, network: IpAddr, bits: u32) -> bool {
     }
 }
 
-/// Whether an address is on the public internet: not loopback, private,
-/// link-local, unique-local, shared, unspecified, multicast or reserved,
-/// also when an IPv6 address carries an IPv4 one.
 fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -1494,7 +1456,6 @@ fn is_public(ip: IpAddr) -> bool {
                 return is_public(IpAddr::V4(v4));
             }
             let segments = v6.segments();
-            // IPv4-compatible (`::a.b.c.d`) and NAT64 (`64:ff9b::a.b.c.d`).
             if segments[..6] == [0; 6] || segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
                 let [.., high, low] = segments;
                 let v4 = std::net::Ipv4Addr::from((u32::from(high) << 16) | u32::from(low));
@@ -1512,9 +1473,6 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
-/// Reads a body up to `limit` bytes: the bytes, and whether more were
-/// left. A read that fails part-way is an error, with how much arrived, so
-/// a cut-off page is never taken for a whole one.
 async fn read_body(
     response: &mut reqwest::Response,
     limit: usize,
@@ -1536,9 +1494,7 @@ async fn read_body(
     }
 }
 
-/// HTML as readable text: scripts and styles dropped, block tags as line
-/// breaks, entities decoded, blank runs collapsed.
-fn html_to_text(html: &str) -> String {
+pub fn html_to_text(html: &str) -> String {
     let mut without = html.to_owned();
     for tag in ["script", "style", "noscript", "template"] {
         without = strip_blocks(&without, tag);
@@ -1572,7 +1528,6 @@ fn html_to_text(html: &str) -> String {
     collapse(&decode_entities(&out))
 }
 
-/// The tags that end a line of text.
 const BLOCK_TAGS: &[&str] = &[
     "p",
     "div",
@@ -1609,77 +1564,85 @@ const BLOCK_TAGS: &[&str] = &[
     "meta",
 ];
 
-/// Removes `<tag ...>…</tag>` blocks, case-insensitively.
 fn strip_blocks(html: &str, tag: &str) -> String {
     let lower = html.to_ascii_lowercase();
     let open = format!("<{tag}");
     let close = format!("</{tag}");
     let mut out = String::with_capacity(html.len());
     let mut at = 0;
-    while let Some(start) = lower[at..].find(&open) {
+    while let Some(start) = lower.split_at(at).1.find(&open) {
         let start = at + start;
-        out.push_str(&html[at..start]);
-        let Some(end) = lower[start..].find(&close) else {
+        out.push_str(
+            html.get(at..start)
+                .expect("invariant: ASCII lowercasing keeps every byte offset"),
+        );
+        let Some(end) = lower.split_at(start).1.find(&close) else {
             return out;
         };
         let end = start + end;
-        let Some(gt) = lower[end..].find('>') else {
+        let Some(gt) = lower.split_at(end).1.find('>') else {
             return out;
         };
         at = end + gt + 1;
     }
-    out.push_str(&html[at..]);
+    out.push_str(html.split_at(at).1);
     out
 }
 
-/// The common named entities, and numeric ones.
 fn decode_entities(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
-        let Some(end) = rest[start..].find(';').filter(|end| *end <= 12) else {
-            out.push_str(&rest[start..=start]);
-            rest = &rest[start + 1..];
-            continue;
-        };
-        let entity = &rest[start + 1..start + end];
-        let decoded = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" | "#39" => Some('\''),
-            "nbsp" | "#160" => Some(' '),
-            "mdash" | "#8212" => Some('—'),
-            "ndash" | "#8211" => Some('–'),
-            "hellip" | "#8230" => Some('…'),
-            "rsquo" | "#8217" => Some('\u{2019}'),
-            "lsquo" | "#8216" => Some('\u{2018}'),
-            "ldquo" | "#8220" => Some('\u{201C}'),
-            "rdquo" | "#8221" => Some('\u{201D}'),
-            _ => entity
-                .strip_prefix("#x")
-                .or_else(|| entity.strip_prefix("#X"))
-                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
-                .or_else(|| {
-                    entity
-                        .strip_prefix('#')
-                        .and_then(|decimal| decimal.parse::<u32>().ok())
-                })
-                .and_then(char::from_u32),
-        };
-        match decoded {
-            Some(character) => out.push(character),
-            None => out.push_str(&rest[start..=start + end]),
+        out.push_str(rest.split_at(start).0);
+        let end = start
+            + 1
+            + rest.as_bytes()[start + 1..]
+                .iter()
+                .take(12)
+                .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'#')
+                .count();
+        let decoded = (rest.as_bytes().get(end) == Some(&b';'))
+            .then(|| rest.get(start + 1..end).and_then(entity))
+            .flatten();
+        if let Some(character) = decoded {
+            out.push(character);
+            rest = rest.split_at(end + 1).1;
+        } else {
+            out.push('&');
+            rest = rest.split_at(start + 1).1;
         }
-        rest = &rest[start + end + 1..];
     }
     out.push_str(rest);
     out
 }
 
-/// Collapses blank runs, trailing whitespace and runs of spaces.
+fn entity(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" | "#39" => Some('\''),
+        "nbsp" | "#160" => Some(' '),
+        "mdash" | "#8212" => Some('—'),
+        "ndash" | "#8211" => Some('–'),
+        "hellip" | "#8230" => Some('…'),
+        "rsquo" | "#8217" => Some('\u{2019}'),
+        "lsquo" | "#8216" => Some('\u{2018}'),
+        "ldquo" | "#8220" => Some('\u{201C}'),
+        "rdquo" | "#8221" => Some('\u{201D}'),
+        _ => name
+            .strip_prefix("#x")
+            .or_else(|| name.strip_prefix("#X"))
+            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+            .or_else(|| {
+                name.strip_prefix('#')
+                    .and_then(|decimal| decimal.parse::<u32>().ok())
+            })
+            .and_then(char::from_u32),
+    }
+}
+
 fn collapse(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut blanks = 0usize;
@@ -1711,15 +1674,13 @@ fn collapse(text: &str) -> String {
     out.trim().to_owned()
 }
 
-/// Runs a shell command in its own process group (a job object on
-/// Windows), so a timeout or a stop ends everything it started.
 async fn bash(
     call: &Call,
     cwd: &Path,
     cancel: &CancellationToken,
-    mcp: &mcp::Servers,
+    runtime: &Runtime,
 ) -> (Answer, ItemKind) {
-    let item = preview(call, cwd, mcp);
+    let item = preview(call, cwd, &runtime.mcp);
     let command = command_of(call);
     if command.trim().is_empty() {
         let answer = Answer::error("Bash needs a command.");
@@ -1729,21 +1690,13 @@ async fn bash(
         .as_u64()
         .map_or(DEFAULT_COMMAND_TIMEOUT, Duration::from_millis)
         .min(MAX_COMMAND_TIMEOUT);
-    let mut shell = if cfg!(windows) {
-        let mut shell = tokio::process::Command::new("cmd");
-        shell.arg("/C").arg(command);
-        shell
-    } else {
-        let mut shell = tokio::process::Command::new("sh");
-        shell.arg("-c").arg(command);
-        shell
-    };
+    let mut shell = shells::command_line(command);
     shell
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = match crate::process::owned_command(shell) {
+    let mut child = match crate::process::owned_command(shell, runtime.containment) {
         Ok(child) => child,
         Err(error) => {
             let answer = Answer::error(format!("The command could not start: {error:#}"));
@@ -1777,8 +1730,20 @@ async fn bash(
         let answer = Answer::error(note);
         return (answer.clone(), finished(item, &answer, Some(-1)));
     };
-    let code = status.ok().and_then(|status| status.code()).unwrap_or(-1);
+    let (code, unwaited) = match status {
+        Ok(status) => (status.code().unwrap_or(-1), None),
+        Err(error) => (
+            -1,
+            Some(format!("[the command's exit could not be read: {error}]")),
+        ),
+    };
     let mut text = out;
+    if let Some(unwaited) = unwaited {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&unwaited);
+    }
     if !err.is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
@@ -1790,7 +1755,7 @@ async fn bash(
         if !answer.is_empty() && !answer.ends_with('\n') {
             answer.push('\n');
         }
-        write!(answer, "[exit code {code}]").ok();
+        write!(answer, "[exit code {code}]").expect("invariant: writing to a String cannot fail");
     }
     if answer.is_empty() {
         answer.push_str("(no output)");
@@ -1805,7 +1770,6 @@ async fn bash(
     )
 }
 
-/// Reads a stream to its end, keeping at most the output limit of it.
 async fn capped(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
     let Some(mut stream) = stream else {
         return String::new();
@@ -1825,13 +1789,12 @@ async fn capped(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
     }
     let mut text = shells::Decoder::new(shells::legacy_encoding().await).push(&kept, true);
     if dropped > 0 {
-        write!(text, "\n[{dropped} more bytes of output cut]").ok();
+        write!(text, "\n[{dropped} more bytes of output cut]")
+            .expect("invariant: writing to a String cannot fail");
     }
     text
 }
 
-/// A call whose input could not be read, shown as itself: running it
-/// answers with what was wrong.
 fn unreadable(call: &Call) -> ItemKind {
     ItemKind::Tool {
         tool: ToolKind::Other {
@@ -1845,801 +1808,14 @@ fn unreadable(call: &Call) -> ItemKind {
     }
 }
 
-/// Cuts a tool's output to what the model can read.
 fn truncate(text: &str) -> String {
     if text.len() <= MAX_OUTPUT_BYTES {
         return text.to_owned();
     }
-    let mut end = MAX_OUTPUT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[output cut]", &text[..end])
+    let (kept, _) = text.split_at(text.floor_char_boundary(MAX_OUTPUT_BYTES));
+    format!("{kept}\n[output cut]")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn call(name: &str, input: Value) -> Call {
-        Call {
-            id: "t1".to_owned(),
-            name: name.to_owned(),
-            input,
-        }
-    }
-
-    /// [`super::plan`] with no MCP servers.
-    fn plan(call: &Call, permissions: Permissions, allowed: &Allowed, rules: &Rules) -> Plan {
-        super::plan(call, permissions, allowed, rules, &mcp::Servers::default())
-    }
-
-    /// [`super::preview`] with no MCP servers.
-    fn preview(call: &Call, cwd: &Path) -> ItemKind {
-        super::preview(call, cwd, &mcp::Servers::default())
-    }
-
-    /// [`super::web_fetch`] in an environment that sets no proxy.
-    async fn web_fetch(call: &Call, rules: &Rules, local_ok: bool) -> Answer {
-        super::web_fetch(call, rules, local_ok, &|_| None).await
-    }
-
-    fn runtime() -> Runtime {
-        Runtime {
-            skills: Vec::new(),
-            mcp: mcp::Servers::default(),
-            shells: shells::Shells::default(),
-            rules: Rules::default(),
-        }
-    }
-
-    #[test]
-    fn a_read_runs_and_a_change_asks_unless_full_or_always_allowed() {
-        let allowed = Allowed::default();
-        let rules = Rules::default();
-        let read = call("Read", json!({ "file_path": "/x" }));
-        assert_eq!(plan(&read, Permissions::Auto, &allowed, &rules), Plan::Run);
-        let write = call("Write", json!({ "file_path": "/x", "content": "y" }));
-        assert_eq!(
-            plan(&write, Permissions::Auto, &allowed, &rules),
-            Plan::Ask(ApprovalRequest::FileChange)
-        );
-        assert_eq!(plan(&write, Permissions::Full, &allowed, &rules), Plan::Run);
-        let mut allowed = Allowed::default();
-        allowed.remember(&write, Decision::AllowAlways);
-        assert_eq!(plan(&write, Permissions::Auto, &allowed, &rules), Plan::Run);
-        let bash = call("Bash", json!({ "command": "ls" }));
-        assert!(matches!(
-            plan(&bash, Permissions::Auto, &allowed, &rules),
-            Plan::Ask(_)
-        ));
-        allowed.remember(&bash, Decision::AllowOnce);
-        assert!(matches!(
-            plan(&bash, Permissions::Auto, &allowed, &rules),
-            Plan::Ask(_)
-        ));
-        allowed.remember(&bash, Decision::AllowAlways);
-        assert_eq!(plan(&bash, Permissions::Auto, &allowed, &rules), Plan::Run);
-    }
-
-    #[test]
-    fn mcp_calls_ask_under_auto_and_run_under_full_or_once_allowed() {
-        let rules = Rules::default();
-        let tool = call("mcp__docs__search", json!({ "query": "x" }));
-        assert!(matches!(
-            plan(&tool, Permissions::Auto, &Allowed::default(), &rules),
-            Plan::Ask(_)
-        ));
-        assert_eq!(
-            plan(&tool, Permissions::Full, &Allowed::default(), &rules),
-            Plan::Run
-        );
-        let mut allowed = Allowed::default();
-        allowed.remember(&tool, Decision::AllowAlways);
-        assert_eq!(plan(&tool, Permissions::Auto, &allowed, &rules), Plan::Run);
-    }
-
-    #[test]
-    fn todo_and_task_run_without_asking_and_keep_their_items() {
-        let rules = Rules::default();
-        let allowed = Allowed::default();
-        let todo = call(
-            "TodoWrite",
-            json!({ "todos": [
-                { "content": "Read the code", "status": "in_progress" },
-                { "content": "Write the fix", "status": "pending" }
-            ] }),
-        );
-        assert_eq!(plan(&todo, Permissions::Auto, &allowed, &rules), Plan::Run);
-        let ItemKind::Plan { steps, .. } = preview(&todo, Path::new("/")) else {
-            panic!("a plan item");
-        };
-        let steps = steps.inline().expect("inline steps");
-        assert_eq!(steps.len(), 2);
-        assert_eq!(steps[0].status, artisan_api::StepStatus::InProgress);
-        let task = call(
-            "Task",
-            json!({ "description": "Find things", "prompt": "Find the things." }),
-        );
-        assert_eq!(plan(&task, Permissions::Auto, &allowed, &rules), Plan::Run);
-        let ItemKind::Agent {
-            description,
-            prompt,
-            ..
-        } = preview(&task, Path::new("/"))
-        else {
-            panic!("an agent item");
-        };
-        assert_eq!(description.inline(), Some("Find things"));
-        assert_eq!(
-            prompt.and_then(|prompt| prompt.inline().map(str::to_owned)),
-            Some("Find the things.".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_malformed_todo_preview_stays_a_tool_call() {
-        let item = preview(
-            &call("TodoWrite", json!({ "todos": [{ "status": "pending" }] })),
-            Path::new("/"),
-        );
-        assert!(
-            matches!(&item, ItemKind::Tool { tool: ToolKind::Other { name, .. }, .. } if name == "TodoWrite"),
-            "{item:?}"
-        );
-    }
-
-    #[test]
-    fn accept_edits_runs_writes_without_asking() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let dir = project.path().join(".claude");
-        std::fs::create_dir_all(&dir).expect("the settings dir");
-        std::fs::write(
-            dir.join("settings.json"),
-            r#"{"permissions": {"defaultMode": "acceptEdits"}}"#,
-        )
-        .expect("settings");
-        let rules = Rules::load(home.path(), project.path());
-        let write = call("Write", json!({ "file_path": "x", "content": "y" }));
-        assert_eq!(
-            plan(&write, Permissions::Auto, &Allowed::default(), &rules),
-            Plan::Run
-        );
-    }
-
-    #[test]
-    fn a_tool_forge_does_not_offer_is_refused_with_the_ones_it_does() {
-        let Plan::Refuse(reason) = plan(
-            &call("bash_tool", json!({})),
-            Permissions::Full,
-            &Allowed::default(),
-            &Rules::default(),
-        ) else {
-            panic!("refused");
-        };
-        assert!(reason.contains("Bash"));
-    }
-
-    #[test]
-    fn html_becomes_readable_text() {
-        let html = "<html><head><title>T</title><style>p { color: red }</style></head>\
-                    <body><h1>Hello &amp; welcome</h1><p>One <b>two</b> three.</p>\
-                    <script>alert('no')</script><ul><li>a</li><li>b</li></ul></body></html>";
-        let text = html_to_text(html);
-        assert!(text.contains("Hello & welcome"), "{text}");
-        assert!(text.contains("One two three."), "{text}");
-        assert!(text.contains("a\n\nb"), "{text}");
-        assert!(!text.contains("alert"), "{text}");
-        assert!(!text.contains("color:red"), "{text}");
-    }
-
-    #[test]
-    fn a_preview_shows_the_change_before_anything_runs() {
-        let work = tempfile::tempdir().expect("a dir");
-        let path = work.path().join("a.txt");
-        let edit = call(
-            "Edit",
-            json!({ "file_path": path.display().to_string(), "old_string": "one", "new_string": "two" }),
-        );
-        let ItemKind::Tool {
-            tool: ToolKind::Edit { changes },
-            ..
-        } = preview(&edit, work.path())
-        else {
-            panic!("an edit item");
-        };
-        assert!(
-            changes
-                .inline()
-                .is_some_and(|changes| changes[0].diff.is_some())
-        );
-        assert!(!path.exists(), "a preview touches nothing");
-    }
-
-    #[tokio::test]
-    async fn read_numbers_its_lines_and_edit_changes_exactly_once() {
-        let work = tempfile::tempdir().expect("a dir");
-        let path = work.path().join("a.txt");
-        std::fs::write(&path, "one\ntwo\n").expect("a file");
-        let cancel = CancellationToken::new();
-        let (answer, _) = execute(
-            &call("Read", json!({ "file_path": path.display().to_string() })),
-            work.path(),
-            &cancel,
-            &runtime(),
-        )
-        .await;
-        assert_eq!(answer.text, "     1\tone\n     2\ttwo\n");
-        let edit = call(
-            "Edit",
-            json!({ "file_path": "a.txt", "old_string": "two", "new_string": "three" }),
-        );
-        let (answer, _) = execute(&edit, work.path(), &cancel, &runtime()).await;
-        assert!(!answer.is_error, "{}", answer.text);
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("the file"),
-            "one\nthree\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn glob_and_grep_honour_gitignore() {
-        let work = tempfile::tempdir().expect("a dir");
-        std::fs::write(work.path().join(".gitignore"), "build/\n").expect("ignore");
-        std::fs::create_dir_all(work.path().join("src")).expect("src");
-        std::fs::create_dir_all(work.path().join("build")).expect("build");
-        std::fs::write(work.path().join("src/lib.rs"), "fn needle() {}\n").expect("lib");
-        std::fs::write(work.path().join("build/out.rs"), "fn needle() {}\n").expect("out");
-        let cancel = CancellationToken::new();
-        let (found, _) = execute(
-            &call("Glob", json!({ "pattern": "**/*.rs" })),
-            work.path(),
-            &cancel,
-            &runtime(),
-        )
-        .await;
-        assert_eq!(found.text, "src/lib.rs");
-        let (hits, _) = execute(
-            &call("Grep", json!({ "pattern": "needle" })),
-            work.path(),
-            &cancel,
-            &runtime(),
-        )
-        .await;
-        assert_eq!(hits.text, "src/lib.rs:1:fn needle() {}");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_failing_command_tells_the_model_its_exit_code() {
-        let work = tempfile::tempdir().expect("a dir");
-        let cancel = CancellationToken::new();
-        let (answer, item) = execute(
-            &call(
-                "Bash",
-                json!({ "command": "echo out; echo err >&2; exit 3" }),
-            ),
-            work.path(),
-            &cancel,
-            &runtime(),
-        )
-        .await;
-        assert!(answer.is_error);
-        assert_eq!(answer.text, "out\nerr\n[exit code 3]");
-        assert!(matches!(
-            item,
-            ItemKind::Tool {
-                exit_code: Some(3),
-                ..
-            }
-        ));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_stop_ends_the_command_and_what_it_started() {
-        let work = tempfile::tempdir().expect("a dir");
-        let cancel = CancellationToken::new();
-        let stopper = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            stopper.cancel();
-        });
-        let started = std::time::Instant::now();
-        let (answer, _) = execute(
-            &call("Bash", json!({ "command": "sleep 30 & sleep 30" })),
-            work.path(),
-            &cancel,
-            &runtime(),
-        )
-        .await;
-        assert!(started.elapsed() < Duration::from_secs(5));
-        assert_eq!(answer.text, "The command was stopped.");
-    }
-
-    /// Rules from a project settings file holding `permissions`.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "test helper takes owned JSON literals"
-    )]
-    fn project_rules(home: &Path, project: &Path, permissions: Value) -> Rules {
-        let dir = project.join(".claude");
-        std::fs::create_dir_all(&dir).expect("the settings dir");
-        std::fs::write(
-            dir.join("settings.json"),
-            json!({ "permissions": permissions }).to_string(),
-        )
-        .expect("settings");
-        Rules::load(home, project)
-    }
-
-    #[test]
-    fn a_compound_command_is_not_allowed_by_a_rule_for_its_first_part() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "allow": ["Bash(npm run test:*)"] }),
-        );
-        let allowed = Allowed::default();
-        let fine = call("Bash", json!({ "command": "npm run test -- --ci" }));
-        assert_eq!(plan(&fine, Permissions::Auto, &allowed, &rules), Plan::Run);
-        let sneaky = call("Bash", json!({ "command": "npm run test && rm -rf ~" }));
-        assert_eq!(
-            plan(&sneaky, Permissions::Auto, &allowed, &rules),
-            Plan::Ask(ApprovalRequest::Command {
-                command: TextContent::from("npm run test && rm -rf ~".to_owned()),
-                cwd: None,
-            })
-        );
-    }
-
-    #[test]
-    fn a_denied_command_is_refused_even_under_full_access_however_it_is_dressed() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "deny": ["Bash(rm:*)"] }),
-        );
-        for command in [
-            " rm -rf /",
-            "FOO=1 rm -rf /",
-            "true && rm -rf /",
-            "cd /; rm -rf /",
-            "(rm -rf /)",
-            "bash -c 'rm -rf /'",
-            "/bin/rm -rf /",
-        ] {
-            let bash = call("Bash", json!({ "command": command }));
-            assert!(
-                matches!(
-                    plan(&bash, Permissions::Full, &Allowed::default(), &rules),
-                    Plan::Refuse(_)
-                ),
-                "{command:?} would have run"
-            );
-        }
-    }
-
-    #[test]
-    fn always_allowing_a_command_does_not_skip_an_ask_rule() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "ask": ["Bash(git push:*)"] }),
-        );
-        let push = call("Bash", json!({ "command": "git push --force" }));
-        let mut allowed = Allowed::default();
-        allowed.remember(&push, Decision::AllowAlways);
-        assert!(matches!(
-            plan(&push, Permissions::Auto, &allowed, &rules),
-            Plan::Ask(_)
-        ));
-        assert_eq!(plan(&push, Permissions::Full, &allowed, &rules), Plan::Run);
-    }
-
-    #[tokio::test]
-    async fn a_search_never_shows_a_denied_file() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "deny": ["Read(.env)", "Read(secrets/**)"] }),
-        );
-        std::fs::create_dir_all(project.path().join("secrets")).expect("secrets");
-        std::fs::write(project.path().join(".env"), "TOKEN=hunter2\n").expect("env");
-        std::fs::write(project.path().join("secrets/key"), "TOKEN=hunter3\n").expect("key");
-        std::fs::write(project.path().join("app.rs"), "// TOKEN=placeholder\n").expect("app");
-        let grep = call("Grep", json!({ "pattern": "TOKEN", "path": ".env" }));
-        assert!(matches!(
-            plan(&grep, Permissions::Full, &Allowed::default(), &rules),
-            Plan::Refuse(_)
-        ));
-        let mut runtime = runtime();
-        runtime.rules = rules;
-        let cancel = CancellationToken::new();
-        let (hits, _) = execute(
-            &call("Grep", json!({ "pattern": "TOKEN" })),
-            project.path(),
-            &cancel,
-            &runtime,
-        )
-        .await;
-        assert_eq!(hits.text, "app.rs:1:// TOKEN=placeholder");
-        let (found, _) = execute(
-            &call("Glob", json!({ "pattern": "**/*" })),
-            project.path(),
-            &cancel,
-            &runtime,
-        )
-        .await;
-        assert!(!found.text.contains("secrets/key"), "{}", found.text);
-    }
-
-    #[test]
-    fn accept_edits_asks_for_a_change_outside_the_project() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let elsewhere = tempfile::tempdir().expect("elsewhere");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "defaultMode": "acceptEdits" }),
-        );
-        let allowed = Allowed::default();
-        let inside = call(
-            "Edit",
-            json!({ "file_path": "src/../a.txt", "old_string": "a", "new_string": "b" }),
-        );
-        assert_eq!(
-            plan(&inside, Permissions::Auto, &allowed, &rules),
-            Plan::Run
-        );
-        for path in [
-            elsewhere.path().join("a.txt").display().to_string(),
-            "../escape.txt".to_owned(),
-        ] {
-            let outside = call("Write", json!({ "file_path": path, "content": "x" }));
-            assert_eq!(
-                plan(&outside, Permissions::Auto, &allowed, &rules),
-                Plan::Ask(ApprovalRequest::FileChange),
-                "{path}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_change_to_permission_settings_always_asks_short_of_full_access() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "defaultMode": "acceptEdits", "allow": ["Edit", "Write"] }),
-        );
-        let mut allowed = Allowed::default();
-        allowed.remember(
-            &call("Write", json!({ "file_path": "a.txt", "content": "" })),
-            Decision::AllowAlways,
-        );
-        for path in [
-            ".claude/settings.json".to_owned(),
-            ".claude/settings.local.json".to_owned(),
-            "sub/.Claude/settings.json".to_owned(),
-            ".mcp.json".to_owned(),
-            home.path()
-                .join(".claude/settings.json")
-                .display()
-                .to_string(),
-            home.path().join("session.json").display().to_string(),
-        ] {
-            let write = call(
-                "Write",
-                json!({ "file_path": path, "content": r#"{"permissions":{"allow":["Bash"]}}"# }),
-            );
-            assert_eq!(
-                plan(&write, Permissions::Auto, &allowed, &rules),
-                Plan::Ask(ApprovalRequest::FileChange),
-                "{path}"
-            );
-            assert_eq!(plan(&write, Permissions::Full, &allowed, &rules), Plan::Run);
-        }
-        let ordinary = call("Write", json!({ "file_path": "a.txt", "content": "" }));
-        assert_eq!(
-            plan(&ordinary, Permissions::Auto, &allowed, &rules),
-            Plan::Run
-        );
-    }
-
-    #[test]
-    fn web_fetch_asks_per_site_under_auto() {
-        let rules = Rules::default();
-        let page = call("WebFetch", json!({ "url": "https://Docs.Example.com/a" }));
-        assert_eq!(
-            plan(&page, Permissions::Auto, &Allowed::default(), &rules),
-            Plan::Ask(ApprovalRequest::Action {
-                description: TextContent::from(
-                    "Fetch a page from docs.example.com: https://Docs.Example.com/a".to_owned()
-                ),
-            })
-        );
-        assert_eq!(
-            plan(&page, Permissions::Full, &Allowed::default(), &rules),
-            Plan::Run
-        );
-        let mut allowed = Allowed::default();
-        allowed.remember(&page, Decision::AllowAlways);
-        let same = call("WebFetch", json!({ "url": "https://docs.example.com/b" }));
-        assert_eq!(plan(&same, Permissions::Auto, &allowed, &rules), Plan::Run);
-        let other = call("WebFetch", json!({ "url": "https://other.example/b" }));
-        assert!(matches!(
-            plan(&other, Permissions::Auto, &allowed, &rules),
-            Plan::Ask(_)
-        ));
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "allow": ["WebFetch(domain:other.example)"] }),
-        );
-        assert_eq!(
-            plan(&other, Permissions::Auto, &Allowed::default(), &rules),
-            Plan::Run
-        );
-    }
-
-    #[test]
-    fn an_mcp_card_names_the_server_and_tool_as_configured() {
-        // A shortened model-facing name still shows the configured names.
-        assert_eq!(
-            mcp_request("mcp__my_srv__search_7f3a", Some(("my__srv", "search"))),
-            ApprovalRequest::Action {
-                description: TextContent::from("Run search on the my__srv MCP server".to_owned()),
-            }
-        );
-        assert_eq!(
-            mcp_request("mcp__my__srv__search", None),
-            ApprovalRequest::Action {
-                description: TextContent::from("Run search on the my__srv MCP server".to_owned()),
-            }
-        );
-    }
-
-    #[test]
-    fn the_environment_s_proxy_applies_unless_no_proxy_exempts_the_host() {
-        let vars = |set: &'static [(&'static str, &'static str)]| {
-            move |name: &str| {
-                set.iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, value)| (*value).to_owned())
-            }
-        };
-        let url = |url: &str| reqwest::Url::parse(url).expect("a url");
-        let env = vars(&[
-            ("HTTPS_PROXY", "http://proxy.corp:3128"),
-            ("no_proxy", "internal.corp, .lan,10.0.0.0/8"),
-        ]);
-        assert_eq!(
-            proxy_for(&url("https://docs.rs/x"), &env).as_deref(),
-            Some("http://proxy.corp:3128")
-        );
-        assert_eq!(
-            proxy_for(&url("http://docs.rs/x"), &env),
-            None,
-            "no HTTP_PROXY"
-        );
-        for exempt in [
-            "https://internal.corp/",
-            "https://wiki.internal.corp/",
-            "https://nas.lan/",
-            "https://10.1.2.3/",
-        ] {
-            assert_eq!(proxy_for(&url(exempt), &env), None, "{exempt}");
-        }
-        assert!(proxy_for(&url("https://notinternal.corp/"), &env).is_some());
-        let all = vars(&[("ALL_PROXY", "http://proxy.corp:3128"), ("NO_PROXY", "*")]);
-        assert_eq!(proxy_for(&url("http://docs.rs/"), &all), None);
-    }
-
-    #[tokio::test]
-    async fn web_fetch_goes_through_the_user_s_proxy() {
-        // The proxy answers for a host that does not resolve here.
-        let proxy = serve(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\nConnection: close\r\n\r\nvia the proxy",
-        )
-        .await;
-        let vars = move |name: &str| (name == "HTTP_PROXY").then(|| proxy.clone());
-        let answer = super::web_fetch(
-            &call(
-                "WebFetch",
-                json!({ "url": "http://artisan-proxy-test.invalid/page" }),
-            ),
-            &Rules::default(),
-            false,
-            &vars,
-        )
-        .await;
-        assert!(!answer.is_error, "{}", answer.text);
-        assert!(answer.text.ends_with("via the proxy"), "{}", answer.text);
-        let answer = super::web_fetch(
-            &call("WebFetch", json!({ "url": "http://127.0.0.1:9/" })),
-            &Rules::default(),
-            false,
-            &vars,
-        )
-        .await;
-        assert!(
-            answer.text.contains("local or private"),
-            "a private address is refused through the proxy too: {}",
-            answer.text
-        );
-    }
-
-    #[test]
-    fn only_public_addresses_are_public() {
-        for address in [
-            "127.0.0.1",
-            "10.1.2.3",
-            "172.16.0.1",
-            "192.168.1.1",
-            "169.254.169.254",
-            "0.0.0.0",
-            "100.64.0.1",
-            "224.0.0.1",
-            "255.255.255.255",
-            "::1",
-            "::",
-            "fe80::1",
-            "fd00::1",
-            "ff02::1",
-            "::ffff:127.0.0.1",
-            "::ffff:10.0.0.1",
-            "64:ff9b::a9fe:a9fe",
-        ] {
-            assert!(
-                !is_public(address.parse().expect("an address")),
-                "{address}"
-            );
-        }
-        for address in ["93.184.216.34", "1.1.1.1", "2606:4700::1111"] {
-            assert!(is_public(address.parse().expect("an address")), "{address}");
-        }
-    }
-
-    #[tokio::test]
-    async fn web_fetch_refuses_local_and_private_hosts() {
-        let rules = Rules::default();
-        for url in [
-            "http://127.0.0.1:9/",
-            "http://localhost:9/",
-            "http://[::ffff:127.0.0.1]:9/",
-            "http://169.254.169.254/latest/meta-data/",
-            "http://10.0.0.1/",
-        ] {
-            let answer = web_fetch(&call("WebFetch", json!({ "url": url })), &rules, false).await;
-            assert!(answer.is_error, "{url}");
-            assert!(
-                answer.text.contains("local or private"),
-                "{url}: {}",
-                answer.text
-            );
-        }
-    }
-
-    /// Serves one canned HTTP response to every connection, on loopback.
-    async fn serve(response: &'static [u8]) -> String {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("a listener");
-        let address = listener.local_addr().expect("an address");
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                let mut request = vec![0u8; 8192];
-                drop(socket.read(&mut request).await);
-                drop(socket.write_all(response).await);
-                drop(socket.shutdown().await);
-            }
-        });
-        format!("http://{address}/")
-    }
-
-    #[tokio::test]
-    async fn a_redirect_to_a_denied_domain_is_not_followed() {
-        let home = tempfile::tempdir().expect("a home");
-        let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(
-            home.path(),
-            project.path(),
-            json!({ "deny": ["WebFetch(domain:denied.example)"] }),
-        );
-        let url = serve(
-            b"HTTP/1.1 302 Found\r\nLocation: http://denied.example/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        )
-        .await;
-        let answer = web_fetch(&call("WebFetch", json!({ "url": url })), &rules, true).await;
-        assert!(answer.is_error, "{}", answer.text);
-        assert!(answer.text.contains("refused"), "{}", answer.text);
-        let answer = web_fetch(
-            &call("WebFetch", json!({ "url": url })),
-            &Rules::default(),
-            true,
-        )
-        .await;
-        assert!(
-            answer
-                .text
-                .contains("redirects to another host: http://denied.example/secret"),
-            "a redirect off the site is handed back, not followed: {}",
-            answer.text
-        );
-    }
-
-    #[tokio::test]
-    async fn web_fetch_shows_no_binary_and_no_cut_off_page() {
-        let rules = Rules::default();
-        let pdf = serve(
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 9\r\nConnection: close\r\n\r\n%PDF-1.7\n",
-        )
-        .await;
-        let answer = web_fetch(&call("WebFetch", json!({ "url": pdf })), &rules, true).await;
-        assert!(answer.is_error);
-        assert!(
-            answer
-                .text
-                .contains("binary content (application/pdf, 9 bytes)"),
-            "{}",
-            answer.text
-        );
-        let unlabelled = serve(
-            b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n\x89PNG\r\n\x1a\n\0\0\0\0",
-        )
-        .await;
-        let answer = web_fetch(
-            &call("WebFetch", json!({ "url": unlabelled })),
-            &rules,
-            true,
-        )
-        .await;
-        assert!(answer.text.contains("binary content"), "{}", answer.text);
-        let broken = serve(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nthe start of",
-        )
-        .await;
-        let answer = web_fetch(&call("WebFetch", json!({ "url": broken })), &rules, true).await;
-        assert!(answer.is_error, "{}", answer.text);
-        assert!(!answer.text.contains("the start of"), "{}", answer.text);
-    }
-
-    #[tokio::test]
-    async fn web_fetch_decodes_the_declared_charset_and_carries_the_prompt() {
-        let page = serve(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 70\r\nConnection: close\r\n\r\n<html><head><meta charset=\"iso-8859-1\"></head><body>Caf\xe9</body></html>",
-        )
-        .await;
-        let answer = web_fetch(
-            &call(
-                "WebFetch",
-                json!({ "url": page, "prompt": "What is sold?" }),
-            ),
-            &Rules::default(),
-            true,
-        )
-        .await;
-        assert!(!answer.is_error, "{}", answer.text);
-        assert!(
-            answer.text.contains("Requested: What is sold?"),
-            "{}",
-            answer.text
-        );
-        assert!(answer.text.ends_with("Café"), "{}", answer.text);
-    }
-}
+#[path = "../../tests/claudeai/tools.rs"]
+mod tests;

@@ -59,7 +59,7 @@ pub fn hint_card(theme: &ArtisanTheme, title: &str, body: &[Phrase]) -> Element 
 }
 
 #[must_use]
-pub fn presence() -> Presence {
+pub(crate) fn presence() -> Presence {
     Presence::new()
         .enter(Motion::tween(
             DROPDOWN_OPEN.as_secs_f64(),

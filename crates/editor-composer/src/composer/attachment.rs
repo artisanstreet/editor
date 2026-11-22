@@ -1,10 +1,10 @@
 use artisan_api::BlobHash;
-pub enum Input {
+enum Input {
     Encoded,
     Uploaded(BlobHash),
     Failed(String),
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Encoding,
     Uploading,
@@ -12,19 +12,19 @@ pub enum State {
     Failed(String),
 }
 impl State {
-    pub const fn hash(&self) -> Option<&BlobHash> {
+    pub(crate) const fn hash(&self) -> Option<&BlobHash> {
         match self {
             Self::Ready(hash) => Some(hash),
             Self::Encoding | Self::Uploading | Self::Failed(_) => None,
         }
     }
-    pub fn failure(&self) -> Option<&str> {
+    pub(crate) fn failure(&self) -> Option<&str> {
         match self {
             Self::Failed(reason) => Some(reason),
             Self::Encoding | Self::Uploading | Self::Ready(_) => None,
         }
     }
-    pub fn accept(&mut self, input: &Input) -> bool {
+    fn accept(&mut self, input: &Input) -> bool {
         match (&self, input) {
             (Self::Encoding, Input::Encoded) => {
                 *self = Self::Uploading;
@@ -38,77 +38,172 @@ impl State {
                 *self = Self::Failed(reason.clone());
                 false
             }
-            _ => false,
+            (Self::Encoding, Input::Uploaded(_))
+            | (Self::Uploading, Input::Encoded)
+            | (
+                Self::Ready(_) | Self::Failed(_),
+                Input::Encoded | Input::Uploaded(_) | Input::Failed(_),
+            ) => false,
         }
     }
 }
 
-use editor_core::{ForgeClient, delivery::Delivery, runtime::runtime};
 use aqua::images::{ImageAssets, ImageHandle, ImageStatus};
+use editor_core::{ForgeClient, delivery::Delivery, runtime::runtime};
 use std::{
     hash::{Hash, Hasher},
     num::NonZeroUsize,
     path::PathBuf,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::Instant,
 };
 
+#[derive(Debug)]
 pub enum Source {
     Bytes(Vec<u8>),
     Path(PathBuf),
     Clipboard(aqua_ui::input::PasteImage),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ReadImageError {
+    #[error("Images must be at most 32 MiB")]
+    TooLarge,
+    #[error("the pasted {width}×{height} image is too large to encode")]
+    ClipboardExtent {
+        width: usize,
+        height: usize,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
+    #[error("encode the pasted image")]
+    Clipboard(#[source] image::ImageError),
+    #[error("read {}", path.display())]
+    File {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UploadImageError {
+    #[error("the image conversion task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error("convert the image")]
+    Encode(#[source] super::encode::EncodeError),
+    #[error("upload the image to Forge")]
+    Put(#[source] editor_core::client::CallError),
+}
+
 impl Source {
-    fn read(self) -> anyhow::Result<Vec<u8>> {
-        use anyhow::Context as _;
+    fn read(&self) -> Result<Vec<u8>, ReadImageError> {
         use std::io::Read as _;
         let bytes = match self {
-            Self::Bytes(bytes) => bytes,
+            Self::Bytes(bytes) => bytes.clone(),
             Self::Clipboard(image) => {
                 use image::ImageEncoder as _;
+                let extent = |source| ReadImageError::ClipboardExtent {
+                    width: image.width(),
+                    height: image.height(),
+                    source,
+                };
                 let mut bytes = Vec::new();
-                image::codecs::png::PngEncoder::new(&mut bytes).write_image(
-                    image.rgba(),
-                    u32::try_from(image.width())?,
-                    u32::try_from(image.height())?,
-                    image::ExtendedColorType::Rgba8,
-                )?;
+                image::codecs::png::PngEncoder::new(&mut bytes)
+                    .write_image(
+                        image.rgba(),
+                        u32::try_from(image.width()).map_err(extent)?,
+                        u32::try_from(image.height()).map_err(extent)?,
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .map_err(ReadImageError::Clipboard)?;
                 bytes
             }
             Self::Path(path) => {
-                let file = std::fs::File::open(&path)
-                    .with_context(|| format!("read {}", path.display()))?;
-                anyhow::ensure!(
-                    file.metadata()?.len() <= super::encode::MAX_INPUT_BYTES as u64,
-                    "Images must be at most 32 MiB"
-                );
+                let failed = |source| ReadImageError::File {
+                    path: path.clone(),
+                    source,
+                };
+                let file = std::fs::File::open(path).map_err(failed)?;
+                if file.metadata().map_err(failed)?.len() > super::encode::MAX_INPUT_BYTES as u64 {
+                    return Err(ReadImageError::TooLarge);
+                }
                 let mut bytes = Vec::new();
                 file.take((super::encode::MAX_INPUT_BYTES + 1) as u64)
-                    .read_to_end(&mut bytes)?;
+                    .read_to_end(&mut bytes)
+                    .map_err(failed)?;
                 bytes
             }
         };
-        anyhow::ensure!(
-            bytes.len() <= super::encode::MAX_INPUT_BYTES,
-            "Images must be at most 32 MiB"
-        );
+        if bytes.len() > super::encode::MAX_INPUT_BYTES {
+            return Err(ReadImageError::TooLarge);
+        }
         Ok(bytes)
     }
 }
 
+#[derive(Debug)]
 pub struct Attachment {
     pub key: u64,
-    pub name: String,
-    pub state: State,
+    pub(crate) name: String,
+    pub(crate) state: State,
     pub preview: Option<ImageHandle>,
     pending_preview: Option<ImageHandle>,
-    pub preview_error: Option<String>,
-    pub revealed: Option<Instant>,
-    pub shown: bool,
+    pub(crate) preview_error: Option<String>,
+    pub(crate) revealed: Option<Instant>,
+    pub(crate) shown: bool,
     source: Option<(u64, usize)>,
+    origin: Option<Arc<Source>>,
     encoded: Option<Vec<u8>>,
     task: Option<tokio::task::AbortHandle>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingUpload {
+    origin: Arc<Source>,
+    name: String,
+}
+
+impl PendingUpload {
+    pub(crate) const KEPT_NAME: &str = "Pasted image";
+
+    pub(crate) fn kept(bytes: Vec<u8>) -> Self {
+        Self {
+            origin: Arc::new(Source::Bytes(bytes)),
+            name: Self::KEPT_NAME.to_owned(),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn from_path(path: PathBuf, name: String) -> Self {
+        Self {
+            origin: Arc::new(Source::Path(path)),
+            name,
+        }
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn read(&self) -> Result<Vec<u8>, ReadImageError> {
+        self.origin.read()
+    }
+}
+
+pub(crate) async fn upload_image(
+    bytes: Arc<[u8]>,
+    client: ForgeClient,
+) -> Result<BlobHash, UploadImageError> {
+    let webp = tokio::task::spawn_blocking(move || super::encode::to_webp(&bytes))
+        .await
+        .map_err(UploadImageError::Task)?
+        .map_err(UploadImageError::Encode)?;
+    client
+        .put_blob(webp)
+        .await
+        .map(|blob| blob.hash)
+        .map_err(UploadImageError::Put)
 }
 
 impl Drop for Attachment {
@@ -119,17 +214,53 @@ impl Drop for Attachment {
     }
 }
 
-enum Completion {
-    Read(u64, Result<(Vec<u8>, Option<image::RgbaImage>), String>),
-    Converted(u64, Result<Vec<u8>, String>),
-    Uploaded(u64, Result<BlobHash, String>),
-    Restored(u64, Result<Vec<u8>, String>),
+#[derive(Debug, thiserror::Error)]
+enum LoadAttachmentError {
+    #[error("the image read task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error(transparent)]
+    Read(ReadImageError),
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ConvertAttachmentError {
+    #[error("the image conversion queue closed")]
+    Queue(#[source] tokio::sync::AcquireError),
+    #[error("the image conversion task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error(transparent)]
+    Encode(super::encode::EncodeError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum UploadAttachmentError {
+    #[error("Upload failed")]
+    Put(#[source] editor_core::client::CallError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum QuickPreviewError {
+    #[error("decode the quick preview pixels")]
+    Decode(#[source] aqua::images::MediaError),
+    #[error("insert the quick preview image")]
+    Insert(#[source] aqua::images::ImageAssetError),
+}
+
+enum Completion {
+    Read(
+        u64,
+        Result<(Vec<u8>, Option<image::RgbaImage>), LoadAttachmentError>,
+    ),
+    Converted(u64, Result<Vec<u8>, ConvertAttachmentError>),
+    Uploaded(u64, Result<BlobHash, UploadAttachmentError>),
+    Restored(u64, Result<Vec<u8>, editor_core::client::CallError>),
+}
+
+#[derive(Debug)]
 pub struct Attachments {
     pub items: Vec<Attachment>,
-    pub shake: Option<(u64, Instant)>,
-    pub notice: Option<String>,
+    pub(crate) shake: Option<(u64, Instant)>,
+    pub(crate) notice: Option<editor_core::Problem>,
     next: u64,
     client: ForgeClient,
     delivery: Delivery<Completion>,
@@ -143,13 +274,16 @@ impl Attachments {
             notice: None,
             next: 0,
             client,
-            delivery: Delivery::new(NonZeroUsize::new(32).unwrap()),
+            delivery: Delivery::new(
+                NonZeroUsize::new(32)
+                    .expect("invariant: the attachment delivery capacity is non-zero"),
+            ),
         }
     }
     pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
         self.delivery.wake_mailbox()
     }
-    pub fn ready_hashes(&self) -> Option<Vec<BlobHash>> {
+    pub(crate) fn ready_hashes(&self) -> Option<Vec<BlobHash>> {
         self.items
             .iter()
             .map(|item| item.state.hash().cloned())
@@ -157,13 +291,16 @@ impl Attachments {
     }
     pub fn add(&mut self, source: Source, name: String) -> bool {
         if self.items.len() >= 8 {
-            self.notice = Some("A message can contain at most 8 images.".into());
+            self.notice = Some(editor_core::Problem::new(
+                "A message can contain at most 8 images.",
+            ));
             return false;
         }
         if matches!(&source, Source::Bytes(bytes) if bytes.len() > super::encode::MAX_INPUT_BYTES) {
-            self.notice = Some("Images must be at most 32 MiB.".into());
+            self.notice = Some(editor_core::Problem::new("Images must be at most 32 MiB."));
             return false;
         }
+        let source = Arc::new(source);
         let key = self.next;
         self.next += 1;
         self.items.push(Attachment {
@@ -176,6 +313,7 @@ impl Attachments {
             revealed: None,
             shown: false,
             source: None,
+            origin: Some(Arc::clone(&source)),
             encoded: None,
             task: None,
         });
@@ -183,23 +321,35 @@ impl Attachments {
         let task = runtime().spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
                 source.read().map(|bytes| {
-                    let placeholder = super::encode::placeholder(&bytes);
+                    let placeholder = match super::encode::placeholder(&bytes) {
+                        Ok(placeholder) => Some(placeholder),
+                        Err(error) => {
+                            tracing::debug!(
+                                key,
+                                error = %diagnostics::chain(&error),
+                                "no quick preview for the attachment; it shows once converted"
+                            );
+                            None
+                        }
+                    };
                     (bytes, placeholder)
                 })
             })
             .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result.map_err(|error| format!("{error:#}")));
-            let _ = sender.send(Completion::Read(key, result)).await;
+            .map_err(LoadAttachmentError::Task)
+            .and_then(|result| result.map_err(LoadAttachmentError::Read));
+            sender.offer(Completion::Read(key, result)).await;
         });
         if let Some(item) = self.items.last_mut() {
             item.task = Some(task.abort_handle());
         }
         true
     }
-    pub fn restore(&mut self, hash: BlobHash) {
+    pub(crate) fn restore(&mut self, hash: BlobHash) {
         if self.items.len() >= 8 {
-            self.notice = Some("This draft exceeds the 8 image limit.".into());
+            self.notice = Some(editor_core::Problem::new(
+                "This draft has more than 8 images, the most a message can contain.",
+            ));
             return;
         }
         let key = self.next;
@@ -214,6 +364,7 @@ impl Attachments {
             revealed: None,
             shown: true,
             source: None,
+            origin: None,
             encoded: None,
             task: None,
         });
@@ -223,14 +374,11 @@ impl Attachments {
         let client = self.client.clone();
         let sender = self.delivery.sender();
         runtime().spawn(async move {
-            let result = client
-                .blob(&hash)
-                .await
-                .map_err(|error| format!("{error:#}"));
-            let _ = sender.send(Completion::Restored(key, result)).await;
+            let result = client.blob(&hash).await;
+            sender.offer(Completion::Restored(key, result)).await;
         });
     }
-    pub fn retry_preview(&mut self, key: u64) {
+    pub(crate) fn retry_preview(&mut self, key: u64) {
         let Some(item) = self.items.iter_mut().find(|item| item.key == key) else {
             return;
         };
@@ -240,13 +388,61 @@ impl Attachments {
         item.preview_error = None;
         self.load_preview(key, hash);
     }
-    pub fn remove(&mut self, key: u64) {
+    pub(crate) fn remove(&mut self, key: u64) {
         self.items.retain(|item| item.key != key);
     }
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.items.clear();
     }
-    pub fn drain(&mut self, assets: &ImageAssets) -> bool {
+    pub(crate) fn contains(&self, hash: &BlobHash) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.state.hash() == Some(hash))
+    }
+    pub(crate) fn uploading(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item.state, State::Encoding | State::Uploading))
+    }
+
+    pub fn take_unfinished(&mut self) -> Vec<PendingUpload> {
+        self.items
+            .iter_mut()
+            .filter(|item| matches!(item.state, State::Encoding | State::Uploading))
+            .filter_map(|item| {
+                item.origin.take().map(|origin| PendingUpload {
+                    origin,
+                    name: item.name.clone(),
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn add_failed(&mut self, name: String, reason: String) -> u64 {
+        let key = self.next;
+        self.next += 1;
+        tracing::warn!(key, %name, %reason, "an image pasted before leaving the draft can't be added");
+        self.items.push(Attachment {
+            key,
+            name,
+            state: State::Failed(reason),
+            preview: None,
+            pending_preview: None,
+            preview_error: None,
+            revealed: None,
+            shown: true,
+            source: None,
+            origin: None,
+            encoded: None,
+            task: None,
+        });
+        key
+    }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each attachment completion kind updates the same item list and notice in one drain pass"
+    )]
+    pub(crate) fn drain(&mut self, assets: &ImageAssets) -> bool {
         let mut changed = false;
         for completion in self.delivery.drain() {
             let key = match &completion {
@@ -264,7 +460,7 @@ impl Attachments {
                     Err(error) => {
                         if let Some(item) = self.items.iter_mut().find(|item| item.key == key) {
                             item.shown = true;
-                            fail(item, error);
+                            fail(item, &error);
                         }
                     }
                     Ok((bytes, placeholder)) => {
@@ -287,35 +483,41 @@ impl Attachments {
                         item.source = Some(source);
                         item.preview = placeholder.and_then(|image| {
                             let (width, height) = image.dimensions();
-                            aqua::images::DecodedImage::from_rgba(
-                                width,
-                                height,
-                                image.into_raw(),
-                            )
-                            .ok()
-                            .and_then(|image| assets.insert(image).ok())
+                            let inserted =
+                                aqua::images::DecodedImage::from_rgba(width, height, image.into_raw())
+                                    .map_err(QuickPreviewError::Decode)
+                                    .and_then(|image| {
+                                        assets.insert(image).map_err(QuickPreviewError::Insert)
+                                    });
+                            match inserted {
+                                Ok(handle) => Some(handle),
+                                Err(error) => {
+                                    tracing::debug!(key, error = %diagnostics::chain(&error), "couldn't show the attachment's quick preview");
+                                    None
+                                }
+                            }
                         });
                         item.shown = true;
                         let sender = self.delivery.sender();
                         let task = runtime().spawn(async move {
-                            static CONVERSION: OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+                            static CONVERSION: OnceLock<Arc<tokio::sync::Semaphore>> =
                                 OnceLock::new();
-                            let permit = CONVERSION
-                                .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)))
-                                .clone()
-                                .acquire_owned()
-                                .await;
+                            let permit = Arc::clone(
+                                CONVERSION.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))),
+                            )
+                            .acquire_owned()
+                            .await;
                             let result = match permit {
                                 Ok(permit) => tokio::task::spawn_blocking(move || {
                                     let _permit = permit;
                                     super::encode::to_webp(&bytes)
                                 })
                                 .await
-                                .map_err(|error| error.to_string())
-                                .and_then(|result| result.map_err(|error| format!("{error:#}"))),
-                                Err(error) => Err(error.to_string()),
+                                .map_err(ConvertAttachmentError::Task)
+                                .and_then(|result| result.map_err(ConvertAttachmentError::Encode)),
+                                Err(error) => Err(ConvertAttachmentError::Queue(error)),
                             };
-                            let _ = sender.send(Completion::Converted(key, result)).await;
+                            sender.offer(Completion::Converted(key, result)).await;
                         });
                         item.task = Some(task.abort_handle());
                     }
@@ -329,11 +531,11 @@ impl Attachments {
                                     item.encoded = Some(bytes);
                                 }
                                 Err(error) => {
-                                    fail(item, error.to_string());
+                                    fail(item, &error);
                                 }
                             },
                             Err(error) => {
-                                fail(item, error);
+                                fail(item, &error);
                             }
                         }
                     }
@@ -342,11 +544,12 @@ impl Attachments {
                     if let Some(item) = self.items.iter_mut().find(|item| item.key == key) {
                         match result {
                             Ok(hash) => {
+                                item.origin = None;
                                 item.state.accept(&Input::Uploaded(hash));
                                 item.revealed = Some(Instant::now());
                             }
                             Err(error) => {
-                                fail(item, format!("Upload failed: {error}"));
+                                fail(item, &error);
                             }
                         }
                     }
@@ -356,9 +559,11 @@ impl Attachments {
                         match result {
                             Ok(bytes) => match assets.decode(bytes) {
                                 Ok(preview) => item.pending_preview = Some(preview),
-                                Err(error) => item.preview_error = Some(error.to_string()),
+                                Err(error) => {
+                                    item.preview_error = Some(diagnostics::chain(&error));
+                                }
                             },
-                            Err(error) => item.preview_error = Some(error),
+                            Err(error) => item.preview_error = Some(diagnostics::chain(&error)),
                         }
                     }
                 }
@@ -373,7 +578,10 @@ impl Attachments {
                     if item.encoded.is_some() && matches!(item.state, State::Encoding) =>
                 {
                     item.preview = item.pending_preview.take();
-                    let bytes = item.encoded.take().unwrap();
+                    let bytes = item
+                        .encoded
+                        .take()
+                        .expect("invariant: the guard checked the encoded bytes are present");
                     if item.state.accept(&Input::Encoded) {
                         let key = item.key;
                         let client = self.client.clone();
@@ -383,8 +591,8 @@ impl Attachments {
                                 .put_blob(bytes)
                                 .await
                                 .map(|blob| blob.hash)
-                                .map_err(|error| format!("{error:#}"));
-                            let _ = sender.send(Completion::Uploaded(key, result)).await;
+                                .map_err(UploadAttachmentError::Put);
+                            sender.offer(Completion::Uploaded(key, result)).await;
                         });
                         item.task = Some(task.abort_handle());
                     }
@@ -398,22 +606,39 @@ impl Attachments {
                     changed = true;
                 }
                 ImageStatus::Failed(error) => {
-                    if matches!(item.state, State::Encoding) {
-                        fail(item, error.to_string());
-                    } else {
-                        item.preview_error = Some(error.to_string());
-                    }
-                    item.pending_preview = None;
+                    abandon_preview(item, error.to_string());
                     changed = true;
                 }
-                _ => {}
+                ImageStatus::Cancelled => {
+                    abandon_preview(item, "The preview was cancelled.".to_owned());
+                    changed = true;
+                }
+                ImageStatus::Pending | ImageStatus::Ready { .. } => {}
             }
         }
         changed
     }
 }
 
-fn fail(item: &mut Attachment, reason: String) {
+fn abandon_preview(item: &mut Attachment, reason: String) {
+    if matches!(item.state, State::Encoding) {
+        settle_failed(item, reason);
+    } else {
+        item.preview_error = Some(reason);
+    }
+    item.pending_preview = None;
+    item.encoded = None;
+}
+
+fn fail(item: &mut Attachment, error: &dyn std::error::Error) {
+    settle_failed(item, diagnostics::chain(error));
+}
+
+fn settle_failed(item: &mut Attachment, reason: String) {
     tracing::warn!(key = item.key, name = %item.name, %reason, "pasted image failed");
     item.state.accept(&Input::Failed(reason));
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/attachment.rs"]
+mod tests;

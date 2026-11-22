@@ -30,8 +30,8 @@ pub struct AuthenticateFrame {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenFrame {
-    pub v: u32,
-    pub channel: String,
+    pub(crate) v: u32,
+    pub(crate) channel: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,9 +113,9 @@ pub struct ChannelClosedFrame {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresenceFrame {
-    pub v: u32,
-    pub forge_online: bool,
-    pub clients: u64,
+    v: u32,
+    forge_online: bool,
+    clients: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

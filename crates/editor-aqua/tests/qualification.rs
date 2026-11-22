@@ -5,8 +5,9 @@ mod observation;
 
 use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ItemKind, Phase, Status};
 use editor_aqua::qualification::fixture::{
-    CheckpointState, Fixture, FixtureItem, ForgeServer, ImmutableFixture, SeedSnapshot,
-    StoreSnapshot, TreeManifest, VerifiedBootstrap,
+    CheckpointState, EditorSettingsError, Fixture, FixtureItem, ForgeServer, ImmutableFixture,
+    LoadBootstrapError, ReadCheckedError, SeedSnapshot, StoreSnapshot, TreeManifest,
+    VerifiedBootstrap,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -85,10 +86,10 @@ fn preparation_accepts_normalized_fixture_paths_and_produces_verified_requests()
     let verified = editor_aqua::core::runtime::runtime()
         .block_on(VerifiedBootstrap::load(&bootstrap))
         .unwrap();
-    assert_eq!(verified.editor_dir, paths[4]);
-    assert_eq!(verified.request.fixture, fixture_path);
+    assert_eq!(verified.editor_dir(), paths[4]);
+    assert_eq!(verified.fixture_path(), fixture_path);
     editor_aqua::core::runtime::runtime()
-        .block_on(verified.server.shutdown_unique())
+        .block_on(verified.into_server().shutdown_unique())
         .unwrap();
 }
 
@@ -100,8 +101,9 @@ fn real_forge_seed_snapshot_restores_identical_tree_at_pinned_path() {
         .build()
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let forge = directory.path().join("forge");
-    let snapshot_dir = directory.path().join("snapshot");
+    let root = editor_aqua::qualification::fixture::canonical_path(directory.path()).unwrap();
+    let forge = root.join("forge");
+    let snapshot_dir = root.join("snapshot");
     for dir in [&forge, &snapshot_dir] {
         std::fs::create_dir(dir).unwrap();
         std::fs::write(
@@ -132,7 +134,7 @@ fn real_forge_seed_snapshot_restores_identical_tree_at_pinned_path() {
             .unwrap();
         snapshot
             .store
-            .verify_stable(&reopened.store, &input)
+            .verify_stable(reopened.store(), &input)
             .await
             .unwrap();
         reopened.shutdown_unique().await.unwrap();
@@ -169,7 +171,7 @@ fn tree_manifest_covers_nested_files_and_rejects_symlinks() {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink("content", root.join("blobs/link")).unwrap();
-        assert!(TreeManifest::capture_stable(root).is_err());
+        TreeManifest::capture_stable(root).unwrap_err();
     }
 }
 
@@ -184,16 +186,20 @@ fn immutable_fixture_rejects_duplicates_unknown_references_and_changed_bytes() {
     std::fs::write(&path, &bytes).unwrap();
     parsed.verify_unchanged(&path).unwrap();
     std::fs::write(&path, [bytes, vec![b' ']].concat()).unwrap();
-    assert!(parsed.verify_unchanged(&path).is_err());
+    parsed.verify_unchanged(&path).unwrap_err();
     let mut duplicate = fixture();
     duplicate.items.push(duplicate.items[0].clone());
-    assert!(ImmutableFixture::parse(serde_json::to_vec(&duplicate).unwrap()).is_err());
+    let Err(_) = ImmutableFixture::parse(serde_json::to_vec(&duplicate).unwrap()) else {
+        panic!("the duplicate fixture must be rejected");
+    };
     let mut unknown = fixture();
     unknown.items[0].thread_id = "missing".into();
-    assert!(ImmutableFixture::parse(serde_json::to_vec(&unknown).unwrap()).is_err());
+    let Err(_) = ImmutableFixture::parse(serde_json::to_vec(&unknown).unwrap()) else {
+        panic!("the unknown fixture must be rejected");
+    };
     let mut unknown_run = fixture();
     unknown_run.items[0].run_id = Some("missing".into());
-    assert!(unknown_run.validate().is_err());
+    unknown_run.validate().unwrap_err();
 }
 
 #[test]
@@ -203,23 +209,23 @@ fn parent_order_rejects_forward_self_and_cyclic_references() {
     child.id = "item-b".into();
     child.parent_id = Some("item-a".into());
     ordered.items.push(child);
-    assert!(ordered.validate().is_ok());
+    ordered.validate().unwrap();
     let mut forward = ordered.clone();
     forward.items.swap(0, 1);
-    assert!(forward.validate().is_err());
+    forward.validate().unwrap_err();
     let mut self_parent = ordered.clone();
     self_parent.items[0].parent_id = Some("item-a".into());
-    assert!(self_parent.validate().is_err());
+    self_parent.validate().unwrap_err();
     let mut cyclic = ordered.clone();
     cyclic.items[0].parent_id = Some("item-b".into());
-    assert!(cyclic.validate().is_err());
+    cyclic.validate().unwrap_err();
     let mut thread_child = ordered.threads[0].clone();
     thread_child.id = "thread-b".into();
     thread_child.parent_thread_id = Some("thread-a".into());
     ordered.threads.push(thread_child);
-    assert!(ordered.validate().is_ok());
+    ordered.validate().unwrap();
     ordered.threads.swap(0, 1);
-    assert!(ordered.validate().is_err());
+    ordered.validate().unwrap_err();
 }
 
 #[test]
@@ -245,9 +251,9 @@ fn checkpoint_digest_canonicalizes_nested_objects_and_rejects_unsorted_pending()
         .insert("fixture".into(), serde_json::json!({"outer":{"a":3,"z":1}}));
     assert_ne!(first.digest().unwrap(), second.digest().unwrap());
     second.pending = vec!["network".into(), "images".into()];
-    assert!(second.digest().is_err());
+    second.digest().unwrap_err();
     second.pending = vec!["images".into(), "images".into()];
-    assert!(second.digest().is_err());
+    second.digest().unwrap_err();
 }
 
 #[test]
@@ -296,19 +302,39 @@ fn bootstrap_requires_absent_or_hash_matched_editor_settings_before_starting_for
             serde_json::to_vec(&request(expected)).unwrap(),
         )
         .unwrap();
-        runtime
-            .block_on(VerifiedBootstrap::load(&request_path))
-            .err()
-            .unwrap()
-            .to_string()
+        let Err(error) = runtime.block_on(VerifiedBootstrap::load(&request_path)) else {
+            panic!("a bootstrap without a seeded Forge must not load");
+        };
+        error
     };
-    assert!(check(None).contains("forge.sqlite3"));
+    let reached_the_database = |error: LoadBootstrapError| {
+        matches!(
+            error,
+            LoadBootstrapError::Database(ReadCheckedError::Read { path, .. })
+                if path.ends_with("forge.sqlite3")
+        )
+    };
+    assert!(reached_the_database(check(None)));
     std::fs::write(editor.join("settings.json"), settings).unwrap();
-    assert!(check(None).contains("settings must be absent"));
-    assert!(check(Some(&"0".repeat(64))).contains("hash mismatch"));
-    assert!(check(Some(&hash)).contains("forge.sqlite3"));
+    assert!(matches!(
+        check(None),
+        LoadBootstrapError::EditorSettings(EditorSettingsError::Present { .. })
+    ));
+    assert!(matches!(
+        check(Some(&"0".repeat(64))),
+        LoadBootstrapError::EditorSettings(EditorSettingsError::Read(
+            ReadCheckedError::Mismatch { .. }
+        ))
+    ));
+    assert!(reached_the_database(check(Some(&hash))));
     std::fs::remove_file(editor.join("settings.json")).unwrap();
-    assert!(check(Some(&hash)).contains("settings.json"));
+    assert!(matches!(
+        check(Some(&hash)),
+        LoadBootstrapError::EditorSettings(EditorSettingsError::Read(ReadCheckedError::Read {
+            path,
+            ..
+        })) if path.ends_with("settings.json")
+    ));
 }
 
 #[test]
@@ -324,7 +350,7 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
         let server = ForgeServer::start(data.clone(), "127.0.0.1:0".parse().unwrap())
             .await
             .unwrap();
-        let baseline = server.store.state().await.unwrap();
+        let baseline = server.store().state().await.unwrap();
         let scratch = baseline
             .projects
             .iter()
@@ -333,11 +359,11 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
         assert_eq!(std::path::Path::new(&scratch.path), data.join("scratch"));
         let mut invalid = fixture();
         invalid.items[0].parent_id = Some("item-a".into());
-        let head = server.store.head();
-        assert!(invalid.seed(&server.store).await.is_err());
-        assert_eq!(server.store.head(), head);
+        let head = server.store().head();
+        invalid.seed(server.store()).await.unwrap_err();
+        assert_eq!(server.store().head(), head);
         let input = fixture();
-        let snapshot = input.seed(&server.store).await.unwrap();
+        let snapshot = input.seed(server.store()).await.unwrap();
         assert!(snapshot.projects.iter().any(|project| project == scratch));
         assert!(
             snapshot
@@ -346,14 +372,20 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
                 .any(|project| project.id.as_str() == "project-a")
         );
         assert_eq!(snapshot.items["thread-a"].len(), 1);
-        snapshot.verify_stable(&server.store, &input).await.unwrap();
+        snapshot
+            .verify_stable(server.store(), &input)
+            .await
+            .unwrap();
         server
-            .store
+            .store()
             .set_setting("fixture-change".into(), serde_json::json!(true))
             .await
             .unwrap();
-        assert!(snapshot.verify_stable(&server.store, &input).await.is_err());
-        let updated = StoreSnapshot::capture_stable(&server.store, &input)
+        snapshot
+            .verify_stable(server.store(), &input)
+            .await
+            .unwrap_err();
+        let updated = StoreSnapshot::capture_stable(server.store(), &input)
             .await
             .unwrap();
         assert!(updated.head > snapshot.head);
@@ -361,7 +393,7 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
             updated.settings.get("fixture-change"),
             Some(&serde_json::json!(true))
         );
-        updated.verify_stable(&server.store, &input).await.unwrap();
+        updated.verify_stable(server.store(), &input).await.unwrap();
         server.shutdown().await.unwrap();
     });
 }
@@ -382,4 +414,63 @@ fn strip_verbatim_rewrites_only_drive_paths() {
         strip_verbatim(PathBuf::from("/tmp/forge")),
         PathBuf::from("/tmp/forge")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_restore_that_cannot_clear_the_old_tree_still_leaves_a_complete_forge_folder() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = editor_aqua::qualification::fixture::canonical_path(directory.path()).unwrap();
+    let forge = root.join("forge");
+    let snapshot_dir = root.join("snapshot");
+    for dir in [&forge, &snapshot_dir] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::write(
+            dir.join(".artisan-qualification"),
+            b"artisan-qualification-v1\n",
+        )
+        .unwrap();
+    }
+    runtime.block_on(async {
+        let input = fixture();
+        let server = ForgeServer::start(forge.clone(), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let snapshot = SeedSnapshot::produce(server, &input, &forge, &snapshot_dir)
+            .await
+            .unwrap();
+        let locked = forge.join("zz-locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("held"), b"held").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let before = TreeManifest::capture_stable(&forge).unwrap();
+        let restored = snapshot.restore_after_all_forge_handles_closed(&snapshot_dir, &forge);
+        let after = TreeManifest::capture_stable(&forge).unwrap();
+        for leftover in [
+            forge.join("zz-locked"),
+            root.join("forge.previous/zz-locked"),
+        ] {
+            if leftover.exists() {
+                std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+        }
+        assert!(
+            after == snapshot.tree || after == before,
+            "the Forge folder is either the snapshot or untouched, never partial: {restored:?}"
+        );
+        snapshot
+            .restore_after_all_forge_handles_closed(&snapshot_dir, &forge)
+            .unwrap();
+        assert_eq!(TreeManifest::capture_stable(&forge).unwrap(), snapshot.tree);
+        assert!(!root.join("forge.previous").exists());
+        assert!(!root.join("forge.restoring").exists());
+    });
 }

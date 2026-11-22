@@ -1,4 +1,5 @@
 use crate::ui::kit::{Space, Spaced, TextRole};
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -44,17 +45,16 @@ pub(super) type CopyFactory = Rc<dyn Fn(&str, &str) -> Element>;
 
 impl Fence {
     pub(super) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + self.source.capacity()
-            + self.lines.len() * std::mem::size_of::<Line>()
+            + self.lines.len() * size_of::<Line>()
             + self
                 .lines
                 .iter()
                 .map(|line| {
                     line.text.len()
-                        + line.tokens.capacity()
-                            * std::mem::size_of::<(Range<usize>, CodeTokenKind)>()
-                        + line.colors.capacity() * std::mem::size_of::<Swatch>()
+                        + line.tokens.capacity() * size_of::<(Range<usize>, CodeTokenKind)>()
+                        + line.colors.capacity() * size_of::<Swatch>()
                         + line
                             .colors
                             .iter()
@@ -78,19 +78,19 @@ impl Fence {
         let mut swatches = Vec::new();
         let mut cursor = 0;
         for range in &colors {
-            shown.push_str(&source[cursor..range.start]);
+            shown.push_str(slice(source, cursor..range.start));
             let start = shown.len();
             shown.push_str(SWATCH_SLOT);
             let slot = start..shown.len();
-            shown.push_str(&source[range.clone()]);
+            shown.push_str(slice(source, range.clone()));
             swatches.push(Swatch {
                 range: start..shown.len(),
                 slot,
-                value: source[range.clone()].to_owned(),
+                value: slice(source, range.clone()).to_owned(),
             });
             cursor = range.end;
         }
-        shown.push_str(&source[cursor..]);
+        shown.push_str(slice(source, cursor..));
         let tokens: Vec<_> = fence
             .tokens
             .as_deref()
@@ -114,31 +114,44 @@ impl Fence {
         if ranges.is_empty() || shown.ends_with('\n') {
             ranges.push(start..start);
         }
-        let mut lines = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let line_tokens = tokens
-                .iter()
-                .filter_map(|(token, kind)| {
-                    let start = token.start.max(range.start);
-                    let end = token.end.min(range.end);
-                    (start < end).then(|| (start - range.start..end - range.start, *kind))
-                })
-                .collect();
-            let line_colors = swatches
-                .iter()
-                .filter(|color| color.range.start >= range.start && color.range.end <= range.end)
-                .map(|color| Swatch {
+        let mut line_tokens: Vec<Vec<(Range<usize>, CodeTokenKind)>> =
+            vec![Vec::new(); ranges.len()];
+        for (token, kind) in &tokens {
+            let first = ranges.partition_point(|range| range.end <= token.start);
+            for (line, range) in ranges.iter().enumerate().skip(first) {
+                if range.start >= token.end {
+                    break;
+                }
+                let start = token.start.max(range.start);
+                let end = token.end.min(range.end);
+                if start < end {
+                    line_tokens[line].push((start - range.start..end - range.start, *kind));
+                }
+            }
+        }
+        let mut line_colors: Vec<Vec<Swatch>> = vec![Vec::new(); ranges.len()];
+        for color in &swatches {
+            let line = ranges.partition_point(|range| range.end < color.range.start);
+            if let Some(range) = ranges
+                .get(line)
+                .filter(|range| color.range.start >= range.start && color.range.end <= range.end)
+            {
+                line_colors[line].push(Swatch {
                     range: color.range.start - range.start..color.range.end - range.start,
                     slot: color.slot.start - range.start..color.slot.end - range.start,
                     value: color.value.clone(),
-                })
-                .collect();
-            lines.push(Line {
-                text: Arc::from(&shown[range]),
-                tokens: line_tokens,
-                colors: line_colors,
-            });
+                });
+            }
         }
+        let lines: Vec<Line> = ranges
+            .into_iter()
+            .zip(line_tokens.into_iter().zip(line_colors))
+            .map(|(range, (tokens, colors))| Line {
+                text: Arc::from(slice(&shown, range)),
+                tokens,
+                colors,
+            })
+            .collect();
         let widest = lines
             .iter()
             .enumerate()
@@ -166,7 +179,7 @@ impl Fence {
                 SelectionSource {
                     id: source_id(offset + line),
                     order,
-                    text: entry.text.clone(),
+                    text: Arc::clone(&entry.text),
                     separator: Arc::from("\n"),
                     copies: entry
                         .colors
@@ -190,7 +203,7 @@ impl Fence {
         copy: Option<CopyFactory>,
         on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
     ) -> Element {
-        let lines = self.lines.clone();
+        let lines = Arc::clone(&self.lines);
         let ids: Arc<[SelectionSourceId]> = sources.iter().map(|source| source.id).collect();
         let theme = *theme;
         let count = lines.len();
@@ -223,7 +236,10 @@ impl Fence {
         if count > 24 {
             content = content.child(crate::ui::rich::narrative::callout::text(
                 &theme,
-                &format!("{count} lines · Scroll to read more"),
+                &format!(
+                    "{} · Scroll to read more",
+                    crate::ui::locale::count(count, "line", "lines")
+                ),
                 TextRole::Caption,
                 theme.colors.text_muted,
             ));
@@ -270,14 +286,14 @@ fn line_view(
     for (range, kind) in &line.tokens {
         if cursor < range.start {
             spans.push(span(
-                &line.text[cursor..range.start],
+                slice(&line.text, cursor..range.start),
                 &style,
                 theme.colors.text,
             ));
         }
         if cursor <= range.start {
             spans.push(span(
-                &line.text[range.clone()],
+                slice(&line.text, range.clone()),
                 &style,
                 token_color(theme, *kind),
             ));
@@ -285,7 +301,7 @@ fn line_view(
         }
     }
     if cursor < line.text.len() {
-        spans.push(span(&line.text[cursor..], &style, theme.colors.text));
+        spans.push(span(slice(&line.text, cursor..), &style, theme.colors.text));
     }
     if spans.is_empty() {
         spans.push(span("", &style, theme.colors.text));

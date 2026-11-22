@@ -1,7 +1,6 @@
 use crate::{BlobHash, Collection, EngineId, ItemId, RunId, Seq, TextContent, ThreadId, Timestamp};
 use serde::{Deserialize, Serialize};
 
-/// The thread whose agent wrote a user message, as it was when it sent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sender {
     pub thread: ThreadId,
@@ -10,31 +9,25 @@ pub struct Sender {
     pub title: Option<String>,
 }
 
-/// The models a thread moved between, as named when it moved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSwitch {
     pub from: NamedModel,
     pub to: NamedModel,
 }
 
-/// A model and its engine, with the name its engine showed for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedModel {
     pub engine: EngineId,
     pub name: String,
 }
 
-/// Anything in a thread. Adapters map each engine's wiring onto these kinds.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub id: ItemId,
     pub thread_id: ThreadId,
-    /// Seq at creation. Stable; orders the thread and pages the window.
     pub position: Seq,
-    /// Seq of the last change. Bumps on every update.
     pub seq: Seq,
     pub run_id: Option<RunId>,
-    /// Set when the item belongs to a subagent: the subagent's `Agent` item.
     pub parent_id: Option<ItemId>,
     pub status: Status,
     pub created_at: Timestamp,
@@ -54,7 +47,6 @@ pub enum Status {
 }
 
 impl Status {
-    /// A terminal status never reopens.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(
@@ -63,7 +55,6 @@ impl Status {
         )
     }
 
-    /// Applies an update, keeping a terminal status terminal.
     #[must_use]
     pub const fn advance(self, next: Self) -> Self {
         if self.is_terminal() { self } else { next }
@@ -77,17 +68,10 @@ pub enum ItemKind {
         text: TextContent,
         #[serde(default)]
         images: Vec<BlobHash>,
-        /// Sent while a run was active.
         #[serde(default)]
         steer: bool,
-        /// Forge delivered it for this agent (the parent's `Agent` item),
-        /// whose result wakes the thread; the Editor shows it as the
-        /// agent's report, not as the user's message.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from_agent: Option<ItemId>,
-        /// Another thread's agent wrote it (`thread_send`, a started thread's
-        /// or agent's first message, a follow-up). Forge sets it; the Editor
-        /// tints the bubble with the sender's harness and renders markdown.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender: Option<Sender>,
     },
@@ -100,25 +84,15 @@ pub enum ItemKind {
         title: Option<String>,
         output: Option<Output>,
         exit_code: Option<i32>,
-        /// Set while the engine asks the user before running it, and kept
-        /// with the decision; the item is `AwaitingUser` until answered.
         approval: Option<Approval>,
     },
     Agent {
-        /// The engine's name for it: a type ("general-purpose"), a nickname
-        /// or nothing.
         name: Option<String>,
         description: TextContent,
-        /// The full task it was given, when the engine reports one apart
-        /// from the description (Claude's `prompt`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<TextContent>,
-        /// The engine's own id for the running agent (Claude's `agentId`,
-        /// the address its `SendMessage` uses).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
-        /// Tokens in the agent's context after its latest message, and the
-        /// model it runs on: what the context meter shows in its view.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context_used: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,34 +100,22 @@ pub enum ItemKind {
         #[serde(default)]
         background: bool,
         result: Option<TextContent>,
-        /// Artisan's name for it, unique in its thread ([`AGENT_NAMES`]):
-        /// Forge assigns it when the agent is first stored. `None` on agents
-        /// stored before; read [`Item::agent_label`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
-        /// The harness it runs on, for an agent Forge started on any harness
-        /// (`agent_spawn`); `None` for the engine's own subagents, which run
-        /// on their thread's harness.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         engine: Option<EngineId>,
-        /// The thread a Forge-started agent runs in; its work lives there.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread: Option<ThreadId>,
     },
     Question {
-        /// The engine waits for the answer.
         blocking: bool,
         questions: Collection<Question>,
-        /// One entry per question; `None` means skipped.
         answers: Option<Collection<Option<QuestionAnswer>>>,
-        /// Forge-computed literal history. Clients never resolve opaque IDs or
-        /// duplicate labels to construct display text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answer_text: Option<TextContent>,
     },
     Plan {
         steps: Collection<PlanStep>,
-        /// A markdown plan awaiting approval.
         proposal: Option<TextContent>,
         approval: Option<Approval>,
     },
@@ -162,13 +124,10 @@ pub enum ItemKind {
         caption: Option<TextContent>,
     },
     Compaction {
-        /// Portable checkpoint text, retained for recall and subsequent handoffs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<TextContent>,
         tokens_before: Option<u64>,
         tokens_after: Option<u64>,
-        /// The thread moved to another engine or model here; the divider
-        /// names both while the history is handed over.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         switch: Option<ModelSwitch>,
     },
@@ -187,22 +146,15 @@ pub enum ItemKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
-    /// Text between tool calls; folds away once the answer arrives.
     Commentary,
-    /// The reply.
     Final,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolKind {
-    /// A message between this thread's agents, or with another session.
     AgentMessage {
-        /// The engine's address for the other side: who it went to (Claude's
-        /// `to`), or who sent it when it came in.
         recipient: String,
-        /// The thread's `Agent` item on the other side, when it is one; Forge
-        /// resolves it from the address.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<ItemId>,
         summary: Option<String>,
@@ -210,14 +162,10 @@ pub enum ToolKind {
         #[serde(default, skip_serializing_if = "MessageDirection::is_sent")]
         direction: MessageDirection,
     },
-    /// Work on agents or background jobs as a whole: listing, waiting for or
-    /// stopping them.
     Agents {
         action: AgentAction,
-        /// The engine's addresses for the agents or jobs it acted on.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         addresses: Vec<String>,
-        /// The thread's `Agent` items among them; Forge resolves them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         targets: Vec<ItemId>,
     },
@@ -226,8 +174,6 @@ pub enum ToolKind {
         cwd: Option<String>,
         #[serde(default)]
         background: bool,
-        /// A watcher: it reports events as they happen instead of ending
-        /// with a result (Claude's `Monitor`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         watch: bool,
     },
@@ -258,6 +204,11 @@ pub enum ToolKind {
     ViewImage {
         path: String,
     },
+    Workflow {
+        name: Option<String>,
+        #[serde(default)]
+        input: Option<TextContent>,
+    },
     Other {
         name: String,
         #[serde(default)]
@@ -270,15 +221,17 @@ pub enum ToolKind {
 pub enum MessageDirection {
     #[default]
     Sent,
-    /// Came in from another agent or session.
     Received,
-    /// A subagent's report to whoever started it.
     Report,
 }
 
 impl MessageDirection {
     #[must_use]
-    pub fn is_sent(&self) -> bool {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if hands the field by reference"
+    )]
+    fn is_sent(&self) -> bool {
         *self == Self::Sent
     }
 }
@@ -303,7 +256,6 @@ pub enum SearchMode {
 pub struct FileChange {
     pub path: String,
     pub op: FileOp,
-    /// Unified diff, when the engine provides one.
     pub diff: Option<TextContent>,
 }
 
@@ -316,7 +268,6 @@ pub enum FileOp {
     Move { from: String },
 }
 
-/// Complete tool output. Historical imports can explicitly report bytes already lost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
     pub text: TextContent,
@@ -331,17 +282,12 @@ impl Output {
             omitted_bytes: 0,
         }
     }
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.text.byte_len() == 0 && self.omitted_bytes == 0
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
     pub request: ApprovalRequest,
     pub reason: Option<TextContent>,
-    /// What the engine offers; the client shows only these.
     pub options: Vec<Decision>,
     pub decision: Option<Decision>,
 }
@@ -393,7 +339,6 @@ pub struct QuestionOption {
     pub description: Option<TextContent>,
 }
 
-/// Choice identity stays separate from presentation and free-form answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QuestionAnswer {
@@ -403,7 +348,7 @@ pub enum QuestionAnswer {
 impl Question {
     pub fn validate_answer_structure(
         &self,
-        answer: &Option<QuestionAnswer>,
+        answer: Option<&QuestionAnswer>,
     ) -> Result<(), &'static str> {
         match answer {
             Some(QuestionAnswer::Text { text }) if text.trim().is_empty() => {
@@ -431,7 +376,7 @@ impl Question {
             }
         }
     }
-    pub fn validate_answer(&self, answer: &Option<QuestionAnswer>) -> Result<(), &'static str> {
+    pub fn validate_answer(&self, answer: Option<&QuestionAnswer>) -> Result<(), &'static str> {
         self.validate_answer_structure(answer)?;
         if let Some(QuestionAnswer::Choices { ids }) = answer {
             let choices = self
@@ -450,7 +395,6 @@ impl Question {
         }
         Ok(())
     }
-    /// Readable history/next-turn copy; transport answers retain opaque IDs.
     pub fn answer_text(&self, answer: &QuestionAnswer) -> Result<String, &'static str> {
         match answer {
             QuestionAnswer::Text { text } => Ok(text.clone()),
@@ -511,22 +455,11 @@ pub enum StepStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NoticeKind {
-    Goal {
-        state: String,
-    },
+    Goal { state: String },
     Safety,
-    Reroute {
-        model: String,
-    },
+    Reroute { model: String },
     Info,
-    /// Something from the work the user should know but might miss, found by
-    /// a side query after the turn: the notice's text, one or two sentences.
-    /// Notes stored with a title drop it when read.
-    YouShouldKnow {
-        /// A decision the agent made that the user may want to judge, rather
-        /// than something to understand.
-        heads_up: bool,
-    },
+    YouShouldKnow { heads_up: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,8 +472,6 @@ pub enum ErrorKind {
 }
 
 impl Item {
-    /// Stateful plans, agents and questions can be explicitly reused by an adapter.
-    /// Completed output and accepted input remain terminal.
     #[must_use]
     pub const fn next_status(&self, next: Status) -> Status {
         if matches!(
@@ -553,30 +484,19 @@ impl Item {
         }
     }
 
-    /// Whether the item folds into its run's work in the root transcript:
-    /// what the agent did between the rows a reader sees. Transcript pages
-    /// ship every other item and summarise these as [`crate::WorkSpan`]s,
-    /// so a turn of thousands of calls opens as one row. Forge stores it
-    /// per item; the Editor folds by it.
     #[must_use]
     pub fn folds_into_work(&self) -> bool {
         match &self.kind {
-            // A steer belongs to the running turn, and an agent's delivered
-            // result reads as its report there.
             ItemKind::UserMessage {
                 steer, from_agent, ..
             } => (*steer && self.run_id.is_some()) || from_agent.is_some(),
             ItemKind::AssistantMessage { phase, .. } => *phase != Phase::Final,
-            // Waiting on the user, it is a prompt of its own.
             ItemKind::Tool { .. } | ItemKind::Plan { .. } => self.status != Status::AwaitingUser,
-            // The composer's strip reads these; the transcript skips them.
             ItemKind::Notice { kind, .. } => !matches!(
                 kind,
                 NoticeKind::Goal { .. } | NoticeKind::YouShouldKnow { .. }
             ),
             ItemKind::Agent { .. } => true,
-            // A compaction is a divider, or an entry of the work it
-            // happened in; the fold decides, so it always ships.
             ItemKind::Question { .. }
             | ItemKind::Compaction { .. }
             | ItemKind::Error { .. }
@@ -584,7 +504,6 @@ impl Item {
         }
     }
 
-    /// The text a reader sees first, for previews and titles.
     #[must_use]
     pub fn preview(&self) -> Option<&str> {
         match &self.kind {
@@ -602,8 +521,6 @@ impl Item {
         }
     }
 
-    /// What a subagent is called on screen: Artisan's name for it, else a
-    /// stable one from its id (agents stored before Forge named them).
     #[must_use]
     pub fn agent_label(&self) -> Option<String> {
         let ItemKind::Agent { label, .. } = &self.kind else {
@@ -618,82 +535,9 @@ impl Item {
 }
 
 #[cfg(test)]
-mod question_identity_tests {
-    use super::{Question, QuestionAnswer, QuestionOption};
-    #[test]
-    fn duplicate_labels_keep_distinct_choice_identity_and_text_is_not_a_choice() {
-        let question = Question {
-            id: "q".into(),
-            header: None,
-            text: "Pick".into(),
-            multi_select: false,
-            options: vec![
-                QuestionOption {
-                    id: "a".into(),
-                    label: "Same".into(),
-                    description: None,
-                },
-                QuestionOption {
-                    id: "b".into(),
-                    label: "Same".into(),
-                    description: None,
-                },
-            ]
-            .into(),
-        };
-        let answer = QuestionAnswer::Choices {
-            ids: vec!["b".into()].into(),
-        };
-        assert!(question.validate_answer(&Some(answer.clone())).is_ok());
-        let encoded = serde_json::to_string(&answer).unwrap();
-        assert_eq!(
-            serde_json::from_str::<QuestionAnswer>(&encoded).unwrap(),
-            answer
-        );
-        assert!(
-            question
-                .validate_answer(&Some(QuestionAnswer::Choices {
-                    ids: vec!["Same".into()].into()
-                }))
-                .is_err()
-        );
-        assert!(
-            question
-                .validate_answer(&Some(QuestionAnswer::Text {
-                    text: "Same".into()
-                }))
-                .is_ok()
-        );
-        assert!(
-            question
-                .validate_answer(&Some(QuestionAnswer::Choices {
-                    ids: vec!["a".into(), "b".into()].into()
-                }))
-                .is_err()
-        );
-        let mut multi = question;
-        multi.multi_select = true;
-        assert!(
-            multi
-                .validate_answer(&Some(QuestionAnswer::Choices {
-                    ids: vec!["a".into(), "a".into()].into()
-                }))
-                .is_err()
-        );
-    }
-}
+#[path = "../tests/item/question_identity.rs"]
+mod question_identity_tests;
 
 #[cfg(test)]
-mod notice_tests {
-    use super::NoticeKind;
-
-    /// Threads holding notes stored with a title still open.
-    #[test]
-    fn a_note_stored_with_a_title_still_reads() {
-        let stored = r#"{"type":"you_should_know","heads_up":true,"title":"Orders cascade"}"#;
-        assert_eq!(
-            serde_json::from_str::<NoticeKind>(stored).unwrap(),
-            NoticeKind::YouShouldKnow { heads_up: true }
-        );
-    }
-}
+#[path = "../tests/item/notice.rs"]
+mod notice_tests;

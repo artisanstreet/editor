@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn native_paths_remain_descriptions_without_listing_the_parent_as_a_worker() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut turn = run(&thread, RunStatus::Running);
     turn.session_id = Some("root-session".into());
     store.upsert_run(turn).await.unwrap();

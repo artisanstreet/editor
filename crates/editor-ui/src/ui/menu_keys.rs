@@ -1,7 +1,7 @@
 use aqua::UiApp;
 use aqua_core::{InputEvent, Key, NamedKey, NodeId};
 
-pub const POPOVER_MENU: &str = "popover-menu";
+pub(crate) const POPOVER_MENU: &str = "popover-menu";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Direction {
@@ -67,7 +67,7 @@ pub fn cycle(ui: &mut UiApp, input: &InputEvent) -> bool {
     let direction = match key.key {
         Key::Named(NamedKey::Down) => Direction::Forward,
         Key::Named(NamedKey::Up) => Direction::Backward,
-        _ => return false,
+        Key::Char(_) | Key::Named(_) => return false,
     };
     let Some(focused) = ui.tree().focused() else {
         return false;

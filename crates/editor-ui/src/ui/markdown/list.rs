@@ -1,21 +1,26 @@
-use std::rc::Rc;
-
-use aqua_core::Insets;
-use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
+use aqua_core::{CollectionSemantics, Insets, Role};
 use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 
 use super::presenter::PresenterError;
-use super::visual::{BodyTone, LinkAction, interactive_leaf, raw_leaf};
+use super::visual::{BodyContext, BodyTone, LeafKind, Sources, interactive_leaf, raw_leaf};
 use super::{Block, ListItem};
-use crate::ui::rich::actions::{ResourceScope, ShowCopyMenu};
-use crate::ui::theme::{ArtisanTheme, ProseTypography};
+use crate::ui::theme::ProseTypography;
+
+struct Marker {
+    indent: usize,
+    glyph: String,
+    ordered: bool,
+    task: Option<bool>,
+    position: usize,
+    size: usize,
+}
 
 struct Row<'a> {
     block: Option<&'a Block>,
     indent: usize,
-    markers: Vec<(usize, String, bool)>,
+    markers: Vec<Marker>,
     gap: f32,
 }
 
@@ -68,7 +73,11 @@ fn visit<'a>(blocks: &'a [Block], indent: usize, rows: &mut Vec<Row<'a>>) {
                 items,
                 ..
             } => visit_items(*ordered, start.unwrap_or(1), items, indent, rows),
-            _ => rows.push(Row {
+            Block::Heading { .. }
+            | Block::Paragraph { .. }
+            | Block::Code(_)
+            | Block::Html { .. }
+            | Block::Table(_) => rows.push(Row {
                 block: Some(block),
                 indent,
                 markers: Vec::new(),
@@ -102,13 +111,20 @@ fn visit_items<'a>(
         }
         visit(&item.blocks, indent + 1, rows);
         if let Some(row) = rows.get_mut(first) {
-            let marker = match item.task {
+            let glyph = match item.task {
                 Some(true) => "☑".to_owned(),
                 Some(false) => "☐".to_owned(),
                 None if ordered => format!("{}.", start.saturating_add(index as u64)),
                 None => "•".to_owned(),
             };
-            row.markers.push((indent, marker, ordered));
+            row.markers.push(Marker {
+                indent,
+                glyph,
+                ordered,
+                task: item.task,
+                position: index + 1,
+                size: items.len(),
+            });
             if index > 0 {
                 row.gap += ProseTypography::ITEM_GAP_PX;
             }
@@ -116,78 +132,55 @@ fn visit_items<'a>(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one list render: each item's leaf, marker, indent and list semantics"
+)]
 pub(super) fn render(
     ordered: bool,
     start: Option<u64>,
     items: &[ListItem],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
+    body: BodyContext<'_>,
     prefix: &[u64],
-    source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
-    sources: &mut Vec<SelectionSource>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<ResourceScope>,
+    sources: &mut Sources<'_>,
 ) -> Result<Element, PresenterError> {
+    let theme = body.theme;
     let mut rows = Vec::new();
     visit_items(ordered, start.unwrap_or(1), items, 0, &mut rows);
     let mut list = ui::Box::new().layout("column").width(Length::Pct(100.0));
     for (ordinal, row) in rows.into_iter().enumerate() {
         let mut order = prefix.to_vec();
         order.push(ordinal as u64);
-        let id = source_id(sources.len());
+        let source = sources.leaf(order, "\n");
         let leaf = match row.block {
-            Some(Block::Paragraph { spans, .. }) => interactive_leaf(
-                spans,
-                theme,
-                tone,
-                document,
-                id,
-                order,
-                "\n",
-                on_link.clone(),
-                on_color.clone(),
-                scope.clone(),
-                None,
-            )
-            .map_err(PresenterError::Inline)?,
+            Some(Block::Paragraph { spans, .. }) => {
+                interactive_leaf(spans, body, source, LeafKind::Prose, Vec::new())
+                    .map_err(PresenterError::Inline)?
+            }
             Some(Block::Heading { level, spans, .. }) => interactive_leaf(
                 spans,
-                theme,
-                BodyTone::Foreground,
-                document,
-                id,
-                order,
-                "\n",
-                on_link.clone(),
-                on_color.clone(),
-                scope.clone(),
-                Some(*level),
+                body.with_tone(BodyTone::Foreground),
+                source,
+                LeafKind::Heading(*level),
+                Vec::new(),
             )
             .map_err(PresenterError::Inline)?,
-            Some(Block::Html { source }) => {
-                raw_leaf(source, theme, tone, document, id, order, "\n")
-            }
-            None => interactive_leaf(
-                &[],
+            Some(Block::Html { source: raw }) => raw_leaf(
+                raw,
                 theme,
-                tone,
-                document,
-                id,
-                order,
-                "\n",
-                on_link.clone(),
-                on_color.clone(),
-                scope.clone(),
-                None,
-            )
-            .map_err(PresenterError::Inline)?,
+                body.tone,
+                source.document,
+                source.id,
+                source.order,
+                source.separator,
+            ),
+            None => interactive_leaf(&[], body, source, LeafKind::Prose, Vec::new())
+                .map_err(PresenterError::Inline)?,
             Some(Block::Code(_)) => return Err(PresenterError::Unavailable("list code fence")),
             Some(Block::Table(_)) => return Err(PresenterError::Unavailable("list table")),
             Some(Block::List { .. }) => return Err(PresenterError::Unavailable("list flow")),
         };
-        sources.push(leaf.source);
+        sources.collected.push(leaf.source);
         let mut frame = ui::Box::new()
             .width(Length::Pct(100.0))
             .style(Style::new().padding_insets(Insets {
@@ -197,12 +190,23 @@ pub(super) fn render(
                 ..Insets::default()
             }))
             .child(leaf.element);
-        for (indent, marker, ordered) in row.markers {
+        let item = row
+            .markers
+            .first()
+            .map(|marker| (marker.indent + 1, marker.task, marker.position, marker.size));
+        for Marker {
+            indent,
+            glyph,
+            ordered,
+            task,
+            ..
+        } in row.markers
+        {
             let color = theme.colors.text_muted.to_reference_text_color();
             let style = TextStyle {
                 families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                size_px: ProseTypography::BODY_SIZE_PX,
-                line_height_px: ProseTypography::BODY_LINE_PX,
+                size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+                line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
                 weight: if ordered {
                     aqua_text::FontWeight::NORMAL
                 } else {
@@ -211,11 +215,14 @@ pub(super) fn render(
                 letter_spacing_em: Some(theme.typography.tracking_em),
                 ..TextStyle::default()
             };
-            let marker = ui::Text::new(marker)
+            let mut marker = ui::Text::new(glyph)
                 .text_style(style)
                 .gpui_source_color(color)
                 .wrap(false)
                 .build();
+            if task.is_some() {
+                marker = marker.aria_hidden();
+            }
             frame = frame.child(
                 ui::Box::new()
                     .style(Style::new().absolute_at(
@@ -231,7 +238,25 @@ pub(super) fn render(
                     .build(),
             );
         }
-        list = list.child(frame.build());
+        let mut frame = frame.build();
+        if let Some((level, task, position, size)) = item {
+            frame = frame
+                .role(Role::ListItem)
+                .aria_level(level)
+                .collection_semantics(CollectionSemantics {
+                    position_in_set: Some(position),
+                    set_size: Some(size),
+                    ..CollectionSemantics::default()
+                });
+            if let Some(checked) = task {
+                frame = frame.aria_checked(checked);
+            }
+        }
+        list = list.child(frame);
     }
-    Ok(list.build())
+    Ok(list.build().role(Role::List))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/list.rs"]
+mod tests;

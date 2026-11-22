@@ -1,28 +1,28 @@
-//! The disk guard: a run watches the free space where it works.
-//!
-//! A full disk slows every build on it long before writes fail. Below
-//! [`WARN`] the agent is told, once, to free space itself; below [`STOP`]
-//! Forge stops the run. A run started below the stop line (the user sent it,
-//! maybe to clean up) stops only once it loses another [`MARGIN`].
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 const GIB: u64 = 1 << 30;
-pub const WARN: u64 = 10 * GIB;
-pub const STOP: u64 = 3 * GIB;
-/// Above this the warning is armed again.
+const WARN: u64 = 10 * GIB;
+const STOP: u64 = 3 * GIB;
 const REARM: u64 = 12 * GIB;
 const MARGIN: u64 = GIB;
+const EXHAUSTED: u64 = GIB / 4;
 
-/// Free bytes on the volume holding a path.
-pub type FreeSpace = Arc<dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync>;
+pub(crate) type FreeSpace = Arc<dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync>;
 
 #[derive(Clone)]
-pub struct Probe {
+pub(crate) struct Probe {
     pub(crate) free_space: FreeSpace,
     pub(crate) every: Duration,
+}
+
+impl std::fmt::Debug for Probe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Probe")
+            .field("every", &self.every)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Probe {
@@ -34,14 +34,12 @@ impl Probe {
     }
 }
 
-/// What a check found that the run acts on.
-pub enum Alarm {
+pub(crate) enum Alarm {
     Low { path: PathBuf, free: u64 },
     Full { path: PathBuf, free: u64 },
 }
 
-/// One run's watch over the volumes it writes to.
-pub struct Watch {
+pub(crate) struct Watch {
     probe: Probe,
     paths: Vec<PathBuf>,
     interval: tokio::time::Interval,
@@ -50,7 +48,6 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// Watches the run's folder and Forge's own data.
     pub(crate) fn new(probe: Probe, paths: Vec<PathBuf>) -> Self {
         let first = tokio::time::Instant::now() + probe.every;
         let mut interval = tokio::time::interval_at(first, probe.every);
@@ -64,15 +61,13 @@ impl Watch {
         }
     }
 
-    /// Waits for the next check. Cancel-safe: the schedule survives a lost race.
     pub(crate) async fn due(&mut self) {
         self.interval.tick().await;
     }
 
-    /// Checks now. A volume that can't be read is skipped, never an alarm.
     pub(crate) async fn check(&mut self) -> Option<Alarm> {
         let (probe, paths) = (Arc::clone(&self.probe.free_space), self.paths.clone());
-        let lowest = tokio::task::spawn_blocking(move || {
+        let measured = tokio::task::spawn_blocking(move || {
             paths
                 .into_iter()
                 .filter_map(|path| match probe(&path) {
@@ -84,13 +79,21 @@ impl Watch {
                 })
                 .min_by_key(|(_, free)| *free)
         })
-        .await
-        .ok()
-        .flatten()?;
-        let (path, free) = lowest;
-        let stop_below = *self
-            .stop_below
-            .get_or_insert_with(|| STOP.min(free.saturating_sub(MARGIN)));
+        .await;
+        let (path, free) = match measured {
+            Ok(lowest) => lowest?,
+            Err(error) => {
+                tracing::warn!(paths = ?self.paths, "read free disk space task: {error}");
+                return None;
+            }
+        };
+        let stop_below = match self.stop_below {
+            None => STOP.min(free.saturating_sub(MARGIN)),
+            Some(_) if free >= STOP => STOP,
+            Some(line) => line,
+        }
+        .max(EXHAUSTED);
+        self.stop_below = Some(stop_below);
         if free < stop_below {
             return Some(Alarm::Full { path, free });
         }
@@ -103,14 +106,12 @@ impl Watch {
         None
     }
 
-    /// The agent was told; quiet until space recovers.
     pub(crate) const fn warned(&mut self) {
         self.warned = true;
     }
 }
 
-/// What the agent reads when the disk runs low.
-pub fn steer(path: &Path, free: u64) -> String {
+pub(crate) fn steer(path: &Path, free: u64) -> String {
     format!(
         "Disk low: {} has {} free. Forge stops runs on this disk below {}. Free space \
          before you continue. Delete only build outputs, caches and dependency folders \
@@ -124,8 +125,7 @@ pub fn steer(path: &Path, free: u64) -> String {
     )
 }
 
-/// The line the user sees in the thread when the agent was told.
-pub fn notice(path: &Path, free: u64) -> String {
+pub(crate) fn notice(path: &Path, free: u64) -> String {
     format!(
         "Disk low: {} free on {}. Asked the agent to free space; runs stop below {}.",
         gib(free),
@@ -134,8 +134,7 @@ pub fn notice(path: &Path, free: u64) -> String {
     )
 }
 
-/// Why the run stopped, on its error card.
-pub fn stopped(path: &Path, free: u64) -> String {
+pub(crate) fn stopped(path: &Path, free: u64) -> String {
     format!(
         "Stopped: only {} free on {}. Free space, then send a message to carry on.",
         gib(free),

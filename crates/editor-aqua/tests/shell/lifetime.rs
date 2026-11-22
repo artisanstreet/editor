@@ -1,21 +1,24 @@
 use artisan_api::ThreadId;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
-use editor_aqua::shell::resource_preview::ResourcePreview;
+use editor_aqua::core::{Core, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::shell::resource_preview::{PreviewError, ResourcePreview};
 use std::{
-    net::TcpListener,
     sync::{Arc, mpsc},
     time::Duration,
 };
-
-fn closing_forge() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    std::thread::spawn(move || listener.incoming().for_each(drop));
-    address
-}
+use test_support::net::ClosingListener;
 
 fn client(core: &Core, address: &str) -> ForgeClient {
-    ForgeClient::new(address, &"0".repeat(64), core.identity.as_ref().unwrap()).unwrap()
+    ForgeClient::new(address, &"0".repeat(64), core.identity().unwrap()).unwrap()
+}
+
+fn connect(core: &mut Core, config: &HostConfig) {
+    let client = client(core, &config.address);
+    test_support::editor::core::connect_client(core, config, client);
+}
+
+fn replace(core: &mut Core, config: &HostConfig) {
+    core.remove_host(&config.id).unwrap();
+    connect(core, config);
 }
 
 fn config(address: &str) -> HostConfig {
@@ -44,41 +47,88 @@ fn pending_preview(core: &Core, config: &HostConfig) -> ResourcePreview {
 
 fn wait_for_result(preview: &ResourcePreview) {
     let (sender, receiver) = mpsc::channel();
-    preview.wake_mailbox().unwrap().set_waker(Arc::new(move || {
-        let _ = sender.send(());
-    }));
+    preview
+        .wake_mailbox()
+        .unwrap()
+        .set_waker(Arc::new(move || match sender.send(()) {
+            Ok(()) | Err(mpsc::SendError(())) => {}
+        }));
     receiver.recv_timeout(Duration::from_secs(15)).unwrap();
 }
 
 #[test]
-fn preview_completion_is_discarded_after_host_removal_and_same_id_replacement() {
+fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
-    let address = closing_forge();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = ClosingListener::bind();
+    let address = forge.address().to_string();
     let config = config(&address);
-    core.add_test_host(&config, client(&core, &address));
+    connect(&mut core, &config);
 
     let mut current = pending_preview(&core, &config);
     wait_for_result(&current);
     assert!(current.drain(&core));
-    assert!(matches!(current.content, Some(Err(_))));
+    assert!(matches!(current.content(), Some(Err(_))));
 
     let mut removed = pending_preview(&core, &config);
     wait_for_result(&removed);
     let old = core.host(&config.id).unwrap().instance();
     core.remove_host(&config.id).unwrap();
-    assert!(!removed.drain(&core));
-    assert!(removed.content.is_none());
+    assert!(removed.drain(&core));
+    assert!(matches!(
+        removed.content(),
+        Some(Err(PreviewError::HostGone { .. }))
+    ));
 
-    core.add_test_host(&config, client(&core, &address));
+    connect(&mut core, &config);
     let new = core.host(&config.id).unwrap().instance();
     assert_ne!(old, new);
     let mut replaced = pending_preview(&core, &config);
     wait_for_result(&replaced);
-    core.add_test_host(&config, client(&core, &address));
-    assert!(!replaced.drain(&core));
-    assert!(replaced.content.is_none());
+    replace(&mut core, &config);
+    assert!(replaced.drain(&core));
+    assert!(matches!(
+        replaced.content(),
+        Some(Err(PreviewError::HostGone { .. }))
+    ));
+}
+
+#[test]
+fn the_waiting_mark_keeps_its_reveal_clock_while_the_same_thread_waits() {
+    use editor_aqua::core::HostId;
+    use editor_aqua::shell::connection::{ConnectionPresenter, Owner};
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::time::Duration;
+
+    let theme = ArtisanTheme::resolved();
+    let waiting = Owner::Thread(HostId("gone".into()), ThreadId::from("waiting"));
+    let mut presenter = ConnectionPresenter::default();
+    let manual = test_support::clock::ManualClock::starting_at(1_700_000_000_000);
+    let clock = manual.clock();
+    let opened = clock.now();
+    let reveal = opened + Duration::from_millis(500);
+    for (rebuilt, step) in [(0, 0), (100, 100), (300, 200)] {
+        manual.advance(Duration::from_millis(step));
+        let now = clock.now();
+        presenter.hold(Some(waiting.clone()));
+        let _mark = presenter.waiting(&theme, &clock, false);
+        assert_eq!(
+            presenter.deadline(now, false),
+            Some(reveal),
+            "rebuilding at {rebuilt} ms keeps the mark's reveal at 500 ms"
+        );
+    }
+    presenter.hold(None);
+    assert_eq!(presenter.deadline(opened, false), None);
+    manual.advance(Duration::from_millis(700));
+    let later = clock.now();
+    presenter.hold(Some(Owner::Thread(
+        HostId("gone".into()),
+        ThreadId::from("another"),
+    )));
+    let _mark = presenter.waiting(&theme, &clock, false);
+    assert_eq!(
+        presenter.deadline(later, false),
+        Some(later + Duration::from_millis(500))
+    );
 }

@@ -1,61 +1,328 @@
-//! Account config sync, Forge ← Core: fetch the latest bundle, check the
-//! manifest bytes against `bundle.content_hash`, apply them through the Hub
-//! and report the result to Core.
-
-use anyhow::{Context, Result};
 use sha2::Digest as _;
 use std::path::{Component, Path, PathBuf};
 
 use crate::core::now_sec;
 
-pub const CONFIG_BUNDLES_LATEST_PATH: &str = "/v1/config/bundles/latest";
-pub const CONFIG_STATE_PATH: &str = "/v1/config/state";
+const CONFIG_BUNDLES_LATEST_PATH: &str = "/v1/config/bundles/latest";
+const CONFIG_STATE_PATH: &str = "/v1/config/state";
 const MANIFEST_FORMAT: &str = "ast-editor-config/1";
 
 fn config_manifest_path(version: u64) -> String {
     format!("/v1/config/bundles/{version}/manifest")
 }
 
-/// The last bundle this Forge applied.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConfigState {
     pub bundle_id: String,
     pub version: u64,
     pub content_hash: String,
     pub etag: String,
-    /// The MCP servers that bundle placed. Sync replaces or removes only
-    /// these; servers added on this machine are never touched.
     #[serde(default)]
     pub mcp_servers: Vec<String>,
+    #[serde(default)]
+    pub report: AppliedReport,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AppliedReport {
+    #[default]
+    Delivered,
+    Pending {
+        changed: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct SyncFile {
+    applied: Option<ConfigState>,
+    claimed_mcp_servers: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum StoredSync {
+    Current(SyncFile),
+    Legacy(ConfigState),
+}
+
+impl From<StoredSync> for SyncFile {
+    fn from(stored: StoredSync) -> Self {
+        match stored {
+            StoredSync::Current(file) => file,
+            StoredSync::Legacy(state) => {
+                let claimed_mcp_servers = state.mcp_servers.clone();
+                Self {
+                    applied: Some(state),
+                    claimed_mcp_servers,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigOutcome {
     Current(ConfigState),
-    Updated(ConfigState),
+    Updated {
+        state: ConfigState,
+        kept_local: Vec<LocalMcpServerKept>,
+    },
 }
 
-pub fn sync_state_path(data_dir: &Path) -> PathBuf {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalMcpServerKept {
+    pub name: String,
+}
+
+fn sync_state_path(data_dir: &Path) -> PathBuf {
     data_dir.join("ast_sync.json")
 }
 
-fn read_state(data_dir: &Path) -> Result<Option<ConfigState>> {
+#[derive(Debug, thiserror::Error)]
+pub enum SyncStateError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("read the config sync record")]
+    Load(#[source] forge_store::ReadSettingError),
+    #[error("decode the config sync record")]
+    Decode(#[source] serde_json::Error),
+    #[error("encode the config sync record")]
+    Encode(#[source] serde_json::Error),
+    #[error("save the config sync record")]
+    Save(#[source] forge_store::SetSettingError),
+    #[error("the worker that reads and writes {} stopped", path.display())]
+    Worker {
+        path: PathBuf,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
+
+fn read_state(data_dir: &Path) -> Result<SyncFile, SyncStateError> {
     let path = sync_state_path(data_dir);
     match std::fs::read(&path) {
-        Ok(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))?,
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        Ok(bytes) => serde_json::from_slice::<StoredSync>(&bytes)
+            .map(SyncFile::from)
+            .map_err(|source| SyncStateError::Parse { path, source }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SyncFile::default()),
+        Err(source) => Err(SyncStateError::Read { path, source }),
     }
 }
 
-fn write_state(data_dir: &Path, state: &ConfigState) -> Result<()> {
-    let path = sync_state_path(data_dir);
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(state)?)
-        .with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
+async fn load_state(
+    store: &forge_store::Store,
+    data_dir: &Path,
+) -> Result<SyncFile, SyncStateError> {
+    if let Some(record) = store
+        .setting(forge_store::CONFIG_SYNC_KEY)
+        .await
+        .map_err(SyncStateError::Load)?
+    {
+        return serde_json::from_value(record).map_err(SyncStateError::Decode);
+    }
+    let dir = data_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || read_state(&dir))
+        .await
+        .map_err(|source| SyncStateError::Worker {
+            path: sync_state_path(data_dir),
+            source,
+        })?
+}
+
+async fn save_state(store: &forge_store::Store, file: &SyncFile) -> Result<(), SyncStateError> {
+    let record = serde_json::to_value(file).map_err(SyncStateError::Encode)?;
+    store
+        .set_setting(forge_store::CONFIG_SYNC_KEY.to_owned(), record)
+        .await
+        .map_err(SyncStateError::Save)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncConfigError {
+    #[error(transparent)]
+    State(#[from] SyncStateError),
+    #[error("sign the request for {step}")]
+    Proof {
+        step: &'static str,
+        #[source]
+        source: crate::core::ProofHeadersError,
+    },
+    #[error("reach Core to {step}")]
+    Reach {
+        step: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Core refused to {step}")]
+    Refused {
+        step: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("read Core's answer to {step}")]
+    Read {
+        step: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("the bundle's manifest is larger than {limit} bytes")]
+    ManifestTooLarge { limit: usize },
+    #[error("Core answered 304 but this Forge has applied no bundle")]
+    NotModifiedWithoutBundle,
+    #[error("Core has no config bundle yet")]
+    NoBundle,
+    #[error("apply config bundle {bundle} version {version}")]
+    Apply {
+        bundle: String,
+        version: u64,
+        #[source]
+        source: Box<ApplyManifestError>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReportError {
+    #[error("encode the {status} report of bundle {bundle}")]
+    Encode {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("sign the {status} report of bundle {bundle}")]
+    Proof {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: crate::core::ProofHeadersError,
+    },
+    #[error("reach Core with the {status} report of bundle {bundle}")]
+    Reach {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Core refused the {status} report of bundle {bundle}")]
+    Refused {
+        bundle: String,
+        status: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyManifestError {
+    #[error("the manifest does not match the bundle hash {expected}")]
+    Hash { expected: String },
+    #[error("read the manifest")]
+    Parse(#[source] serde_json::Error),
+    #[error("unknown manifest format {format}")]
+    Format { format: String },
+    #[error("the bundle carries {files} skill files; the limit is {limit}")]
+    TooManyFiles { files: usize, limit: usize },
+    #[error("the bundle's skill files decode to about {bytes} bytes; the limit is {limit}")]
+    TooManyBytes { bytes: usize, limit: usize },
+    #[error("install skill {skill} from the bundle")]
+    InstallSkill {
+        skill: String,
+        #[source]
+        source: Box<InstallBundleError>,
+    },
+    #[error("read the skill catalog")]
+    Catalog(#[source] Box<forge_runs::SkillCatalogError>),
+    #[error("skill {skill} is not installed and the bundle carries none")]
+    SkillMissing { skill: String },
+    #[error("place the bundle's skills")]
+    PlaceSkills(#[source] Box<forge_runs::PlaceSkillsError>),
+    #[error("read the global prompt")]
+    ReadPrompt(#[source] forge_store::ReadSettingError),
+    #[error("read the global prompt's version")]
+    PromptVersion(#[source] forge_store::PromptVersionError),
+    #[error("the global prompt changed while syncing (now version {latest})")]
+    PromptChanged { latest: u64 },
+    #[error("encode the config sync record")]
+    Record(#[source] serde_json::Error),
+    #[error("save the bundle's skills, global prompt and MCP servers together")]
+    Commit(#[source] forge_store::ApplyConfigBundleError),
+    #[error("{failed}; the bundle's skills placed before it couldn't be taken back")]
+    Stranded {
+        failed: String,
+        #[source]
+        source: Box<forge_runs::UndoSkillsError>,
+    },
+    #[error(transparent)]
+    Mcp(#[from] ApplyMcpError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InstallBundleError {
+    #[error("stage a skill bundle")]
+    Stage(#[source] std::io::Error),
+    #[error("the worker staging a skill bundle stopped")]
+    Worker(#[source] tokio::task::JoinError),
+    #[error("the bundle has an unsafe path {path}")]
+    UnsafePath { path: String },
+    #[error("decode {path}")]
+    Decode {
+        path: String,
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("create the folder of {path}")]
+    Folder {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write {path}")]
+    Write {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApplyMcpError {
+    #[error("the bundle has an MCP server without a name")]
+    Unnamed,
+    #[error("MCP server {server} in the bundle has neither a command nor a URL")]
+    TargetMissing { server: String },
+    #[error("the bundle lists MCP server {server} more than once")]
+    Duplicate { server: String },
+    #[error("read the MCP servers")]
+    Read(#[source] forge_store::ReadSettingError),
+    #[error("decode the MCP servers")]
+    Decode(#[source] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MachineIdentityError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read the machine account in {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: artisan_account::MachineFileError,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -71,7 +338,6 @@ struct BundleLatest {
     bundle: Option<BundleInfo>,
 }
 
-/// Strict, so a Core shape change fails loudly instead of half-applying.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EditorManifest {
@@ -99,8 +365,6 @@ struct ManifestMcpServer {
 #[derive(serde::Deserialize)]
 struct ManifestSkill {
     name: String,
-    /// Installed on machines that lack the skill; absent means the skill
-    /// must already be in the catalog.
     #[serde(default)]
     bundle: Option<SkillBundle>,
 }
@@ -110,15 +374,12 @@ struct SkillBundle {
     files: Vec<SkillBundleFile>,
 }
 
-/// Per-file hashes are not checked: the whole manifest is already checked
-/// against `bundle.content_hash`.
 #[derive(serde::Deserialize)]
 struct SkillBundleFile {
     path: String,
     content_base64: String,
 }
 
-/// Machine-proof requests to Core.
 struct Core<'a> {
     http: &'a reqwest::Client,
     base: &'a str,
@@ -127,7 +388,11 @@ struct Core<'a> {
 }
 
 impl Core<'_> {
-    fn get(&self, path: &str) -> Result<reqwest::RequestBuilder> {
+    fn get(
+        &self,
+        step: &'static str,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder, SyncConfigError> {
         let headers = crate::core::CoreClient::proof_headers(
             self.machine_id,
             self.secret,
@@ -135,19 +400,31 @@ impl Core<'_> {
             path,
             b"",
             now_sec(),
-        )?;
+        )
+        .map_err(|source| SyncConfigError::Proof { step, source })?;
         Ok(self
             .http
             .get(format!("{}{path}", self.base))
             .headers(headers))
     }
 
-    async fn report(&self, bundle_id: &str, status: &str, detail: &str) -> Result<()> {
+    async fn report(
+        &self,
+        bundle_id: &str,
+        status: &'static str,
+        detail: &str,
+    ) -> Result<(), ReportError> {
+        let bundle = || bundle_id.to_owned();
         let body = serde_json::to_vec(&serde_json::json!({
             "bundleId": bundle_id,
             "status": status,
             "detail": detail,
-        }))?;
+        }))
+        .map_err(|source| ReportError::Encode {
+            bundle: bundle(),
+            status,
+            source,
+        })?;
         let headers = crate::core::CoreClient::proof_headers(
             self.machine_id,
             self.secret,
@@ -155,7 +432,12 @@ impl Core<'_> {
             CONFIG_STATE_PATH,
             &body,
             now_sec(),
-        )?;
+        )
+        .map_err(|source| ReportError::Proof {
+            bundle: bundle(),
+            status,
+            source,
+        })?;
         self.http
             .post(format!("{}{CONFIG_STATE_PATH}", self.base))
             .headers(headers)
@@ -163,13 +445,25 @@ impl Core<'_> {
             .body(body)
             .send()
             .await
-            .context("reach Core")?
+            .map_err(|source| ReportError::Reach {
+                bundle: bundle(),
+                status,
+                source,
+            })?
             .error_for_status()
-            .context("report the config bundle")?;
+            .map_err(|source| ReportError::Refused {
+                bundle: bundle(),
+                status,
+                source,
+            })?;
         Ok(())
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sync turn from fetching the bundle to reporting it"
+)]
 pub async fn sync_config(
     http: &reqwest::Client,
     core_base_url: &str,
@@ -177,31 +471,46 @@ pub async fn sync_config(
     secret: &[u8; 32],
     hub: &forge_runs::Hub,
     data_dir: &Path,
-) -> Result<ConfigOutcome> {
+) -> Result<ConfigOutcome, SyncConfigError> {
     let core = Core {
         http,
         base: core_base_url,
         machine_id,
         secret,
     };
-    let previous = read_state(data_dir)?;
-    let mut request = core.get(CONFIG_BUNDLES_LATEST_PATH)?;
-    if let Some(etag) = previous
+    let file = load_state(hub.store(), data_dir).await?;
+    let latest_step = "fetch the latest config bundle";
+    let mut request = core.get(latest_step, CONFIG_BUNDLES_LATEST_PATH)?;
+    if let Some(etag) = file
+        .applied
         .as_ref()
         .map(|state| state.etag.as_str())
         .filter(|etag| !etag.is_empty())
     {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
-    let response = request.send().await.context("reach Core")?;
+    let response = request
+        .send()
+        .await
+        .map_err(|source| SyncConfigError::Reach {
+            step: latest_step,
+            source,
+        })?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-        return previous
-            .map(ConfigOutcome::Current)
-            .context("Core answered 304 but this Forge has applied no bundle");
+        return current(
+            &core,
+            hub.store(),
+            file,
+            SyncConfigError::NotModifiedWithoutBundle,
+        )
+        .await;
     }
     let response = response
         .error_for_status()
-        .context("fetch the latest config bundle")?;
+        .map_err(|source| SyncConfigError::Refused {
+            step: latest_step,
+            source,
+        })?;
     let etag = response
         .headers()
         .get(reqwest::header::ETAG)
@@ -211,267 +520,622 @@ pub async fn sync_config(
     let latest: BundleLatest = response
         .json()
         .await
-        .context("read the latest config bundle")?;
+        .map_err(|source| SyncConfigError::Read {
+            step: latest_step,
+            source,
+        })?;
     let Some(bundle) = latest.bundle else {
-        return previous
-            .map(ConfigOutcome::Current)
-            .context("Core has no config bundle yet");
+        return current(&core, hub.store(), file, SyncConfigError::NoBundle).await;
     };
-    if let Some(current) = previous.as_ref().filter(|state| {
+    if file.applied.as_ref().is_some_and(|state| {
         (&state.bundle_id, &state.content_hash) == (&bundle.id, &bundle.content_hash)
     }) {
-        return Ok(ConfigOutcome::Current(current.clone()));
+        return current(&core, hub.store(), file, SyncConfigError::NoBundle).await;
     }
-    let bytes = core
-        .get(&config_manifest_path(bundle.version))?
+    let manifest_step = "fetch the bundle's manifest";
+    let mut response = core
+        .get(manifest_step, &config_manifest_path(bundle.version))?
         .send()
         .await
-        .context("reach Core")?
+        .map_err(|source| SyncConfigError::Reach {
+            step: manifest_step,
+            source,
+        })?
         .error_for_status()
-        .context("fetch the manifest")?
-        .bytes()
+        .map_err(|source| SyncConfigError::Refused {
+            step: manifest_step,
+            source,
+        })?;
+    let too_large = SyncConfigError::ManifestTooLarge {
+        limit: MAX_MANIFEST_BYTES,
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MANIFEST_BYTES as u64)
+    {
+        return Err(too_large);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .context("read the manifest")?;
-    let synced_before = previous.map(|state| state.mcp_servers).unwrap_or_default();
-    let applied = apply_manifest(hub, &bytes, &bundle.content_hash, &synced_before).await;
-    let (changed, mcp_servers) = match applied {
+        .map_err(|source| SyncConfigError::Read {
+            step: manifest_step,
+            source,
+        })?
+    {
+        if bytes.len() + chunk.len() > MAX_MANIFEST_BYTES {
+            return Err(too_large);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let stamp = Stamp {
+        bundle_id: bundle.id.clone(),
+        version: bundle.version,
+        content_hash: bundle.content_hash.clone(),
+        etag,
+    };
+    let applied = apply_manifest(hub, &bytes, stamp, &file).await;
+    let Committed { file, kept_local } = match applied {
         Ok(applied) => applied,
-        Err(error) => {
+        Err(source) => {
             if let Err(report) = core
-                .report(&bundle.id, "failed", &format!("{error:#}"))
+                .report(&bundle.id, "failed", &diagnostics::chain(&source))
                 .await
             {
-                tracing::debug!("{report:#}");
+                tracing::debug!(
+                    error = diagnostics::chain(&report),
+                    "report a failed config bundle"
+                );
             }
-            return Err(error).context("apply the config bundle");
+            return Err(SyncConfigError::Apply {
+                bundle: bundle.id,
+                version: bundle.version,
+                source: Box::new(source),
+            });
         }
     };
-    let state = ConfigState {
-        bundle_id: bundle.id,
-        version: bundle.version,
-        content_hash: bundle.content_hash,
-        etag,
-        mcp_servers,
+    let state = deliver_report(&core, hub.store(), file).await?;
+    Ok(ConfigOutcome::Updated { state, kept_local })
+}
+
+async fn current(
+    core: &Core<'_>,
+    store: &forge_store::Store,
+    file: SyncFile,
+    unapplied: SyncConfigError,
+) -> Result<ConfigOutcome, SyncConfigError> {
+    if file.applied.is_none() {
+        return Err(unapplied);
+    }
+    Ok(ConfigOutcome::Current(
+        deliver_report(core, store, file).await?,
+    ))
+}
+
+async fn deliver_report(
+    core: &Core<'_>,
+    store: &forge_store::Store,
+    mut file: SyncFile,
+) -> Result<ConfigState, SyncStateError> {
+    let state = file
+        .applied
+        .as_mut()
+        .expect("invariant: only an applied bundle has a report to deliver");
+    let AppliedReport::Pending { changed } = &state.report else {
+        return Ok(state.clone());
     };
-    write_state(data_dir, &state)?;
-    if let Err(error) = core
+    match core
         .report(&state.bundle_id, "applied", &changed.join(","))
         .await
     {
-        tracing::warn!(
-            "applied config bundle {} but could not tell Core: {error:#}",
-            state.version
-        );
+        Ok(()) => {
+            state.report = AppliedReport::Delivered;
+            let delivered = state.clone();
+            save_state(store, &file).await?;
+            Ok(delivered)
+        }
+        Err(error) => {
+            tracing::warn!(
+                bundle = %state.bundle_id,
+                version = state.version,
+                error = diagnostics::chain(&error),
+                "applied a config bundle but could not tell Core; telling it on the next sync"
+            );
+            Ok(state.clone())
+        }
     }
-    Ok(ConfigOutcome::Updated(state))
+}
+
+const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BUNDLE_FILES: usize = 4096;
+const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+
+fn admit_bundles(manifest: &EditorManifest) -> Result<(), ApplyManifestError> {
+    let files: Vec<&SkillBundleFile> = manifest
+        .skills
+        .iter()
+        .filter_map(|skill| skill.bundle.as_ref())
+        .flat_map(|bundle| &bundle.files)
+        .collect();
+    if files.len() > MAX_BUNDLE_FILES {
+        return Err(ApplyManifestError::TooManyFiles {
+            files: files.len(),
+            limit: MAX_BUNDLE_FILES,
+        });
+    }
+    let bytes: usize = files
+        .iter()
+        .map(|file| file.content_base64.len() / 4 * 3 + 3)
+        .sum();
+    if bytes > MAX_BUNDLE_BYTES {
+        return Err(ApplyManifestError::TooManyBytes {
+            bytes,
+            limit: MAX_BUNDLE_BYTES,
+        });
+    }
+    Ok(())
 }
 
 async fn apply_manifest(
     hub: &forge_runs::Hub,
     bytes: &[u8],
-    content_hash: &str,
-    synced_before: &[String],
-) -> Result<(Vec<String>, Vec<String>)> {
-    anyhow::ensure!(
-        hex::encode(sha2::Sha256::digest(bytes)) == content_hash,
-        "the manifest does not match the bundle hash"
-    );
-    let manifest: EditorManifest = serde_json::from_slice(bytes).context("read the manifest")?;
-    anyhow::ensure!(
-        manifest.format == MANIFEST_FORMAT,
-        "unknown manifest format {}",
-        manifest.format
-    );
-    let changed = apply(hub, &manifest, synced_before).await?;
-    let synced = manifest
-        .mcp_servers
-        .into_iter()
-        .map(|server| server.name)
-        .collect();
-    anyhow::Ok((changed, synced))
+    stamp: Stamp,
+    file: &SyncFile,
+) -> Result<Committed, ApplyManifestError> {
+    if hex::encode(sha2::Sha256::digest(bytes)) != stamp.content_hash {
+        return Err(ApplyManifestError::Hash {
+            expected: stamp.content_hash,
+        });
+    }
+    let manifest: EditorManifest =
+        serde_json::from_slice(bytes).map_err(ApplyManifestError::Parse)?;
+    if manifest.format != MANIFEST_FORMAT {
+        return Err(ApplyManifestError::Format {
+            format: manifest.format,
+        });
+    }
+    apply(hub, &manifest, stamp, file).await
 }
 
-/// Skills go first, so a skill that cannot install leaves the prompt and
-/// the MCP servers as they were.
+struct Stamp {
+    bundle_id: String,
+    version: u64,
+    content_hash: String,
+    etag: String,
+}
+
 async fn apply(
     hub: &forge_runs::Hub,
     manifest: &EditorManifest,
-    synced_before: &[String],
-) -> Result<Vec<String>> {
-    let mut changed = Vec::new();
+    stamp: Stamp,
+    file: &SyncFile,
+) -> Result<Committed, ApplyManifestError> {
+    let destinations = mcp_destinations(&manifest.mcp_servers)?;
+    admit_bundles(manifest)?;
+    let mut staged = Vec::new();
+    let applied = apply_staged(hub, manifest, destinations, stamp, file, &mut staged).await;
+    drop(tokio::task::spawn_blocking(move || drop(staged)));
+    applied
+}
+
+struct Committed {
+    file: SyncFile,
+    kept_local: Vec<LocalMcpServerKept>,
+}
+
+async fn apply_staged(
+    hub: &forge_runs::Hub,
+    manifest: &EditorManifest,
+    destinations: Vec<artisan_api::McpServer>,
+    stamp: Stamp,
+    file: &SyncFile,
+    staged: &mut Vec<(String, tempfile::TempDir)>,
+) -> Result<Committed, ApplyManifestError> {
     for skill in &manifest.skills {
         if let Some(bundle) = &skill.bundle {
-            install_bundle(hub, &skill.name, bundle).await?;
-            changed.push(format!("skill:{}", skill.name));
+            let dir =
+                stage_bundle(bundle)
+                    .await
+                    .map_err(|source| ApplyManifestError::InstallSkill {
+                        skill: skill.name.clone(),
+                        source: Box::new(source),
+                    })?;
+            staged.push((skill.name.clone(), dir));
         }
     }
     if !manifest.skills.is_empty() {
-        let catalog = hub.skill_catalog().await?;
-        for skill in &manifest.skills {
-            let suffix = format!(".{}", skill.name);
-            let entry = catalog
+        let catalog = skill_catalog(hub).await?;
+        if let Some(missing) = manifest
+            .skills
+            .iter()
+            .filter(|skill| skill.bundle.is_none())
+            .find(|skill| catalog_entry(&catalog, &skill.name).is_none())
+        {
+            return Err(ApplyManifestError::SkillMissing {
+                skill: missing.name.clone(),
+            });
+        }
+    }
+    let prompt = plan_prompt(hub.store(), manifest.global_prompt.as_deref()).await?;
+    let mcp = plan_mcp(hub.store(), destinations, &file.claimed_mcp_servers).await?;
+    let placed = hub
+        .extensions()
+        .place_skills(
+            staged
                 .iter()
-                .find(|entry| {
-                    [&entry.id, &entry.name].contains(&&skill.name) || entry.id.ends_with(&suffix)
-                })
-                .with_context(|| {
-                    format!(
-                        "skill {} is not installed and the bundle carries none",
-                        skill.name
-                    )
-                })?;
-            if !entry.enabled {
-                hub.set_skill_enabled(&entry.id, true).await?;
+                .map(|(_, dir)| dir.path().to_path_buf())
+                .collect(),
+        )
+        .await
+        .map_err(|source| ApplyManifestError::PlaceSkills(Box::new(source)))?;
+    let committed = commit(hub, manifest, &placed, prompt, mcp, stamp, staged).await;
+    let (committed, prompt_changed) = match committed {
+        Ok(committed) => committed,
+        Err(failed) => {
+            return Err(match placed.undo().await {
+                Ok(()) => failed,
+                Err(source) => ApplyManifestError::Stranded {
+                    failed: diagnostics::chain(&failed),
+                    source: Box::new(source),
+                },
+            });
+        }
+    };
+    if manifest.skills.is_empty() {
+        drop(placed);
+    } else if let Err(error) = placed.keep().await {
+        tracing::warn!(
+            error = diagnostics::chain(&error),
+            "applied the config bundle's skills but couldn't put them into the engines yet; the next launch does"
+        );
+    }
+    if prompt_changed && let Err(error) = hub.extensions().reconcile_global_prompt().await {
+        tracing::warn!(
+            error = diagnostics::chain(&error),
+            "applied the config bundle's global prompt but couldn't put it into the engines yet; the next launch does"
+        );
+    }
+    hub.mcp().check_auth().await;
+    Ok(committed)
+}
+
+async fn skill_catalog(
+    hub: &forge_runs::Hub,
+) -> Result<Vec<artisan_api::CatalogSkill>, ApplyManifestError> {
+    hub.extensions()
+        .skill_catalog()
+        .await
+        .map_err(|error| ApplyManifestError::Catalog(Box::new(error)))
+}
+
+async fn plan_prompt(
+    store: &forge_store::Store,
+    text: Option<&str>,
+) -> Result<Option<forge_store::PromptEdit>, ApplyManifestError> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let current = store
+        .setting("global_prompt")
+        .await
+        .map_err(ApplyManifestError::ReadPrompt)?;
+    if current.as_ref().and_then(serde_json::Value::as_str) == Some(text) {
+        return Ok(None);
+    }
+    let base = store
+        .prompt_version()
+        .await
+        .map_err(ApplyManifestError::PromptVersion)?;
+    Ok(Some(forge_store::PromptEdit {
+        base,
+        text: text.to_owned(),
+    }))
+}
+
+async fn commit(
+    hub: &forge_runs::Hub,
+    manifest: &EditorManifest,
+    placed: &forge_runs::PlacedSkills,
+    prompt: Option<forge_store::PromptEdit>,
+    mcp: McpPlan,
+    stamp: Stamp,
+    staged: &[(String, tempfile::TempDir)],
+) -> Result<(Committed, bool), ApplyManifestError> {
+    let mut changed: Vec<String> = staged
+        .iter()
+        .map(|(skill, _)| format!("skill:{skill}"))
+        .collect();
+    let mut enable_skills: Vec<String> =
+        placed.names().map(|name| format!("local.{name}")).collect();
+    if !manifest.skills.is_empty() {
+        let catalog = skill_catalog(hub).await?;
+        for skill in &manifest.skills {
+            let Some(entry) = catalog_entry(&catalog, &skill.name) else {
+                return Err(ApplyManifestError::SkillMissing {
+                    skill: skill.name.clone(),
+                });
+            };
+            if !entry.enabled && !enable_skills.contains(&entry.id) {
                 changed.push(format!("skill:{}", entry.id));
+                enable_skills.push(entry.id.clone());
             }
         }
-        hub.reconcile_skills().await.context("reconcile skills")?;
     }
-    if let Some(text) = manifest.global_prompt.as_deref() {
-        let store = hub.store();
-        let current = store.setting("global_prompt").await?;
-        if current.as_ref().and_then(serde_json::Value::as_str) != Some(text) {
-            let base = store.prompt_version().await?;
-            store
-                .save_prompt_version(base, text.to_owned())
-                .await?
-                .map_err(|latest| {
-                    anyhow::anyhow!(
-                        "the global prompt changed while syncing (now version {latest})"
-                    )
-                })?;
-            hub.reconcile_global_prompt()
-                .await
-                .context("reconcile the global prompt")?;
-            changed.push("globalPrompt".to_owned());
+    let prompt_changed = prompt.is_some();
+    if prompt_changed {
+        changed.push("globalPrompt".to_owned());
+    }
+    let McpPlan {
+        mutations,
+        changed: mcp_changed,
+        placed: mcp_servers,
+        kept_local,
+    } = mcp;
+    changed.extend(mcp_changed);
+    let file = SyncFile {
+        applied: Some(ConfigState {
+            bundle_id: stamp.bundle_id,
+            version: stamp.version,
+            content_hash: stamp.content_hash,
+            etag: stamp.etag,
+            mcp_servers: mcp_servers.clone(),
+            report: AppliedReport::Pending { changed },
+        }),
+        claimed_mcp_servers: mcp_servers,
+    };
+    let record = serde_json::to_value(&file).map_err(ApplyManifestError::Record)?;
+    let commit = hub
+        .store()
+        .apply_config_bundle(forge_store::ConfigBundle {
+            enable_skills,
+            prompt,
+            mcp: mutations,
+            record,
+        })
+        .await
+        .map_err(ApplyManifestError::Commit)?;
+    match commit {
+        forge_store::BundleCommit::Applied { forgotten } => {
+            hub.mcp().forget_flows(forgotten).await;
+            Ok((Committed { file, kept_local }, prompt_changed))
+        }
+        forge_store::BundleCommit::PromptChanged { latest } => {
+            Err(ApplyManifestError::PromptChanged { latest })
         }
     }
-    changed.extend(apply_mcp(hub.store(), &manifest.mcp_servers, synced_before).await?);
-    hub.check_mcp_auth().await;
-    Ok(changed)
 }
 
-async fn install_bundle(hub: &forge_runs::Hub, name: &str, bundle: &SkillBundle) -> Result<()> {
+fn catalog_entry<'a>(
+    catalog: &'a [artisan_api::CatalogSkill],
+    name: &str,
+) -> Option<&'a artisan_api::CatalogSkill> {
+    let suffix = format!(".{name}");
+    catalog
+        .iter()
+        .find(|entry| entry.id == name || entry.name == name || entry.id.ends_with(&suffix))
+}
+
+async fn stage_bundle(bundle: &SkillBundle) -> Result<tempfile::TempDir, InstallBundleError> {
     use base64::Engine as _;
-    let dir = tempfile::tempdir().context("stage a skill bundle")?;
+    let mut files = Vec::with_capacity(bundle.files.len());
     for file in &bundle.files {
         let relative = Path::new(&file.path);
-        anyhow::ensure!(
-            relative
-                .components()
-                .all(|component| matches!(component, Component::Normal(_))),
-            "skill {name} bundles an unsafe path {}",
-            file.path
-        );
+        if !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(InstallBundleError::UnsafePath {
+                path: file.path.clone(),
+            });
+        }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(&file.content_base64)
-            .with_context(|| format!("decode {} in skill {name}", file.path))?;
-        let path = dir.path().join(relative);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&path, bytes).await?;
+            .map_err(|source| InstallBundleError::Decode {
+                path: file.path.clone(),
+                source,
+            })?;
+        files.push((file.path.clone(), bytes));
     }
-    hub.install_skill(dir.path().to_path_buf(), true)
+    tokio::task::spawn_blocking(move || write_bundle(files))
         .await
-        .with_context(|| format!("install skill {name}"))?;
-    Ok(())
+        .map_err(InstallBundleError::Worker)?
 }
 
-/// Upserts the manifest's servers, keeping each one's local fields (env,
-/// headers), and removes only servers an earlier bundle placed.
-async fn apply_mcp(
-    store: &forge_store::Store,
+fn write_bundle(files: Vec<(String, Vec<u8>)>) -> Result<tempfile::TempDir, InstallBundleError> {
+    let dir = tempfile::tempdir().map_err(InstallBundleError::Stage)?;
+    for (relative, bytes) in files {
+        let path = dir.path().join(&relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| InstallBundleError::Folder {
+                path: relative.clone(),
+                source,
+            })?;
+        }
+        std::fs::write(&path, bytes).map_err(|source| InstallBundleError::Write {
+            path: relative,
+            source,
+        })?;
+    }
+    Ok(dir)
+}
+
+fn mcp_destinations(
     servers: &[ManifestMcpServer],
-    synced_before: &[String],
-) -> Result<Vec<String>> {
-    let current: Vec<artisan_api::McpServer> = store
-        .setting("mcp_servers")
-        .await?
-        .map(serde_json::from_value)
-        .transpose()?
-        .unwrap_or_default();
-    let mut changed = Vec::new();
+) -> Result<Vec<artisan_api::McpServer>, ApplyMcpError> {
+    let mut destinations: Vec<artisan_api::McpServer> = Vec::with_capacity(servers.len());
     for entry in servers {
-        let previous = current.iter().find(|server| server.name == entry.name);
-        let server = artisan_api::McpServer {
+        if entry.name.trim().is_empty() {
+            return Err(ApplyMcpError::Unnamed);
+        }
+        let destination = artisan_api::McpServer {
             name: entry.name.clone(),
             command: entry.command.clone().unwrap_or_default(),
             args: entry.args.clone().unwrap_or_default(),
             url: entry.url.clone(),
-            ..previous.cloned().unwrap_or_default()
+            ..artisan_api::McpServer::default()
         };
-        if previous != Some(&server) {
-            store
-                .mutate_mcp(artisan_api::McpMutation::Upsert {
-                    previous: previous.cloned(),
-                    server,
-                })
-                .await?;
-            changed.push(format!("mcp:{}", entry.name));
+        if destination.command.trim().is_empty()
+            && destination
+                .url
+                .as_ref()
+                .is_none_or(|url| url.trim().is_empty())
+        {
+            return Err(ApplyMcpError::TargetMissing {
+                server: entry.name.clone(),
+            });
         }
+        if destinations
+            .iter()
+            .any(|placed| placed.name == destination.name)
+        {
+            return Err(ApplyMcpError::Duplicate {
+                server: entry.name.clone(),
+            });
+        }
+        destinations.push(destination);
     }
-    let dropped = current.iter().filter(|server| {
-        synced_before.contains(&server.name)
-            && !servers.iter().any(|entry| entry.name == server.name)
-    });
-    for server in dropped {
-        store
-            .mutate_mcp(artisan_api::McpMutation::Remove {
-                previous: server.clone(),
-            })
-            .await?;
-        changed.push(format!("mcp-removed:{}", server.name));
-    }
-    Ok(changed)
+    Ok(destinations)
 }
 
-/// The machine identity `ae account enroll/confirm` wrote to
-/// `<data_dir>/ast_account.json`.
-#[derive(Clone, Debug)]
+struct McpPlan {
+    mutations: Vec<artisan_api::McpMutation>,
+    changed: Vec<String>,
+    placed: Vec<String>,
+    kept_local: Vec<LocalMcpServerKept>,
+}
+
+async fn plan_mcp(
+    store: &forge_store::Store,
+    destinations: Vec<artisan_api::McpServer>,
+    synced_before: &[String],
+) -> Result<McpPlan, ApplyMcpError> {
+    let current: Vec<artisan_api::McpServer> = store
+        .setting("mcp_servers")
+        .await
+        .map_err(ApplyMcpError::Read)?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(ApplyMcpError::Decode)?
+        .unwrap_or_default();
+    let mut plan = McpPlan {
+        mutations: Vec::new(),
+        changed: Vec::new(),
+        placed: Vec::new(),
+        kept_local: Vec::new(),
+    };
+    for destination in &destinations {
+        let previous = current
+            .iter()
+            .find(|server| server.name == destination.name);
+        let server = match (previous, synced_before.contains(&destination.name)) {
+            (Some(_), false) => {
+                plan.kept_local.push(LocalMcpServerKept {
+                    name: destination.name.clone(),
+                });
+                continue;
+            }
+            (Some(previous), true) => rebind(previous, destination.clone()),
+            (None, _) => destination.clone(),
+        };
+        plan.placed.push(destination.name.clone());
+        if previous != Some(&server) {
+            plan.changed.push(format!("mcp:{}", destination.name));
+            plan.mutations.push(artisan_api::McpMutation::Upsert {
+                previous: previous.cloned(),
+                server,
+            });
+        }
+    }
+    for server in current.iter().filter(|server| {
+        synced_before.contains(&server.name)
+            && !destinations
+                .iter()
+                .any(|destination| destination.name == server.name)
+    }) {
+        plan.changed.push(format!("mcp-removed:{}", server.name));
+        plan.mutations.push(artisan_api::McpMutation::Remove {
+            previous: server.clone(),
+        });
+    }
+    Ok(plan)
+}
+
+fn rebind(
+    previous: &artisan_api::McpServer,
+    destination: artisan_api::McpServer,
+) -> artisan_api::McpServer {
+    if same_destination(previous, &destination) {
+        artisan_api::McpServer {
+            env: previous.env.clone(),
+            headers: previous.headers.clone(),
+            sse: previous.sse,
+            ..destination
+        }
+    } else {
+        artisan_api::McpServer {
+            sse: previous.sse,
+            ..destination
+        }
+    }
+}
+
+fn same_destination(previous: &artisan_api::McpServer, next: &artisan_api::McpServer) -> bool {
+    match (previous.url.as_deref(), next.url.as_deref()) {
+        (Some(previous), Some(next)) => match (url::Url::parse(previous), url::Url::parse(next)) {
+            (Ok(previous), Ok(next)) => previous.origin() == next.origin(),
+            (Err(_), _) | (_, Err(_)) => false,
+        },
+        (None, None) => previous.command == next.command && previous.args == next.args,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+#[derive(Clone)]
 pub struct MachineIdentity {
     pub machine_id: String,
-    pub account_id: Option<String>,
+    pub account_id: String,
     pub secret: [u8; 32],
 }
 
-/// `None` when this Forge is not enrolled.
-pub fn load_machine_identity(data_dir: &Path) -> Result<Option<MachineIdentity>> {
-    use base64::Engine as _;
-    #[derive(serde::Deserialize)]
-    struct AccountFile {
-        #[serde(default)]
-        secret_b64u: Option<String>,
-        #[serde(default)]
-        machine_id: Option<String>,
-        #[serde(default)]
-        account_id: Option<String>,
+impl std::fmt::Debug for MachineIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MachineIdentity")
+            .field("machine_id", &self.machine_id)
+            .field("account_id", &self.account_id)
+            .field("secret", &"redacted")
+            .finish()
     }
+}
+
+pub fn load_machine_identity(
+    data_dir: &Path,
+) -> Result<Option<MachineIdentity>, MachineIdentityError> {
     let path = data_dir.join("ast_account.json");
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        Err(source) => return Err(MachineIdentityError::Read { path, source }),
     };
-    let file: AccountFile =
-        serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))?;
-    let (Some(secret_b64u), Some(machine_id)) = (file.secret_b64u, file.machine_id) else {
-        return Ok(None);
-    };
-    let secret: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(secret_b64u.as_bytes())
-        .context("read the machine secret")?
-        .try_into()
-        .map_err(|_bytes| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
-    Ok(Some(MachineIdentity {
-        machine_id,
-        account_id: file.account_id,
-        secret,
-    }))
+    match artisan_account::MachineAccount::decode(&bytes) {
+        Ok(artisan_account::MachineAccount::Enrolled {
+            key,
+            machine_id,
+            account_id,
+        }) => Ok(Some(MachineIdentity {
+            machine_id,
+            account_id,
+            secret: *key.secret(),
+        })),
+        Ok(
+            artisan_account::MachineAccount::Unkeyed
+            | artisan_account::MachineAccount::Keyed { .. }
+            | artisan_account::MachineAccount::Pending { .. },
+        ) => Ok(None),
+        Err(source) => Err(MachineIdentityError::Decode { path, source }),
+    }
 }
 
-/// Syncs at startup and then every `interval`. Core has no push channel for
-/// config changes, so this is the one place sync polls.
 pub(crate) async fn run_config_loop(
     data_dir: PathBuf,
     hub: forge_runs::Hub,
@@ -486,7 +1150,7 @@ pub(crate) async fn run_config_loop(
     {
         Ok(http) => http,
         Err(error) => {
-            tracing::warn!("config sync off: {error:#}");
+            tracing::warn!(error = %error, "config sync off");
             return;
         }
     };
@@ -504,14 +1168,22 @@ pub(crate) async fn run_config_loop(
         match synced {
             Ok(outcome) => {
                 failing = false;
-                if let ConfigOutcome::Updated(state) = outcome {
+                if let ConfigOutcome::Updated { state, kept_local } = outcome {
                     tracing::info!(version = state.version, "applied config bundle");
+                    for kept in kept_local {
+                        tracing::warn!(
+                            server = %kept.name,
+                            "kept the MCP server created on this machine over the account's server of the same name"
+                        );
+                    }
                 }
             }
-            Err(error) if failing => tracing::debug!("config sync failed: {error:#}"),
+            Err(error) if failing => {
+                tracing::debug!(error = diagnostics::chain(&error), "config sync failed");
+            }
             Err(error) => {
                 failing = true;
-                tracing::warn!("config sync failed: {error:#}");
+                tracing::warn!(error = diagnostics::chain(&error), "config sync failed");
             }
         }
         tokio::select! {
@@ -522,393 +1194,9 @@ pub(crate) async fn run_config_loop(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
-mod tests {
-    use super::*;
-    use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode};
-    use base64::Engine as _;
-    use std::sync::{Arc, Mutex};
+#[path = "../tests/sync.rs"]
+mod sync_tests;
 
-    const MACHINE: &str = "mch_11111111111111111111111111";
-    const SECRET: [u8; 32] = [0x21_u8; 32];
-
-    fn test_client() -> reqwest::Client {
-        reqwest::Client::new()
-    }
-
-    fn machine_proof_ok(headers: &HeaderMap) {
-        for name in [
-            "x-ast-machine",
-            "x-ast-timestamp",
-            "x-ast-nonce",
-            "authorization",
-        ] {
-            assert!(headers.contains_key(name), "missing proof header {name}");
-        }
-        assert!(
-            headers["authorization"]
-                .to_str()
-                .unwrap()
-                .starts_with("AST-Machine ")
-        );
-    }
-
-    fn manifest_bytes() -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
-            "format": "ast-editor-config/1",
-            "mcp_servers": [{"name": "s", "command": "srv"}],
-            "skills": [],
-            "global_prompt": "synced prompt",
-        }))
-        .unwrap()
-    }
-
-    fn bundle_hash() -> String {
-        hex::encode(sha2::Sha256::digest(manifest_bytes()))
-    }
-
-    fn skill_md(name: &str) -> String {
-        format!("---\nname: {name}\ndescription: probe skill\n---\n\n# Probe\n")
-    }
-
-    fn skill_file(path: &str, contents: &[u8]) -> serde_json::Value {
-        serde_json::json!({
-            "path": path,
-            "content_base64": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(contents),
-            "sha256": hex::encode(sha2::Sha256::digest(contents)),
-        })
-    }
-
-    #[derive(Clone, Default)]
-    struct Stub {
-        reports: Arc<Mutex<Vec<serde_json::Value>>>,
-        tamper_manifest: bool,
-        manifest_override: Option<Vec<u8>>,
-    }
-
-    fn stub_manifest(stub: &Stub) -> Vec<u8> {
-        stub.manifest_override
-            .clone()
-            .unwrap_or_else(manifest_bytes)
-    }
-
-    async fn latest(
-        State(stub): State<Stub>,
-        headers: HeaderMap,
-    ) -> impl axum::response::IntoResponse {
-        machine_proof_ok(&headers);
-        let manifest = stub_manifest(&stub);
-        let hash = hex::encode(sha2::Sha256::digest(&manifest));
-        if headers
-            .get("if-none-match")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|tag| tag.trim() == format!("\"{hash}\""))
-        {
-            return (StatusCode::NOT_MODIFIED, Vec::new());
-        }
-        let body = serde_json::to_vec(&serde_json::json!({
-            "bundle": {
-                "id": "bundle_000000000000000000000001",
-                "version": 3,
-                "content_hash": hash,
-                "r2_key": "cfg/acct/bundle-3.json",
-                "created_at": "2026-10-26T20:00:00.000Z",
-            },
-            "manifest": serde_json::from_slice::<serde_json::Value>(&manifest_bytes()).unwrap(),
-        }))
-        .unwrap();
-        let _ = stub;
-        (StatusCode::OK, body)
-    }
-
-    async fn serve_manifest(State(stub): State<Stub>, headers: HeaderMap) -> Vec<u8> {
-        machine_proof_ok(&headers);
-        if stub.tamper_manifest {
-            return b"{}".to_vec();
-        }
-        stub_manifest(&stub)
-    }
-
-    async fn report(
-        State(stub): State<Stub>,
-        headers: HeaderMap,
-        body: axum::body::Bytes,
-    ) -> impl axum::response::IntoResponse {
-        machine_proof_ok(&headers);
-        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(request.get("bundleId").is_some());
-        stub.reports.lock().unwrap().push(request);
-        axum::Json(serde_json::json!({
-            "machine_id": MACHINE,
-            "bundle_id": "bundle_000000000000000000000001",
-            "status": "applied",
-            "applied_at": "2026-10-26T20:01:00.000Z",
-        }))
-    }
-
-    fn test_hub(dir: &std::path::Path) -> forge_runs::Hub {
-        let store = forge_store::Store::open(dir).unwrap();
-        let engines = forge_engines::Engines::new(dir);
-        forge_runs::Hub::new(store, engines, dir.to_owned())
-    }
-
-    async fn stub_server(
-        tamper: bool,
-        manifest: Option<Vec<u8>>,
-    ) -> (String, Stub, tokio::task::JoinHandle<()>) {
-        use axum::routing::{get, post};
-        let stub = Stub {
-            reports: Arc::new(Mutex::new(Vec::new())),
-            tamper_manifest: tamper,
-            manifest_override: manifest,
-        };
-        let router = axum::Router::new()
-            .route(CONFIG_BUNDLES_LATEST_PATH, get(latest))
-            .route("/v1/config/bundles/3/manifest", get(serve_manifest))
-            .route(CONFIG_STATE_PATH, post(report))
-            .with_state(stub.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        (format!("http://{address}"), stub, task)
-    }
-
-    /// Full config journey against Core-shaped routes: 200 applies through
-    /// the Hub (prompt text + MCP list observable in the store), reports
-    /// `applied`, then ETag 304 means current with no reapply.
-    #[tokio::test]
-    async fn config_sync_applies_through_hub_then_revalidates() {
-        let (base, stub, _server) = stub_server(false, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let hub = test_hub(dir.path());
-        let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
-            .await
-            .unwrap();
-        let ConfigOutcome::Updated(state) = outcome else {
-            panic!("first sync must apply");
-        };
-        assert_eq!(state.version, 3);
-        assert_eq!(state.content_hash, bundle_hash());
-        assert_eq!(stub.reports.lock().unwrap().len(), 1);
-        // Observable engine state, not a cached file.
-        let prompt: Option<serde_json::Value> = hub.store().setting("global_prompt").await.unwrap();
-        assert_eq!(
-            prompt
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .as_deref(),
-            Some("synced prompt")
-        );
-        let mcp: Vec<artisan_api::McpServer> = serde_json::from_value(
-            hub.store()
-                .setting("mcp_servers")
-                .await
-                .unwrap()
-                .unwrap_or_default(),
-        )
-        .unwrap();
-        assert!(
-            mcp.iter()
-                .any(|server| server.name == "s" && server.command == "srv")
-        );
-
-        let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
-            .await
-            .unwrap();
-        assert!(
-            matches!(outcome, ConfigOutcome::Current(_)),
-            "ETag 304 must not reapply"
-        );
-        assert_eq!(
-            stub.reports.lock().unwrap().len(),
-            1,
-            "no second report on 304"
-        );
-    }
-
-    /// Manifest bytes that do not hash to `bundle.content_hash` are rejected
-    /// before anything applies; last-good stays absent and `failed` reports.
-    #[tokio::test]
-    async fn config_sync_rejects_tampered_manifest_bytes() {
-        let (base, stub, _server) = stub_server(true, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let hub = test_hub(dir.path());
-        let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
-        assert!(result.is_err());
-        assert!(!sync_state_path(dir.path()).exists());
-        assert_eq!(stub.reports.lock().unwrap().len(), 1);
-        assert_eq!(
-            stub.reports.lock().unwrap()[0]["status"],
-            serde_json::json!("failed")
-        );
-    }
-
-    fn skill_manifest(skill: &serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
-            "format": "ast-editor-config/1",
-            "mcp_servers": [{"name": "s", "command": "srv"}],
-            "skills": [skill],
-            "global_prompt": "synced prompt",
-        }))
-        .unwrap()
-    }
-
-    fn bundled_skill(name: &str, extra: Vec<(&str, &[u8])>) -> serde_json::Value {
-        let mut files = vec![skill_file("SKILL.md", skill_md(name).as_bytes())];
-        for (path, contents) in extra {
-            files.push(skill_file(path, contents));
-        }
-        serde_json::json!({
-            "name": name,
-            "source": "builtin",
-            "bundle": {"files": files},
-        })
-    }
-
-    /// A bundled skill installs through the real installer and reads back
-    /// enabled in the catalog; prompt + MCP converge in the same apply.
-    #[tokio::test]
-    async fn bundled_skill_installs_and_reads_back_enabled() {
-        let manifest = skill_manifest(&bundled_skill(
-            "syncprobed",
-            vec![("refs/notes.md", b"notes")],
-        ));
-        let (base, stub, _server) = stub_server(false, Some(manifest)).await;
-        let dir = tempfile::tempdir().unwrap();
-        let hub = test_hub(dir.path());
-        let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
-            .await
-            .unwrap();
-        assert!(matches!(outcome, ConfigOutcome::Updated(_)));
-        let catalog = hub.skill_catalog().await.unwrap();
-        let installed = catalog
-            .iter()
-            .find(|entry| entry.id == "local.syncprobed")
-            .expect("installed skill in catalog");
-        assert!(installed.enabled, "installed skill is enabled");
-        let prompt: Option<String> = hub
-            .store()
-            .setting("global_prompt")
-            .await
-            .unwrap()
-            .and_then(|value| value.as_str().map(str::to_owned));
-        assert_eq!(prompt.as_deref(), Some("synced prompt"));
-        assert_eq!(stub.reports.lock().unwrap().len(), 1);
-        assert_eq!(
-            stub.reports.lock().unwrap()[0]["status"],
-            serde_json::json!("applied")
-        );
-    }
-
-    /// A bundle missing SKILL.md fails the whole apply: prompt and MCP are
-    /// unchanged, nothing is installed, last-good stays absent, and the
-    /// failure is reported with detail.
-    #[tokio::test]
-    async fn a_skill_that_cannot_install_changes_nothing_else() {
-        let bad_skill = serde_json::json!({
-            "name": "brokenskill",
-            "source": "builtin",
-            "bundle": {"files": [skill_file("refs/notes.md", b"notes")]},
-        });
-        let manifest = skill_manifest(&bad_skill);
-        let (base, stub, _server) = stub_server(false, Some(manifest)).await;
-        let dir = tempfile::tempdir().unwrap();
-        let hub = test_hub(dir.path());
-        let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
-        assert!(result.is_err(), "missing SKILL.md must fail the apply");
-        // Nothing applied: prompt untouched, no skill installed, no state.
-        let prompt: Option<serde_json::Value> = hub.store().setting("global_prompt").await.unwrap();
-        assert_eq!(prompt, None);
-        let catalog = hub.skill_catalog().await.unwrap();
-        assert!(
-            catalog.iter().all(|entry| entry.id != "local.brokenskill"),
-            "no partial install may remain"
-        );
-        assert!(!super::sync_state_path(dir.path()).exists());
-        let reports = stub.reports.lock().unwrap();
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0]["status"], serde_json::json!("failed"));
-        assert!(
-            reports[0]["detail"].as_str().unwrap().contains("SKILL.md"),
-            "detail names the cause: {}",
-            reports[0]["detail"]
-        );
-        drop(reports);
-    }
-
-    /// An unknown skill with no bundle fails with a named error instead of
-    /// a silent no-op.
-    #[tokio::test]
-    async fn unknown_skill_without_bundle_fails_named() {
-        let manifest = skill_manifest(&serde_json::json!({
-            "name": "not-installed-anywhere",
-            "source": "builtin",
-        }));
-        let (base, stub, _server) = stub_server(false, Some(manifest)).await;
-        let dir = tempfile::tempdir().unwrap();
-        let hub = test_hub(dir.path());
-        let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
-        assert!(result.is_err());
-        let reports = stub.reports.lock().unwrap();
-        assert_eq!(reports[0]["status"], serde_json::json!("failed"));
-        assert!(
-            reports[0]["detail"]
-                .as_str()
-                .unwrap()
-                .contains("not-installed-anywhere"),
-            "detail names the skill: {}",
-            reports[0]["detail"]
-        );
-        drop(reports);
-    }
-
-    /// Sync owns only the MCP servers it placed: a server added on this
-    /// machine survives, and a synced server keeps its local headers.
-    #[tokio::test]
-    async fn sync_keeps_local_mcp_servers_and_their_headers() {
-        let (base, _stub, _server) = stub_server(false, None).await;
-        let dir = tempfile::tempdir().unwrap();
-        let hub = test_hub(dir.path());
-        let store = hub.store();
-        let local = [
-            artisan_api::McpServer {
-                name: "mine".into(),
-                command: "local".into(),
-                ..Default::default()
-            },
-            artisan_api::McpServer {
-                name: "s".into(),
-                command: "old".into(),
-                headers: [("Authorization".to_owned(), "Bearer x".to_owned())].into(),
-                ..Default::default()
-            },
-        ];
-        for server in local {
-            store
-                .mutate_mcp(artisan_api::McpMutation::Upsert {
-                    previous: None,
-                    server,
-                })
-                .await
-                .unwrap();
-        }
-        sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
-            .await
-            .unwrap();
-        let mcp: Vec<artisan_api::McpServer> =
-            serde_json::from_value(store.setting("mcp_servers").await.unwrap().unwrap()).unwrap();
-        assert!(
-            mcp.iter()
-                .any(|server| server.name == "mine" && server.command == "local"),
-            "{mcp:?}"
-        );
-        let synced = mcp.iter().find(|server| server.name == "s").unwrap();
-        assert_eq!(synced.command, "srv");
-        assert_eq!(
-            synced.headers.get("Authorization").map(String::as_str),
-            Some("Bearer x")
-        );
-    }
-}
+#[cfg(test)]
+#[path = "../tests/sync/unit.rs"]
+mod tests;

@@ -1,4 +1,5 @@
 use crate::ui::kit::TextRole;
+use crate::ui::kit::control::focus_ring;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use editor_assets::AssetId;
 use crate::ui::kit::{Button, ButtonTone, Finish, IconButton, IconButtonSize, Space, Spaced};
 use crate::ui::markdown::DiagramSvg;
 use crate::ui::rich::narrative::callout::text;
-use crate::ui::theme::{ArtisanTheme, ThemeMode};
+use crate::ui::theme::ArtisanTheme;
 
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
@@ -28,6 +29,7 @@ const WHEEL_ZOOM_PER_PIXEL: f32 = 0.01 * GPUI_LINE_PX / AQUA_LINE_PX;
 const KEY_PAN_PX: f32 = 32.0;
 const MIN_VIEWPORT_PX: f32 = 120.0;
 const MAX_VIEWPORT_PX: f32 = 440.0;
+const INSTRUCTIONS: &str = "Drag to pan; scroll to zoom; 0 to fit.";
 
 #[derive(Default)]
 pub(crate) struct DiagramState {
@@ -73,14 +75,13 @@ impl DiagramState {
         self.drag = None;
     }
 
-    fn destination(&mut self, bounds: Rect, diagram: &DiagramSvg) -> Rect {
-        let fit = (bounds.w / diagram.width())
-            .min(bounds.h / diagram.height())
+    fn destination(&self, bounds: Rect, diagram: &DiagramSvg, scale: f32) -> Rect {
+        let (width, height) = (diagram.width(), diagram.height());
+        let fit = (bounds.w / width)
+            .min(viewport_height(diagram, 1.0) / height)
             .min(1.0);
-        let displayed = (
-            diagram.width() * fit * self.zoom,
-            diagram.height() * fit * self.zoom,
-        );
+        let size = fit * scale * self.zoom;
+        let displayed = (width * size, height * size);
         Rect {
             x: bounds.x + (bounds.w - displayed.0) / 2.0 + self.pan.x,
             y: bounds.y + (bounds.h - displayed.1) / 2.0 + self.pan.y,
@@ -98,7 +99,7 @@ impl DiagramState {
             Key::Named(NamedKey::Right) => self.pan.x -= KEY_PAN_PX,
             Key::Named(NamedKey::Up) => self.pan.y += KEY_PAN_PX,
             Key::Named(NamedKey::Down) => self.pan.y -= KEY_PAN_PX,
-            _ => return false,
+            Key::Char(_) | Key::Named(_) => return false,
         }
         true
     }
@@ -114,6 +115,10 @@ impl DiagramState {
         self.drag = Some(point);
         true
     }
+}
+
+fn viewport_height(diagram: &DiagramSvg, scale: f32) -> f32 {
+    (diagram.height() * scale).clamp(MIN_VIEWPORT_PX, MAX_VIEWPORT_PX)
 }
 
 type Shared = Rc<RefCell<DiagramState>>;
@@ -132,6 +137,10 @@ fn changing(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one diagram view built from its layout, interaction state and invalidation"
+)]
 pub(crate) fn view(
     theme: &ArtisanTheme,
     id: &str,
@@ -144,17 +153,17 @@ pub(crate) fn view(
         let state = state.borrow();
         (state.zoom, state.drag.is_some())
     };
-    let source = match theme.colors.mode {
-        ThemeMode::Dark => Arc::clone(&diagram.source),
-        ThemeMode::Light => Arc::clone(&diagram.light_source),
-    };
+    let source = Arc::clone(diagram.inks.for_theme(theme));
+    let scale = theme.typography.scale;
     let paint_state = Rc::clone(state);
     let paint_diagram = Arc::clone(diagram);
     let canvas = ui::Canvas::new()
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
         .on_paint(move |bounds| {
-            let destination = paint_state.borrow_mut().destination(bounds, &paint_diagram);
+            let destination = paint_state
+                .borrow_mut()
+                .destination(bounds, &paint_diagram, scale);
             vec![DisplayItem::GpuiSvg {
                 bounds: destination,
                 source: Arc::clone(&source),
@@ -175,13 +184,19 @@ pub(crate) fn view(
     let key_invalidate = Rc::clone(invalidate);
     let viewport = ui::Box::new()
         .width(Length::Pct(100.0))
-        .height(diagram.height().clamp(MIN_VIEWPORT_PX, MAX_VIEWPORT_PX))
+        .height(viewport_height(diagram, scale))
         .clip(true)
         .child(canvas)
         .build()
         .with_key(format!("{id}-viewport"))
         .focusable(true)
-        .aria_label("Mermaid diagram. Drag to pan; scroll to zoom; 0 to fit.")
+        .focus_visible_style(focus_ring(theme))
+        .aria_label("Mermaid diagram")
+        .aria_description(if diagram.summary.is_empty() {
+            INSTRUCTIONS.to_owned()
+        } else {
+            format!("{}. {INSTRUCTIONS}", diagram.summary)
+        })
         .cursor(if dragging {
             CursorIcon::Grabbing
         } else {

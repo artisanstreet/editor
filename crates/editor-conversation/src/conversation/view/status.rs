@@ -1,35 +1,38 @@
 use crate::conversation::adapter::RowModel;
 use crate::conversation::phase::{self, Phase};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::Element;
 use artisan_api::{LiveTarget, RunId};
+use editor_ui::theme::ArtisanTheme;
 
 use crate::conversation::fold::RowKey;
-use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
 use editor_ui::kit::TextRole;
+use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
 
-pub enum StatusText {
+pub(crate) enum StatusText {
     Reasoning(String),
     Status(String),
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct StatusShimmers {
     scope: Option<crate::conversation::presentation::PresentationScope>,
 }
 
 impl StatusShimmers {
-    pub fn set_scope(&mut self, scope: &crate::conversation::presentation::PresentationScope) {
+    pub(crate) fn set_scope(
+        &mut self,
+        scope: &crate::conversation::presentation::PresentationScope,
+    ) {
         self.scope = Some(scope.clone());
     }
-    pub fn render(
-        &mut self,
-        row: RowKey,
+    pub(crate) fn render(
+        &self,
+        row: &RowKey,
         text: StatusText,
         live: bool,
         reduced_motion: bool,
-        theme: ArtisanTheme,
-    ) -> anyhow::Result<Element> {
+        theme: &ArtisanTheme,
+    ) -> Element {
         let (content, timing, runs) = match text {
             StatusText::Status(text) => (text, ShimmerTiming::Status, None),
             StatusText::Reasoning(text) => {
@@ -38,45 +41,39 @@ impl StatusShimmers {
             }
         };
         let key = format!("conversation-status-{:?}-{row:?}", self.scope);
-        let typography = TextRole::Prose.style(&theme);
+        let typography = TextRole::Prose.style(theme);
         let spans = runs.map_or_else(Vec::new, |runs| {
             runs.styled_spans(
                 &typography,
                 theme.colors.text_muted.to_reference_text_color(),
-                &theme,
+                theme,
             )
         });
-        Ok(ShimmerText::new(key, content, theme)
+        ShimmerText::new(key, content, *theme)
             .active(live)
             .reduced_motion(reduced_motion)
             .timing(timing)
             .tone(ShimmerTone::Muted)
             .truncate()
             .spans(spans)
-            .build(typography))
+            .build(typography)
     }
 
-    pub fn agent(
-        &mut self,
-        row: RowKey,
+    pub(crate) fn agent(
+        &self,
+        row: &RowKey,
         text: String,
         reduced_motion: bool,
-        theme: ArtisanTheme,
-    ) -> anyhow::Result<Element> {
-        self.render(
-            row,
-            StatusText::Status(text),
-            true,
-            reduced_motion,
-            theme,
-        )
+        theme: &ArtisanTheme,
+    ) -> Element {
+        self.render(row, StatusText::Status(text), true, reduced_motion, theme)
     }
 }
 
-pub fn run<T>(
+pub(crate) fn run<T>(
     model: &RowModel,
     run: &RunId,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     render: impl FnOnce(StatusText, bool, ArtisanTheme) -> T,
 ) -> Option<T> {
     let phase = model
@@ -117,17 +114,20 @@ pub fn run<T>(
             .or_else(|| phase::status_copy(phase).map(str::to_owned))?,
         ),
     };
-    let live = model.run.as_ref().is_none_or(|summary| summary.live());
-    Some(render(text, live, theme))
+    let live = model
+        .run
+        .as_ref()
+        .is_none_or(super::super::fold::RunSummary::live);
+    Some(render(text, live, *theme))
 }
 
-pub fn agent<T>(
+pub(crate) fn agent<T>(
     doing: Option<&str>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     render: impl FnOnce(String, ArtisanTheme) -> T,
 ) -> Option<T> {
     let text = doing
         .or_else(|| phase::status_copy(Phase::Thinking))?
         .to_owned();
-    Some(render(text, theme))
+    Some(render(text, *theme))
 }

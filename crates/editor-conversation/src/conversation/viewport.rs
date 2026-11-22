@@ -22,7 +22,7 @@ pub enum Effect {
     ScrollTo(Seq),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Input {
     Open,
     Resume,
@@ -40,6 +40,7 @@ pub enum Input {
         more: bool,
     },
     LoadFailed,
+    Retry(Fetch),
     EvictedOlder {
         oldest: Seq,
     },
@@ -58,7 +59,7 @@ pub struct Viewport {
     pub oldest: Option<Seq>,
     pub exhausted: bool,
     pub in_flight: bool,
-    pub requested: Option<Fetch>,
+    pub(crate) requested: Option<Fetch>,
     pub gap: Option<Seq>,
 }
 
@@ -262,6 +263,11 @@ impl Viewport {
             Input::LoadFailed => {
                 self.in_flight = false;
                 self.requested = None;
+            }
+            Input::Retry(fetch) => {
+                if !self.in_flight {
+                    self.fetch(*fetch, effects);
+                }
             }
             Input::EvictedOlder { oldest } => {
                 self.oldest = Some(*oldest);

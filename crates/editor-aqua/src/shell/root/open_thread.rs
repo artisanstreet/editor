@@ -14,9 +14,10 @@ impl PendingStall {
     const LIMIT: u32 = 4;
 
     pub(super) fn observe(&mut self, pending: bool, epoch: u64) -> bool {
-        self.streak = match pending && self.epoch == epoch {
-            true => self.streak.saturating_add(1),
-            false => 0,
+        self.streak = if pending && self.epoch == epoch {
+            self.streak.saturating_add(1)
+        } else {
+            0
         };
         self.epoch = epoch;
         pending && self.streak < Self::LIMIT
@@ -25,7 +26,6 @@ impl PendingStall {
 
 impl RootViews {
     pub(super) fn request_landing_deadline(
-        &self,
         shell: &Shell,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,

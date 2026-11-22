@@ -1,14 +1,18 @@
 use super::*;
-use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
 use artisan_api::Status;
+use editor_core::{Clock, ForgeClient, HostConfig, HostKind};
+use test_support::clock::ManualClock;
 
 fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
+    fixture_at(Clock::system())
+}
+
+pub(super) fn fixture_at(
+    clock: Clock,
+) -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let directory = tempfile::tempdir().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core_with_clock(directory.path(), clock);
     let config = HostConfig {
         id: HostId("reset-host".into()),
         name: "Reset Forge".into(),
@@ -19,16 +23,16 @@ fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id, ThreadId("thread".into()));
     (directory, listener, core, conversation)
 }
 
-fn origin(conversation: &Conversation) -> Origin {
+pub(super) fn origin(conversation: &Conversation) -> Origin {
     Origin {
         host: conversation.open.as_ref().unwrap().0.clone(),
         instance: conversation.host_instance.unwrap(),
@@ -62,15 +66,13 @@ fn page(id: &str) -> ItemsPage {
     }
 }
 
-fn enqueue(conversation: &Conversation, completion: Completion) {
-    assert!(
-        runtime()
-            .block_on(conversation.delivery.sender().send(completion))
-            .is_ok()
-    );
+pub(super) fn enqueue(conversation: &Conversation, completion: Completion) {
+    runtime()
+        .block_on(conversation.delivery.sender().send(completion))
+        .unwrap();
 }
 
-fn finish_tail(conversation: &mut Conversation, core: &mut Core) {
+pub(super) fn finish_tail(conversation: &mut Conversation, core: &mut Core) {
     enqueue(
         conversation,
         Completion::Page {
@@ -153,7 +155,13 @@ fn reset_rejects_queued_work_even_when_the_new_span_reuses_its_position() {
         Completion::Work {
             origin: previous,
             first: 10,
-            result: Err(anyhow::anyhow!("stale work failed")),
+            result: Err(CallError {
+                method: "GET".parse().expect("GET is an HTTP method"),
+                path: "/threads/thread/work".into(),
+                failure: Box::new(editor_core::client::CallFailure::Inconsistent {
+                    check: "stale work failed",
+                }),
+            }),
         },
     );
     conversation.host_event(&core, &HostEvent::Reset, false);
@@ -197,8 +205,10 @@ fn reset_restarts_pending_agent_context_without_accepting_its_old_completion() {
         &conversation,
         Completion::Agent {
             origin: previous.clone(),
-            context: HashMap::new(),
-            error: Some("stale ancestry failure".into()),
+            context: BTreeMap::new(),
+            error: Some(LoadFailure::Ancestry {
+                problem: Problem::new("stale ancestry failure"),
+            }),
             effects: Vec::new(),
         },
     );
@@ -215,11 +225,13 @@ fn reset_restarts_pending_agent_context_without_accepting_its_old_completion() {
 
 #[test]
 fn the_landing_lock_holds_until_the_first_page_arrives() {
-    let (_directory, _listener, mut core, mut conversation) = fixture();
-    let much_later = Instant::now() + std::time::Duration::from_secs(3600);
+    let clock = ManualClock::starting_at(1_700_000_000_000);
+    let (_directory, _listener, mut core, mut conversation) = fixture_at(clock.clock());
+    let an_hour = std::time::Duration::from_secs(3600);
 
     assert_eq!(conversation.landing, Some(Landing::Loading));
-    assert!(!conversation.expire_landing(much_later));
+    clock.advance(an_hour);
+    assert!(!conversation.expire_landing());
     assert!(conversation.is_landing());
 
     finish_tail(&mut conversation, &mut core);
@@ -230,9 +242,13 @@ fn the_landing_lock_holds_until_the_first_page_arrives() {
     ));
     conversation.host_event(&core, &HostEvent::Reset, false);
     assert_eq!(conversation.landing, Some(Landing::Loading));
-    assert!(!conversation.expire_landing(much_later));
+    clock.advance(an_hour);
+    assert!(!conversation.expire_landing());
 
     finish_tail(&mut conversation, &mut core);
-    assert!(conversation.expire_landing(much_later));
+    assert!(conversation.is_landing());
+    assert!(!conversation.expire_landing());
+    clock.advance(LANDING_SETTLE);
     assert!(!conversation.is_landing());
+    assert!(conversation.expire_landing());
 }

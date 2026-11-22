@@ -1,6 +1,8 @@
 use crate::Store;
-use anyhow::{Context, Result};
+use crate::error::AtStep as _;
+use crate::error::{StorageError, operation_error};
 use artisan_api::{ItemId, ThreadId};
+use rusqlite::OptionalExtension as _;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
@@ -9,6 +11,37 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_RESOURCE_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 
+type Result<T, E = ResourceFailure> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResourceFailure {
+    #[error("{step} {}", path.display())]
+    Io {
+        step: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+fn io(step: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> ResourceFailure {
+    let path = path.to_path_buf();
+    move |source| ResourceFailure::Io { step, path, source }
+}
+
+operation_error!(
+    CollectSnapshotsError(ResourceFailure),
+    "collect resource snapshots"
+);
+operation_error!(
+    KeptAtViewError(StorageError),
+    "check whether item {item} of thread {thread} keeps its files when first viewed",
+    thread: ThreadId,
+    item: ItemId,
+);
+
 fn file_safe(id: &str) -> bool {
     (1..=128).contains(&id.len())
         && id
@@ -16,7 +49,7 @@ fn file_safe(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-pub fn snapshot_path(
+fn snapshot_path(
     dir: &Path,
     thread: &ThreadId,
     item: &ItemId,
@@ -29,7 +62,7 @@ pub fn snapshot_path(
         hasher.update(written.as_bytes());
         dir.join(thread.as_str())
             .join(item.as_str())
-            .join(&hex::encode(hasher.finalize())[..32])
+            .join(hex::encode(&hasher.finalize()[..16]))
     })
 }
 
@@ -37,35 +70,41 @@ pub fn keep(target: &Path, bytes: &[u8]) -> Result<bool> {
     if bytes.len() > MAX_RESOURCE_SNAPSHOT_BYTES {
         return Ok(false);
     }
-    let folder = target.parent().context("snapshot folder")?;
-    fs::create_dir_all(folder).with_context(|| format!("create {}", folder.display()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(folder)?;
-    temporary.write_all(bytes)?;
+    let folder = target
+        .parent()
+        .expect("invariant: a snapshot target sits in its item folder");
+    fs::create_dir_all(folder).map_err(io("create", folder))?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(folder).map_err(io("create a snapshot file in", folder))?;
+    temporary
+        .write_all(bytes)
+        .map_err(io("write resource snapshot", target))?;
     match temporary.persist_noclobber(target) {
         Ok(_) => Ok(true),
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => {
-            Err(error).with_context(|| format!("write resource snapshot {}", target.display()))
-        }
+        Err(error) => Err(io("write resource snapshot", target)(error.error)),
     }
 }
 
-pub fn gc(dir: &Path, threads: &HashSet<String>) -> Result<usize> {
+fn gc(dir: &Path, threads: &HashSet<String>) -> Result<usize> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error).with_context(|| format!("list {}", dir.display())),
+        Err(error) => return Err(io("list", dir)(error)),
     };
     let mut removed = 0;
     for entry in entries {
-        let entry = entry?;
+        let entry = entry.map_err(io("list", dir))?;
         let kept = entry
             .file_name()
             .to_str()
             .is_some_and(|name| threads.contains(name));
-        if !kept && entry.file_type()?.is_dir() {
-            fs::remove_dir_all(entry.path())
-                .with_context(|| format!("remove {}", entry.path().display()))?;
+        let is_dir = entry
+            .file_type()
+            .map_err(io("read the type of", &entry.path()))?
+            .is_dir();
+        if !kept && is_dir {
+            fs::remove_dir_all(entry.path()).map_err(io("remove", &entry.path()))?;
             removed += 1;
         }
     }
@@ -84,18 +123,49 @@ impl Store {
         snapshot_path(&self.inner.resource_dir, thread, item, written, from_home)
     }
 
-    pub async fn gc_resource_snapshots(&self) -> Result<usize> {
+    pub async fn resource_kept_at_view(
+        &self,
+        thread: &ThreadId,
+        item: &ItemId,
+    ) -> Result<bool, KeptAtViewError> {
+        let (thread_id, item_id) = (thread.clone(), item.clone());
+        self.read(move |conn| {
+            conn.prepare_cached(include_str!("sql/resources/kept_at_view.sql"))
+                .at("resources/kept_at_view.sql")?
+                .query_row([item_id.as_str(), thread_id.as_str()], |row| {
+                    row.get::<_, bool>(0)
+                })
+                .optional()
+                .map(|kept| kept == Some(true))
+                .at("resources/kept_at_view.sql")
+        })
+        .await
+        .map_err(|cause| KeptAtViewError {
+            thread: thread.clone(),
+            item: item.clone(),
+            cause: Box::new(cause),
+        })
+    }
+
+    pub async fn gc_resource_snapshots(&self) -> Result<usize, CollectSnapshotsError> {
         let dir = self.inner.resource_dir.clone();
-        let threads = self
-            .read(|conn| {
-                conn.prepare_cached("SELECT id FROM threads")?
-                    .query_map([], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<HashSet<_>>>()
-                    .map_err(Into::into)
-            })
-            .await?;
-        tokio::task::spawn_blocking(move || gc(&dir, &threads))
-            .await
-            .context("resource snapshot collection task")?
+        let collected = async {
+            let threads = self
+                .read(|conn| {
+                    conn.prepare_cached(include_str!("sql/state/thread_ids.sql"))
+                        .at("state/thread_ids.sql")?
+                        .query_map([], |row| row.get::<_, String>(0))
+                        .at("state/thread_ids.sql")?
+                        .collect::<rusqlite::Result<HashSet<_>>>()
+                        .at("state/thread_ids.sql")
+                })
+                .await?;
+            tokio::task::spawn_blocking(move || gc(&dir, &threads))
+                .await
+                .map_err(StorageError::Task)?
+        };
+        collected.await.map_err(|cause| CollectSnapshotsError {
+            cause: Box::new(cause),
+        })
     }
 }

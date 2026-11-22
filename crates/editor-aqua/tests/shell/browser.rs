@@ -12,14 +12,18 @@ fn browser(name: &str, program: &str, handler: Option<&str>) -> Browser {
 #[test]
 fn the_program_is_read_from_quoted_and_bare_open_commands() {
     assert_eq!(
-        program_of(r#""C:\Users\s\AppData\Local\imput\Helium\Application\chrome.exe" --single-argument %1"#),
+        program_of(
+            r#""C:\Users\s\AppData\Local\imput\Helium\Application\chrome.exe" --single-argument %1"#
+        ),
         Some(PathBuf::from(
             r"C:\Users\s\AppData\Local\imput\Helium\Application\chrome.exe"
         ))
     );
     assert_eq!(
         program_of(r"C:\Program Files\Mozilla Firefox\firefox.exe -osint -url %1"),
-        Some(PathBuf::from(r"C:\Program Files\Mozilla Firefox\firefox.exe"))
+        Some(PathBuf::from(
+            r"C:\Program Files\Mozilla Firefox\firefox.exe"
+        ))
     );
     assert_eq!(program_of("  "), None);
 }
@@ -34,8 +38,14 @@ fn the_named_browser_wins_then_the_system_default_then_the_first() {
         ]
     };
     let name = |preferred, default| pick(installed(), preferred, default).map(|found| found.name);
-    assert_eq!(name(Some("helium"), Some("MSEdgeHTM")).as_deref(), Some("Helium"));
-    assert_eq!(name(None, Some("msedgehtm")).as_deref(), Some("Microsoft Edge"));
+    assert_eq!(
+        name(Some("helium"), Some("MSEdgeHTM")).as_deref(),
+        Some("Helium")
+    );
+    assert_eq!(
+        name(None, Some("msedgehtm")).as_deref(),
+        Some("Microsoft Edge")
+    );
     assert_eq!(
         name(Some("Not installed"), Some("MSEdgeHTM")).as_deref(),
         Some("Microsoft Edge")
@@ -51,7 +61,8 @@ fn a_search_goes_to_the_browsers_own_search_engine() {
         ["? fuzzy finder"]
     );
     assert_eq!(
-        browser("Firefox", r"C:\Mozilla Firefox\firefox.exe", None).search_arguments("fuzzy finder"),
+        browser("Firefox", r"C:\Mozilla Firefox\firefox.exe", None)
+            .search_arguments("fuzzy finder"),
         ["-search", "fuzzy finder"]
     );
 }

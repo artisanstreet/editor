@@ -1,10 +1,7 @@
 use std::{
     num::NonZeroUsize,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -17,24 +14,24 @@ use aqua_ui::{
 };
 
 use super::{
-    image::Images,
+    image::{ImageError, ImageLoader, Images, cache_key},
     source::{MediaFetcher, MediaSource},
 };
-use editor_core::{Core, HostId, HostInstance};
 use crate::ui::{
     kit::{
-        Finish, IconButton, IconButtonSize, Media as MediaKind, Space, Surface, TextRole,
-        control::icon_button::CORNER_INSET,
+        Button, ButtonSize, ButtonTone, Finish, IconButton, IconButtonSize, Media as MediaKind,
+        Space, Spaced, Surface, TextRole, control::icon_button::CORNER_INSET,
     },
     motion::MotionCurve,
     theme::{ArtisanTheme, Opacity},
 };
+use editor_core::{Core, HostId, HostInstance};
 
 const FRAME: Surface = Surface::Media(MediaKind::Frame);
 
 static NEXT_WAITER: AtomicU64 = AtomicU64::new(1 << 62);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct OpenPreview {
     pub fetcher: MediaFetcher,
     pub sources: Vec<MediaSource>,
@@ -43,7 +40,7 @@ pub struct OpenPreview {
     pub opener_key: String,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Effect {
     Open(OpenPreview),
     ShowCopyMenu(crate::ui::rich::actions::ShowCopyMenu),
@@ -54,17 +51,35 @@ pub enum Effect {
 pub enum Action {
     Close,
     Navigate(bool),
-    Press { at: aqua_core::Point, picture: bool },
-    Drag { at: aqua_core::Point, viewport: Size },
-    Release { at: aqua_core::Point },
-    Zoom { at: aqua_core::Point, delta: f32, viewport: Size },
+    Press {
+        at: aqua_core::Point,
+        picture: bool,
+    },
+    Drag {
+        at: aqua_core::Point,
+        viewport: Size,
+    },
+    Release {
+        at: aqua_core::Point,
+    },
+    Zoom {
+        at: aqua_core::Point,
+        delta: f32,
+        viewport: Size,
+    },
     CycleFocus(bool),
+    Retry,
 }
 
 #[derive(Clone, Copy)]
 enum Press {
-    Backdrop { at: aqua_core::Point },
-    Picture { at: aqua_core::Point, pan: aqua_core::Point },
+    Backdrop {
+        at: aqua_core::Point,
+    },
+    Picture {
+        at: aqua_core::Point,
+        pan: aqua_core::Point,
+    },
 }
 
 const MAX_ZOOM: f32 = 8.0;
@@ -89,7 +104,7 @@ pub struct Preview {
     instance: HostInstance,
     content: Content,
     image: Option<ImageHandle>,
-    failed: bool,
+    failure: Option<ImageError>,
     outgoing: Option<(ImageHandle, Instant, bool)>,
     started: Instant,
     slide_started: Option<Instant>,
@@ -103,8 +118,18 @@ pub struct Preview {
     wake: aqua::mailbox::Mailbox<()>,
 }
 
+impl std::fmt::Debug for Preview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Preview").finish_non_exhaustive()
+    }
+}
+
 impl Preview {
-    pub fn new(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a preview starts from its host, fetcher, loader, sources, index, image and clock"
+    )]
+    fn new(
         generation: u64,
         host: HostId,
         instance: HostInstance,
@@ -115,30 +140,21 @@ impl Preview {
         image: ImageHandle,
         now: Instant,
     ) -> Option<Self> {
-        (index < sources.len()).then(|| Self {
-            generation,
-            opener_key: None,
-            host,
-            instance,
-            content: Content::Gallery {
-                fetcher,
-                loader,
-                sources,
-                index,
-            },
-            image: Some(image),
-            failed: false,
-            outgoing: None,
-            started: now,
-            slide_started: None,
-            closing: None,
-            forward: true,
-            press: None,
-            swipe_offset: 0.0,
-            zoom: 1.0,
-            pan: aqua_core::Point { x: 0.0, y: 0.0 },
-            waiter: NEXT_WAITER.fetch_add(1, Ordering::Relaxed),
-            wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN),
+        (index < sources.len()).then(|| {
+            Self::opened(
+                generation,
+                None,
+                host,
+                instance,
+                Content::Gallery {
+                    fetcher,
+                    loader,
+                    sources,
+                    index,
+                },
+                image,
+                now,
+            )
         })
     }
 
@@ -150,14 +166,34 @@ impl Preview {
         opener_key: String,
         now: Instant,
     ) -> Self {
-        Self {
+        Self::opened(
             generation,
-            opener_key: Some(opener_key),
+            Some(opener_key),
             host,
             instance,
-            content: Content::ReadyOnly,
+            Content::ReadyOnly,
+            image,
+            now,
+        )
+    }
+
+    fn opened(
+        generation: u64,
+        opener_key: Option<String>,
+        host: HostId,
+        instance: HostInstance,
+        content: Content,
+        image: ImageHandle,
+        now: Instant,
+    ) -> Self {
+        Self {
+            generation,
+            opener_key,
+            host,
+            instance,
+            content,
             image: Some(image),
-            failed: false,
+            failure: None,
             outgoing: None,
             started: now,
             slide_started: None,
@@ -230,10 +266,7 @@ impl Preview {
         if !self.is_live(core) || self.closing.is_some() || self.image.is_some() {
             return false;
         }
-        let sender = self.wake.sender();
-        let wake: aqua::mailbox::Wake = Arc::new(move || {
-            let _ = sender.send(());
-        });
+        let wake = crate::ui::media::wake_on(&self.wake);
         let Content::Gallery {
             fetcher,
             loader,
@@ -252,14 +285,11 @@ impl Preview {
         ) {
             Some(Ok(image)) => {
                 self.image = Some(image);
-                self.failed = false;
+                self.failure = None;
                 true
             }
-            Some(Err(_)) if !self.failed => {
-                self.failed = true;
-                true
-            }
-            _ => false,
+            Some(Err(error)) => self.failure.replace(error.clone()) != Some(error),
+            None => false,
         }
     }
 
@@ -302,7 +332,7 @@ impl Preview {
                 }
                 Some(Press::Picture { at: start, .. }) if self.gallery_count() > 1 => {
                     let offset = at.x - start.x;
-                    std::mem::replace(&mut self.swipe_offset, offset) != offset
+                    std::mem::replace(&mut self.swipe_offset, offset).to_bits() != offset.to_bits()
                 }
                 Some(Press::Picture { .. } | Press::Backdrop { .. }) | None => false,
             },
@@ -318,8 +348,9 @@ impl Preview {
                 Some(Press::Picture { at: start, .. }) => {
                     let dx = at.x - start.x;
                     let dy = at.y - start.y;
-                    let moved = std::mem::replace(&mut self.swipe_offset, 0.0) != 0.0;
-                    if self.zoom == 1.0 && dx.abs() >= 48.0 && dx.abs() > dy.abs() * 1.25 {
+                    let moved = std::mem::replace(&mut self.swipe_offset, 0.0).to_bits()
+                        != 0.0_f32.to_bits();
+                    if self.zoom <= 1.0 && dx.abs() >= 48.0 && dx.abs() > dy.abs() * 1.25 {
                         self.navigate(dx < 0.0, now, reduced_motion) || moved
                     } else {
                         moved
@@ -333,7 +364,7 @@ impl Preview {
                 viewport,
             } => {
                 let zoom = (self.zoom * ZOOM_PER_NOTCH.powf(-delta / NOTCH)).clamp(1.0, MAX_ZOOM);
-                if zoom == self.zoom {
+                if zoom.to_bits() == self.zoom.to_bits() {
                     return false;
                 }
                 let ratio = zoom / self.zoom;
@@ -344,20 +375,41 @@ impl Preview {
                 self.zoom = zoom;
                 self.pan = self.clamped(
                     aqua_core::Point {
-                        x: self.pan.x + (at.x - centre.x) * (1.0 - ratio),
-                        y: self.pan.y + (at.y - centre.y) * (1.0 - ratio),
+                        x: (at.x - centre.x).mul_add(1.0 - ratio, self.pan.x),
+                        y: (at.y - centre.y).mul_add(1.0 - ratio, self.pan.y),
                     },
                     viewport,
                 );
                 true
             }
             Action::CycleFocus(_) => false,
+            Action::Retry => self.retry(core),
         }
+    }
+
+    fn retry(&mut self, core: &Core) -> bool {
+        let Content::Gallery {
+            fetcher,
+            sources,
+            index,
+            ..
+        } = &self.content
+        else {
+            return false;
+        };
+        if !self.failure.as_ref().is_some_and(ImageError::retryable) {
+            return false;
+        }
+        let key = cache_key(fetcher, &sources[*index], &format!("image-{index}"));
+        fetcher.resources().forget::<ImageLoader>(&key);
+        self.failure = None;
+        self.refresh(core);
+        true
     }
 
     fn clamped(&self, pan: aqua_core::Point, viewport: Size) -> aqua_core::Point {
         let (width, height) = self.picture_size(viewport);
-        let reach = |picture: f32, room: f32| ((picture * self.zoom - room) / 2.0).max(0.0);
+        let reach = |picture: f32, room: f32| (picture.mul_add(self.zoom, -room) / 2.0).max(0.0);
         let (x, y) = (reach(width, viewport.w), reach(height, viewport.h));
         aqua_core::Point {
             x: pan.x.clamp(-x, x),
@@ -387,7 +439,7 @@ impl Preview {
         } else {
             self.image.take().map(|image| (image, now, forward))
         };
-        self.failed = false;
+        self.failure = None;
         self.slide_started = Some(now);
         true
     }
@@ -427,22 +479,26 @@ impl Preview {
     )]
     fn picture_size(&self, viewport: Size) -> (f32, f32) {
         let Some(image) = &self.image else {
-            return ((viewport.w - 112.0).max(1.0).min(320.0), 180.0);
+            return ((viewport.w - 112.0).clamp(1.0, 320.0), 180.0);
         };
         let aqua::images::ImageStatus::Ready { width, height } = image.status() else {
-            return ((viewport.w - 112.0).max(1.0).min(320.0), 180.0);
+            return ((viewport.w - 112.0).clamp(1.0, 320.0), 180.0);
         };
         let width = width.max(1) as f32;
         let height = height.max(1) as f32;
-        let scale = ((viewport.w - 112.0).max(1.0).min(960.0) / width)
-            .min((viewport.h - 112.0).max(1.0).min(720.0) / height)
+        let scale = ((viewport.w - 112.0).clamp(1.0, 960.0) / width)
+            .min((viewport.h - 112.0).clamp(1.0, 720.0) / height)
             .min(1.0);
         (width * scale, height * scale)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one preview view across its image, controls and load states"
+    )]
     pub fn view(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         viewport: Size,
         now: Instant,
         reduced_motion: bool,
@@ -456,9 +512,9 @@ impl Preview {
         let top = (viewport.h - height) / 2.0 + self.pan.y;
         let duration = 0.25;
         let progress = |since: Instant| {
-            MotionCurve::SmoothOut.sample(f64::from(
+            MotionCurve::SmoothOut.sample_f32(f64::from(
                 (now.saturating_duration_since(since).as_secs_f32() / duration).min(1.0),
-            )) as f32
+            ))
         };
         let presence = if reduced_motion {
             1.0
@@ -480,44 +536,20 @@ impl Preview {
         let slide = self
             .slide_started
             .filter(|_| !reduced_motion)
-            .map(progress)
-            .unwrap_or(1.0);
+            .map_or(1.0, progress);
         let mut stage = UiBox::new().width(width).height(height).style(
             Style::new()
                 .absolute_at(Some(left), Some(top), None, None)
                 .transform(transform),
         );
         stage = stage.child(if let Some(image) = &self.image {
-            UiBox::new()
-                .width(width)
-                .height(height)
-                .opacity(slide)
-                .style(
-                    Style::new()
-                        .absolute_at(
-                            Some(8.0 * if self.forward { 1.0 } else { -1.0 } * (1.0 - slide)),
-                            Some(0.0),
-                            None,
-                            None,
-                        )
-                        .content_blur(3.0 * (1.0 - slide)),
-                )
-                .child(
-                    UiBox::new()
-                        .width(width)
-                        .height(height)
-                        .radius(FRAME.radius_px())
-                        .clip(true)
-                        .child(
-                            Media::new(image.clone())
-                                .width(width)
-                                .height(height)
-                                .fit(aqua_core::image::ImageFit::Contain)
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build()
+            sliding_image(
+                image,
+                width,
+                height,
+                slide,
+                8.0 * if self.forward { 1.0 } else { -1.0 } * (1.0 - slide),
+            )
         } else {
             UiBox::new()
                 .width(width)
@@ -527,18 +559,35 @@ impl Preview {
                         .align(aqua_ui::AlignItems::CENTER)
                         .justify(aqua_ui::JustifyContent::CENTER),
                 )
+                .layout("column")
+                .spaced(Space::S8)
                 .child(
                     TextRole::Label
                         .text(
-                            &theme,
-                            if self.failed {
-                                "Couldn't load image"
-                            } else {
-                                "Loading image…"
-                            },
+                            theme,
+                            self.failure
+                                .as_ref()
+                                .map_or("Loading image…", ImageError::summary),
                         )
-                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                    .build(),
+                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                        .build(),
+                )
+                .children(
+                    self.failure
+                        .as_ref()
+                        .filter(|error| error.retryable())
+                        .map(|_| {
+                            let retry = Rc::clone(&emit);
+                            Button::text(
+                                "image-preview-retry",
+                                *theme,
+                                ButtonTone::Neutral,
+                                "Try again",
+                            )
+                            .size(ButtonSize::Sm)
+                            .on_activate(move |_| retry(Action::Retry))
+                            .build()
+                        }),
                 )
                 .build()
         });
@@ -549,38 +598,13 @@ impl Preview {
                 progress(*started)
             };
             if outgoing < 1.0 {
-                stage = stage.child(
-                    UiBox::new()
-                        .width(width)
-                        .height(height)
-                        .opacity(1.0 - outgoing)
-                        .style(
-                            Style::new()
-                                .absolute_at(
-                                    Some(8.0 * if *forward { -1.0 } else { 1.0 } * outgoing),
-                                    Some(0.0),
-                                    None,
-                                    None,
-                                )
-                                .content_blur(3.0 * outgoing),
-                        )
-                        .child(
-                            UiBox::new()
-                                .width(width)
-                                .height(height)
-                                .radius(FRAME.radius_px())
-                                .clip(true)
-                                .child(
-                                    Media::new(image.clone())
-                                        .width(width)
-                                        .height(height)
-                                        .fit(aqua_core::image::ImageFit::Contain)
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                );
+                stage = stage.child(sliding_image(
+                    image,
+                    width,
+                    height,
+                    1.0 - outgoing,
+                    8.0 * if *forward { -1.0 } else { 1.0 } * outgoing,
+                ));
             }
         }
         let pressing = Rc::clone(&emit);
@@ -624,7 +648,7 @@ impl Preview {
             .child(
                 IconButton::corner_close(
                     "image-preview-close",
-                    theme,
+                    *theme,
                     "Close image preview",
                     FRAME.radius_px(),
                 )
@@ -663,7 +687,7 @@ impl Preview {
                     } else {
                         "image-preview-previous"
                     },
-                    theme,
+                    *theme,
                     if forward {
                         editor_assets::AssetId::TABLER_CHEVRON_RIGHT
                     } else {
@@ -689,7 +713,7 @@ impl Preview {
                         .style(Style::new().absolute_at(
                             if forward { None } else { Some(Space::S8.px()) },
                             Some((viewport.h - nav_size.edge()) / 2.0),
-                            if forward { Some(Space::S8.px()) } else { None },
+                            forward.then(|| Space::S8.px()),
                             None,
                         ))
                         .child(button)
@@ -705,12 +729,13 @@ impl Preview {
                             .justify(aqua_ui::JustifyContent::CENTER),
                     )
                     .child(
-                        TextRole::Caption.text(
-                            &theme,
-                            format!("{} / {}", self.gallery_index() + 1, self.gallery_count()),
-                        )
-                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                        .build(),
+                        TextRole::Caption
+                            .text(
+                                theme,
+                                format!("{} / {}", self.gallery_index() + 1, self.gallery_count()),
+                            )
+                            .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                            .build(),
                     )
                     .build(),
             );
@@ -756,26 +781,26 @@ impl Preview {
             viewport,
         )
         .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input {
-                    let action = match key.key {
-                        Key::Named(NamedKey::Escape) => Some(Action::Close),
-                        Key::Named(NamedKey::Left) => Some(Action::Navigate(false)),
-                        Key::Named(NamedKey::Right) => Some(Action::Navigate(true)),
-                        Key::Named(NamedKey::Tab) => Some(Action::CycleFocus(
-                            key.modifiers.contains(aqua_core::Modifiers::SHIFT),
-                        )),
-                        _ => None,
+            if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input {
+                let action = match key.key {
+                    Key::Named(NamedKey::Escape) => Some(Action::Close),
+                    Key::Named(NamedKey::Left) => Some(Action::Navigate(false)),
+                    Key::Named(NamedKey::Right) => Some(Action::Navigate(true)),
+                    Key::Named(NamedKey::Tab) => Some(Action::CycleFocus(
+                        key.modifiers.contains(aqua_core::Modifiers::SHIFT),
+                    )),
+                    Key::Char(_) | Key::Named(_) => None,
+                };
+                if let Some(action) = action {
+                    keys(action);
+                    return InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::handled()
                     };
-                    if let Some(action) = action {
-                        keys(action);
-                        return InputResponse {
-                            stop_propagation: true,
-                            ..InputResponse::handled()
-                        };
-                    }
                 }
-                InputResponse::default()
-            })
+            }
+            InputResponse::default()
+        })
     }
 }
 
@@ -814,3 +839,31 @@ fn track(element: Element, emit: &Rc<dyn Fn(Action)>, viewport: Size) -> Element
 #[cfg(all(test, feature = "test-support"))]
 #[path = "../../../tests/ui/media/preview.rs"]
 mod tests;
+
+fn sliding_image(image: &ImageHandle, width: f32, height: f32, shown: f32, offset: f32) -> Element {
+    UiBox::new()
+        .width(width)
+        .height(height)
+        .opacity(shown)
+        .style(
+            Style::new()
+                .absolute_at(Some(offset), Some(0.0), None, None)
+                .content_blur(3.0 * (1.0 - shown)),
+        )
+        .child(
+            UiBox::new()
+                .width(width)
+                .height(height)
+                .radius(FRAME.radius_px())
+                .clip(true)
+                .child(
+                    Media::new(image.clone())
+                        .width(width)
+                        .height(height)
+                        .fit(aqua_core::image::ImageFit::Contain)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}

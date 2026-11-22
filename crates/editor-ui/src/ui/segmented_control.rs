@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::rc::Rc;
 
 use aqua_core::{InputEvent, Key as InputKey, NamedKey, Oklch, Role};
@@ -13,14 +14,13 @@ use super::theme::{ArtisanTheme, Opacity};
 
 const SEGMENT: Row = Row::ListItem(Density::Dense);
 const SEGMENT_TEXT: TextRole = TextRole::Caption;
-const SEGMENT_HEIGHT: f32 = SEGMENT_TEXT.spec().line + 2.0 * SEGMENT.pad().y.px();
 
-pub struct Segment<T> {
+pub(crate) struct Segment<T> {
     value: T,
     label: String,
 }
 impl<T> Segment<T> {
-    pub fn new(value: T, label: impl Into<String>) -> Self {
+    pub(crate) fn new(value: T, label: impl Into<String>) -> Self {
         Self {
             value,
             label: label.into(),
@@ -30,7 +30,7 @@ impl<T> Segment<T> {
 
 type Change<T> = Rc<dyn Fn(T)>;
 
-pub struct SegmentedControl<T: Clone + Eq + 'static> {
+pub(crate) struct SegmentedControl<T: Clone + Eq + 'static> {
     id: Key,
     theme: ArtisanTheme,
     label: String,
@@ -38,12 +38,14 @@ pub struct SegmentedControl<T: Clone + Eq + 'static> {
     options: Vec<Segment<T>>,
     disabled: bool,
     change: Option<Change<T>>,
-    focus_change: Option<Rc<dyn Fn(usize)>>,
-    focus_request: Option<Rc<std::cell::Cell<Option<(aqua_core::NodeId, usize)>>>>,
 }
 
 impl<T: Clone + Eq + 'static> SegmentedControl<T> {
-    pub fn new(
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the segmented control stores this theme copy and paints from it when built"
+    )]
+    pub(crate) fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,
@@ -58,11 +60,9 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             options: vec![first],
             disabled: false,
             change: None,
-            focus_change: None,
-            focus_request: None,
         }
     }
-    pub fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
+    pub(crate) fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
         for option in options {
             if !self
                 .options
@@ -74,26 +74,22 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         }
         self
     }
-    pub const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
-    pub fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
+    pub(crate) fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
         self.change = Some(Rc::new(handler));
         self
     }
-    pub fn on_focus_change(mut self, handler: impl Fn(usize) + 'static) -> Self {
-        self.focus_change = Some(Rc::new(handler));
-        self
-    }
 
-    pub fn focus_host(mut self, host: &SegmentedFocus) -> Self {
-        self.focus_request = Some(host.pending.clone());
-        self
-    }
-
-    pub fn build(self) -> Element {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one segmented control build with its segments and keyboard semantics"
+    )]
+    pub(crate) fn build(self) -> Element {
         let theme = self.theme;
+        let segment_height = SEGMENT
+            .pad()
+            .y
+            .px()
+            .mul_add(2.0, SEGMENT_TEXT.line_px(&theme));
         let selected = self
             .options
             .iter()
@@ -133,7 +129,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .border_of(1.0, Oklch::TRANSPARENT)
                 .radius(Length::Px(Radius::Field.px()));
             let mut button = Button::new()
-                .height(SEGMENT_HEIGHT)
+                .height(segment_height)
                 .style(style)
                 .child(live::layer(
                     Hover::Neutral,
@@ -145,11 +141,11 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             if self.disabled {
                 button = button.opacity(Opacity::Disabled.alpha());
             }
-            if !self.disabled {
-                if let Some(change) = self.change.clone() {
-                    let value = option.value.clone();
-                    button = button.on_activate(move || change(value.clone()));
-                }
+            if !self.disabled
+                && let Some(change) = self.change.clone()
+            {
+                let value = option.value.clone();
+                button = button.on_activate(move || change(value.clone()));
             }
             let mut item = button
                 .build()
@@ -157,80 +153,54 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .role(Role::RadioButton)
                 .aria_label(option.label)
                 .aria_checked(chosen)
+                .focusable(false)
                 .disabled(self.disabled);
+            if chosen {
+                item = item.aria_active_descendant();
+            }
             if !self.disabled {
-                item = live::track(item)
-                    .cursor(aqua_core::CursorIcon::Pointer)
-                    .tab_index(if chosen { 0 } else { -1 })
-                    .focus_visible_style(focus_ring(&theme));
-                let values = values.clone();
-                let change = self.change.clone();
-                let focus_change = self.focus_change.clone();
-                let focus_request = self.focus_request.clone();
-                item = item.on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                    let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
-                        return InputResponse::default();
-                    };
-                    let next = match key.key {
-                        InputKey::Named(NamedKey::Left | NamedKey::Up) => {
-                            if index == 0 {
-                                count - 1
-                            } else {
-                                index - 1
-                            }
-                        }
-                        InputKey::Named(NamedKey::Right | NamedKey::Down) => (index + 1) % count,
-                        InputKey::Named(NamedKey::Home) => 0,
-                        InputKey::Named(NamedKey::End) => count - 1,
-                        _ => return InputResponse::default(),
-                    };
-                    if let Some(change) = &change {
-                        change(values[next].clone());
-                    }
-                    if let Some(focus) = &focus_change {
-                        focus(next);
-                    }
-                    if let Some(request) = &focus_request {
-                        request.set(Some((event.current_target, next)));
-                    }
-                    InputResponse {
-                        stop_propagation: true,
-                        ..InputResponse::handled()
-                    }
-                });
+                item = live::track(item).cursor(aqua_core::CursorIcon::Pointer);
             }
             root = root.child(item);
         }
-        root.build()
+        let group = root
+            .build()
             .with_key(self.id)
             .role(Role::RadioGroup)
             .aria_label(self.label)
+            .focusable(!self.disabled);
+        if self.disabled {
+            return group;
+        }
+        let current = Rc::new(Cell::new(selected));
+        let change = self.change;
+        group
+            .tab_index(0)
+            .focus_visible_style(focus_ring(&theme))
+            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
+                let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
+                    return InputResponse::default();
+                };
+                let at = current.get();
+                let next = match key.key {
+                    InputKey::Named(NamedKey::Left | NamedKey::Up) => (at + count - 1) % count,
+                    InputKey::Named(NamedKey::Right | NamedKey::Down) => (at + 1) % count,
+                    InputKey::Named(NamedKey::Home) => 0,
+                    InputKey::Named(NamedKey::End) => count - 1,
+                    InputKey::Char(_) | InputKey::Named(_) => return InputResponse::default(),
+                };
+                current.set(next);
+                if let Some(change) = &change {
+                    change(values[next].clone());
+                }
+                InputResponse {
+                    stop_propagation: true,
+                    ..InputResponse::handled()
+                }
+            })
     }
 }
 
-#[derive(Default, Clone)]
-pub struct SegmentedFocus {
-    pending: Rc<std::cell::Cell<Option<(aqua_core::NodeId, usize)>>>,
-}
-
-impl SegmentedFocus {
-    pub fn sync(&self, app: &mut aqua::UiApp) -> bool {
-        let Some((current, index)) = self.pending.take() else {
-            return false;
-        };
-        let target = app
-            .tree()
-            .get(current)
-            .and_then(|item| item.parent)
-            .and_then(|parent| app.tree().get(parent))
-            .and_then(|group| group.children.get(index))
-            .copied();
-        target.is_some_and(|node| app.tree_mut().set_focused(Some(node)))
-    }
-
-    pub fn handle_input(&self, app: &mut aqua::UiApp, event: &aqua_core::InputEvent) -> bool {
-        let handled = app.handle_input(event);
-        self.sync(app);
-        handled
-    }
-}
+#[cfg(test)]
+#[path = "../../tests/ui/segmented_control.rs"]
+mod tests;

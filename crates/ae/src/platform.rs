@@ -1,45 +1,259 @@
-//! What an install sets up around an app, per OS: `ae` on PATH, the
-//! Editor's launcher entry and `artisan://` handler, the Settings → Apps
-//! entries on Windows, and closing running Editors before replacing them.
-
-use crate::sys::{self, ps_quote, ps_string};
-use anyhow::{Context, Result};
-use artisan_paths::App;
+use crate::paths::{self, LocateError};
+use crate::sys::{self, RemoveError, RunError, SpawnError, WriteError, ps_quote, ps_string};
+use artisan_paths::{App, EnvPathError};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const DESKTOP_FILE: &str = "artisan-editor.desktop";
 const EDITOR_ICON: &str = include_str!("../../editor-assets/app/artisan-editor.svg");
 const SHORTCUT: &str = "Artisan Editor.lnk";
+const PROTOCOL_KEY: &str = r"HKCU:\Software\Classes\artisan";
+const KEEP_OTHER_ENTRIES: &str = r"$_ -and $_.TrimEnd('\') -ne $dir.TrimEnd('\')";
 
-/// Puts `ae` on PATH: its folder on the user `Path` on Windows,
-/// `~/.local/bin/ae` elsewhere. Returns a hint when the shell won't see it.
-pub fn add_to_path() -> Result<Option<String>> {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AddToPathError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("add ae's folder to the user Path")]
+    PowerShell(#[source] RunError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error("create {}", path.display())]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("look at {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} changed during the install and isn't Artisan's `ae`, so it was left alone", path.display())]
+    Changed { path: PathBuf },
+    #[error("link {}", path.display())]
+    Link {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ExistingAeError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error("look at {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RemoveFromPathError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("drop ae's folder from the user Path")]
+    PowerShell(#[source] RunError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error("look at {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Remove(#[from] RemoveError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum IntegrateEditorError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("APPDATA is not set")]
+    NoAppData,
+    #[error("find the user data folder")]
+    Data(#[source] EnvPathError),
+    #[error("add the Editor's Start menu entry and artisan:// handler")]
+    PowerShell(#[source] RunError),
+    #[error(transparent)]
+    Write(#[from] WriteError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RemoveEditorIntegrationError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("APPDATA is not set")]
+    NoAppData,
+    #[error("find the user data folder")]
+    Data(#[source] EnvPathError),
+    #[error("remove the Editor's artisan:// handler")]
+    PowerShell(#[source] RunError),
+    #[error(transparent)]
+    Remove(#[from] RemoveError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RegisterUninstallError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("add {} to Settings → Apps", app.display_name())]
+    PowerShell {
+        app: App,
+        #[source]
+        source: RunError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LaunchEditorError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error(transparent)]
+    Spawn(#[from] SpawnError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Held {
+    Nothing,
+    Link(PathBuf),
+    File { sha256: String },
+    Other,
+}
+
+#[derive(Debug)]
+pub(crate) struct Replaceable(Held);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Found(Held);
+
+impl Found {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        let held = match value.split_once(':') {
+            Some(("link", target)) => Held::Link(PathBuf::from(target)),
+            Some(("file", sha256)) => Held::File {
+                sha256: sha256.to_owned(),
+            },
+            None if value == "nothing" => Held::Nothing,
+            None if value == "other" => Held::Other,
+            Some(_) | None => return Err(format!("{value:?} doesn't describe a file")),
+        };
+        Ok(Self(held))
+    }
+
+    pub(crate) fn argument(&self) -> String {
+        match &self.0 {
+            Held::Nothing => "nothing".to_owned(),
+            Held::Link(target) => format!("link:{}", target.to_string_lossy()),
+            Held::File { sha256 } => format!("file:{sha256}"),
+            Held::Other => "other".to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Consent {
+    pub(crate) path: PathBuf,
+    pub(crate) found: Found,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExistingAe {
+    Artisans(Replaceable),
+    Foreign {
+        path: PathBuf,
+        replaceable: Replaceable,
+    },
+}
+
+fn held(link: &Path) -> std::io::Result<Held> {
+    use sha2::Digest as _;
+    match link.symlink_metadata() {
+        Ok(metadata) if metadata.is_symlink() => Ok(Held::Link(std::fs::read_link(link)?)),
+        Ok(metadata) if metadata.is_file() => Ok(Held::File {
+            sha256: hex::encode(sha2::Sha256::digest(std::fs::read(link)?)),
+        }),
+        Ok(_) => Ok(Held::Other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Held::Nothing),
+        Err(error) => Err(error),
+    }
+}
+
+fn artisans(held: &Held, binary: &Path) -> bool {
+    match held {
+        Held::Nothing => true,
+        Held::Link(target) => target == binary,
+        Held::File { .. } | Held::Other => false,
+    }
+}
+
+impl Replaceable {
+    pub(crate) fn consent(&self, path: &Path) -> Consent {
+        Consent {
+            path: path.to_owned(),
+            found: Found(self.0.clone()),
+        }
+    }
+}
+
+pub(crate) fn existing_ae() -> Result<ExistingAe, ExistingAeError> {
     if cfg!(windows) {
-        let dir = ps_quote(&App::Ae.dir()?);
-        // Keeps the value's REG_EXPAND_SZ type and other entries' %VARS%;
-        // setting a throwaway variable broadcasts WM_SETTINGCHANGE so new
-        // terminals see the change.
+        return Ok(ExistingAe::Artisans(Replaceable(Held::Nothing)));
+    }
+    let link = unix_link().map_err(ExistingAeError::Home)?;
+    let binary = paths::binary(App::Ae)?;
+    let found = held(&link).map_err(|source| ExistingAeError::Inspect {
+        path: link.clone(),
+        source,
+    })?;
+    Ok(if artisans(&found, &binary) {
+        ExistingAe::Artisans(Replaceable(found))
+    } else {
+        ExistingAe::Foreign {
+            path: link,
+            replaceable: Replaceable(found),
+        }
+    })
+}
+
+pub(crate) fn add_to_path(replaceable: &Replaceable) -> Result<Option<String>, AddToPathError> {
+    if cfg!(windows) {
+        let dir = ps_quote(&paths::dir(App::Ae)?);
         sys::powershell(&format!(
             "$dir = {dir}; $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
              $old = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); \
-             $parts = @($old -split ';' | Where-Object {{ $_ -and $_ -ne $dir }}); \
+             $parts = @($old -split ';' | Where-Object {{ {KEEP_OTHER_ENTRIES} }}); \
              $key.SetValue('Path', ((@($dir) + $parts) -join ';'), 'ExpandString'); \
              [Environment]::SetEnvironmentVariable('ArtisanPathRefresh', '1', 'User'); \
              [Environment]::SetEnvironmentVariable('ArtisanPathRefresh', $null, 'User')"
-        ))?;
+        ))
+        .map_err(AddToPathError::PowerShell)?;
         Ok(None)
     } else {
-        // A file of someone else's here was confirmed away (`foreign_ae`).
-        let link = unix_link()?;
-        if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+        let link = unix_link().map_err(AddToPathError::Home)?;
+        let binary = paths::binary(App::Ae)?;
+        let dir = link
+            .parent()
+            .expect("invariant: ~/.local/bin/ae has a folder");
+        std::fs::create_dir_all(dir).map_err(|source| AddToPathError::CreateDir {
+            path: dir.to_owned(),
+            source,
+        })?;
+        let now = held(&link).map_err(|source| AddToPathError::Inspect {
+            path: link.clone(),
+            source,
+        })?;
+        if now != replaceable.0 && !artisans(&now, &binary) {
+            return Err(AddToPathError::Changed { path: link });
         }
-        std::fs::remove_file(&link).ok();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(App::Ae.binary()?, &link)
-            .with_context(|| format!("link {}", link.display()))?;
-        let dir = link.parent().unwrap_or(&link);
+        link_over(&binary, &link)?;
         Ok((!on_path(dir)).then(|| {
             format!(
                 "Add {} to your PATH to run `ae` from a terminal.",
@@ -49,50 +263,74 @@ pub fn add_to_path() -> Result<Option<String>> {
     }
 }
 
-/// A `~/.local/bin/ae` that isn't Artisan's link, which installing replaces.
-pub fn foreign_ae() -> Option<PathBuf> {
-    if cfg!(windows) {
-        return None;
-    }
-    let link = unix_link().ok()?;
-    link.symlink_metadata()
-        .is_ok_and(|metadata| !metadata.is_symlink())
-        .then_some(link)
+fn link_over(binary: &Path, link: &Path) -> Result<(), AddToPathError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_file as symlink;
+    let linking = |source| AddToPathError::Link {
+        path: link.to_owned(),
+        source,
+    };
+    let dir = link
+        .parent()
+        .expect("invariant: ~/.local/bin/ae has a folder");
+    tempfile::Builder::new()
+        .prefix(".ae-")
+        .make_in(dir, |incoming| symlink(binary, incoming))
+        .map_err(linking)?
+        .persist(link)
+        .map_err(|failed| linking(failed.error))
 }
 
-pub fn remove_from_path() -> Result<()> {
+pub(crate) fn remove_from_path() -> Result<(), RemoveFromPathError> {
     if cfg!(windows) {
-        remove_path_entry(&App::Ae.dir()?)
+        remove_path_entry(&paths::dir(App::Ae)?).map_err(RemoveFromPathError::PowerShell)
     } else {
-        let link = unix_link()?;
-        if std::fs::read_link(&link)
-            .is_ok_and(|target| target == App::Ae.binary().unwrap_or_default())
-        {
+        let link = unix_link().map_err(RemoveFromPathError::Home)?;
+        let binary = paths::binary(App::Ae)?;
+        let found = held(&link).map_err(|source| RemoveFromPathError::Inspect {
+            path: link.clone(),
+            source,
+        })?;
+        if matches!(&found, Held::Link(target) if *target == binary) {
             sys::remove(&link)?;
         }
         Ok(())
     }
 }
 
-/// Drops one folder from the user `Path` (Windows).
-pub fn remove_path_entry(dir: &Path) -> Result<()> {
+pub(crate) fn remove_path_entry(dir: &Path) -> Result<(), RunError> {
     let dir = ps_quote(dir);
     sys::powershell(&format!(
         "$dir = {dir}; $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); \
          $old = [string]$key.GetValue('Path', '', 'DoNotExpandEnvironmentNames'); \
-         $new = (@($old -split ';' | Where-Object {{ $_ -and $_.TrimEnd('\\') -ne $dir.TrimEnd('\\') }})) -join ';'; \
+         $new = (@($old -split ';' | Where-Object {{ {KEEP_OTHER_ENTRIES} }})) -join ';'; \
          if ($new -ne $old) {{ $key.SetValue('Path', $new, 'ExpandString') }}"
     ))
     .map(drop)
 }
 
-/// Whether a new terminal finds this `ae`.
-pub fn path_ok() -> bool {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PathCheckError {
+    #[error("find ae's folder")]
+    Locate(#[source] artisan_paths::RootError),
+    #[error("read the user Path from the registry")]
+    Registry(#[source] RunError),
+    #[error("find the home folder")]
+    Home(#[source] EnvPathError),
+    #[error("read the link {}", path.display())]
+    Link {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub(crate) fn path_ok() -> Result<bool, PathCheckError> {
     if cfg!(windows) {
-        let Ok(dir) = App::Ae.dir() else {
-            return false;
-        };
-        sys::output(
+        let dir = App::Ae.dir().map_err(PathCheckError::Locate)?;
+        let path = sys::output(
             "powershell.exe",
             &[
                 "-NoProfile",
@@ -100,17 +338,34 @@ pub fn path_ok() -> bool {
                 "[Environment]::GetEnvironmentVariable('Path','User')",
             ],
         )
-        .is_ok_and(|path| path.split(';').any(|entry| Path::new(entry.trim()) == dir))
+        .map_err(PathCheckError::Registry)?;
+        Ok(windows_path_lists(&path, &dir))
     } else {
-        unix_link().is_ok_and(|link| {
-            std::fs::read_link(&link)
-                .is_ok_and(|target| target == App::Ae.binary().unwrap_or_default())
-                && link.parent().is_some_and(on_path)
-        })
+        let link = unix_link().map_err(PathCheckError::Home)?;
+        let ae = App::Ae.binary().map_err(PathCheckError::Locate)?;
+        let target = match std::fs::read_link(&link) {
+            Ok(target) => target,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(source) => return Err(PathCheckError::Link { path: link, source }),
+        };
+        Ok(target == ae && link.parent().is_some_and(on_path))
     }
 }
 
-pub fn unix_link() -> Result<PathBuf> {
+fn windows_path_lists(path: &str, dir: &Path) -> bool {
+    let folded = |folder: &str| folder.trim().trim_end_matches(['\\', '/']).to_lowercase();
+    let wanted = folded(&dir.display().to_string());
+    path.split(';').any(|entry| folded(entry) == wanted)
+}
+
+pub(crate) fn unix_link() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::home()?.join(".local/bin/ae"))
 }
 
@@ -119,17 +374,17 @@ fn on_path(dir: &Path) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == dir))
 }
 
-/// The Start menu entry and `artisan://` handler (Windows), or the
-/// `.desktop` entry (Linux), pointing at the Editor's fixed path.
-pub fn integrate_editor() -> Result<()> {
-    let editor = App::Editor.binary()?;
+pub(crate) fn integrate_editor() -> Result<(), IntegrateEditorError> {
+    let editor = paths::binary(App::Editor)?;
     if cfg!(windows) {
-        let link = start_menu()?.join(SHORTCUT);
-        let command = format!("\"{}\" \"%1\"", editor.display());
+        let link = start_menu()
+            .ok_or(IntegrateEditorError::NoAppData)?
+            .join(SHORTCUT);
+        let command = protocol_command(&editor);
         sys::powershell(&format!(
             "$shell = New-Object -ComObject WScript.Shell; $s = $shell.CreateShortcut({link}); \
              $s.TargetPath = {target}; $s.WorkingDirectory = {folder}; $s.IconLocation = {target} + ',0'; $s.Save(); \
-             $key = 'HKCU:\\Software\\Classes\\artisan'; \
+             $key = {protocol}; \
              New-Item -Path \"$key\\shell\\open\\command\" -Force | Out-Null; \
              Set-ItemProperty -Path $key -Name '(default)' -Value 'URL:Artisan Protocol'; \
              Set-ItemProperty -Path $key -Name 'URL Protocol' -Value ''; \
@@ -138,21 +393,29 @@ pub fn integrate_editor() -> Result<()> {
             target = ps_quote(&editor),
             folder = ps_quote(editor.parent().unwrap_or(&editor)),
             command = ps_string(&command),
+            protocol = ps_string(PROTOCOL_KEY),
         ))
         .map(drop)
+        .map_err(IntegrateEditorError::PowerShell)
     } else if cfg!(target_os = "linux") {
         let entry = format!(
             "[Desktop Entry]\nType=Application\nName=Artisan Editor\nExec=\"{}\" %u\nIcon=artisan-editor\nTerminal=false\n\
              Categories=Development;TextEditor;\nMimeType=x-scheme-handler/artisan;\nStartupWMClass=artisan-editor\n",
             editor.display()
         );
-        sys::write(&desktop_file()?, &entry)?;
-        sys::write(&icon_file()?, EDITOR_ICON)?;
+        sys::write(&desktop_file().map_err(IntegrateEditorError::Data)?, &entry)?;
+        sys::write(
+            &icon_file().map_err(IntegrateEditorError::Data)?,
+            EDITOR_ICON,
+        )?;
         if let Err(error) = sys::run(
             "xdg-mime",
             &["default", DESKTOP_FILE, "x-scheme-handler/artisan"],
         ) {
-            tracing::debug!("couldn't register artisan:// links: {error:#}");
+            tracing::debug!(
+                "couldn't register artisan:// links: {}",
+                diagnostics::chain(&error)
+            );
         }
         Ok(())
     } else {
@@ -160,36 +423,52 @@ pub fn integrate_editor() -> Result<()> {
     }
 }
 
-pub fn remove_editor_integration() -> Result<()> {
+pub(crate) fn remove_editor_integration() -> Result<(), RemoveEditorIntegrationError> {
     if cfg!(windows) {
-        sys::remove(&start_menu()?.join(SHORTCUT))?;
-        if sys::output("reg.exe", &["query", r"HKCU\Software\Classes\artisan"]).is_ok() {
-            sys::run(
-                "reg.exe",
-                &["delete", r"HKCU\Software\Classes\artisan", "/f"],
-            )?;
+        sys::remove(
+            &start_menu()
+                .ok_or(RemoveEditorIntegrationError::NoAppData)?
+                .join(SHORTCUT),
+        )?;
+        let registered = sys::powershell(&format!(
+            "$v = (Get-ItemProperty -LiteralPath {key} -ErrorAction SilentlyContinue).'(default)'; if ($v) {{ $v }}",
+            key = ps_string(&format!(r"{PROTOCOL_KEY}\shell\open\command")),
+        ))
+        .map_err(RemoveEditorIntegrationError::PowerShell)?;
+        if registered.trim() == protocol_command(&paths::binary(App::Editor)?) {
+            sys::powershell(&format!(
+                "Remove-Item -LiteralPath {} -Recurse -Force",
+                ps_string(PROTOCOL_KEY)
+            ))
+            .map_err(RemoveEditorIntegrationError::PowerShell)?;
         }
         Ok(())
     } else if cfg!(target_os = "linux") {
-        sys::remove(&icon_file()?)?;
-        sys::remove(&desktop_file()?)
+        sys::remove(&icon_file().map_err(RemoveEditorIntegrationError::Data)?)?;
+        Ok(sys::remove(
+            &desktop_file().map_err(RemoveEditorIntegrationError::Data)?,
+        )?)
     } else {
         Ok(())
     }
 }
 
-pub fn start_menu() -> Result<PathBuf> {
-    let app_data = PathBuf::from(std::env::var_os("APPDATA").context("APPDATA is not set")?);
-    Ok(app_data.join(r"Microsoft\Windows\Start Menu\Programs"))
+fn protocol_command(editor: &Path) -> String {
+    format!("\"{}\" \"%1\"", editor.display())
 }
 
-fn desktop_file() -> Result<PathBuf> {
+fn start_menu() -> Option<PathBuf> {
+    let app_data = PathBuf::from(std::env::var_os("APPDATA")?);
+    Some(app_data.join(r"Microsoft\Windows\Start Menu\Programs"))
+}
+
+fn desktop_file() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::xdg_data()?
         .join("applications")
         .join(DESKTOP_FILE))
 }
 
-fn icon_file() -> Result<PathBuf> {
+fn icon_file() -> Result<PathBuf, EnvPathError> {
     Ok(artisan_paths::xdg_data()?
         .join("icons/hicolor/scalable/apps")
         .join("artisan-editor.svg"))
@@ -202,9 +481,7 @@ fn uninstall_key(app: App) -> String {
     )
 }
 
-/// The app's entry in Settings → Apps (Windows); uninstalling there runs
-/// `ae uninstall <app> --yes`.
-pub fn register_uninstall(app: App, version: &str) -> Result<()> {
+pub(crate) fn register_uninstall(app: App, version: &str) -> Result<(), RegisterUninstallError> {
     if !cfg!(windows) {
         return Ok(());
     }
@@ -213,7 +490,7 @@ pub fn register_uninstall(app: App, version: &str) -> Result<()> {
         App::Forge => "Artisan Forge",
         App::Editor => "Artisan Editor",
     };
-    let ae = App::Ae.binary()?;
+    let ae = paths::binary(App::Ae)?;
     let uninstall = format!("\"{}\" uninstall {} --yes", ae.display(), app.id());
     sys::powershell(&format!(
         "$key = {key}; New-Item -Path $key -Force | Out-Null; \
@@ -229,14 +506,15 @@ pub fn register_uninstall(app: App, version: &str) -> Result<()> {
         key = ps_string(&uninstall_key(app)),
         name = ps_string(name),
         version = ps_string(version),
-        location = ps_quote(&app.dir()?),
-        icon = ps_quote(&app.binary()?),
+        location = ps_quote(&paths::dir(app)?),
+        icon = ps_quote(&paths::binary(app)?),
         uninstall = ps_string(&uninstall),
     ))
     .map(drop)
+    .map_err(|source| RegisterUninstallError::PowerShell { app, source })
 }
 
-pub fn unregister_uninstall(app: App) -> Result<()> {
+pub(crate) fn unregister_uninstall(app: App) -> Result<(), RunError> {
     if !cfg!(windows) {
         return Ok(());
     }
@@ -247,10 +525,8 @@ pub fn unregister_uninstall(app: App) -> Result<()> {
     .map(drop)
 }
 
-/// Starts the installed Editor, detached and outside this process's job
-/// (Explorer starts it on Windows, so it outlives a WSL terminal).
-pub fn launch_editor() -> Result<()> {
-    let editor = App::Editor.binary()?;
+pub(crate) fn launch_editor() -> Result<(), LaunchEditorError> {
+    let editor = paths::binary(App::Editor)?;
     if cfg!(windows) {
         sys::spawn_detached(std::process::Command::new("explorer.exe").arg(&editor))?;
     } else {
@@ -263,79 +539,152 @@ pub fn launch_editor() -> Result<()> {
     Ok(())
 }
 
-/// Closes running processes started from `executables` (case-insensitive
-/// on Windows), so their files can be replaced. Forge holds all data, so a
-/// forced stop after 10 seconds loses nothing.
-pub fn close_processes(executables: &[PathBuf]) -> Result<usize> {
-    if cfg!(windows) {
-        let list = executables
-            .iter()
-            .map(|path| ps_quote(path))
-            .collect::<Vec<_>>()
-            .join(",");
-        let closed = sys::powershell(&format!(
-            "$targets = @({list}); \
-             $p = @(Get-CimInstance Win32_Process | Where-Object {{ $x = $_.ExecutablePath; $x -and ($targets | Where-Object {{ $_ -ieq $x }}) }}); \
-             foreach ($x in $p) {{ taskkill.exe /PID $x.ProcessId | Out-Null }}; \
-             foreach ($x in $p) {{ Wait-Process -Id $x.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }}; \
-             @($p | Where-Object {{ Get-Process -Id $_.ProcessId -ErrorAction Ignore }}) | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}; \
-             $p.Count"
-        ))?;
-        Ok(closed.trim().parse().unwrap_or(0))
-    } else {
-        let mut system = sysinfo::System::new();
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::All,
-            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
-        );
-        let running: Vec<_> = system
-            .processes()
-            .iter()
-            .filter_map(|(pid, process)| {
-                let exe = process.exe()?.to_string_lossy().into_owned();
-                let exe = exe.strip_suffix(" (deleted)").unwrap_or(&exe);
-                executables
-                    .iter()
-                    .any(|path| Path::new(exe) == path)
-                    .then_some((*pid, process.start_time()))
-            })
-            .collect();
-        for (pid, _) in &running {
-            sys::run("kill", &["-TERM", &pid.to_string()]).ok();
-        }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        for (pid, started) in &running {
-            loop {
-                let mut current = sysinfo::System::new();
-                current.refresh_processes_specifics(
-                    sysinfo::ProcessesToUpdate::Some(&[*pid]),
-                    sysinfo::ProcessRefreshKind::new(),
-                );
-                let alive = current
-                    .process(*pid)
-                    .is_some_and(|process| process.start_time() == *started);
-                if !alive {
-                    break;
-                }
-                if std::time::Instant::now() >= deadline {
-                    sys::run("kill", &["-KILL", &pid.to_string()]).ok();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-        Ok(running.len())
+const CLOSE_DEADLINE: Duration = Duration::from_secs(10);
+const FORCE_DEADLINE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Running {
+    pub pid: u32,
+    pub executable: PathBuf,
+    pub started: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StopError {
+    #[error("process {pid} ({}) still runs after it was force-stopped", executable.display())]
+    Survived { pid: u32, executable: PathBuf },
+}
+
+pub(crate) fn close_processes(executables: &[PathBuf]) -> Result<usize, StopError> {
+    let running: Vec<Running> = processes(sysinfo::ProcessesToUpdate::All)
+        .into_iter()
+        .filter(|process| {
+            executables
+                .iter()
+                .any(|path| same_executable(&process.executable, path))
+        })
+        .collect();
+    stop(&running)?;
+    Ok(running.len())
+}
+
+pub(crate) fn running(pid: u32) -> Option<Running> {
+    processes(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(
+        pid,
+    )]))
+    .into_iter()
+    .next()
+}
+
+pub(crate) fn stop(processes: &[Running]) -> Result<(), StopError> {
+    for process in processes {
+        request_close(process);
+    }
+    let started = Instant::now();
+    let mut left: Vec<&Running> = processes.iter().collect();
+    while !left.is_empty() && started.elapsed() < CLOSE_DEADLINE {
+        std::thread::sleep(Duration::from_millis(100));
+        left.retain(|process| alive(process));
+    }
+    for process in &left {
+        force_close(process);
+    }
+    let forced = Instant::now();
+    while !left.is_empty() && forced.elapsed() < FORCE_DEADLINE {
+        std::thread::sleep(Duration::from_millis(50));
+        left.retain(|process| alive(process));
+    }
+    match left.first() {
+        Some(process) => Err(StopError::Survived {
+            pid: process.pid,
+            executable: process.executable.clone(),
+        }),
+        None => Ok(()),
     }
 }
 
-/// Whether a desktop is here to show the Editor.
-pub fn has_desktop() -> bool {
+fn processes(which: sysinfo::ProcessesToUpdate<'_>) -> Vec<Running> {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        which,
+        sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+    );
+    system
+        .processes()
+        .iter()
+        .filter(|(_, process)| {
+            !matches!(
+                process.status(),
+                sysinfo::ProcessStatus::Zombie | sysinfo::ProcessStatus::Dead
+            )
+        })
+        .filter_map(|(pid, process)| {
+            let executable = process.exe()?.to_string_lossy();
+            let executable = executable.strip_suffix(" (deleted)").unwrap_or(&executable);
+            Some(Running {
+                pid: pid.as_u32(),
+                executable: PathBuf::from(executable),
+                started: process.start_time(),
+            })
+        })
+        .collect()
+}
+
+fn alive(process: &Running) -> bool {
+    running(process.pid).is_some_and(|now| now.started == process.started)
+}
+
+pub(crate) fn same_executable(left: &Path, right: &Path) -> bool {
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
+fn request_close(process: &Running) {
+    let pid = process.pid.to_string();
+    let requested = if cfg!(windows) {
+        sys::run("taskkill.exe", &["/PID", &pid])
+    } else {
+        sys::run("kill", &["-TERM", &pid])
+    };
+    if let Err(error) = requested {
+        tracing::debug!(
+            pid = process.pid,
+            "asking the process to close failed: {}",
+            diagnostics::chain(&error)
+        );
+    }
+}
+
+fn force_close(process: &Running) {
+    let pid = process.pid.to_string();
+    let forced = if cfg!(windows) {
+        sys::run("taskkill.exe", &["/PID", &pid, "/F"])
+    } else {
+        sys::run("kill", &["-KILL", &pid])
+    };
+    if let Err(error) = forced {
+        tracing::debug!(
+            pid = process.pid,
+            "force-stopping the process failed: {}",
+            diagnostics::chain(&error)
+        );
+    }
+}
+
+pub(crate) fn has_desktop() -> bool {
     cfg!(any(windows, target_os = "macos"))
         || std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-/// Inside WSL (Linux with Windows interop).
-pub fn in_wsl() -> bool {
+pub(crate) fn in_wsl() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WSL_DISTRO_NAME").is_some()
 }
+
+#[cfg(test)]
+#[path = "../tests/platform/unit.rs"]
+mod tests;

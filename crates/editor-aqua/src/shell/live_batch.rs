@@ -1,6 +1,6 @@
 use crate::core::{CoreEvent, HostEvent};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct LiveBatch {
     pending: Vec<CoreEvent>,
 }

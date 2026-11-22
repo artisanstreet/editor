@@ -1,4 +1,26 @@
 use super::*;
+use crate::shell::resource_preview::{PreviewState, PreviewText};
+use crate::ui::dialog::Dialog;
+
+fn ignore() -> Rc<dyn Fn(Action)> {
+    Rc::new(|_| {})
+}
+
+fn preview_dialog(
+    state: &ViewState,
+    preview: &ResourcePreview,
+    theme: &ArtisanTheme,
+    viewport_height: f32,
+    emit: Rc<dyn Fn(Action)>,
+) -> Result<Dialog, UnpreparedError> {
+    let content = state.content(preview, theme, viewport_height, &emit)?;
+    let generation = state.generation;
+    Ok(
+        Dialog::new("resource-preview", *theme, preview.path.clone(), content)
+            .max_width(1100.0)
+            .on_dismiss(move |_| emit(Action::Dismiss { generation })),
+    )
+}
 
 #[test]
 fn preview_selection_includes_full_clipped_and_offscreen_lines() {
@@ -6,15 +28,15 @@ fn preview_selection_includes_full_clipped_and_offscreen_lines() {
     let long = "x".repeat(16 * 1024 + 12);
     let input = format!("first\n{long}\nlast\n");
     let content = PreviewText::new(input.clone(), 1);
-    let prepared = prepare_text(&content, 1);
-    assert_eq!(prepared.ranges.len(), 3);
-    assert_eq!(prepared.text.as_ref(), input.trim_end_matches('\n'));
+    let window = content.window().unwrap();
+    assert_eq!(window.len(), 3);
+    assert_eq!(window.text().as_ref(), input.trim_end_matches('\n'));
     let mut selection = SelectionDocument::new();
     selection
         .register(SelectionSource {
             id: SelectionSourceId(3),
             order: vec![0],
-            text: Arc::clone(&prepared.text),
+            text: Arc::clone(window.text()),
             separator: Arc::from(""),
             copies: Vec::new(),
         })
@@ -24,16 +46,71 @@ fn preview_selection_includes_full_clipped_and_offscreen_lines() {
         selection.selected_text().as_deref(),
         Some(input.trim_end_matches('\n'))
     );
-    assert_eq!(&prepared.text[prepared.ranges[1].clone()], long);
+    assert_eq!(window.line(1), long);
 }
 
 #[test]
 fn selected_window_is_bounded_and_keeps_target() {
     let content = PreviewText::new("x\n".repeat(100_000), 80_000);
-    let prepared = prepare_text(&content, 80_000);
-    assert_eq!(prepared.start_line, 77_500);
-    assert_eq!(prepared.ranges.len(), 5_000);
-    assert_eq!(&prepared.text[prepared.ranges[2_500].clone()], "x");
+    let window = content.window().unwrap();
+    assert_eq!(window.start_line(), 77_500);
+    assert_eq!(window.len(), 5_000);
+    assert_eq!(window.line(2_500), "x");
+}
+
+#[test]
+fn multibyte_lines_are_previewed_whole() {
+    let content = PreviewText::new("ære\nø\n日本語\n".to_owned(), 0);
+    let window = content.window().unwrap();
+    assert_eq!(
+        (0..window.len())
+            .map(|index| window.line(index))
+            .collect::<Vec<_>>(),
+        ["ære", "ø", "日本語"]
+    );
+    assert_eq!(content.full().as_ref(), "ære\nø\n日本語\n");
+}
+
+#[test]
+fn an_empty_file_says_it_is_empty_instead_of_an_inverted_range() {
+    use aqua_text::{SharedFonts, SharedRuns};
+    let mut preview = ResourcePreview::new("src/empty.rs".into(), Some(3), None);
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new(String::new(), 2)),
+    };
+    let Some(Ok(content)) = preview.content() else {
+        unreachable!("the preview was just given its content")
+    };
+    assert_eq!(content.note(), "This file is empty.");
+    let mut state = ViewState::new(5, SelectionDocumentId(41), SelectionSourceId(42));
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    assert!(!state.prepare(&preview, &mut app).unwrap());
+    assert_eq!(state.pending_jump(), None);
+    let content = state
+        .content(&preview, &ArtisanTheme::resolved(), 600.0, &ignore())
+        .unwrap();
+    app.mount(|_| content).unwrap();
+    app.set_viewport(800.0, 600.0, 1.0);
+    app.build_frame().unwrap();
+    let said: Vec<String> = app
+        .tree()
+        .traverse()
+        .into_iter()
+        .filter_map(|node| match &app.tree().get(node)?.kind {
+            aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
+            aqua_ui::tree::NodeKind::Box(_)
+            | aqua_ui::tree::NodeKind::Media(_)
+            | aqua_ui::tree::NodeKind::Scroll(_)
+            | aqua_ui::tree::NodeKind::Canvas(_)
+            | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
+        })
+        .collect();
+    assert!(
+        said.iter().any(|line| line == "This file is empty."),
+        "{said:?}"
+    );
+    assert!(!said.iter().any(|line| line.contains("1–0")), "{said:?}");
 }
 
 #[test]
@@ -42,22 +119,25 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
     use aqua_text::{SharedFonts, SharedRuns};
     use std::cell::RefCell;
     let mut preview = ResourcePreview::new("src/file.rs".into(), Some(2), None);
-    preview.content = Some(Ok(PreviewText::new("first\nsecond\n".into(), 1)));
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new("first\nsecond\n".into(), 1)),
+    };
     let mut state = ViewState::new(7, SelectionDocumentId(23), SelectionSourceId(24));
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     assert!(state.prepare(&preview, &mut app).unwrap());
     assert!(!state.prepare(&preview, &mut app).unwrap());
     assert_eq!(state.pending_jump(), Some(1));
     let events = Rc::new(RefCell::new(Vec::new()));
-    let sink = events.clone();
-    let dialog = state
-        .dialog(
-            &preview,
-            ArtisanTheme::resolved(),
-            900.0,
-            Rc::new(move |action| sink.borrow_mut().push(action)),
-        )
-        .unwrap();
+    let sink = Rc::clone(&events);
+    let dialog = preview_dialog(
+        &state,
+        &preview,
+        &ArtisanTheme::resolved(),
+        900.0,
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    )
+    .unwrap();
     app.mount(|_| dialog.build_panel(Size::new(1000.0, 900.0)))
         .unwrap();
     app.set_viewport(1000.0, 900.0, 1.0);
@@ -97,16 +177,15 @@ fn mounted_copy_actions_keep_full_file_and_generation() {
             }
         ]
     );
-    state.jumped(0);
-    assert_eq!(state.pending_jump(), Some(1));
-    state.jumped(1);
-    assert_eq!(state.pending_jump(), None);
     state.release(&mut app);
-    assert!(
-        state
-            .dialog(&preview, ArtisanTheme::resolved(), 900.0, Rc::new(|_| {}))
-            .is_err()
-    );
+    preview_dialog(
+        &state,
+        &preview,
+        &ArtisanTheme::resolved(),
+        900.0,
+        Rc::new(|_| {}),
+    )
+    .unwrap_err();
 }
 
 #[test]
@@ -116,7 +195,10 @@ fn refreshing_body_retains_dialog_and_control_focus() {
     use aqua_ui::element::Box as UiBox;
 
     let mut preview = ResourcePreview::new("src/file.rs".into(), None, None);
-    preview.content = Some(Ok(PreviewText::new("line\n".into(), 0)));
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new("line\n".into(), 0)),
+    };
     let mut state = ViewState::new(4, SelectionDocumentId(9), SelectionSourceId(10));
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
@@ -134,13 +216,11 @@ fn refreshing_body_retains_dialog_and_control_focus() {
     state.prepare(&preview, &mut app).unwrap();
     let emit: Rc<dyn Fn(Action)> = Rc::new(|_| {});
     let theme = ArtisanTheme::resolved();
-    let dialog = state
-        .dialog(&preview, theme, 700.0, Rc::clone(&emit))
-        .unwrap();
+    let dialog = preview_dialog(&state, &preview, &theme, 700.0, Rc::clone(&emit)).unwrap();
     let host = DialogHost::open(&mut app, owner, dialog).unwrap();
     assert!(app.focus_key("resource-copy-text"));
     let focused = app.tree().focused();
-    let content = state.content(&preview, theme, 700.0, emit).unwrap();
+    let content = state.content(&preview, &theme, 700.0, &emit).unwrap();
     host.refresh_content(&mut app, content).unwrap();
     assert!(host.is_open(&app));
     assert_eq!(app.tree().focused(), focused);
@@ -158,14 +238,17 @@ fn target_line_jump_waits_for_layout_and_aligns_to_start() {
     };
 
     let mut preview = ResourcePreview::new("src/file.rs".into(), Some(51), None);
-    preview.content = Some(Ok(PreviewText::new("line\n".repeat(100), 50)));
+    preview.state = PreviewState::Settled {
+        origin: None,
+        content: Ok(PreviewText::new("line\n".repeat(100), 50)),
+    };
     let mut state = ViewState::new(8, SelectionDocumentId(31), SelectionSourceId(32));
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     state.prepare(&preview, &mut app).unwrap();
     assert_eq!(state.pending_jump(), Some(50));
     assert!(!state.sync_jump(&mut app));
     let content = state
-        .content(&preview, ArtisanTheme::resolved(), 400.0, Rc::new(|_| {}))
+        .content(&preview, &ArtisanTheme::resolved(), 400.0, &ignore())
         .unwrap();
     app.mount(|_| content).unwrap();
     app.set_viewport(600.0, 400.0, 1.0);
@@ -187,4 +270,56 @@ fn target_line_jump_waits_for_layout_and_aligns_to_start() {
         matches!(&app.tree().get(list).unwrap().kind, NodeKind::Scroll(scroll) if (scroll.offset.y - 1200.0).abs() < 0.01)
     );
     state.release(&mut app);
+}
+
+#[test]
+fn a_preview_whose_forge_disconnects_says_so_and_retries_on_the_new_connection() {
+    use std::cell::RefCell;
+    use test_support::editor::core::{connect, remote_host, test_core};
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_core(directory.path());
+    let config = remote_host("resource-forge");
+    connect(&mut core, &config);
+    let source = |core: &crate::core::Core| {
+        let host = core.host(&config.id).unwrap();
+        (
+            config.id.clone(),
+            host.instance(),
+            host.client.clone(),
+            artisan_api::ThreadId("thread".into()),
+        )
+    };
+    let mut preview = ResourcePreview::new("src/lib.rs".into(), Some(12), Some(source(&core)));
+    assert!(preview.content().is_none());
+    core.remove_host(&config.id).unwrap();
+    assert!(preview.drain(&core));
+    assert!(matches!(
+        preview.content(),
+        Some(Err(PreviewError::HostGone { .. }))
+    ));
+
+    let state = ViewState::new(5, SelectionDocumentId(51), SelectionSourceId(52));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&events);
+    let emit: Rc<dyn Fn(Action)> = Rc::new(move |action| sink.borrow_mut().push(action));
+    let content = state
+        .content(&preview, &ArtisanTheme::resolved(), 600.0, &emit)
+        .unwrap();
+    let mut app = test_support::editor::ui::mounted(800.0, 600.0, content);
+    let said = test_support::editor::ui::painted_texts(&app);
+    assert!(
+        said.iter().any(|text| text
+            == "The Forge holding this resource disconnected. Try again once it is back."),
+        "{said:?}"
+    );
+    test_support::editor::ui::click(&mut app, "resource-retry");
+    assert_eq!(&*events.borrow(), &[Action::Retry { generation: 5 }]);
+
+    connect(&mut core, &config);
+    assert!(preview.retry(&core));
+    assert!(
+        preview.content().is_none(),
+        "the preview reads the file again"
+    );
+    assert_eq!(preview.target_line, 11);
 }

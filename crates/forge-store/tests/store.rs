@@ -3,29 +3,9 @@ use artisan_api::{
     ItemsQuery, MessageDirection, Permissions, Phase, ProjectId, Question, Run, RunId, RunStatus,
     Status, ThreadId, ToolKind, Usage, now,
 };
-use forge_store::{Acceptance, BlobRejected, NewItem, Store};
-use std::path::{Path, PathBuf};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    #[expect(
-        clippy::unwrap_used,
-        reason = "test helper; a failure fails the calling test"
-    )]
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("forge-store-test-{}", ItemId::new()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        // Best effort: a leftover temp dir is harmless.
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
+use forge_store::{Acceptance, BlobRejected, DeviceCertificate, NewItem, PairCodeHash, Store};
+use std::path::Path;
+use std::time::Duration;
 
 #[expect(
     clippy::unwrap_used,
@@ -109,13 +89,18 @@ fn run(thread: &ThreadId, status: RunStatus) -> Run {
         engine: EngineId::Claude,
         model: None,
         input_cutoff: 0,
-        status,
+        state: artisan_api::RunOutcome::of(status).map_or(
+            artisan_api::RunState::Running,
+            |outcome| artisan_api::RunState::Finished {
+                outcome,
+                error: None,
+                ended_at: now(),
+            },
+        ),
         usage: Usage::default(),
         session_id: None,
-        error: None,
         seq: 0,
         started_at: now(),
-        ended_at: None,
         continuation: None,
     }
 }
@@ -134,8 +119,8 @@ fn text(item: &Item) -> &str {
     reason = "any other event fails the test"
 )]
 async fn a_client_resuming_after_a_seq_gets_every_later_change_in_order() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     store
         .upsert_item(message(&thread, "m1", "first"))
         .await
@@ -183,7 +168,6 @@ async fn a_client_resuming_after_a_seq_gets_every_later_change_in_order() {
     assert!(seqs[0] > seen);
     assert_eq!(*seqs.last().unwrap(), store.head());
 
-    // Only the latest version of each entity, and nothing from before `seen`.
     let kinds: Vec<&str> = changes
         .iter()
         .map(|envelope| match &envelope.event {
@@ -202,7 +186,6 @@ async fn a_client_resuming_after_a_seq_gets_every_later_change_in_order() {
         .collect();
     assert_eq!(kinds, ["run", "thread", "item", "setting"]);
 
-    // Too far behind: the caller resets instead.
     assert_eq!(store.changes_since(0, 3).await.unwrap(), None);
     let state = store.state().await.unwrap();
     assert_eq!(state.head, store.head());
@@ -215,8 +198,8 @@ async fn a_client_resuming_after_a_seq_gets_every_later_change_in_order() {
 
 #[tokio::test]
 async fn updating_an_item_keeps_its_place_and_a_finished_item_never_reopens() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let initial_activity = store.thread(&thread).await.unwrap().unwrap().activity_seq;
     let first = store
         .upsert_item(reply(&thread, "a1", None, "draft", Status::Running))
@@ -237,7 +220,6 @@ async fn updating_an_item_keeps_its_place_and_a_finished_item_never_reopens() {
     );
     assert!(done.seq > second.seq);
 
-    // A late event from the engine must not resurrect the finished message.
     let late = store
         .upsert_item(reply(&thread, "a1", None, "final!", Status::Running))
         .await
@@ -268,25 +250,24 @@ async fn updating_an_item_keeps_its_place_and_a_finished_item_never_reopens() {
 
 #[tokio::test]
 async fn a_retried_send_stores_the_message_once() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let (sent, created) = store
         .insert_user_message(message(&thread, "m1", "hello"))
         .await
         .unwrap();
     assert!(created);
 
-    let mut events = store.subscribe();
+    let events = store.subscribe();
     let (again, created) = store
         .insert_user_message(message(&thread, "m1", "hello"))
         .await
         .unwrap();
     assert!(!created);
     assert_eq!(again, sent);
-    assert!(
-        events.try_recv().is_err(),
-        "a retry must not publish anything"
-    );
+    events
+        .try_recv()
+        .expect_err("a retry must not publish anything");
 
     let page = store
         .items_page(
@@ -305,8 +286,8 @@ async fn a_retried_send_stores_the_message_once() {
 
 #[tokio::test]
 async fn paging_walks_back_from_the_tail_and_forward_with_more() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut positions = Vec::new();
     for index in 0..7 {
         let item = store
@@ -360,9 +341,9 @@ async fn paging_walks_back_from_the_tail_and_forward_with_more() {
 
 #[tokio::test]
 async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items() {
-    let dir = TempDir::new();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
     let (thread, live, finished, seen) = {
-        let store = Store::open(&dir.0).unwrap();
+        let store = Store::open(dir.path()).unwrap();
         let thread = add_thread(&store).await;
         let finished = store
             .upsert_run(run(&thread, RunStatus::Done))
@@ -409,10 +390,10 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
         (thread, live, finished, store.head())
     };
 
-    let store = Store::open(&dir.0).unwrap();
+    let store = Store::open(dir.path()).unwrap();
     let run = store.run(&live.id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Interrupted);
-    assert!(run.ended_at.is_some());
+    assert_eq!(run.status(), RunStatus::Interrupted);
+    assert!(run.ended_at().is_some());
     assert_eq!(store.run(&finished.id).await.unwrap().unwrap(), finished);
 
     let tool = store
@@ -444,10 +425,9 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
         Status::Done
     );
 
-    // An Editor that was connected before the restart learns about it.
     let changes = store.changes_since(seen, 100).await.unwrap().unwrap();
     assert!(changes.iter().any(|envelope| matches!(&envelope.event,
-        Event::Run { run } if run.status == RunStatus::Interrupted)));
+        Event::Run { run } if run.status() == RunStatus::Interrupted)));
     assert_eq!(
         store.latest_run(&thread).await.unwrap().unwrap().id,
         live.id
@@ -456,10 +436,10 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn subscribers_see_concurrent_writes_in_seq_order() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let start = store.head();
-    let mut events = store.subscribe();
+    let events = store.subscribe();
 
     let writers: Vec<_> = (0..8)
         .map(|writer| {
@@ -477,7 +457,6 @@ async fn subscribers_see_concurrent_writes_in_seq_order() {
         writer.await.unwrap();
     }
 
-    // Raw Item writes publish exactly one durable change.
     let mut seqs = Vec::new();
     while let Ok(envelope) = events.try_recv() {
         seqs.push(envelope.seq.unwrap());
@@ -489,8 +468,8 @@ async fn subscribers_see_concurrent_writes_in_seq_order() {
 
 #[tokio::test]
 async fn blobs_are_stored_once_by_content_and_only_webp_is_accepted() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let webp = webp::Encoder::from_rgb(&[7, 7, 7], 1, 1)
         .encode_lossless()
         .to_vec();
@@ -503,14 +482,17 @@ async fn blobs_are_stored_once_by_content_and_only_webp_is_accepted() {
     assert_eq!(std::fs::read(&path).unwrap(), webp);
     assert_eq!(
         path.parent().unwrap().file_name().unwrap().to_str(),
-        Some(&first.hash.as_str()[..2])
+        Some(first.hash.as_str().split_at(2).0)
     );
 
     let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     let error = store.put_blob(png).await.unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<BlobRejected>(),
-        Some(&BlobRejected::NotWebp)
+    assert!(
+        matches!(
+            *error.cause,
+            forge_store::BlobFailure::Rejected(BlobRejected::NotWebp)
+        ),
+        "a PNG is refused as not WebP: {error}"
     );
 
     assert_eq!(store.blob_path(&BlobHash("../../etc/passwd".into())), None);
@@ -519,82 +501,145 @@ async fn blobs_are_stored_once_by_content_and_only_webp_is_accepted() {
 
 #[tokio::test]
 async fn a_pairing_code_works_once_and_not_after_it_expires() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let now = now();
     store
-        .add_pair_code("fresh".into(), now + 600_000)
+        .add_pair_code(PairCodeHash::of("fresh"), now + 600_000)
         .await
         .unwrap();
-    store.add_pair_code("stale".into(), now - 1).await.unwrap();
+    store
+        .add_pair_code(PairCodeHash::of("stale"), now - 1)
+        .await
+        .unwrap();
 
-    let pair =
-        |code: &str, key: &str| store.pair_device(code.to_owned(), "Laptop".into(), key.to_owned());
+    let pair = |code: &str, key: &str| {
+        store.pair_device(
+            PairCodeHash::of(code),
+            "Laptop".into(),
+            DeviceCertificate::from_der(key.as_bytes()),
+        )
+    };
     let device = pair("fresh", "key-a").await.unwrap().unwrap();
     assert_eq!(pair("fresh", "key-b").await.unwrap(), None);
     assert_eq!(pair("stale", "key-c").await.unwrap(), None);
-    assert_eq!(store.is_authorized("key-a").unwrap(), Some(device.clone()));
-    assert_eq!(store.is_authorized("key-b").unwrap(), None);
+    assert_eq!(
+        store
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
+            .unwrap(),
+        Some(device.clone())
+    );
+    assert_eq!(
+        store
+            .is_authorized(&DeviceCertificate::from_der(b"key-b"))
+            .await
+            .unwrap(),
+        None
+    );
 
     let mut revocations = store.subscribe_revocations();
     assert!(store.revoke_device(&device).await.unwrap());
-    assert_eq!(store.is_authorized("key-a").unwrap(), None);
+    assert_eq!(
+        store
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
+            .unwrap(),
+        None
+    );
     assert_eq!(revocations.recv().await.unwrap(), device);
 }
 
-/// `ae forge devices revoke` writes from another process while Forge runs;
-/// the device's next request is refused and its open streams are told.
 #[tokio::test]
-async fn a_device_revoked_by_another_process_is_refused_next() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
-    let device = store
-        .add_device("Laptop".into(), "key-a".into())
+async fn abandoned_pairing_codes_do_not_pile_up() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
+    let now = now();
+    for attempt in 0..20 {
+        store
+            .add_pair_code(PairCodeHash::of(&format!("abandoned-{attempt}")), now - 1)
+            .await
+            .unwrap();
+    }
+    store
+        .add_pair_code(PairCodeHash::of("current"), now + 600_000)
         .await
         .unwrap();
-    assert_eq!(store.is_authorized("key-a").unwrap(), Some(device.clone()));
+    forge_store::admin::Admin::open(dir.path())
+        .unwrap()
+        .add_pair_code(&PairCodeHash::of("from-ae"), now + 600_000)
+        .unwrap();
+
+    let stored: i64 = rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
+        .unwrap()
+        .query_row(include_str!("store/count_pair_codes.sql"), [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, 2);
+}
+
+#[tokio::test]
+async fn a_device_revoked_by_another_process_is_refused_next() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
+    let device = store
+        .add_device("Laptop".into(), DeviceCertificate::from_der(b"key-a"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
+            .unwrap(),
+        Some(device.clone())
+    );
     let mut revocations = store.subscribe_revocations();
-    let admin = forge_store::admin::Admin::open(&dir.0).unwrap();
+    let admin = forge_store::admin::Admin::open(dir.path()).unwrap();
     assert!(admin.revoke_device(device.as_str()).unwrap().is_some());
-    assert_eq!(store.is_authorized("key-a").unwrap(), None);
+    assert_eq!(
+        store
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
+            .unwrap(),
+        None
+    );
     assert_eq!(revocations.try_recv().unwrap(), device);
 }
 
-/// Threads saved with the old access and approvals keep running the way
-/// they did: never asking stays Full, everything else becomes Auto.
 #[tokio::test]
 async fn old_permission_choices_become_auto_or_full() {
-    let dir = TempDir::new();
-    let seed = TempDir::new();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let seed = tempfile::tempdir().expect("create the test's temporary directory");
     let (asks, never_asks) = {
-        let store = Store::open(&seed.0).unwrap();
+        let store = Store::open(seed.path()).unwrap();
         (add_thread(&store).await, add_thread(&store).await)
     };
-    let conn = rusqlite::Connection::open(dir.0.join("forge.sqlite3")).unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     conn.execute_batch(include_str!("fixtures/schema-v3.sql"))
         .unwrap();
     conn.execute(
-        "ATTACH DATABASE ?1 AS seed",
-        [seed.0.join("forge.sqlite3").to_str().unwrap()],
+        include_str!("store/attach_seed.sql"),
+        [seed.path().join("forge.sqlite3").to_str().unwrap()],
     )
     .unwrap();
-    conn.execute_batch("INSERT INTO projects SELECT id,seq,body FROM seed.projects; INSERT INTO threads SELECT id,seq,body FROM seed.threads; DETACH DATABASE seed;").unwrap();
+    conn.execute_batch(include_str!("store/copy_seed.sql"))
+        .unwrap();
     for (thread, approvals) in [(&asks, "on_request"), (&never_asks, "never")] {
         conn.execute(
-            "UPDATE threads SET body = json_set(json_remove(body, '$.config.permissions'),
-                 '$.config.access', 'workspace', '$.config.approvals', ?2) WHERE id = ?1",
+            include_str!("store/legacy_thread_permissions.sql"),
             rusqlite::params![thread.to_string(), approvals],
         )
         .unwrap();
     }
     conn.execute(
-        "INSERT OR REPLACE INTO kv (key, seq, value) VALUES ('default_engine_config', 0, ?1)",
+        include_str!("store/legacy_default_config.sql"),
         [r#"{"engine":"codex","model":null,"effort":null,"access":"full","approvals":"never","options":{}}"#],
     )
     .unwrap();
     drop(conn);
 
-    let state = Store::open(&dir.0).unwrap().state().await.unwrap();
+    let state = Store::open(dir.path()).unwrap().state().await.unwrap();
     let permissions = |id: &ThreadId| {
         state
             .threads
@@ -611,8 +656,8 @@ async fn old_permission_choices_become_auto_or_full() {
 
 #[tokio::test]
 async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_existing_ids() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let missing_project = ProjectId::new();
     let mut request = CreateThread {
         id: ThreadId::new(),
@@ -624,18 +669,13 @@ async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_ex
     };
     let head = store.head();
     let error = store.create_thread(request.clone()).await.unwrap_err();
-    assert_eq!(
-        error
-            .downcast_ref::<forge_store::ProjectNotFound>()
-            .unwrap()
-            .0,
-        missing_project,
-    );
+    assert!(matches!(
+        error,
+        forge_store::CreateThreadError::ProjectNotFound { ref project, .. } if *project == missing_project
+    ));
     assert_eq!(store.head(), head);
     assert!(store.thread(&request.id).await.unwrap().is_none());
 
-    // Existing IDs return their canonical stored thread. A route must not
-    // override that operation with an earlier check of the replayed request.
     request.id = thread.clone();
     let existing = store.thread(&thread).await.unwrap().unwrap();
     assert_eq!(store.create_thread(request).await.unwrap(), existing);
@@ -643,9 +683,173 @@ async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_ex
 }
 
 #[tokio::test]
+async fn threads_are_refused_under_removed_projects_and_with_impossible_lineage() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, parent) = test_store(dir.path()).await;
+    let project = store.thread(&parent).await.unwrap().unwrap().project_id;
+    let other = add_thread(&store).await;
+    let foreign_agent = ItemId::new();
+    store
+        .upsert_item(NewItem {
+            id: foreign_agent.clone(),
+            thread_id: other,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Running,
+            kind: ItemKind::Agent {
+                name: None,
+                description: "elsewhere".into(),
+                prompt: None,
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: None,
+                label: None,
+                engine: None,
+                thread: None,
+            },
+        })
+        .await
+        .unwrap();
+    let request = |parent_thread_id: Option<ThreadId>, spawned_by: Option<ItemId>| CreateThread {
+        id: ThreadId::new(),
+        project_id: project.clone(),
+        config: EngineConfig::new(EngineId::Claude),
+        title: None,
+        parent_thread_id,
+        spawned_by,
+    };
+    let refusal = |error: forge_store::CreateThreadError| error;
+    let head = store.head();
+
+    let mut own_parent = request(None, None);
+    own_parent.parent_thread_id = Some(own_parent.id.clone());
+    assert!(matches!(
+        refusal(store.create_thread(own_parent).await.unwrap_err()),
+        forge_store::CreateThreadError::ParentNotFound { .. }
+    ));
+    assert!(matches!(
+        refusal(
+            store
+                .create_thread(request(Some(ThreadId::new()), None))
+                .await
+                .unwrap_err()
+        ),
+        forge_store::CreateThreadError::ParentNotFound { .. }
+    ));
+    assert!(matches!(
+        refusal(
+            store
+                .create_thread(request(None, Some(ItemId::new())))
+                .await
+                .unwrap_err()
+        ),
+        forge_store::CreateThreadError::AgentWithoutParent { .. }
+    ));
+    assert!(matches!(
+        refusal(
+            store
+                .create_thread(request(Some(parent.clone()), Some(foreign_agent)))
+                .await
+                .unwrap_err()
+        ),
+        forge_store::CreateThreadError::AgentNotInParent { .. }
+    ));
+    assert_eq!(store.head(), head);
+
+    store
+        .create_thread(request(Some(parent), None))
+        .await
+        .unwrap();
+    store.remove_project(&project).await.unwrap();
+    assert!(matches!(
+        refusal(store.create_thread(request(None, None)).await.unwrap_err()),
+        forge_store::CreateThreadError::ProjectRemoved { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_run_stays_in_the_thread_it_started_in() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
+    let other = add_thread(&store).await;
+    let started = store
+        .upsert_run(run(&thread, RunStatus::Running))
+        .await
+        .unwrap();
+    let mut moved = started.clone();
+    moved.thread_id = other.clone();
+    moved
+        .finish(artisan_api::RunOutcome::Done, None, now())
+        .unwrap();
+
+    let error = store.upsert_run(moved).await.unwrap_err();
+
+    assert!(
+        matches!(*error.cause, forge_store::WriteFailure::RunMoved(_)),
+        "a run that changes thread is refused as moved: {error}"
+    );
+    assert_eq!(store.latest_run(&thread).await.unwrap(), Some(started));
+    assert_eq!(store.latest_run(&other).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkpoint_a_reader_held_back_finishes_once_the_reader_lets_go() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
+    let database = dir.path().join("forge.sqlite3");
+    let on_disk = || std::fs::metadata(&database).unwrap().len();
+    let logical = || {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let pages: u64 = conn
+            .query_row(include_str!("store/page_count.sql"), [], |row| row.get(0))
+            .unwrap();
+        let size: u64 = conn
+            .query_row(include_str!("store/page_size.sql"), [], |row| row.get(0))
+            .unwrap();
+        pages * size
+    };
+    let before = on_disk();
+    let reader = rusqlite::Connection::open(&database).unwrap();
+    reader
+        .execute_batch(include_str!("store/begin.sql"))
+        .unwrap();
+    let _: i64 = reader
+        .query_row(include_str!("store/count_items.sql"), [], |row| row.get(0))
+        .unwrap();
+    for index in 0..600 {
+        store
+            .upsert_item(message(&thread, &format!("held-{index}"), "x"))
+            .await
+            .unwrap();
+    }
+    test_support::wait::wait_until(
+        "a checkpoint up to the reader",
+        Duration::from_secs(30),
+        || on_disk() > before,
+    );
+    assert!(
+        on_disk() < logical(),
+        "the reader held the newer commits back"
+    );
+
+    reader
+        .execute_batch(include_str!("store/commit.sql"))
+        .unwrap();
+
+    test_support::wait::wait_until(
+        "the held-back commits to reach the database file",
+        Duration::from_secs(30),
+        || on_disk() >= logical(),
+    );
+}
+
+#[tokio::test]
 async fn unchanged_values_publish_nothing_and_read_markers_never_regress() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let input = message(&thread, "unchanged", "hello");
     let item = store.upsert_item(input.clone()).await.unwrap();
     let run = store
@@ -662,7 +866,7 @@ async fn unchanged_values_publish_nothing_and_read_markers_never_regress() {
     };
     store.update_thread(&thread, update.clone()).await.unwrap();
     let head = store.head();
-    let mut events = store.subscribe();
+    let events = store.subscribe();
     assert_eq!(store.upsert_item(input).await.unwrap(), item);
     assert_eq!(store.upsert_run(run.clone()).await.unwrap(), run);
     store
@@ -681,21 +885,23 @@ async fn unchanged_values_publish_nothing_and_read_markers_never_regress() {
         .await
         .unwrap();
     assert_eq!(store.head(), head);
-    assert!(events.try_recv().is_err());
+    events
+        .try_recv()
+        .expect_err("the refused write emitted no event");
 }
 
 #[tokio::test]
 async fn restart_preserves_accepted_input_for_delivery() {
-    let dir = TempDir::new();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
     let thread;
     {
-        let (store, id) = test_store(&dir.0).await;
+        let (store, id) = test_store(dir.path()).await;
         thread = id;
         let mut input = message(&thread, "pending", "not delivered");
         input.status = Status::Running;
         store.insert_user_message(input).await.unwrap();
     }
-    let reopened = Store::open(&dir.0).unwrap();
+    let reopened = Store::open(dir.path()).unwrap();
     let pending = reopened.pending_inputs(&thread).await.unwrap().items;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id.as_str(), "pending");
@@ -704,61 +910,71 @@ async fn restart_preserves_accepted_input_for_delivery() {
 
 #[tokio::test]
 async fn a_message_id_cannot_change_content_or_thread() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     store
         .insert_user_message(message(&thread, "fixed", "original"))
         .await
         .unwrap();
     let head = store.head();
-    assert!(
-        store
-            .insert_user_message(message(&thread, "fixed", "changed"))
-            .await
-            .is_err()
-    );
+    store
+        .insert_user_message(message(&thread, "fixed", "changed"))
+        .await
+        .expect_err("the same message id with other content is refused");
     let other = add_thread(&store).await;
     let after_thread = store.head();
-    assert!(
-        store
-            .insert_user_message(message(&other, "fixed", "original"))
-            .await
-            .is_err()
-    );
+    store
+        .insert_user_message(message(&other, "fixed", "original"))
+        .await
+        .expect_err("the same message id in another thread is refused");
     assert_eq!(store.head(), after_thread);
     assert!(after_thread > head);
 }
 
 #[tokio::test]
 async fn pairing_failure_does_not_consume_the_invitation() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     store
-        .add_pair_code("invite".into(), now() + 60_000)
+        .add_pair_code(PairCodeHash::of("invite"), now() + 60_000)
         .await
         .unwrap();
-    let conn = rusqlite::Connection::open(dir.0.join("forge.sqlite3")).unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER reject_device BEFORE INSERT ON authorized_keys
-        BEGIN SELECT RAISE(ABORT, 'injected device failure'); END;",
-    )
-    .unwrap();
-    assert!(
-        store
-            .pair_device("invite".into(), "Laptop".into(), "certificate".into())
-            .await
-            .is_err()
-    );
-    conn.execute_batch("DROP TRIGGER reject_device;").unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
+    conn.execute_batch(include_str!("store/reject_device_trigger.sql"))
+        .unwrap();
+    store
+        .pair_device(
+            PairCodeHash::of("invite"),
+            "Laptop".into(),
+            DeviceCertificate::from_der(b"certificate"),
+        )
+        .await
+        .expect_err("pairing with an unknown invitation is refused");
+    conn.execute_batch(include_str!("store/drop_reject_device.sql"))
+        .unwrap();
     let id = store
-        .pair_device("invite".into(), "Laptop".into(), "certificate".into())
+        .pair_device(
+            PairCodeHash::of("invite"),
+            "Laptop".into(),
+            DeviceCertificate::from_der(b"certificate"),
+        )
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(store.is_authorized("certificate").unwrap(), Some(id));
+    assert_eq!(
+        store
+            .is_authorized(&DeviceCertificate::from_der(b"certificate"))
+            .await
+            .unwrap(),
+        Some(id)
+    );
     assert!(
         store
-            .pair_device("invite".into(), "Laptop".into(), "certificate".into())
+            .pair_device(
+                PairCodeHash::of("invite"),
+                "Laptop".into(),
+                DeviceCertificate::from_der(b"certificate"),
+            )
             .await
             .unwrap()
             .is_none()
@@ -767,8 +983,8 @@ async fn pairing_failure_does_not_consume_the_invitation() {
 
 #[tokio::test]
 async fn replaying_a_send_cannot_change_config_or_title() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let command = artisan_api::SendMessage {
         draft: None,
         id: ItemId::new(),
@@ -780,8 +996,7 @@ async fn replaying_a_send_cannot_change_config_or_title() {
         .send_message(
             thread.clone(),
             command.clone(),
-            false,
-            forge_store::Acceptance {
+            Acceptance {
                 title: Some("First title".into()),
                 remember_config: true,
                 from_agent: None,
@@ -798,8 +1013,7 @@ async fn replaying_a_send_cannot_change_config_or_title() {
         .send_message(
             thread.clone(),
             replay,
-            true,
-            forge_store::Acceptance {
+            Acceptance {
                 title: Some("Replayed title".into()),
                 remember_config: true,
                 from_agent: None,
@@ -818,8 +1032,8 @@ async fn replaying_a_send_cannot_change_config_or_title() {
 
 #[tokio::test]
 async fn concurrent_skill_changes_and_unrelated_mcp_edits_survive() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let (left, right) = tokio::join!(
         store.set_skill_enabled("local.review".into(), false),
         store.set_skill_enabled("local.deploy".into(), false)
@@ -850,8 +1064,8 @@ async fn concurrent_skill_changes_and_unrelated_mcp_edits_survive() {
             server: right.clone()
         })
     );
-    a.unwrap();
-    b.unwrap();
+    assert!(a.unwrap().forgotten.into_names().is_empty());
+    assert!(b.unwrap().forgotten.into_names().is_empty());
     let mut edited = left.clone();
     edited.command = "new-left-server".into();
     let servers = store
@@ -861,21 +1075,129 @@ async fn concurrent_skill_changes_and_unrelated_mcp_edits_survive() {
         })
         .await
         .unwrap();
-    assert_eq!(servers, vec![edited, right]);
+    assert!(servers.forgotten.into_names().is_empty());
+    assert_eq!(servers.servers, vec![edited, right]);
+    store
+        .mutate_mcp(artisan_api::McpMutation::Remove { previous: left })
+        .await
+        .expect_err("stale deletion must not remove a newer edit");
+}
+
+#[tokio::test]
+async fn a_config_bundle_that_removes_a_server_names_it_so_its_sign_ins_end() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
+    let server = artisan_api::McpServer {
+        name: "linear".into(),
+        url: Some("https://mcp.linear.app/mcp".into()),
+        ..Default::default()
+    };
+    let bundle = |mcp| forge_store::ConfigBundle {
+        enable_skills: Vec::new(),
+        prompt: None,
+        mcp,
+        record: serde_json::json!({}),
+    };
+    let forgotten = |commit| match commit {
+        forge_store::BundleCommit::Applied { forgotten } => forgotten.into_names(),
+        forge_store::BundleCommit::PromptChanged { latest } => {
+            panic!("a bundle without a prompt hit prompt version {latest}")
+        }
+    };
+    let added = store
+        .apply_config_bundle(bundle(vec![artisan_api::McpMutation::Upsert {
+            previous: None,
+            server: server.clone(),
+        }]))
+        .await
+        .unwrap();
+    assert!(forgotten(added).is_empty());
+    let removed = store
+        .apply_config_bundle(bundle(vec![artisan_api::McpMutation::Remove {
+            previous: server,
+        }]))
+        .await
+        .unwrap();
+    assert_eq!(
+        forgotten(removed),
+        ["linear"],
+        "a synced removal has to end the server's pending sign-ins"
+    );
+}
+
+#[tokio::test]
+async fn removing_an_mcp_server_forgets_its_sign_in() {
+    use forge_store::McpSecret;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
+    let server = artisan_api::McpServer {
+        name: "linear".into(),
+        url: Some("https://mcp.linear.app/mcp".into()),
+        ..Default::default()
+    };
+    let url = server.url.clone().unwrap();
+    let added = store
+        .mutate_mcp(artisan_api::McpMutation::Upsert {
+            previous: None,
+            server: server.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(added.forgotten.into_names().is_empty());
+    for secret in [McpSecret::Tokens, McpSecret::Client] {
+        assert!(
+            store
+                .set_mcp_secret("linear".into(), url.clone(), secret, "account-a".into())
+                .await
+                .unwrap()
+        );
+    }
+
+    let removed = store
+        .mutate_mcp(artisan_api::McpMutation::Remove {
+            previous: server.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(removed.forgotten.into_names(), ["linear"]);
+    let added = store
+        .mutate_mcp(artisan_api::McpMutation::Upsert {
+            previous: None,
+            server,
+        })
+        .await
+        .unwrap();
+    assert!(added.forgotten.into_names().is_empty());
+
+    for secret in [McpSecret::Tokens, McpSecret::Client] {
+        assert_eq!(store.secret(&secret.key("linear")).await.unwrap(), None);
+    }
     assert!(
-        store
-            .mutate_mcp(artisan_api::McpMutation::Remove { previous: left })
+        !store
+            .set_mcp_secret(
+                "linear".into(),
+                "https://elsewhere.example/mcp".into(),
+                McpSecret::Tokens,
+                "late sign-in".into(),
+            )
             .await
-            .is_err(),
-        "stale deletion must not remove a newer edit"
+            .unwrap(),
+        "a sign-in that finishes for a removed or changed server keeps nothing"
+    );
+    assert_eq!(
+        store
+            .secret(&McpSecret::Tokens.key("linear"))
+            .await
+            .unwrap(),
+        None
     );
 }
 
 #[tokio::test]
 async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
     use artisan_api::{DraftRevision, SendMessage, WriteDraft};
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let saved = store
         .set_draft(
             "scope".into(),
@@ -919,12 +1241,7 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
         }),
     };
     store
-        .send_message(
-            thread.clone(),
-            command.clone(),
-            false,
-            Acceptance::default(),
-        )
+        .send_message(thread.clone(), command.clone(), Acceptance::default())
         .await
         .unwrap();
     assert_eq!(store.draft("scope").await.unwrap(), newer.current);
@@ -932,7 +1249,7 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
     accepted.id = ItemId::new();
     accepted.draft.as_mut().unwrap().revision = newer.current.revision;
     store
-        .send_message(thread, accepted, false, Acceptance::default())
+        .send_message(thread, accepted, Acceptance::default())
         .await
         .unwrap();
     let cleared = store.draft("scope").await.unwrap();
@@ -955,8 +1272,8 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
 
 #[tokio::test]
 async fn settlement_is_monotonic_and_cannot_acknowledge_future_activity() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     store
         .insert_user_message(message(&thread, "settle-input", "hello"))
         .await
@@ -979,8 +1296,8 @@ async fn settlement_is_monotonic_and_cannot_acknowledge_future_activity() {
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist() {
     use artisan_api::{FileChange, FileOp, PlanStep, StepStatus};
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut shell = message(&thread, "background-shell", "");
     shell.status = Status::Running;
     shell.kind = ItemKind::Tool {
@@ -1014,13 +1331,9 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
     let mut workflow = message(&thread, "workflow", "");
     workflow.status = Status::Running;
     workflow.kind = ItemKind::Tool {
-        tool: ToolKind::Other {
-            name: "Workflow".into(),
-            input: Some(
-                serde_json::json!({"script": "export const meta = { name: 'review-changes' }"})
-                    .to_string()
-                    .into(),
-            ),
+        tool: ToolKind::Workflow {
+            name: Some("review-changes".into()),
+            input: None,
         },
         title: None,
         output: None,
@@ -1094,7 +1407,6 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
             .any(|item| item.id.as_str() == "background-shell")
     );
     let summary = store.inspector(&thread).await.unwrap();
-    // The panel splits what the turn waits on from what runs on without it.
     let terminals: Vec<_> = summary
         .terminals
         .iter()
@@ -1121,8 +1433,8 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
 
 #[tokio::test]
 async fn transcript_pages_do_not_spend_the_root_window_on_agent_output() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     store
         .upsert_item(message(&thread, "root-first", "root"))
         .await
@@ -1173,8 +1485,8 @@ async fn transcript_pages_do_not_spend_the_root_window_on_agent_output() {
 
 #[tokio::test]
 async fn large_sources_do_not_spend_item_page_budget_and_keep_both_cursor_orders() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let text = "x".repeat(3 * 1024 * 1024);
     let mut positions = Vec::new();
     for n in 0..4 {
@@ -1245,8 +1557,8 @@ async fn large_sources_do_not_spend_item_page_budget_and_keep_both_cursor_orders
 
 #[tokio::test]
 async fn thread_controls_survive_window_eviction_and_goal_completion() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut goal = message(&thread, "goal", "");
     goal.kind = ItemKind::Notice {
         kind: artisan_api::NoticeKind::Goal {
@@ -1291,12 +1603,10 @@ async fn thread_controls_survive_window_eviction_and_goal_completion() {
     assert!(store.inspector(&thread).await.unwrap().goal.is_none());
 }
 
-/// The user clears the goal (a new notice), then the engine sets it again
-/// on its run's goal notice, which sits earlier: the goal is set.
 #[tokio::test]
 async fn a_goal_set_again_after_a_clear_shows_the_goal() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let goal = |id: &str, state: &str| {
         let mut item = message(&thread, id, "");
         item.kind = ItemKind::Notice {
@@ -1320,8 +1630,8 @@ async fn a_goal_set_again_after_a_clear_shows_the_goal() {
 
 #[tokio::test]
 async fn edit_totals_replace_instead_of_double_counting_item_updates() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut edit = message(&thread, "counted-edit", "");
     let kind = |diff: &str| ItemKind::Tool {
         tool: ToolKind::Edit {
@@ -1365,8 +1675,8 @@ async fn edit_totals_replace_instead_of_double_counting_item_updates() {
 
 #[tokio::test]
 async fn agents_get_unique_stable_names_across_harnesses_and_tool_promotions() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut labels = std::collections::HashSet::new();
     for engine in EngineId::ALL {
         for promoted in [false, true] {
@@ -1414,8 +1724,6 @@ async fn agents_get_unique_stable_names_across_harnesses_and_tool_promotions() {
                 assert_eq!(named.position, initial.position);
                 assert_eq!(named.created_at, initial.created_at);
             }
-            // Replayed adapter updates must keep the reserved name, even
-            // when they contain a blank label.
             assert_eq!(
                 store
                     .upsert_item(agent.clone())
@@ -1436,8 +1744,8 @@ async fn agents_get_unique_stable_names_across_harnesses_and_tool_promotions() {
 
 #[tokio::test]
 async fn canonical_agent_message_appears_in_both_pages_without_another_row() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut agent = message(&thread, "agent-owner", "");
     agent.kind = ItemKind::Agent {
         engine: None,
@@ -1491,8 +1799,8 @@ async fn canonical_agent_message_appears_in_both_pages_without_another_row() {
 
 #[tokio::test]
 async fn inline_metadata_pages_enforce_byte_budget_without_cursor_gaps() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let text = "x".repeat(artisan_api::INLINE_TEXT_BYTES);
     let label = "n".repeat(4096);
     let mut positions = Vec::new();
@@ -1594,9 +1902,8 @@ async fn inline_metadata_pages_enforce_byte_budget_without_cursor_gaps() {
 
 #[tokio::test]
 async fn a_settled_agent_leaves_the_inspector_at_once() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
-    // The agents belong to the turn still in progress.
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let turn = store
         .upsert_run(run(&thread, RunStatus::Running))
         .await
@@ -1634,7 +1941,6 @@ async fn a_settled_agent_leaves_the_inspector_at_once() {
         listed(store.inspector(&thread).await.unwrap()),
         ["stopping", "finishing", "working"]
     );
-    // Done and cancelled agents go now, not when the next turn starts.
     store
         .upsert_item(agent("finishing", Status::Done))
         .await
@@ -1648,8 +1954,8 @@ async fn a_settled_agent_leaves_the_inspector_at_once() {
 
 #[tokio::test]
 async fn an_engine_subagent_shows_the_threads_settings_with_its_own_model() {
-    let dir = TempDir::new();
-    let (store, thread) = test_store(&dir.0).await;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
     let mut item = message(&thread, "helper", "");
     item.status = Status::Running;
     item.kind = ItemKind::Agent {
@@ -1670,13 +1976,13 @@ async fn an_engine_subagent_shows_the_threads_settings_with_its_own_model() {
     let config = summary.agents[0].config.clone().expect("agent settings");
     assert_eq!(config.engine, EngineId::Claude);
     assert_eq!(config.model.as_deref(), Some("claude-haiku-5-5"));
-    assert_eq!(config.permissions, artisan_api::Permissions::Auto);
+    assert_eq!(config.permissions, Permissions::Auto);
 }
 
 #[tokio::test]
 async fn a_newer_thread_page_slides_back_up_from_its_cursor() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     for _ in 0..5 {
         add_thread(&store).await;
     }
@@ -1693,24 +1999,22 @@ async fn a_newer_thread_page_slides_back_up_from_its_cursor() {
             .collect()
     };
     let after = |thread: &artisan_api::Thread, limit| artisan_api::ThreadsQuery {
-        after_activity: Some(thread.activity_seq),
-        after_id: Some(thread.id.clone()),
+        window: artisan_api::ThreadWindow::After(artisan_api::ThreadCursor {
+            activity_seq: thread.activity_seq,
+            id: thread.id.clone(),
+        }),
         limit: Some(limit),
         ..Default::default()
     };
-    // The two just above the fourth newest, newest first; more above them.
     let page = store.threads_page(after(&all[3], 2)).await.unwrap();
     assert_eq!(ids(&page), [all[1].id.clone(), all[2].id.clone()]);
     assert!(page.newer);
     assert!(page.next.is_none());
-    // Up to the newest: nothing above it.
     let page = store.threads_page(after(&all[1], 2)).await.unwrap();
     assert_eq!(ids(&page), [all[0].id.clone()]);
     assert!(!page.newer);
 }
 
-/// A run left live with an engine session, as a Forge that died mid-turn
-/// leaves it.
 #[expect(
     clippy::unwrap_used,
     reason = "test helper; a failure fails the calling test"
@@ -1723,17 +2027,15 @@ async fn live_run_with_session(store: &Store, thread: &ThreadId) -> Run {
 
 #[tokio::test]
 async fn a_turn_a_restart_cut_short_carries_on_by_itself() {
-    let dir = TempDir::new();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
     let (thread, without_session, waiting) = {
-        let (store, thread) = test_store(&dir.0).await;
+        let (store, thread) = test_store(dir.path()).await;
         live_run_with_session(&store, &thread).await;
-        // The engine never named a session: nothing to resume.
         let without_session = add_thread(&store).await;
         store
             .upsert_run(run(&without_session, RunStatus::Running))
             .await
             .unwrap();
-        // An undelivered message starts the next run anyway.
         let waiting = add_thread(&store).await;
         live_run_with_session(&store, &waiting).await;
         let mut input = message(&waiting, "pending", "not delivered");
@@ -1741,7 +2043,7 @@ async fn a_turn_a_restart_cut_short_carries_on_by_itself() {
         store.insert_user_message(input).await.unwrap();
         (thread, without_session, waiting)
     };
-    let store = Store::open(&dir.0).unwrap();
+    let store = Store::open(dir.path()).unwrap();
     assert!(store.continue_pending(&thread).await.unwrap());
     assert!(!store.continue_pending(&without_session).await.unwrap());
     assert!(!store.continue_pending(&waiting).await.unwrap());
@@ -1757,9 +2059,9 @@ async fn a_turn_a_restart_cut_short_carries_on_by_itself() {
 
 #[tokio::test]
 async fn a_turn_that_keeps_taking_forge_down_stops_carrying_on() {
-    let dir = TempDir::new();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
     let thread = {
-        let (store, thread) = test_store(&dir.0).await;
+        let (store, thread) = test_store(dir.path()).await;
         for _ in 0..forge_store::MAX_RESTART_CONTINUATIONS - 1 {
             let mut continued = run(&thread, RunStatus::Interrupted);
             continued.continuation = Some(artisan_api::Continuation::Restart);
@@ -1770,15 +2072,15 @@ async fn a_turn_that_keeps_taking_forge_down_stops_carrying_on() {
         store.upsert_run(live).await.unwrap();
         thread
     };
-    let store = Store::open(&dir.0).unwrap();
+    let store = Store::open(dir.path()).unwrap();
     assert!(!store.continue_pending(&thread).await.unwrap());
 }
 
 #[tokio::test]
 async fn turning_continue_after_restart_off_leaves_interrupted_turns_alone() {
-    let dir = TempDir::new();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
     let thread = {
-        let (store, thread) = test_store(&dir.0).await;
+        let (store, thread) = test_store(dir.path()).await;
         store
             .set_setting(
                 forge_store::CONTINUE_AFTER_RESTART_KEY.into(),
@@ -1789,19 +2091,79 @@ async fn turning_continue_after_restart_off_leaves_interrupted_turns_alone() {
         live_run_with_session(&store, &thread).await;
         thread
     };
-    let store = Store::open(&dir.0).unwrap();
+    let store = Store::open(dir.path()).unwrap();
     assert_eq!(
-        store.latest_run(&thread).await.unwrap().unwrap().status,
+        store.latest_run(&thread).await.unwrap().unwrap().status(),
         RunStatus::Interrupted
     );
     assert!(!store.continue_pending(&thread).await.unwrap());
 }
 
 #[tokio::test]
+async fn turning_retries_off_publishes_the_setting_before_the_threads_it_unparks() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, thread) = test_store(dir.path()).await;
+    let mut failed = live_run_with_session(&store, &thread).await;
+    failed
+        .finish(artisan_api::RunOutcome::Failed, None, now())
+        .unwrap();
+    let (_, parked) = store
+        .settle_run(forge_store::Settlement {
+            run: failed,
+            open: Vec::new(),
+            attempted: Vec::new(),
+            park: Some(forge_store::Park {
+                continuation: artisan_api::Continuation::Overloaded,
+                due_at: now() + 60_000,
+            }),
+            note: None,
+        })
+        .await
+        .unwrap();
+    assert!(parked);
+    let events = store.subscribe();
+
+    store
+        .set_setting(
+            forge_store::RETRY_WHEN_OVERLOADED_KEY.into(),
+            serde_json::Value::Bool(false),
+        )
+        .await
+        .unwrap();
+
+    let mut delivered = Vec::new();
+    while let Ok(envelope) = events.try_recv() {
+        delivered.push(envelope);
+    }
+    let mut cursor = 0;
+    let accepted: Vec<&Event> = delivered
+        .iter()
+        .filter(|envelope| {
+            let seq = envelope.seq.unwrap();
+            let fresh = seq > cursor;
+            cursor = cursor.max(seq);
+            fresh
+        })
+        .map(|envelope| &envelope.event)
+        .collect();
+    assert!(
+        accepted.iter().any(|event| matches!(
+            event,
+            Event::Setting { key, .. } if key == forge_store::RETRY_WHEN_OVERLOADED_KEY
+        )),
+        "a client following the cursor still sees retries turn off"
+    );
+    assert!(accepted.iter().any(|event| matches!(
+        event,
+        Event::Thread { thread: unparked } if unparked.id == thread && unparked.parked_until.is_none()
+    )));
+}
+
+#[tokio::test]
 async fn an_agent_forge_started_keeps_working_through_a_restart() {
-    let dir = TempDir::new();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
     let (parent, child) = {
-        let (store, parent) = test_store(&dir.0).await;
+        let (store, parent) = test_store(dir.path()).await;
         let child = add_thread(&store).await;
         let live = live_run_with_session(&store, &parent).await;
         let mut agent = reply(&parent, "agent", Some(&live.id), "", Status::Running);
@@ -1822,12 +2184,128 @@ async fn an_agent_forge_started_keeps_working_through_a_restart() {
         live_run_with_session(&store, &child).await;
         (parent, child)
     };
-    let store = Store::open(&dir.0).unwrap();
+    let store = Store::open(dir.path()).unwrap();
     let agent = store.item(&ItemId::from("agent")).await.unwrap().unwrap();
     assert_eq!(agent.status, Status::Running);
     assert!(store.continue_pending(&parent).await.unwrap());
     assert!(store.continue_pending(&child).await.unwrap());
 }
 
+#[cfg(unix)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
+fn modes(dir: &Path) -> Vec<(String, u32)> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut modes: Vec<(String, u32)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("forge.sqlite3")
+        })
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.metadata().unwrap().permissions().mode() & 0o777,
+            )
+        })
+        .collect();
+    modes.sort();
+    modes
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_database_is_readable_only_by_this_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (store, _) = test_store(dir.path()).await;
+    let files = modes(dir.path());
+    drop(store);
+    assert!(
+        files.iter().any(|(name, _)| name == "forge.sqlite3-wal"),
+        "the write-ahead log exists while the store is open: {files:?}"
+    );
+    assert!(
+        files.iter().all(|(_, mode)| *mode == 0o600),
+        "other local users can read Forge's credentials: {files:?}"
+    );
+    let folder = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        folder, 0o700,
+        "other local users can enter Forge's data folder"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn opening_repairs_a_readable_database_and_its_backups() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let (store, _) = test_store(dir.path()).await;
+    drop(store);
+    let backup = dir.path().join("forge.sqlite3.schema-1");
+    std::fs::write(&backup, b"backup").unwrap();
+    for (name, _) in modes(dir.path()) {
+        std::fs::set_permissions(
+            dir.path().join(name),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+    }
+    let store = Store::open(dir.path()).unwrap();
+    let files = modes(dir.path());
+    drop(store);
+    assert!(
+        files.iter().all(|(_, mode)| *mode == 0o600),
+        "an existing database stays readable by other local users: {files:?}"
+    );
+}
+
 #[path = "store/native-agents.rs"]
 mod native_agents;
+
+fn take_alone(database: &Path) -> rusqlite::Result<()> {
+    let conn = rusqlite::Connection::open(database)?;
+    conn.busy_timeout(Duration::ZERO)?;
+    conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    conn.execute_batch(include_str!("store/take_alone.sql"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_store_closes_the_database_before_it_returns() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let database = dir.path().join("forge.sqlite3");
+    for round in 0..3 {
+        let (store, thread) = test_store(dir.path()).await;
+        for item in 0..200 {
+            store
+                .upsert_item(reply(
+                    &thread,
+                    &format!("item-{round}-{item}"),
+                    None,
+                    &"words ".repeat(200),
+                    Status::Done,
+                ))
+                .await
+                .unwrap();
+        }
+        drop(store);
+        take_alone(&database).unwrap_or_else(|error| {
+            panic!("round {round}: the dropped store still holds the database: {error}")
+        });
+    }
+    let reopened = Store::open(dir.path()).expect("the next Forge opens at once");
+    assert!(
+        reopened
+            .item(&ItemId::from("item-2-199"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

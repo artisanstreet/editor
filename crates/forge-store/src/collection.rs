@@ -1,24 +1,63 @@
-//! Indexed canonical collections in the existing immutable content owner.
-use anyhow::{Context, Result, ensure};
+use crate::content::{ContentError, Damage, to_usize};
+use crate::error::AtStep as _;
 use artisan_api::{CollectionQuery, CollectionRange, CollectionRef, ContentId, ContentRef};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 
-const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
+
+type Result<T, E = ContentError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AnswerRefused {
+    #[error("{0}")]
+    Invalid(&'static str),
+    #[error("submitted choices must be inline")]
+    StoredChoices,
+    #[error("unknown question choice")]
+    UnknownChoice,
+    #[error("answer count does not match questions")]
+    CountMismatch,
+    #[error("This question needs its engine, which has stopped.")]
+    EngineStopped,
+    #[error("This question was already answered differently.")]
+    AnsweredDifferently,
+    #[error("This question is not waiting for an answer.")]
+    NotWaiting,
+    #[error("Item {item} is not a question.")]
+    NotAQuestion { item: artisan_api::ItemId },
+}
+
+fn damaged(content: &ContentId, damage: Damage) -> ContentError {
+    ContentError::Damaged {
+        content: content.clone(),
+        damage,
+    }
+}
+
+fn missing(content: &ContentId) -> ContentError {
+    ContentError::Missing {
+        content: content.clone(),
+    }
+}
+
+fn written(result: std::fmt::Result) {
+    result.expect("invariant: writing to a String cannot fail");
+}
 
 fn encode<T: Serialize>(record: &T) -> Result<String> {
-    let json = serde_json::to_string(record)?;
-    ensure!(
-        json.len() <= forge_content::INLINE_COLLECTION_BYTES,
-        "canonical record metadata exceeds 64 KiB; authored text must use a source reference"
-    );
+    let json = crate::read::to_body(record)?;
+    if json.len() > forge_content::INLINE_COLLECTION_BYTES {
+        return Err(ContentError::RecordTooLarge { bytes: json.len() });
+    }
     Ok(json)
 }
 
 fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
-    let value: serde_json::Value = serde_json::from_str(encoded)?;
+    let value: serde_json::Value = crate::read::from_body(encoded)?;
     let key = match &value {
         serde_json::Value::String(key) => Some(key.clone()),
         serde_json::Value::Object(record) => record
@@ -30,11 +69,12 @@ fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
         | serde_json::Value::Number(_)
         | serde_json::Value::Array(_) => None,
     };
-    ensure!(
-        key.as_ref()
-            .is_none_or(|key| !key.is_empty() && key.len() <= 4096),
-        "invalid canonical record identity"
-    );
+    if !key
+        .as_ref()
+        .is_none_or(|key| !key.is_empty() && key.len() <= 4096)
+    {
+        return Err(ContentError::RecordIdentity);
+    }
     let label = value
         .get("label")
         .and_then(|label| label.as_str())
@@ -42,46 +82,93 @@ fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
     Ok((key, label))
 }
 
-pub fn store<T: Serialize>(
+const CONTENT_EXISTS: &str = include_str!("sql/content/exists.sql");
+const INSERT_CONTENT: &str = include_str!("sql/collection/insert_content.sql");
+const INSERT_COLLECTION: &str = include_str!("sql/collection/insert.sql");
+const INSERT_RECORD: &str = include_str!("sql/collection/insert_record.sql");
+const INSERT_CHUNK: &str = include_str!("sql/content/insert_chunk.sql");
+const RECORD_COUNT: &str = include_str!("sql/collection/count.sql");
+const INSERT_DEPENDENCY: &str = include_str!("sql/content/insert_dependency.sql");
+
+fn check_dependencies(
     conn: &Connection,
+    source: &ContentId,
+    dependencies: &BTreeSet<ContentId>,
+) -> Result<()> {
+    for child in dependencies {
+        if child == source {
+            return Err(ContentError::SelfDependency {
+                content: child.clone(),
+            });
+        }
+        let exists: bool = conn
+            .query_row(CONTENT_EXISTS, [child.as_str()], |row| row.get(0))
+            .at("content/exists.sql")?;
+        if !exists {
+            return Err(ContentError::MissingDependency {
+                content: child.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn record_dependencies(
+    conn: &Connection,
+    parent: &ContentId,
+    dependencies: &BTreeSet<ContentId>,
+) -> Result<()> {
+    for child in dependencies {
+        conn.execute(INSERT_DEPENDENCY, params![parent.as_str(), child.as_str()])
+            .at("content/insert_dependency.sql")?;
+    }
+    Ok(())
+}
+
+fn store<T: Serialize>(
+    conn: &crate::content::Stamped<'_>,
     records: &[T],
     dependencies: &BTreeSet<ContentId>,
     authored_bytes: u64,
     nested_structural_bytes: u64,
 ) -> Result<CollectionRef> {
-    // First pass computes identity with at most one encoded record in memory.
-    // Existing immutable collections do not incur chunk or record writes.
-    let reference = forge_content::collection_ref(records)?;
+    let reference = forge_content::collection_ref(records)
+        .map_err(crate::error::StorageError::encode::<[T]>)?;
     let source = reference.source;
-    ensure!(
-        source
-            .bytes
-            .saturating_add(authored_bytes)
-            .saturating_add(nested_structural_bytes)
-            <= MAX_COLLECTION_BYTES,
-        "canonical collection authored and structural data exceeds 64 MiB"
-    );
-    for child in dependencies {
-        ensure!(child != &source.id, "source cannot depend on itself");
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM content WHERE id=?1)",
-            [child.as_str()],
-            |row| row.get(0),
-        )?;
-        ensure!(exists, "collection source dependency is missing");
+    let bytes = source
+        .bytes
+        .saturating_add(authored_bytes)
+        .saturating_add(nested_structural_bytes);
+    if bytes > MAX_COLLECTION_BYTES {
+        return Err(ContentError::CollectionTooLarge { bytes });
     }
-    let inserted = conn.execute("INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,0,0,?4) ON CONFLICT(id) DO NOTHING",
-        params![source.id.as_str(), source.bytes, source.lines, artisan_api::now()])? != 0;
-    // A pre-existing ordinary text source with identical NDJSON bytes can become
-    // an indexed collection. It still has one content identity and one lifecycle.
-    let indexed = conn.execute("INSERT INTO content_collections(content_id,count,authored_bytes,structural_bytes) VALUES(?1,?2,?3,?4) ON CONFLICT(content_id) DO NOTHING",
-        params![source.id.as_str(), records.len() as u64,authored_bytes,source.bytes.saturating_add(nested_structural_bytes)])? != 0;
+    check_dependencies(conn, &source.id, dependencies)?;
+    let inserted = conn
+        .execute(
+            INSERT_CONTENT,
+            params![source.id.as_str(), source.bytes, source.lines, conn.now],
+        )
+        .at("collection/insert_content.sql")?
+        != 0;
+    let indexed = conn
+        .execute(
+            INSERT_COLLECTION,
+            params![
+                source.id.as_str(),
+                records.len() as u64,
+                authored_bytes,
+                source.bytes.saturating_add(nested_structural_bytes)
+            ],
+        )
+        .at("collection/insert.sql")?
+        != 0;
     if inserted || indexed {
-        let mut insert_record = conn.prepare_cached(
-            "INSERT INTO content_records(content_id,ordinal,start,end,record_key,record_label) VALUES(?1,?2,?3,?4,?5,?6)",
-        )?;
+        let mut insert_record = conn
+            .prepare_cached(INSERT_RECORD)
+            .at("collection/insert_record.sql")?;
         let mut insert_chunk = conn
-            .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
+            .prepare_cached(INSERT_CHUNK)
+            .at("content/insert_chunk.sql")?;
         let mut buffer = String::with_capacity(if inserted {
             crate::content::CHUNK_BYTES + artisan_api::COLLECTION_RANGE_BYTES
         } else {
@@ -94,14 +181,16 @@ pub fn store<T: Serialize>(
             let end = position + encoded.len() as u64;
             if indexed {
                 let (key, label) = record_key(&encoded)?;
-                insert_record.execute(params![
-                    source.id.as_str(),
-                    ordinal as u64,
-                    position,
-                    end,
-                    key,
-                    label
-                ])?;
+                insert_record
+                    .execute(params![
+                        source.id.as_str(),
+                        ordinal as u64,
+                        position,
+                        end,
+                        key,
+                        label
+                    ])
+                    .at("collection/insert_record.sql")?;
             }
             position = end + 1;
             if !inserted {
@@ -114,71 +203,94 @@ pub fn store<T: Serialize>(
                 while !buffer.is_char_boundary(boundary) {
                     boundary -= 1;
                 }
-                insert_chunk.execute(params![
-                    source.id.as_str(),
-                    chunk_start,
-                    &buffer.as_bytes()[..boundary]
-                ])?;
+                insert_chunk
+                    .execute(params![
+                        source.id.as_str(),
+                        chunk_start,
+                        &buffer.as_bytes()[..boundary]
+                    ])
+                    .at("content/insert_chunk.sql")?;
                 buffer.drain(..boundary);
                 chunk_start += boundary as u64;
             }
         }
         if !buffer.is_empty() {
-            insert_chunk.execute(params![source.id.as_str(), chunk_start, buffer.as_bytes()])?;
+            insert_chunk
+                .execute(params![source.id.as_str(), chunk_start, buffer.as_bytes()])
+                .at("content/insert_chunk.sql")?;
         }
     }
-    let known: u64 = conn.query_row(
-        "SELECT count FROM content_collections WHERE content_id=?1",
-        [source.id.as_str()],
-        |row| row.get(0),
-    )?;
-    ensure!(
-        known == records.len() as u64,
-        "collection descriptor mismatch"
-    );
-    for child in dependencies {
-        conn.execute("INSERT INTO content_dependencies(parent_id,child_id) VALUES(?1,?2) ON CONFLICT DO NOTHING", params![source.id.as_str(),child.as_str()])?;
+    let known: u64 = conn
+        .query_row(RECORD_COUNT, [source.id.as_str()], |row| row.get(0))
+        .at("collection/count.sql")?;
+    if known != records.len() as u64 {
+        return Err(damaged(&source.id, Damage::DescriptorMismatch));
     }
+    record_dependencies(conn, &source.id, dependencies)?;
     Ok(CollectionRef {
         source,
         count: records.len() as u64,
     })
 }
 
-pub fn range<T: DeserializeOwned>(
+pub(crate) fn range<T: DeserializeOwned>(
     conn: &Connection,
     id: &ContentId,
     query: CollectionQuery,
 ) -> Result<Option<CollectionRange<T>>> {
-    ensure!(id.is_valid(), "invalid collection identity");
+    if !id.is_valid() {
+        return Err(ContentError::InvalidIdentity {
+            content: id.clone(),
+        });
+    }
     let limit = query.limit.unwrap_or(artisan_api::COLLECTION_RANGE_ENTRIES);
-    ensure!(
-        (1..=artisan_api::COLLECTION_RANGE_ENTRIES).contains(&limit),
-        "collection limit must be 1..64"
-    );
-    let Some((bytes, lines, total)) = conn.query_row("SELECT c.bytes,c.lines,r.count FROM content c JOIN content_collections r ON r.content_id=c.id WHERE c.id=?1", [id.as_str()], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,u64>(1)?,row.get::<_,u64>(2)?))).optional()? else { return Ok(None) };
-    ensure!(
-        query.offset <= total,
-        "collection offset exceeds record count"
-    );
-    let mut select = conn.prepare_cached("SELECT ordinal,start,end FROM content_records WHERE content_id=?1 AND ordinal>=?2 ORDER BY ordinal LIMIT ?3")?;
-    let mut rows = select.query(params![id.as_str(), query.offset, limit])?;
+    if !(1..=artisan_api::COLLECTION_RANGE_ENTRIES).contains(&limit) {
+        return Err(ContentError::CollectionLimit { limit });
+    }
+    let Some((bytes, lines, total)) = conn
+        .query_row(
+            include_str!("sql/collection/header.sql"),
+            [id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .at("collection/header.sql")?
+    else {
+        return Ok(None);
+    };
+    if query.offset > total {
+        return Err(ContentError::RecordOffsetPastEnd {
+            content: id.clone(),
+            offset: query.offset,
+            total,
+        });
+    }
+    let mut select = conn
+        .prepare_cached(include_str!("sql/collection/records.sql"))
+        .at("collection/records.sql")?;
+    let mut rows = select
+        .query(params![id.as_str(), query.offset, limit])
+        .at("collection/records.sql")?;
     let mut records = Vec::new();
     let mut loaded_bytes = 0usize;
     let mut byte_limited = false;
-    while let Some(row) = rows.next()? {
-        let ordinal: u64 = row.get(0)?;
-        let start: u64 = row.get(1)?;
-        let end: u64 = row.get(2)?;
-        ensure!(
-            ordinal == query.offset + records.len() as u64 && end >= start && end <= bytes,
-            "collection index is missing or inconsistent"
-        );
-        let size = usize::try_from(end - start)?;
-        ensure!(
-            size <= forge_content::INLINE_COLLECTION_BYTES,
-            "stored record exceeds range budget"
-        );
+    while let Some(row) = rows.next().at("collection/records.sql")? {
+        let ordinal: u64 = row.get(0).at("collection/records.sql")?;
+        let start: u64 = row.get(1).at("collection/records.sql")?;
+        let end: u64 = row.get(2).at("collection/records.sql")?;
+        if !(ordinal == query.offset + records.len() as u64 && end >= start && end <= bytes) {
+            return Err(damaged(id, Damage::RecordIndex));
+        }
+        let size = to_usize(end - start);
+        if size > forge_content::INLINE_COLLECTION_BYTES {
+            return Err(damaged(id, Damage::OversizedRecord));
+        }
         if loaded_bytes + size > artisan_api::COLLECTION_RANGE_BYTES {
             byte_limited = true;
             break;
@@ -195,27 +307,26 @@ pub fn range<T: DeserializeOwned>(
                 ),
             },
         )?
-        .context("collection source is missing")?;
-        ensure!(
-            source.start == start && source.end >= end,
-            "collection record source is incomplete"
-        );
-        records.push(
-            serde_json::from_str::<T>(&source.text[..size])
-                .context("canonical collection record has the wrong shape")?,
-        );
+        .ok_or_else(|| missing(id))?;
+        if !(source.start == start && source.end >= end) {
+            return Err(damaged(id, Damage::IncompleteRecord));
+        }
+        let record = source
+            .text
+            .get(..size)
+            .ok_or_else(|| damaged(id, Damage::IncompleteRecord))?;
+        records.push(crate::read::from_body::<T>(record)?);
         loaded_bytes += size;
     }
-    ensure!(
-        query.offset == total || !records.is_empty(),
-        "collection index is missing"
-    );
-    ensure!(
-        byte_limited
-            || query.offset + records.len() as u64
-                == query.offset.saturating_add(u64::from(limit)).min(total),
-        "collection index has a missing trailing record"
-    );
+    if query.offset != total && records.is_empty() {
+        return Err(damaged(id, Damage::RecordIndex));
+    }
+    if !(byte_limited
+        || query.offset + records.len() as u64
+            == query.offset.saturating_add(u64::from(limit)).min(total))
+    {
+        return Err(damaged(id, Damage::MissingTrailingRecord));
+    }
     Ok(Some(CollectionRange {
         source: ContentRef {
             id: id.clone(),
@@ -229,53 +340,53 @@ pub fn range<T: DeserializeOwned>(
     }))
 }
 
-#[expect(
-    clippy::ref_option,
-    reason = "forwards to artisan_api::Question's validators, which take &Option"
-)]
-pub fn validate_answer(
+fn validate_answer(
     conn: &Connection,
     question: &artisan_api::Question,
-    answer: &Option<artisan_api::QuestionAnswer>,
+    answer: Option<&artisan_api::QuestionAnswer>,
 ) -> Result<()> {
-    let refused = |message: &str| crate::Refused(message.to_owned());
     question
         .validate_answer_structure(answer)
-        .map_err(refused)?;
+        .map_err(AnswerRefused::Invalid)?;
     if let Some(artisan_api::QuestionAnswer::Choices { ids }) = answer {
-        let ids = ids
-            .inline()
-            .ok_or_else(|| refused("submitted choices must be inline"))?;
+        let ids = ids.inline().ok_or(AnswerRefused::StoredChoices)?;
         match &question.options {
             artisan_api::Collection::Inline(_) => {
-                question.validate_answer(answer).map_err(refused)?;
+                question
+                    .validate_answer(answer)
+                    .map_err(AnswerRefused::Invalid)?;
             }
             artisan_api::Collection::Stored(reference) => {
                 metrics(conn, reference)?;
-                let mut exists=conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM content_records WHERE content_id=?1 AND record_key=?2)")?;
+                let mut exists = conn
+                    .prepare_cached(include_str!("sql/collection/key_exists.sql"))
+                    .at("collection/key_exists.sql")?;
                 for id in ids {
                     let known: bool = exists
-                        .query_row(params![reference.source.id.as_str(), id], |row| row.get(0))?;
-                    ensure!(known, refused("unknown question choice"));
+                        .query_row(params![reference.source.id.as_str(), id], |row| row.get(0))
+                        .at("collection/key_exists.sql")?;
+                    if !known {
+                        return Err(AnswerRefused::UnknownChoice.into());
+                    }
                 }
             }
         }
     }
     Ok(())
 }
-pub fn answer_text(
+pub(crate) fn answer_text(
     conn: &Connection,
     question: &artisan_api::Question,
     answer: &artisan_api::QuestionAnswer,
 ) -> Result<String> {
     let artisan_api::Collection::Stored(reference) = &question.options else {
-        return question.answer_text(answer).map_err(anyhow::Error::msg);
+        return Ok(question
+            .answer_text(answer)
+            .map_err(AnswerRefused::Invalid)?);
     };
-    let artisan_api::QuestionAnswer::Choices { ids } = answer else {
-        let artisan_api::QuestionAnswer::Text { text } = answer else {
-            unreachable!()
-        };
-        return Ok(text.clone());
+    let ids = match answer {
+        artisan_api::QuestionAnswer::Choices { ids } => ids,
+        artisan_api::QuestionAnswer::Text { text } => return Ok(text.clone()),
     };
     metrics(conn, reference)?;
     let loaded;
@@ -288,26 +399,28 @@ pub fn answer_text(
     };
     let mut labels = String::new();
     let mut duplicate_counts = std::collections::HashMap::<String, u64>::new();
-    let mut option = conn.prepare_cached(
-        "SELECT ordinal,record_label FROM content_records WHERE content_id=?1 AND record_key=?2",
-    )?;
-    let mut count = conn.prepare_cached(
-        "SELECT COUNT(*) FROM content_records WHERE content_id=?1 AND record_label=?2",
-    )?;
+    let mut option = conn
+        .prepare_cached(include_str!("sql/collection/record_by_key.sql"))
+        .at("collection/record_by_key.sql")?;
+    let mut count = conn
+        .prepare_cached(include_str!("sql/collection/label_count.sql"))
+        .at("collection/label_count.sql")?;
     for id in ids {
         let (index, label): (u64, String) = option
             .query_row(params![reference.source.id.as_str(), id], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .optional()?
-            .context("unknown question choice")?;
+            .optional()
+            .at("collection/label_count.sql")?
+            .ok_or(AnswerRefused::UnknownChoice)?;
         let duplicates = if let Some(value) = duplicate_counts.get(&label) {
             *value
         } else {
             let value: u64 = count
                 .query_row(params![reference.source.id.as_str(), label], |row| {
                     row.get(0)
-                })?;
+                })
+                .at("collection/label_count.sql")?;
             duplicate_counts.insert(label.clone(), value);
             value
         };
@@ -316,19 +429,21 @@ pub fn answer_text(
         }
         labels.push_str(&label);
         if duplicates > 1 {
-            write!(labels, " (option {} of {})", index + 1, reference.count)?;
+            written(write!(
+                labels,
+                " (option {} of {})",
+                index + 1,
+                reference.count
+            ));
         }
-        ensure!(
-            labels.len() as u64 <= MAX_COLLECTION_BYTES,
-            "answer display exceeds 64 MiB"
-        );
+        if labels.len() as u64 > MAX_COLLECTION_BYTES {
+            return Err(ContentError::AnswerDisplayTooLarge);
+        }
     }
     Ok(labels)
 }
 
-/// Runs once when answers are first persisted or during the historical data
-/// migration. Status-only native events inherit the same immutable display.
-pub fn derive_answer_text(
+pub(crate) fn derive_answer_text(
     conn: &Connection,
     kind: &mut artisan_api::ItemKind,
     old: Option<&artisan_api::ItemKind>,
@@ -357,10 +472,12 @@ pub fn derive_answer_text(
         *display = Some(text.clone());
         return Ok(());
     }
-    ensure!(
-        answers.len() == questions.len(),
-        "saved answer count does not match questions"
-    );
+    if answers.len() != questions.len() {
+        return Err(ContentError::SavedAnswerCount {
+            questions: questions.len(),
+            answers: answers.len(),
+        });
+    }
     let mut cached: Option<CollectionRange<Option<artisan_api::QuestionAnswer>>> = None;
     let mut text = String::new();
     visit_questions(conn, questions, |index, question| {
@@ -381,27 +498,28 @@ pub fn derive_answer_text(
                                 limit: None,
                             },
                         )?
-                        .context("saved answer source is missing")?,
+                        .ok_or_else(|| missing(&reference.source.id))?,
                     );
                 }
-                let page = cached.as_ref().context("saved answer page is missing")?;
-                &page.records[usize::try_from(index64 - page.start)?]
+                let page = cached
+                    .as_ref()
+                    .expect("invariant: the saved answer page was just loaded");
+                &page.records[to_usize(index64 - page.start)]
             }
         };
         if !text.is_empty() {
             text.push_str("\n\n");
         }
         if questions.len() > 1 {
-            write!(text, "Question {}: ", index + 1)?;
+            written(write!(text, "Question {}: ", index + 1));
         }
         match answer {
             Some(answer) => text.push_str(&answer_text(conn, question, answer)?),
             None => text.push_str("You skipped this question."),
         }
-        ensure!(
-            text.len() as u64 <= MAX_COLLECTION_BYTES,
-            "answer display exceeds 64 MiB"
-        );
+        if text.len() as u64 > MAX_COLLECTION_BYTES {
+            return Err(ContentError::AnswerDisplayTooLarge);
+        }
         Ok(())
     })?;
     *display = Some(text.into());
@@ -409,23 +527,41 @@ pub fn derive_answer_text(
 }
 
 #[derive(Default, Clone, Copy)]
-pub struct Metrics {
+pub(crate) struct Metrics {
     pub authored: u64,
     pub structural: u64,
 }
-pub fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
-    ensure!(
-        reference.source.id.is_valid(),
-        "invalid collection source identity"
-    );
-    let value = conn.query_row("SELECT r.count,c.bytes,c.lines,r.authored_bytes,r.structural_bytes FROM content_collections r JOIN content c ON c.id=r.content_id WHERE r.content_id=?1",
-        [reference.source.id.as_str()], |row| Ok((row.get::<_,u64>(0)?,row.get::<_,u64>(1)?,row.get::<_,u64>(2)?,row.get::<_,u64>(3)?,row.get::<_,u64>(4)?))).optional()?.context("collection source is missing")?;
-    ensure!(
-        reference.count == value.0
-            && reference.source.bytes == value.1
-            && reference.source.lines == value.2,
-        "collection descriptor mismatch"
-    );
+fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
+    if !reference.source.id.is_valid() {
+        return Err(ContentError::InvalidIdentity {
+            content: reference.source.id.clone(),
+        });
+    }
+    let value = conn
+        .query_row(
+            include_str!("sql/collection/metrics.sql"),
+            [reference.source.id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .at("collection/metrics.sql")?
+        .ok_or_else(|| missing(&reference.source.id))?;
+    if !(reference.count == value.0
+        && reference.source.bytes == value.1
+        && reference.source.lines == value.2)
+    {
+        return Err(ContentError::UnknownReference {
+            content: reference.source.id.clone(),
+        });
+    }
     Ok(Metrics {
         authored: value.3,
         structural: value.4,
@@ -438,9 +574,13 @@ fn dependency(text: &artisan_api::TextContent, ids: &mut BTreeSet<ContentId>) ->
     text.byte_len()
 }
 fn normalize<T: Serialize>(
-    conn: &Connection,
+    conn: &crate::content::Stamped<'_>,
     collection: &mut artisan_api::Collection<T>,
-    mut record_metrics: impl FnMut(&Connection, &mut T, &mut BTreeSet<ContentId>) -> Result<Metrics>,
+    mut record_metrics: impl FnMut(
+        &crate::content::Stamped<'_>,
+        &mut T,
+        &mut BTreeSet<ContentId>,
+    ) -> Result<Metrics>,
 ) -> Result<Metrics> {
     let records = match collection {
         artisan_api::Collection::Inline(records) => records,
@@ -454,16 +594,15 @@ fn normalize<T: Serialize>(
         total.authored = total.authored.saturating_add(record_total.authored);
         total.structural = total.structural.saturating_add(record_total.structural);
         let encoded = encode(record)?;
-        crate::content::validate_metadata(&serde_json::from_str(&encoded)?, "")?;
+        crate::content::validate_metadata(&crate::read::from_body(&encoded)?, "")?;
         encoded_bytes = encoded_bytes.saturating_add(encoded.len() as u64 + 1);
-        ensure!(
-            total
-                .authored
-                .saturating_add(total.structural)
-                .saturating_add(encoded_bytes)
-                <= MAX_COLLECTION_BYTES,
-            "collection data exceeds 64 MiB"
-        );
+        let bytes = total
+            .authored
+            .saturating_add(total.structural)
+            .saturating_add(encoded_bytes);
+        if bytes > MAX_COLLECTION_BYTES {
+            return Err(ContentError::CollectionTooLarge { bytes });
+        }
     }
     if records.len() > forge_content::INLINE_COLLECTION_ENTRIES
         || encoded_bytes.saturating_add(1) > forge_content::INLINE_COLLECTION_BYTES as u64
@@ -481,7 +620,7 @@ fn normalize<T: Serialize>(
     Ok(total)
 }
 fn normalize_options(
-    conn: &Connection,
+    conn: &crate::content::Stamped<'_>,
     options: &mut artisan_api::Collection<artisan_api::QuestionOption>,
 ) -> Result<Metrics> {
     normalize(conn, options, |_, option, ids| {
@@ -494,7 +633,10 @@ fn normalize_options(
         })
     })
 }
-pub fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
+pub(crate) fn normalize_item(
+    conn: &crate::content::Stamped<'_>,
+    kind: &mut artisan_api::ItemKind,
+) -> Result<()> {
     use artisan_api::{ItemKind, ToolKind};
     match kind {
         ItemKind::Plan { steps, .. } => {
@@ -563,16 +705,17 @@ pub fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Re
     }
     Ok(())
 }
-pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics> {
+pub(crate) fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics> {
     let Some(count) = conn
         .query_row(
-            "SELECT count FROM content_collections WHERE content_id=?1",
+            include_str!("sql/collection/count.sql"),
             [source.id.as_str()],
             |row| row.get::<_, u64>(0),
         )
-        .optional()?
+        .optional()
+        .at("collection/count.sql")?
     else {
-        anyhow::bail!("collection source is missing")
+        return Err(missing(&source.id));
     };
     metrics(
         conn,
@@ -583,15 +726,13 @@ pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics>
     )
 }
 
-/// Resolving all records is reserved for admitted Forge operations such as a
-/// native question callback. HTTP and the Client use indexed range reads.
-pub fn resolve<T: DeserializeOwned>(
+pub(crate) fn resolve<T: DeserializeOwned>(
     conn: &Connection,
     collection: &artisan_api::Collection<T>,
 ) -> Result<Vec<T>> {
     let reference = collection
         .stored()
-        .context("only stored collections need resolving")?;
+        .expect("invariant: only stored collections are resolved");
     metrics(conn, reference)?;
     let mut records = Vec::new();
     let mut offset = 0;
@@ -604,33 +745,34 @@ pub fn resolve<T: DeserializeOwned>(
                 limit: None,
             },
         )?
-        .context("collection source is missing")?;
-        ensure!(
-            page.total == reference.count && page.end > offset,
-            "collection descriptor changed"
-        );
+        .ok_or_else(|| missing(&reference.source.id))?;
+        if !(page.total == reference.count && page.end > offset) {
+            return Err(damaged(&reference.source.id, Damage::DescriptorMismatch));
+        }
         offset = page.end;
         records.extend(page.records);
     }
     Ok(records)
 }
 
-pub fn visit_questions(
+pub(crate) fn visit_until<T: DeserializeOwned>(
     conn: &Connection,
-    questions: &artisan_api::Collection<artisan_api::Question>,
-    mut visit: impl FnMut(usize, &artisan_api::Question) -> Result<()>,
+    collection: &artisan_api::Collection<T>,
+    mut visit: impl FnMut(&T) -> Result<ControlFlow<()>>,
 ) -> Result<()> {
-    match questions {
-        artisan_api::Collection::Inline(questions) => {
-            for (index, question) in questions.iter().enumerate() {
-                visit(index, question)?;
+    match collection {
+        artisan_api::Collection::Inline(records) => {
+            for record in records {
+                if visit(record)?.is_break() {
+                    return Ok(());
+                }
             }
         }
         artisan_api::Collection::Stored(reference) => {
             metrics(conn, reference)?;
             let mut offset = 0;
             while offset < reference.count {
-                let page = range::<artisan_api::Question>(
+                let page = range::<T>(
                     conn,
                     &reference.source.id,
                     CollectionQuery {
@@ -638,13 +780,14 @@ pub fn visit_questions(
                         limit: None,
                     },
                 )?
-                .context("question collection is missing")?;
-                ensure!(
-                    page.end > offset && page.total == reference.count,
-                    "question collection page is inconsistent"
-                );
-                for (index, question) in page.records.iter().enumerate() {
-                    visit(usize::try_from(offset)? + index, question)?;
+                .ok_or_else(|| missing(&reference.source.id))?;
+                if !(page.end > offset && page.total == reference.count) {
+                    return Err(damaged(&reference.source.id, Damage::DescriptorMismatch));
+                }
+                for record in &page.records {
+                    if visit(record)?.is_break() {
+                        return Ok(());
+                    }
                 }
                 offset = page.end;
             }
@@ -652,20 +795,32 @@ pub fn visit_questions(
     }
     Ok(())
 }
-pub fn validate_answers(
+
+pub(crate) fn visit_questions(
+    conn: &Connection,
+    questions: &artisan_api::Collection<artisan_api::Question>,
+    mut visit: impl FnMut(usize, &artisan_api::Question) -> Result<()>,
+) -> Result<()> {
+    let mut index = 0;
+    visit_until(conn, questions, |question| {
+        visit(index, question)?;
+        index += 1;
+        Ok(ControlFlow::Continue(()))
+    })
+}
+pub(crate) fn validate_answers(
     conn: &Connection,
     questions: &artisan_api::Collection<artisan_api::Question>,
     answers: &[Option<artisan_api::QuestionAnswer>],
 ) -> Result<()> {
-    ensure!(
-        questions.len() == answers.len() as u64,
-        crate::Refused("answer count does not match questions".into())
-    );
+    if questions.len() != answers.len() as u64 {
+        return Err(AnswerRefused::CountMismatch.into());
+    }
     visit_questions(conn, questions, |index, question| {
-        validate_answer(conn, question, &answers[index])
+        validate_answer(conn, question, answers[index].as_ref())
     })
 }
-pub fn answers_equal(
+pub(crate) fn answers_equal(
     conn: &Connection,
     saved: Option<&artisan_api::Collection<Option<artisan_api::QuestionAnswer>>>,
     answers: &[Option<artisan_api::QuestionAnswer>],
@@ -688,7 +843,7 @@ pub fn answers_equal(
     Ok(decoded == answers)
 }
 
-pub fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
+pub(crate) fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
     use artisan_api::{Collection, ItemKind, ToolKind};
     fn hydrate<T: DeserializeOwned>(conn: &Connection, value: &mut Collection<T>) -> Result<()> {
         if let Collection::Stored(_) = value {
@@ -737,453 +892,5 @@ pub fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Resu
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use artisan_api::{PlanStep, StepStatus, TextContent};
-    fn database() -> Connection {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&mut conn).unwrap();
-        conn
-    }
-    fn steps(count: usize) -> Vec<PlanStep> {
-        (0..count)
-            .map(|index| PlanStep {
-                text: format!("Step {index}: αβ🙂").into(),
-                status: StepStatus::Pending,
-            })
-            .collect()
-    }
-    #[test]
-    fn five_thousand_records_use_indexed_bounded_ranges_and_keep_order() {
-        let conn = database();
-        let original = steps(5000);
-        let reference = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
-        assert_eq!(reference.count, 5000);
-        assert!(serde_json::to_string(&reference).unwrap().len() < 256);
-        let duplicate = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
-        assert_eq!(reference, duplicate);
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            5000
-        );
-        let mut actual = Vec::new();
-        let mut offset = 0;
-        while offset < reference.count {
-            let page = range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset,
-                    limit: None,
-                },
-            )
-            .unwrap()
-            .unwrap();
-            assert_eq!(page.start, offset);
-            assert_eq!(page.end - offset, page.records.len() as u64);
-            assert!(page.records.len() <= 64);
-            offset = page.end;
-            actual.extend(page.records);
-        }
-        assert_eq!(actual, original);
-        let last = range::<PlanStep>(
-            &conn,
-            &reference.source.id,
-            CollectionQuery {
-                offset: 4999,
-                limit: Some(1),
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(last.records, original[4999..]);
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 5001,
-                    limit: None
-                }
-            )
-            .is_err()
-        );
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 0,
-                    limit: Some(65)
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn byte_budget_bounds_a_page_even_when_count_limit_is_not_reached() {
-        let conn = database();
-        let original: Vec<_> = (0..4000)
-            .map(|index| PlanStep {
-                text: format!("{index}{}", "α".repeat(6000)).into(),
-                status: StepStatus::Pending,
-            })
-            .collect();
-        let reference = store(&conn, &original, &BTreeSet::new(), 0, 0).unwrap();
-        let page = range::<PlanStep>(&conn, &reference.source.id, CollectionQuery::default())
-            .unwrap()
-            .unwrap();
-        assert!(page.records.len() < 64);
-        assert_eq!(page.records, original[..page.records.len()]);
-        let encoded: usize = page
-            .records
-            .iter()
-            .map(|record| serde_json::to_string(record).unwrap().len())
-            .sum();
-        assert!(encoded <= artisan_api::COLLECTION_RANGE_BYTES);
-    }
-    #[test]
-    fn nested_sources_survive_item_updates_then_collect_after_parent_grace() {
-        let conn = database();
-        let mut text = TextContent::Inline("a large step\n".repeat(3000));
-        crate::content::normalize_text(&conn, &mut text).unwrap();
-        let TextContent::Stored(child_source) = &text else {
-            panic!("large text must be stored")
-        };
-        let child_bytes = child_source.bytes;
-        let child = child_source.id.clone();
-        let dependencies = BTreeSet::from([child]);
-        let parent = store(
-            &conn,
-            &[PlanStep {
-                text,
-                status: StepStatus::Pending,
-            }],
-            &dependencies,
-            child_bytes,
-            0,
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO item_content(item_id,content_id) VALUES('owner',?1)",
-            [parent.source.id.as_str()],
-        )
-        .unwrap();
-        assert_eq!(crate::content::collect(&conn, i64::MAX).unwrap(), 0);
-        conn.execute("DELETE FROM item_content WHERE item_id='owner'", [])
-            .unwrap();
-        assert_eq!(
-            crate::content::collect(&conn, artisan_api::now()).unwrap(),
-            0
-        );
-        assert_eq!(crate::content::collect(&conn, i64::MAX).unwrap(), 1);
-        // Deleting the parent marks its last nested owner as unreferenced now,
-        // so in-flight windows retain the child for the same full-day grace.
-        assert_eq!(
-            crate::content::collect(&conn, artisan_api::now()).unwrap(),
-            0
-        );
-        assert_eq!(crate::content::collect(&conn, i64::MAX).unwrap(), 1);
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-    }
-    #[test]
-    fn rollback_and_missing_index_cannot_publish_partial_collections() {
-        let mut conn = database();
-        {
-            let tx = conn.transaction().unwrap();
-            store(&tx, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        let reference = store(&conn, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
-        conn.execute(
-            "DELETE FROM content_records WHERE content_id=?1 AND ordinal=4000",
-            [reference.source.id.as_str()],
-        )
-        .unwrap();
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 3999,
-                    limit: Some(4)
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn selected_option_lookup_uses_opaque_keys_and_preserves_duplicate_labels() {
-        let conn = database();
-        let options = (0..5000)
-            .map(|index| artisan_api::QuestionOption {
-                id: format!("opaque-{index}"),
-                label: "Same".into(),
-                description: None,
-            })
-            .collect::<Vec<_>>();
-        let reference = store(&conn, &options, &BTreeSet::new(), 0, 0).unwrap();
-        let question = artisan_api::Question {
-            id: "question".into(),
-            header: None,
-            text: "Pick".into(),
-            multi_select: false,
-            options: artisan_api::Collection::Stored(reference),
-        };
-        let answer = artisan_api::QuestionAnswer::Choices {
-            ids: vec!["opaque-4999".into()].into(),
-        };
-        validate_answer(&conn, &question, &Some(answer.clone())).unwrap();
-        assert_eq!(
-            answer_text(&conn, &question, &answer).unwrap(),
-            "Same (option 5000 of 5000)"
-        );
-        assert!(
-            validate_answer(
-                &conn,
-                &question,
-                &Some(artisan_api::QuestionAnswer::Choices {
-                    ids: vec!["Same".into()].into()
-                })
-            )
-            .is_err()
-        );
-        assert!(
-            validate_answer(
-                &conn,
-                &question,
-                &Some(artisan_api::QuestionAnswer::Choices {
-                    ids: vec!["opaque-1".into(), "opaque-1".into()].into()
-                })
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn five_thousand_saved_answer_records_and_choice_ids_keep_nested_ownership() {
-        let conn = database();
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            answer_text: None,
-            questions: vec![artisan_api::Question {
-                id: "q".into(),
-                header: None,
-                text: "Choose".into(),
-                multi_select: true,
-                options: vec![].into(),
-            }]
-            .into(),
-            answers: Some(
-                vec![Some(artisan_api::QuestionAnswer::Choices {
-                    ids: (0..5000)
-                        .map(|index| format!("id-{index}"))
-                        .collect::<Vec<_>>()
-                        .into(),
-                })]
-                .into(),
-            ),
-        };
-        normalize_item(&conn, &mut kind).unwrap();
-        let artisan_api::ItemKind::Question {
-            answers: Some(artisan_api::Collection::Inline(answers)),
-            ..
-        } = &kind
-        else {
-            panic!("small answer collection should stay inline")
-        };
-        let Some(artisan_api::QuestionAnswer::Choices {
-            ids: artisan_api::Collection::Stored(ids),
-        }) = &answers[0]
-        else {
-            panic!("many choices must use an indexed source")
-        };
-        assert_eq!(ids.count, 5000);
-        let ordinal = conn
-            .query_row(
-                "SELECT ordinal FROM content_records WHERE content_id=?1 AND record_key=?2",
-                params![ids.source.id.as_str(), "id-4999"],
-                |row| row.get::<_, u64>(0),
-            )
-            .unwrap();
-        assert_eq!(ordinal, 4999);
-        let page = range::<String>(
-            &conn,
-            &ids.source.id,
-            artisan_api::CollectionQuery {
-                offset: ordinal,
-                limit: Some(1),
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(page.records, ["id-4999"]);
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            answer_text: None,
-            questions: vec![].into(),
-            answers: Some(vec![None; 5000].into()),
-        };
-        normalize_item(&conn, &mut kind).unwrap();
-        let artisan_api::ItemKind::Question {
-            answers: Some(artisan_api::Collection::Stored(answers)),
-            ..
-        } = kind
-        else {
-            panic!("large saved answer arrays must use a source")
-        };
-        assert_eq!(answers.count, 5000);
-        let page = range::<Option<artisan_api::QuestionAnswer>>(
-            &conn,
-            &answers.source.id,
-            CollectionQuery {
-                offset: 4999,
-                limit: Some(1),
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(page.records, vec![None]);
-    }
-    #[test]
-    fn missing_final_index_record_cannot_return_a_short_successful_page() {
-        let conn = database();
-        let reference = store(&conn, &steps(5000), &BTreeSet::new(), 0, 0).unwrap();
-        conn.execute(
-            "DELETE FROM content_records WHERE content_id=?1 AND ordinal=4999",
-            [reference.source.id.as_str()],
-        )
-        .unwrap();
-        assert!(
-            range::<PlanStep>(
-                &conn,
-                &reference.source.id,
-                CollectionQuery {
-                    offset: 4990,
-                    limit: Some(64)
-                }
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn canonical_answer_display_is_derived_once_and_free_text_stays_literal() {
-        let conn = database();
-        let options = (0..5000)
-            .map(|index| artisan_api::QuestionOption {
-                id: format!("opaque-{index}"),
-                label: "Same".into(),
-                description: None,
-            })
-            .collect::<Vec<_>>();
-        let reference = store(&conn, &options, &BTreeSet::new(), 0, 0).unwrap();
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            questions: vec![artisan_api::Question {
-                id: "q".into(),
-                header: None,
-                text: "Pick".into(),
-                multi_select: false,
-                options: artisan_api::Collection::Stored(reference.clone()),
-            }]
-            .into(),
-            answers: Some(
-                vec![Some(artisan_api::QuestionAnswer::Choices {
-                    ids: vec!["opaque-4999".into()].into(),
-                })]
-                .into(),
-            ),
-            answer_text: None,
-        };
-        derive_answer_text(&conn, &mut kind, None).unwrap();
-        let expected = artisan_api::TextContent::from("Same (option 5000 of 5000)");
-        assert!(
-            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text==&expected)
-        );
-        let old = kind.clone();
-        let artisan_api::ItemKind::Question { answer_text, .. } = &mut kind else {
-            unreachable!()
-        };
-        *answer_text = None;
-        conn.execute(
-            "UPDATE content_records SET record_label='Changed' WHERE content_id=?1",
-            [reference.source.id.as_str()],
-        )
-        .unwrap();
-        derive_answer_text(&conn, &mut kind, Some(&old)).unwrap();
-        assert!(
-            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text==&expected)
-        );
-        let literal = " \n**still literal** \n";
-        let mut kind = artisan_api::ItemKind::Question {
-            blocking: false,
-            questions: vec![artisan_api::Question {
-                id: "free".into(),
-                header: None,
-                text: "Explain".into(),
-                multi_select: false,
-                options: vec![].into(),
-            }]
-            .into(),
-            answers: Some(
-                vec![Some(artisan_api::QuestionAnswer::Text {
-                    text: literal.into(),
-                })]
-                .into(),
-            ),
-            answer_text: None,
-        };
-        derive_answer_text(&conn, &mut kind, None).unwrap();
-        assert!(
-            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text.inline()==Some(literal))
-        );
-    }
-    #[test]
-    fn duplicate_opaque_record_keys_roll_back_with_the_item_transaction() {
-        let mut conn = database();
-        {
-            let tx = conn.transaction().unwrap();
-            let duplicate = artisan_api::QuestionOption {
-                id: "same".into(),
-                label: "Choice".into(),
-                description: None,
-            };
-            assert!(store(&tx, &[duplicate.clone(), duplicate], &BTreeSet::new(), 0, 0).is_err());
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM content_records", [], |row| row
-                .get::<_, u64>(0))
-                .unwrap(),
-            0
-        );
-    }
-}
+#[path = "../tests/collection/unit.rs"]
+mod tests;

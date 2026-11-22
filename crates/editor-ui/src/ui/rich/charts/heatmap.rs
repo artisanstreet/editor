@@ -3,9 +3,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::HeatmapFixture;
-pub(crate) use view::{HeatmapState, TextRole, envelope};
+pub(crate) use view::{EnvelopeTextFactory, HeatmapState, TextFactory, TextRole, envelope};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -53,8 +51,8 @@ impl std::ops::Deref for Heatmap {
 impl Heatmap {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<HeatmapData>()
+        size_of::<Self>()
+            + size_of::<HeatmapData>()
             + retained_strings(&self.x)
             + retained_strings(&self.y)
             + retained_vec(&self.values)
@@ -102,14 +100,14 @@ impl TryFrom<HeatmapSpec> for Heatmap {
 }
 
 impl Heatmap {
-    pub(crate) fn rows(&self) -> usize {
+    fn rows(&self) -> usize {
         self.0.rows
     }
-    pub(crate) fn columns(&self) -> usize {
+    fn columns(&self) -> usize {
         self.0.columns
     }
 
-    pub(crate) fn cell(&self, row: usize, column: usize) -> Option<f64> {
+    fn cell(&self, row: usize, column: usize) -> Option<f64> {
         self.values
             .get(row)
             .and_then(|cells| cells.get(column).copied().flatten())
@@ -131,7 +129,7 @@ impl Heatmap {
         Self::label(&self.y, row)
     }
 
-    pub(crate) fn position(&self, value: f64) -> f32 {
+    fn position(&self, value: f64) -> f32 {
         match self.scale {
             Scale::Sequential => self.domain.fraction(value).clamp(0.0, 1.0),
             Scale::Diverging => {

@@ -24,10 +24,9 @@ fn enabled() -> bool {
 fn report(stage: &str, detail: &str) {
     OPENED.with(|opened| {
         if let Some(opened) = opened.borrow().as_ref() {
-            eprintln!(
-                "open-timing: stage={stage} since_open_ms={:.2} unix_ms={} {detail}",
-                opened.at.elapsed().as_secs_f64() * 1000.0,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
+            tracing::info!(
+                "open-timing: stage={stage} since_open_ms={:.2} {detail}",
+                opened.at.elapsed().as_secs_f64() * 1000.0
             );
         }
     });
@@ -132,18 +131,40 @@ pub fn acknowledged() {
     }
 }
 
-pub fn gate(
-    reason: &str,
-    pending: bool,
-    changed: bool,
-    animating: bool,
-    active: bool,
-    painted: usize,
-    visible: usize,
-    candidates: usize,
-    elapsed: Duration,
-) {
+#[derive(Clone, Copy, Debug)]
+pub struct Reveal {
+    pub pending: bool,
+    pub changed: bool,
+    pub animating: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Gate<'a> {
+    pub reason: &'a str,
+    pub reveal: Reveal,
+    pub active: bool,
+    pub painted: usize,
+    pub visible: usize,
+    pub candidates: usize,
+    pub elapsed: Duration,
+}
+
+pub fn gate(gate: &Gate<'_>) {
     if enabled() {
+        let Gate {
+            reason,
+            reveal:
+                Reveal {
+                    pending,
+                    changed,
+                    animating,
+                },
+            active,
+            painted,
+            visible,
+            candidates,
+            elapsed,
+        } = *gate;
         report(
             "gate",
             &format!(
@@ -161,9 +182,9 @@ pub fn note_fail(reason: &'static str) {
     }
 }
 
-pub fn rpc_done(started: Duration, finished: Duration) {
+pub(crate) fn rpc_done(started: Duration, finished: Duration) {
     if enabled() {
-        eprintln!(
+        tracing::info!(
             "open-timing: read_rpc spawn_ms={:.2} total_ms={:.2}",
             started.as_secs_f64() * 1000.0,
             finished.as_secs_f64() * 1000.0

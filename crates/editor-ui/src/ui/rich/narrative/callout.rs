@@ -1,16 +1,16 @@
 use serde::Deserialize;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use aqua_core::geometry::CornerRadii;
-use aqua_core::{DisplayItem, InputEvent, Insets, PointerButton};
+use aqua_core::{DisplayItem, Insets};
 use aqua_text::StyledSpan;
 use aqua_ui::element::{Element, ui};
-use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 
+use crate::ui::kit::control::focus_ring;
 use crate::ui::kit::{IconSize, Space, Spaced, Surface, TextRole, Tone};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 
@@ -40,7 +40,7 @@ pub(crate) struct Callout {
 }
 impl Callout {
     pub(crate) fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + crate::ui::rich::kit::retained_optional(self.title.as_ref())
             + self.body.capacity()
     }
@@ -55,7 +55,13 @@ impl CalloutState {
     }
 }
 
-pub(crate) type GlyphFactory = Rc<dyn Fn(AssetId, f32, aqua_core::GpuiHsla) -> Element>;
+#[derive(Clone, Copy)]
+pub(crate) struct CalloutNotes<'a> {
+    pub(crate) subtitle: Option<&'a str>,
+    pub(crate) caption: Option<&'a str>,
+}
+
+pub type GlyphFactory = Rc<dyn Fn(AssetId, f32, aqua_core::GpuiHsla) -> Element>;
 
 impl Kind {
     fn presentation(self, theme: &ArtisanTheme) -> (&'static str, AssetId, Oklch, Tone) {
@@ -127,12 +133,17 @@ pub(crate) fn text_with_wrap(
 }
 
 impl Callout {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one callout view: tone, glyph, title and body"
+    )]
     pub(crate) fn view(
         &self,
         id: String,
         theme: &ArtisanTheme,
+        notes: CalloutNotes<'_>,
         states: CalloutState,
-        glyph: GlyphFactory,
+        glyph: &GlyphFactory,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let open = *states
@@ -150,9 +161,27 @@ impl Callout {
         if let Some(title) = &self.title {
             header = header.child(text(theme, title, TextRole::Title, theme.colors.text));
         }
-        if self.collapsed {
-            header = header
-                .child(ui::Box::new().style(Style::new().flex_grow(1.0)).build())
+        let header = if self.collapsed {
+            let name = match &self.title {
+                Some(title) => format!("{label}: {title}"),
+                None => label.to_owned(),
+            };
+            let state = states;
+            let key = id.clone();
+            ui::Button::new()
+                .layout("row")
+                .style(
+                    Style::new()
+                        .width(Length::Pct(100.0))
+                        .align(aqua_ui::AlignItems::CENTER),
+                )
+                .on_activate(move || {
+                    if let Some(open) = state.0.borrow_mut().get_mut(&key) {
+                        *open = !*open;
+                    }
+                    invalidate();
+                })
+                .child(header.style(Style::new().flex_grow(1.0)).build())
                 .child(glyph(
                     if open {
                         AssetId::TABLER_CHEVRON_UP
@@ -161,38 +190,17 @@ impl Callout {
                     },
                     IconSize::Md.px(),
                     theme.colors.text_muted.to_reference_paint(),
-                ));
-        }
-        let mut header = header.build();
-        if self.collapsed {
-            let pressed = Rc::new(Cell::new(false));
-            let down = pressed.clone();
-            header = header.cursor(aqua_core::CursorIcon::Pointer).on_input(
-                InputKind::PointerDown,
-                EventPhase::Bubble,
-                move |event| {
-                    if matches!(
-                        &event.input,
-                        RoutedInput::Native(InputEvent::PointerDown(_, PointerButton::Primary))
-                    ) {
-                        down.set(true);
-                        InputResponse::capture()
-                    } else {
-                        InputResponse::default()
-                    }
-                },
-            );
-            let state = states.clone();
-            let key = id.clone();
-            header = header.on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
-                let should_toggle = matches!(&event.input, RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) if event.bounds.contains(pointer.position));
-                if pressed.replace(false) && should_toggle {
-                    if let Some(open) = state.0.borrow_mut().get_mut(&key) { *open = !*open; }
-                    invalidate();
-                }
-                InputResponse { pointer_capture: aqua_ui::input::CaptureRequest::Release, ..InputResponse::default() }
-            });
-        }
+                ))
+                .build()
+                .role(aqua_core::Role::Button)
+                .aria_label(name)
+                .aria_expanded(open)
+                .cursor(aqua_core::CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(theme))
+                .with_key(format!("{id}-header"))
+        } else {
+            header.build()
+        };
         let surface = Surface::Callout(tone);
         let radius = surface.radius_px();
         let edge = color.to_reference_paint();
@@ -219,6 +227,14 @@ impl Callout {
             .layout("column")
             .spaced(Space::S8)
             .child(header);
+        if let Some(subtitle) = notes.subtitle {
+            content = content.child(text(
+                theme,
+                subtitle,
+                TextRole::Label,
+                theme.colors.text_muted,
+            ));
+        }
         if open {
             let mut paragraphs = ui::Box::new().layout("column").spaced(Space::S8);
             for paragraph in self
@@ -231,6 +247,14 @@ impl Callout {
                     paragraphs.child(text(theme, paragraph, TextRole::Label, theme.colors.text));
             }
             content = content.child(paragraphs.build());
+            if let Some(caption) = notes.caption {
+                content = content.child(text(
+                    theme,
+                    caption,
+                    TextRole::Caption,
+                    theme.colors.text_muted,
+                ));
+            }
         }
         surface
             .build(theme, vec![stripe, content.build()])
@@ -238,3 +262,7 @@ impl Callout {
             .with_key(id)
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/ui/rich/narrative/callout.rs"]
+mod tests;

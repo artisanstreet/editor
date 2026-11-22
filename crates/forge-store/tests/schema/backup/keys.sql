@@ -1,0 +1,1 @@
+SELECT key FROM kv ORDER BY key;

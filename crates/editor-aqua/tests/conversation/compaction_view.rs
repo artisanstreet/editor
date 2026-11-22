@@ -1,6 +1,6 @@
 use aqua::UiApp;
-use aqua_text::{SharedFonts, SharedRuns};
 use aqua_core::{DisplayItem, scene::GpuiTextShimmer};
+use aqua_text::{SharedFonts, SharedRuns};
 use aqua_ui::{
     element::{Box as UiBox, Key},
     tree::hash_key,
@@ -42,9 +42,12 @@ fn scopes(app: &mut UiApp) -> Vec<GpuiTextShimmer> {
     app.tree_mut()
         .emit_scene()
         .into_iter()
-        .filter_map(|(_, item)| match item {
-            DisplayItem::PushGpuiTextShimmer(shimmer) => Some(shimmer),
-            _ => None,
+        .filter_map(|(_, item)| {
+            if let DisplayItem::PushGpuiTextShimmer(shimmer) = item {
+                Some(shimmer)
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -63,7 +66,7 @@ fn label_shimmers_only_while_it_reads_as_running() {
         UiBox::new()
             .width(400.0)
             .height(40.0)
-            .child(compaction::label(phase, None, current, theme, clock))
+            .child(compaction::label(phase, None, current, &theme, clock))
             .build()
             .with_key("row")
     };
@@ -125,7 +128,7 @@ fn a_rebuilt_model_switch_label_never_paints_a_frame_without_its_shimmer() {
                 CompactionPhase::Running,
                 Some(&switch),
                 current,
-                theme,
+                &theme,
                 Some(CLOCK),
             ))
             .build()
@@ -158,7 +161,7 @@ fn a_rebuilt_model_switch_label_never_paints_a_frame_without_its_shimmer() {
             "the frame painted right after a rebuild still shimmers"
         );
         assert!(
-            (phases[0] - (now / 2.0) as f32).abs() < 0.001,
+            (f64::from(phases[0]) - now / 2.0).abs() < 0.001,
             "the sweep continues across rebuilds instead of restarting: {phases:?} at {now}"
         );
     }

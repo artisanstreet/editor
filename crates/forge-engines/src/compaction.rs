@@ -1,7 +1,3 @@
-//! Portable compaction prompt, adapted from OpenCode's session/compaction.ts.
-//! Keep it independent of provider setup and tool schemas so forks can reuse their prefix.
-
-/// OpenCode's summary template and preservation rules.
 #[must_use]
 pub fn compaction_prompt() -> String {
     [
@@ -57,8 +53,6 @@ const RULES: &str = r"Rules:
 
 pub const COMPACTION_NUDGE: &str = "The previous response did not fill in the required summary template. Do not call tools. Return the summary as text using the exact section headings from the template.";
 
-/// OpenCode permits inapplicable sections to be omitted. At least one
-/// exact template heading must be present; empty prose or tool calls fail.
 #[must_use]
 pub fn is_compaction_summary(text: &str) -> bool {
     text.lines().any(|line| {

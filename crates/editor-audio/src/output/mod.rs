@@ -1,11 +1,3 @@
-//! The platform audio output: one stream per playing track, owned by a
-//! dedicated thread that follows the shared state.
-//!
-//! The thread opens the stream, then reconciles it with the state whenever the
-//! player sends a command, including end-of-track and failure: running while playing, paused (corked) otherwise, flushed after a
-//! seek. Dropping the [`Output`] closes the command channel, which ends the
-//! thread and releases the stream.
-
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 mod cpal;
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -17,23 +9,19 @@ use self::cpal as platform;
 use self::pulse as platform;
 
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SendError, Sender};
 use std::thread;
 
 use crate::state::Shared;
 
-/// The layout of the decoded track the output streams.
 #[derive(Clone, Debug)]
-pub struct Format {
-    /// 1 or 2.
+pub(crate) struct Format {
     #[cfg_attr(
         not(all(unix, not(target_os = "macos"))),
         expect(dead_code, reason = "cpal maps channels per sample instead")
     )]
     pub(crate) channels: usize,
-    /// Frames per second.
     pub(crate) rate: u32,
-    /// The track's file name, shown by sound servers that list streams.
     #[cfg_attr(
         not(all(unix, not(target_os = "macos"))),
         expect(dead_code, reason = "cpal streams carry no title")
@@ -41,71 +29,66 @@ pub struct Format {
     pub(crate) title: Option<String>,
 }
 
-/// A request from the player to the output thread.
 enum Command {
-    /// Re-read the state and run or pause the stream to match.
     Sync,
-    /// Drop buffered audio because the cursor moved.
     Flush,
 }
 
-/// The handle to one track's output thread.
-pub struct Output {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OpenOutputError {
+    #[error("Couldn't start the audio output")]
+    Spawn {
+        generation: u64,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub(crate) struct Output {
     commands: Sender<Command>,
 }
 
 impl Output {
-    /// Starts the output thread for the track of `generation`. Opening the
-    /// device happens on that thread; its failure fails the track.
-    ///
-    /// # Errors
-    ///
-    /// The thread couldn't be started.
     pub(crate) fn open(
         shared: Arc<Shared>,
         generation: u64,
         format: Format,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, OpenOutputError> {
         let (commands, receiver) = mpsc::channel();
         thread::Builder::new()
             .name("artisan-audio-output".to_owned())
             .spawn(move || {
-                if let Err(message) = platform::run(&shared, generation, &format, &receiver) {
-                    shared.lock().fail(generation, message);
+                if let Err(error) = platform::run(&shared, generation, &format, &receiver) {
+                    shared.lock().fail(generation, &error);
                 }
             })
-            .map_err(|error| format!("Couldn't start the audio output: {error}"))?;
+            .map_err(|source| OpenOutputError::Spawn { generation, source })?;
         Ok(Self { commands })
     }
 
-    /// Asks the thread to match the stream to the state.
     pub(crate) fn sync(&self) {
-        // A send fails only once the thread has exited, when there is nothing to sync.
-        self.commands.send(Command::Sync).ok();
+        self.send(Command::Sync);
     }
 
-    /// Asks the thread to drop buffered audio after a seek.
+    fn send(&self, command: Command) {
+        match self.commands.send(command) {
+            Ok(()) | Err(SendError(Command::Sync | Command::Flush)) => {}
+        }
+    }
+
     pub(crate) fn flush(&self) {
-        // As with `sync`, only a thread that has exited refuses it.
-        self.commands.send(Command::Flush).ok();
+        self.send(Command::Flush);
     }
 }
 
-/// Drives an open stream until the player drops the output: calls
-/// `set_running` whenever the wanted run state differs from the stream's, and
-/// `flush` on seeks. `running` is whether the stream starts running.
-///
-/// # Errors
-///
-/// The first error of `set_running` or `flush`.
-fn control(
+fn control<E>(
     shared: &Shared,
     generation: u64,
     commands: &Receiver<Command>,
     mut running: bool,
-    mut set_running: impl FnMut(bool) -> Result<(), String>,
-    mut flush: impl FnMut() -> Result<(), String>,
-) -> Result<(), String> {
+    mut set_running: impl FnMut(bool) -> Result<(), E>,
+    mut flush: impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     loop {
         let Some(wanted) = shared.lock().wants_running(generation) else {
             return Ok(());
@@ -120,16 +103,4 @@ fn control(
             Err(_) => return Ok(()),
         }
     }
-}
-
-/// Renders an error and its sources as `error: cause: cause`.
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
 }

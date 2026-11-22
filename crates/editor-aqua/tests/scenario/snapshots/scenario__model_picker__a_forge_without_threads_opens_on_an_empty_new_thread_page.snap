@@ -1,0 +1,24 @@
+---
+source: crates/editor-aqua/tests/scenario/model_picker.rs
+expression: "editor.settle(\"the new thread page\", |view|\n{\n    view.shows(\"No threads yet.\") &&\n    view.find(Role::ComboBox, \"Project\").is_some()\n})"
+---
+Group "Artisan Editor" [focused]
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  Label "No threads yet."
+  Button "New thread"
+    Label "New thread"
+  Button "Test" [collapsed]
+    Label "Test"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  ComboBox "Opus 5.5" [collapsed]
+    Label "Opus 5.5"
+    Label "1M"
+  ComboBox "Project" [collapsed]
+    Label "Project"
+  ScrollView
+    TextInput "Message"
+  Button "Send message" [disabled]

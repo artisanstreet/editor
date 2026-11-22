@@ -27,11 +27,6 @@ pub struct TerminalStyle {
 }
 
 impl TerminalStyle {
-    #[must_use]
-    pub fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
     pub(super) fn apply_sgr(&mut self, params: &Params) {
         let mut index = 0;
         while index < params.len() {

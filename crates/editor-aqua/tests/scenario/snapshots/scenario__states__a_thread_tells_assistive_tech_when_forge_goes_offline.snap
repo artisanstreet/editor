@@ -1,0 +1,33 @@
+---
+source: crates/editor-aqua/tests/scenario/states.rs
+expression: "editor.settle(\"the offline status\", |view|\n{ view.shows(\"Lost the connection to Forge\") })"
+---
+Group "Artisan Editor" [focused]
+  Button "Hide sidebar"
+  TextInput "Search threads"
+  Button "New thread"
+  List
+    ListItem
+      Group "Project"
+        Label "Project"
+    ListItem
+      Button "Greeting" [selected]
+        Label "Greeting"
+  Button "Test" [collapsed]
+    Label "Test"
+  Group "Project / Greeting"
+    Group "Project / Greeting"
+      Button "New thread in Project"
+        Label "Project"
+      Label "/"
+      Label "Greeting"
+  Button "Minimize window"
+  Button "Maximize window"
+  Button "Close window"
+  Label "No messages yet."
+  ComboBox "No model" [collapsed]
+    Label "No model"
+  ScrollView
+    TextInput "Message"
+  Button "Send message" [disabled]
+  Label "Lost the connection to Forge. Reconnecting…"

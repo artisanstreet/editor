@@ -1,19 +1,78 @@
-//! WSL from Windows: which distributions have Forge, and running `ae`
-//! inside one. On Windows, Forge commands go to the distribution that has
-//! Forge when this PC has none.
-
-use crate::{sys, ui};
-use anyhow::{Context, Result, bail};
+use crate::paths::{self, LocateError};
+use crate::sys::{self, BoundedRunError};
+use crate::ui::{self, AskError};
 use artisan_paths::App;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-/// The installed distributions, without Docker's.
-pub fn distros() -> Result<Vec<String>> {
-    let output = sys::quiet(Command::new("wsl.exe").args(["--list", "--quiet"]))
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("run wsl.exe")?;
-    // wsl.exe writes UTF-16LE.
+const LIST_DEADLINE: Duration = Duration::from_secs(20);
+const PROBE_DEADLINE: Duration = Duration::from_secs(60);
+const PROBES_AT_ONCE: usize = 4;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DistrosError {
+    #[error("list WSL distributions")]
+    Run(#[source] BoundedRunError),
+    #[error("wsl.exe --list failed ({status})")]
+    Failed { status: ExitStatus },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StatusInError {
+    #[error("run `ae status --json` in {distro}")]
+    Run {
+        distro: String,
+        #[source]
+        source: BoundedRunError,
+    },
+    #[error("`ae status` in {distro} failed ({status}): {stderr}")]
+    Failed {
+        distro: String,
+        status: ExitStatus,
+        stderr: String,
+    },
+    #[error("read `ae status --json` from {distro}")]
+    Parse {
+        distro: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ForgeTargetError {
+    #[error("--distro only applies on Windows")]
+    DistroOffWindows,
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("look for Forge in WSL")]
+    Distros(#[source] DistrosError),
+    #[error("Forge isn't installed on this PC or in WSL; run `ae install`")]
+    NotInstalled,
+    #[error(transparent)]
+    Ask(#[from] AskError),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("run ae in {distro} (WSL)")]
+pub(crate) struct ForwardError {
+    distro: String,
+    #[source]
+    source: std::io::Error,
+}
+
+pub(crate) fn distros() -> Result<Vec<String>, DistrosError> {
+    let output = sys::output_within(
+        Command::new("wsl.exe").args(["--list", "--quiet"]),
+        LIST_DEADLINE,
+    )
+    .map_err(DistrosError::Run)?;
+    if !output.status.success() {
+        return Err(DistrosError::Failed {
+            status: output.status,
+        });
+    }
     let units: Vec<u16> = output
         .stdout
         .as_chunks::<2>()
@@ -31,8 +90,7 @@ pub fn distros() -> Result<Vec<String>> {
         .collect())
 }
 
-/// `ae` inside `distro`, where `ae install` links it.
-pub fn ae(distro: &str) -> Command {
+pub(crate) fn ae(distro: &str) -> Command {
     let mut command = Command::new("wsl.exe");
     command.args([
         "-d",
@@ -46,64 +104,142 @@ pub fn ae(distro: &str) -> Command {
     command
 }
 
-fn has_forge(distro: &str) -> bool {
-    sys::quiet(Command::new("wsl.exe").args([
-        "-d",
-        distro,
-        "--exec",
-        "sh",
-        "-c",
-        r#"test -x "${XDG_DATA_HOME:-$HOME/.local/share}/artisan-street/forge/forge""#,
-    ]))
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status()
-    .is_ok_and(|status| status.success())
+pub(crate) struct Probe {
+    pub distro: String,
+    pub report: Result<crate::status::Report, StatusInError>,
 }
 
-/// The distributions with Forge installed (starts stopped ones to look).
-pub fn distros_with_forge() -> Vec<String> {
-    distros()
-        .unwrap_or_default()
+impl Probe {
+    pub(crate) fn has_forge(&self) -> bool {
+        self.report
+            .as_ref()
+            .is_ok_and(|report| report.has(App::Forge))
+    }
+}
+
+fn status_in(distro: &str) -> Result<crate::status::Report, StatusInError> {
+    let output = sys::output_within(ae(distro).args(["status", "--json"]), PROBE_DEADLINE)
+        .map_err(|source| StatusInError::Run {
+            distro: distro.to_owned(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(StatusInError::Failed {
+            distro: distro.to_owned(),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    serde_json::from_slice(&output.stdout).map_err(|source| StatusInError::Parse {
+        distro: distro.to_owned(),
+        source,
+    })
+}
+
+fn in_parallel<T: Sync, R: Send>(
+    items: &[T],
+    at_once: usize,
+    run: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..at_once.min(items.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    let claim = || {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        items.get(index).map(|item| (index, item))
+                    };
+                    while let Some((index, item)) = claim() {
+                        done.push((index, run(item)));
+                    }
+                    done
+                })
+            })
+            .collect();
+        let mut done: Vec<(usize, R)> = workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect();
+        done.sort_by_key(|(index, _)| *index);
+        done.into_iter().map(|(_, result)| result).collect()
+    })
+}
+
+pub(crate) fn probe_all() -> Result<Vec<Probe>, DistrosError> {
+    let distros = distros()?;
+    let reports = in_parallel(&distros, PROBES_AT_ONCE, |distro| status_in(distro));
+    Ok(distros
         .into_iter()
-        .filter(|distro| has_forge(distro))
-        .collect()
+        .zip(reports)
+        .map(|(distro, report)| Probe { distro, report })
+        .collect())
 }
 
-/// Where a Forge command runs: `None` for this machine, else the WSL
-/// distribution (on Windows, when this PC has no Forge).
-pub fn forge_target(distro: Option<&str>) -> Result<Option<String>> {
+pub(crate) fn distros_with_forge() -> Result<Vec<String>, DistrosError> {
+    let mut found = Vec::new();
+    for probe in probe_all()? {
+        match &probe.report {
+            Ok(_) if probe.has_forge() => found.push(probe.distro),
+            Ok(_) => {}
+            Err(error) => ui::warning(format!(
+                "Couldn't check {} (WSL) for Forge: {}",
+                probe.distro,
+                diagnostics::chain(error)
+            )),
+        }
+    }
+    Ok(found)
+}
+
+pub(crate) fn forge_target(distro: Option<&str>) -> Result<Option<String>, ForgeTargetError> {
     if let Some(distro) = distro {
-        anyhow::ensure!(cfg!(windows), "--distro only applies on Windows");
+        if !cfg!(windows) {
+            return Err(ForgeTargetError::DistroOffWindows);
+        }
         return Ok(Some(distro.to_owned()));
     }
-    if !cfg!(windows) || App::Forge.binary()?.is_file() {
+    if !cfg!(windows) || paths::binary(App::Forge)?.is_file() {
         return Ok(None);
     }
     let progress = ui::Progress::spinner("Looking for Forge in WSL");
     let found = distros_with_forge();
     progress.clear();
+    let found = found.map_err(ForgeTargetError::Distros)?;
     match found.as_slice() {
-        [] => bail!("Forge isn't installed on this PC or in WSL; run `ae install`"),
+        [] => Err(ForgeTargetError::NotInstalled),
         [distro] => Ok(Some(distro.clone())),
         _ if ui::interactive() => {
             let mut select = cliclack::select("Which Forge?");
             for distro in &found {
                 select = select.item(distro.clone(), format!("{distro} (WSL)"), "");
             }
-            select.interact().map(Some).map_err(ui::prompt_error)
+            Ok(select.interact().map(Some).map_err(ui::prompt_error)?)
         }
         _ => Err(ui::needs_flag(
             "which WSL distribution's Forge to use",
             &format!("--distro {}", found.join("|")),
-        )),
+        )
+        .into()),
     }
 }
 
-/// Runs this same command with the `ae` in `distro` (minus `--distro`) and
-/// exits with its status.
-pub fn forward(distro: &str) -> Result<()> {
+pub(crate) fn exit_code(status: ExitStatus) -> std::process::ExitCode {
+    status
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .map_or(
+            std::process::ExitCode::FAILURE,
+            std::process::ExitCode::from,
+        )
+}
+
+pub(crate) fn forward(distro: &str) -> Result<std::process::ExitCode, ForwardError> {
     let mut args = Vec::new();
     let mut skip = false;
     for arg in std::env::args_os().skip(1) {
@@ -116,6 +252,16 @@ pub fn forward(distro: &str) -> Result<()> {
             args.push(arg);
         }
     }
-    let status = ae(distro).args(args).status().context("run wsl.exe")?;
-    std::process::exit(status.code().unwrap_or(1));
+    let status = ae(distro)
+        .args(args)
+        .status()
+        .map_err(|source| ForwardError {
+            distro: distro.to_owned(),
+            source,
+        })?;
+    Ok(exit_code(status))
 }
+
+#[cfg(test)]
+#[path = "../tests/wsl/unit.rs"]
+mod tests;

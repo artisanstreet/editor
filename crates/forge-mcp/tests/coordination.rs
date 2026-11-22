@@ -54,16 +54,17 @@ impl Fixture {
             Engines::new(directory.path()),
             directory.path().to_path_buf(),
         );
+        let mcp = ArtisanMcp::new(hub.clone());
         Self {
-            mcp: ArtisanMcp::new(hub.clone()),
-            hub,
-            threads,
             _directory: directory,
+            hub,
+            mcp,
+            threads,
         }
     }
 
     async fn call(&self, who: usize, name: &str, args: Value) -> Value {
-        server::handle(&self.mcp,&self.threads[who],json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).await.unwrap()["result"].clone()
+        server::handle(&self.mcp,&forge_runs::GatewayCaller { thread: self.threads[who].clone(), ended: tokio_util::sync::CancellationToken::new(), acting: forge_runs::Acting::Run { stopped: tokio_util::sync::CancellationToken::new() } },json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).await.unwrap()["result"].clone()
     }
 
     async fn claim(&self, who: usize, path: &str) -> Value {
@@ -242,7 +243,8 @@ async fn long_item_continuation_preserves_every_utf8_character() {
             offset = next;
         } else {
             assert_eq!(
-                usize::try_from(page["structuredContent"]["total_bytes"].as_u64().unwrap()).unwrap(),
+                usize::try_from(page["structuredContent"]["total_bytes"].as_u64().unwrap())
+                    .unwrap(),
                 rendered.len()
             );
             break;
@@ -266,4 +268,69 @@ async fn long_item_continuation_preserves_every_utf8_character() {
         )
         .await;
     assert_eq!(invalid["isError"], true);
+}
+
+#[tokio::test]
+async fn a_stored_plan_keeps_its_steps_in_both_read_tools() {
+    let fixture = Fixture::new().await;
+    let steps: Vec<artisan_api::PlanStep> = (0..120)
+        .map(|step| artisan_api::PlanStep {
+            text: format!("step number {step}").into(),
+            status: artisan_api::StepStatus::Pending,
+        })
+        .collect();
+    let item = fixture
+        .hub
+        .store()
+        .upsert_item(forge_store::NewItem {
+            id: artisan_api::ItemId::new(),
+            thread_id: fixture.threads[0].clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::Plan {
+                steps: artisan_api::Collection::Inline(steps),
+                proposal: None,
+                approval: None,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        &item.kind,
+        artisan_api::ItemKind::Plan {
+            steps: artisan_api::Collection::Stored(_),
+            ..
+        }
+    ));
+    let read = fixture
+        .call(0, "read_thread", json!({"item":item.id}))
+        .await;
+    let text = read["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("step number 0\n"), "{text}");
+    assert!(text.contains("step number 49\n"), "{text}");
+    assert!(text.contains("70 more steps"), "{text}");
+    let whole = fixture
+        .call(0, "read_thread_item", json!({"item":item.id,"limit":64000}))
+        .await;
+    let text = whole["structuredContent"]["text"].as_str().unwrap();
+    assert!(text.contains("step number 119\n"), "{text}");
+}
+
+#[tokio::test]
+async fn a_legacy_tool_name_refuses_a_mistyped_limit_instead_of_using_the_default() {
+    let fixture = Fixture::new().await;
+    let response = fixture
+        .call(
+            0,
+            "threads_touching",
+            json!({"paths":["src/a.rs"],"limit":"5"}),
+        )
+        .await;
+    assert_eq!(response["isError"], true, "{response}");
+    let message = response["structuredContent"]["error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(message.contains("read limit"), "{message}");
 }

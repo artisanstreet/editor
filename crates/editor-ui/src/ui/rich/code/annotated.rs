@@ -56,8 +56,8 @@ pub(crate) struct AnnotatedCode(Arc<Model>);
 impl AnnotatedCode {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_strings, retained_vec};
-        std::mem::size_of::<Self>()
-            + std::mem::size_of::<Model>()
+        size_of::<Self>()
+            + size_of::<Model>()
             + retained_strings(&self.0.lines)
             + retained_optional(self.0.path.as_ref())
             + retained_vec(&self.0.notes)
@@ -90,9 +90,9 @@ impl From<Spec> for AnnotatedCode {
         }
         let lines = code_lines(&spec.code);
         let width = excerpt_width(&lines);
-        let start = spec.start_line.max(1);
         let count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
-        let last = start.saturating_add(count.saturating_sub(1));
+        let start = spec.start_line.clamp(1, u32::MAX - count.saturating_sub(1));
+        let last = start + count.saturating_sub(1);
         let notes: Vec<Note> = spec
             .notes
             .into_iter()
@@ -101,14 +101,13 @@ impl From<Spec> for AnnotatedCode {
                 let mut span = note.lines;
                 let outside = span.end < start || span.start > last;
                 if outside && start > 1 && span.start >= 1 && span.end <= count {
-                    span = LineSpan {
-                        start: span.start + start - 1,
-                        end: span.end + start - 1,
-                    };
+                    span = span.offset(start - 1).expect(
+                        "invariant: a relative note ends within the excerpt, whose last line fits in u32",
+                    );
                 }
                 Note {
                     span,
-                    text: String::from(note.text.trim().to_owned()),
+                    text: note.text.trim().to_owned(),
                 }
             })
             .collect();
@@ -147,8 +146,7 @@ impl From<Spec> for AnnotatedCode {
             path: spec
                 .path
                 .map(|path| path.trim().to_owned())
-                .filter(|path| !path.is_empty())
-                .map(String::from),
+                .filter(|path| !path.is_empty()),
             notes,
             owner,
             marker,

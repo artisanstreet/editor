@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 
 use aqua_text::{InlineCellError, StyledSpan, TextStyle};
@@ -13,6 +14,7 @@ pub struct GlyphToken {
     pub color: Oklch,
 }
 
+#[derive(Debug)]
 pub struct CompiledTokens {
     pub spans: Vec<StyledSpan>,
     pub glyphs: Vec<GlyphToken>,
@@ -34,31 +36,31 @@ pub fn compile_tokens(
             continue;
         }
         if end < range.start {
-            spans.push(StyledSpan::new(&text[end..range.start], base.clone()));
+            spans.push(StyledSpan::new(slice(text, end..range.start), base.clone()));
         }
         let mut style = base.clone();
         if let Some(weight) = token.font_weight {
             style.weight = weight;
         }
         let mut start = range.start;
-        if let Some(asset) = token.glyph {
-            if let Some(sigil) = text[range.clone()].chars().next() {
-                let sigil_end = start + sigil.len_utf8();
-                let cell = 20.0_f32.max(sigil_advance(sigil));
-                let span = StyledSpan::new(&text[start..sigil_end], style.clone())
-                    .gpui_source_color([0.0, 0.0, 0.0, 0.0])
-                    .inline_cell(cell)?;
-                spans.push(span);
-                glyphs.push(GlyphToken {
-                    range: start..sigil_end,
-                    asset,
-                    color: token.color.unwrap_or(foreground).at(Opacity::MentionGlyph),
-                });
-                start = sigil_end;
-            }
+        if let Some(asset) = token.glyph
+            && let Some(sigil) = slice(text, range.clone()).chars().next()
+        {
+            let sigil_end = start + sigil.len_utf8();
+            let cell = 20.0_f32.max(sigil_advance(sigil));
+            let span = StyledSpan::new(slice(text, start..sigil_end), style.clone())
+                .gpui_source_color([0.0, 0.0, 0.0, 0.0])
+                .inline_cell(cell)?;
+            spans.push(span);
+            glyphs.push(GlyphToken {
+                range: start..sigil_end,
+                asset,
+                color: token.color.unwrap_or(foreground).at(Opacity::MentionGlyph),
+            });
+            start = sigil_end;
         }
         if start < range.end {
-            let mut span = StyledSpan::new(&text[start..range.end], style);
+            let mut span = StyledSpan::new(slice(text, start..range.end), style);
             if let Some(color) = token.color {
                 let hsla = color.to_reference_text_color();
                 span = span.gpui_source_color([
@@ -73,7 +75,7 @@ pub fn compile_tokens(
         end = range.end;
     }
     if end < text.len() {
-        spans.push(StyledSpan::new(&text[end..], base.clone()));
+        spans.push(StyledSpan::new(slice(text, end..), base.clone()));
     }
     Ok(CompiledTokens { spans, glyphs })
 }

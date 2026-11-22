@@ -1,353 +1,114 @@
 use super::{
     asset::source_asset_glyph,
-    kit::{self, Hover, Radius, live},
-    motion::MotionPolicy,
-    theme::{ArtisanTheme, Opacity, RadiusTokens},
+    kit::{Hover, Radius, live},
+    theme::{ArtisanTheme, Opacity},
 };
 use aqua_core::{CursorIcon, Insets, Oklch, Role};
-use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Button as UiButton, Element, Key, Text},
-    style::{Length, Style},
+    element::{Box as UiBox, Button as UiButton, Element, Key},
+    style::Style,
     tree::ActionEvent,
 };
 use editor_assets::AssetId;
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ButtonVariant {
-    Primary,
-    Outline,
-    Secondary,
-    Ghost,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LabelOverflow {
-    Start,
-    End,
-}
-enum Content {
-    Text(String),
-    Icon(AssetId, String),
-    IconText(AssetId, String),
-}
-impl Content {
-    fn label(&self) -> &str {
-        match self {
-            Self::Text(label) | Self::Icon(_, label) | Self::IconText(_, label) => label,
-        }
-    }
-}
-pub struct Button {
+pub(crate) struct Button {
     id: Key,
     theme: ArtisanTheme,
-    content: Content,
-    variant: ButtonVariant,
-    disabled: bool,
-    muted: bool,
-    radius: Option<f32>,
-    glass: bool,
-    size: Option<f32>,
-    label_overflow: Option<LabelOverflow>,
+    icon: AssetId,
+    label: String,
     icon_slot: Option<Element>,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
-    debug_selector: Option<String>,
-    motion_policy: MotionPolicy,
 }
 impl Button {
-    fn with_content(id: impl Into<Key>, theme: ArtisanTheme, content: Content) -> Self {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the icon button stores this theme copy and paints from it when built"
+    )]
+    pub(crate) fn icon(
+        id: impl Into<Key>,
+        theme: ArtisanTheme,
+        icon: AssetId,
+        label: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             theme,
-            content,
-            variant: ButtonVariant::Ghost,
-            disabled: false,
-            muted: false,
-            radius: None,
-            glass: false,
-            size: None,
-            label_overflow: None,
+            icon,
+            label: label.into(),
             icon_slot: None,
             on_activate: None,
-            debug_selector: None,
-            motion_policy: MotionPolicy::Full,
         }
     }
-    pub fn text(id: impl Into<Key>, theme: ArtisanTheme, label: impl Into<String>) -> Self {
-        Self::with_content(id, theme, Content::Text(label.into()))
-    }
-    pub fn icon(
-        id: impl Into<Key>,
-        theme: ArtisanTheme,
-        icon: AssetId,
-        label: impl Into<String>,
-    ) -> Self {
-        Self::with_content(id, theme, Content::Icon(icon, label.into()))
-    }
-    pub fn icon_text(
-        id: impl Into<Key>,
-        theme: ArtisanTheme,
-        icon: AssetId,
-        label: impl Into<String>,
-    ) -> Self {
-        Self::with_content(id, theme, Content::IconText(icon, label.into()))
-    }
-    pub const CORNER_INSET: f32 = 2.0;
-    pub fn corner_close(
-        id: impl Into<Key>,
-        theme: ArtisanTheme,
-        label: impl Into<String>,
-        surface_radius: f32,
-    ) -> Self {
-        Self::icon(id, theme, AssetId::TABLER_X, label)
-            .variant(ButtonVariant::Ghost)
-            .muted()
-            .glass()
-            .compact(24.0)
-            .nested_radius(RadiusTokens::nested(surface_radius, Self::CORNER_INSET))
-    }
-    pub const fn variant(mut self, value: ButtonVariant) -> Self {
-        self.variant = value;
-        self
-    }
-    pub const fn label_overflow(mut self, value: LabelOverflow) -> Self {
-        self.label_overflow = Some(value);
-        self
-    }
-    pub const fn disabled(mut self, value: bool) -> Self {
-        self.disabled = value;
-        self
-    }
-    pub const fn muted(mut self) -> Self {
-        self.muted = true;
-        self
-    }
-    pub const fn nested_radius(mut self, value: f32) -> Self {
-        self.radius = Some(value);
-        self
-    }
-    pub const fn glass(mut self) -> Self {
-        self.glass = true;
-        self
-    }
-    pub const fn compact(mut self, value: f32) -> Self {
-        self.size = Some(value);
-        self
-    }
-    pub fn on_activate(mut self, handler: impl Fn(ActionEvent) + 'static) -> Self {
+    pub(crate) fn on_activate(mut self, handler: impl Fn(ActionEvent) + 'static) -> Self {
         self.on_activate = Some(Box::new(handler));
         self
     }
-    pub fn icon_slot(mut self, icon: Element) -> Self {
+    pub(crate) fn icon_slot(mut self, icon: Element) -> Self {
         self.icon_slot = Some(icon);
         self
     }
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.debug_selector = Some(selector.into());
-        self
-    }
-    pub const fn motion_policy(mut self, policy: MotionPolicy) -> Self {
-        self.motion_policy = policy;
-        self
-    }
-    fn primary(self) -> Element {
-        let label = match self.content {
-            Content::Text(text) | Content::Icon(_, text) => kit::Label::Text(text),
-            Content::IconText(icon, text) => kit::Label::IconText(icon, text),
-        };
-        let mut button = kit::Button::new(
-            self.id,
-            self.theme,
-            kit::ButtonTone::Primary,
-            kit::ButtonSize::Md,
-            label,
-        )
-        .disabled(self.disabled)
-        .motion_policy(self.motion_policy);
-        if let Some(radius) = self.radius {
-            button = button.nested(radius, 0.0);
-        }
-        if let Some(overflow) = self.label_overflow {
-            button = button.ellipsis(match overflow {
-                LabelOverflow::Start => kit::Ellipsis::Start,
-                LabelOverflow::End => kit::Ellipsis::End,
-            });
-        }
-        if let Some(handler) = self.on_activate {
-            button = button.on_activate(handler);
-        }
-        if let Some(selector) = self.debug_selector {
-            button = button.debug_selector(selector);
-        }
-        button.build()
-    }
-    pub fn build(self) -> Element {
+    pub(crate) fn build(self) -> Element {
         let t = self.theme;
-        let (background, border) = match self.variant {
-            ButtonVariant::Primary => return self.primary(),
-            ButtonVariant::Outline => (t.colors.surface.to_paint(), t.colors.line.to_paint()),
-            ButtonVariant::Secondary => (t.colors.raised.to_paint(), Oklch::TRANSPARENT),
-            ButtonVariant::Ghost => (Oklch::TRANSPARENT, Oklch::TRANSPARENT),
-        };
-        let icon_foreground = if self.muted {
-            t.colors.text_muted
-        } else {
-            t.colors.text
-        };
-        let background = if self.glass {
-            Oklch::TRANSPARENT
-        } else {
-            background
-        };
-        let edge = if self.glass { 0.0 } else { 1.0 };
-        let height = self.size.unwrap_or(t.density.control_sm);
-        let icon_only = matches!(self.content, Content::Icon(..));
-        let label = self.content.label().to_owned();
-        let mut style = Style::new()
+        let icon_foreground = t.colors.text;
+        let height = t.density.control_sm;
+        let radius = Radius::Field.px();
+        let style = Style::new()
             .align(AlignItems::CENTER)
             .justify(JustifyContent::CENTER)
             .gpui_source_text_color(icon_foreground.to_reference_text_color())
-            .flex_shrink(if self.label_overflow.is_some() && !icon_only {
-                1.0
-            } else {
-                0.0
-            })
+            .flex_shrink(0.0)
             .padding_insets(Insets {
-                left: if icon_only { 0.0 } else { 12.0 },
-                right: if icon_only { 0.0 } else { 12.0 },
+                left: 0.0,
+                right: 0.0,
                 top: 0.0,
                 bottom: 0.0,
             });
-        if self.label_overflow.is_some() && !icon_only {
-            style = style
-                .min_width(Length::Px(0.0))
-                .max_width(Length::Pct(100.0));
-        }
+        let icon = self.icon;
         let mut root = UiButton::new()
             .height(height)
+            .width(height)
             .gap(4.0)
-            .radius(self.radius.unwrap_or(Radius::Field.px()))
-            .border((edge, border))
-            .fill(background)
-            .style(style);
-        if icon_only {
-            root = root.width(height);
-        }
-        let radius = self.radius.unwrap_or(Radius::Field.px());
-        if self.glass {
-            root = root.child(crate::ui::kit::surface::glass::paint(
-                &t,
-                crate::ui::kit::surface::glass::Shade::Clear,
-                radius,
-            ));
-        }
-        if !self.disabled {
-            root = root.child(live::layer(Hover::Neutral, &t, radius, false));
-        }
-        let make_text = |text: String| {
-            let text = Text::new(text).text_style(TextStyle {
-                families: vec![FontFamily::Named(t.typography.sans.family.to_owned())],
-                size_px: t.typography.control_text,
-                line_height_px: t.typography.control_text * 1.25,
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::default()
-            });
-            let text = match self.label_overflow {
-                Some(LabelOverflow::Start) => {
-                    text.overflow(aqua_text::overflow::OverflowMode::StartEllipsis)
-                }
-                Some(LabelOverflow::End) => {
-                    text.overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                }
-                None => text,
-            };
-            if self.label_overflow.is_some() {
-                text.style(Style::new().flex_shrink(1.0).min_width(Length::Px(0.0)))
-                    .build()
-            } else {
-                text.build()
-            }
-        };
-        match self.content {
-            Content::Text(text) => root = root.child(make_text(text)),
-            Content::Icon(icon, _) => {
-                root = root.child(
-                    UiBox::new()
-                        .width(16.0)
-                        .height(16.0)
-                        .style(Style::new().flex_shrink(0.0))
-                        .clip(true)
-                        .child(self.icon_slot.unwrap_or_else(|| {
-                            source_asset_glyph(icon, 16.0, icon_foreground.to_reference_paint())
-                        }))
-                        .build(),
-                )
-            }
-            Content::IconText(icon, text) => {
-                root = root
-                    .child(
-                        UiBox::new()
-                            .width(16.0)
-                            .height(16.0)
-                            .style(Style::new().flex_shrink(0.0))
-                            .clip(true)
-                            .child(source_asset_glyph(
-                                icon,
-                                16.0,
-                                icon_foreground.to_reference_paint(),
-                            ))
-                            .build(),
-                    )
-                    .child(make_text(text))
-            }
-        }
-        if self.disabled {
-            root = root.opacity(Opacity::Disabled.alpha());
-        } else if let Some(handler) = self.on_activate {
+            .radius(radius)
+            .border((1.0, Oklch::TRANSPARENT))
+            .fill(Oklch::TRANSPARENT)
+            .style(style)
+            .child(live::layer(Hover::Neutral, &t, radius, false))
+            .child(
+                UiBox::new()
+                    .width(16.0)
+                    .height(16.0)
+                    .style(Style::new().flex_shrink(0.0))
+                    .clip(true)
+                    .child(self.icon_slot.unwrap_or_else(|| {
+                        source_asset_glyph(icon, 16.0, icon_foreground.to_reference_paint())
+                    }))
+                    .build(),
+            );
+        if let Some(handler) = self.on_activate {
             root = root.on_activate_event(handler);
         }
         let element = root
             .build()
             .with_key(self.id)
             .role(Role::Button)
-            .aria_label(label)
+            .aria_label(self.label)
             .gpui_keyboard_activation()
-            .disabled(self.disabled)
-            .focusable(!self.disabled);
-        let element = if let Some(selector) = self.debug_selector {
-            element.debug_selector(selector)
-        } else {
-            element
-        };
-        if self.disabled {
-            element.aria_description("Unavailable")
-        } else {
-            let focus = Style::new()
-                .border_of(1.0, t.colors.ring.to_paint())
-                .shadows(vec![aqua::ShadowLayer {
-                    dx: 0.0,
-                    dy: 0.0,
-                    blur: 0.0,
-                    spread: t.interaction.focus_ring_width,
-                    inset: false,
-                    color: t.colors.ring.at(Opacity::FocusRing).to_paint(),
-                }]);
-            let hover_style = match self.muted {
-                true => {
-                    Style::new().gpui_source_text_color(t.colors.text.to_reference_text_color())
-                }
-                false => Style::new(),
-            };
-            let element = live::track(element)
-                .cursor(CursorIcon::Pointer)
-                .focus_visible_style(focus)
-                .hover_style(hover_style);
-            if self.motion_policy == MotionPolicy::Full {
-                element.pressed_style(
-                    Style::new().transform(aqua_core::Transform2D::translate(0.0, 1.0)),
-                )
-            } else {
-                element
-            }
-        }
+            .disabled(false)
+            .focusable(true);
+        let focus = Style::new()
+            .border_of(1.0, t.colors.ring.to_paint())
+            .shadows(vec![aqua::ShadowLayer {
+                dx: 0.0,
+                dy: 0.0,
+                blur: 0.0,
+                spread: t.interaction.focus_ring_width,
+                inset: false,
+                color: t.colors.ring.at(Opacity::FocusRing).to_paint(),
+            }]);
+        let element = live::track(element)
+            .cursor(CursorIcon::Pointer)
+            .focus_visible_style(focus)
+            .hover_style(Style::new());
+        super::kit::control::pressable(element, &t, 1.0)
     }
 }

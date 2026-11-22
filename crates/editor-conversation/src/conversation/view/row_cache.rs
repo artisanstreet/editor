@@ -17,14 +17,20 @@ pub struct RowOwner {
     identity: Option<(RowKey, PresentationScope)>,
 }
 
+impl std::fmt::Debug for RowOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowOwner").finish_non_exhaustive()
+    }
+}
+
 impl Default for RowOwner {
     fn default() -> Self {
         Self {
             motion: RefCell::new(super::motion::RowMotion::default()),
             reveal: RefCell::new(None),
-            sources: RefCell::new(Default::default()),
-            questions: RefCell::new(Default::default()),
-            batches: RefCell::new(Default::default()),
+            sources: RefCell::new(crate::conversation::content::SourceOwners::default()),
+            questions: RefCell::new(crate::conversation::questions::QuestionCollection::default()),
+            batches: RefCell::new(super::resources::ResourceBatches::default()),
             source_ids: RefCell::new(HashMap::new()),
             stored_leaf: RefCell::new(None),
             cleanup: Rc::default(),
@@ -42,12 +48,6 @@ impl Drop for RowOwner {
 }
 
 impl RowOwner {
-    #[cfg(feature = "test-support")]
-    pub fn question_browser_for_tests(
-        &self,
-    ) -> Option<Rc<RefCell<editor_sources::CollectionBrowser<artisan_api::Question>>>> {
-        self.questions.borrow().browser()
-    }
     pub fn identity(&self) -> Option<(&RowKey, &PresentationScope)> {
         self.identity.as_ref().map(|(key, scope)| (key, scope))
     }
@@ -62,7 +62,7 @@ impl RowOwner {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct RowCache {
     scope: Option<PresentationScope>,
     rows: HashMap<RowKey, Rc<RowOwner>>,
@@ -72,7 +72,7 @@ pub struct RowCache {
 }
 
 impl RowCache {
-    pub const CAPACITY: usize = 128;
+    const CAPACITY: usize = 128;
 
     pub fn rebind(&mut self, scope: Option<PresentationScope>) {
         if self.scope != scope {
@@ -82,16 +82,16 @@ impl RowCache {
         }
     }
 
-    pub fn scope_is(&self, scope: &PresentationScope) -> bool {
+    pub(crate) fn scope_is(&self, scope: &PresentationScope) -> bool {
         self.scope.as_ref() == Some(scope)
     }
 
     pub fn candidate(&self, key: &RowKey) -> Rc<RowOwner> {
         if let Some(owner) = self.rows.get(key) {
-            return owner.clone();
+            return Rc::clone(owner);
         }
         let mut owner = RowOwner::default();
-        owner.cleanup = self.cleanup.clone();
+        owner.cleanup = Rc::clone(&self.cleanup);
         owner.identity = self
             .scope
             .as_ref()

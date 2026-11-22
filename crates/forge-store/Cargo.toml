@@ -2,36 +2,66 @@
 name = "forge-store"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Forge's durable state: one SQLite file with a global change seq, plus content-addressed blobs."
 
+[lib]
+doctest = false
+
 [features]
-legacy-import = []
 qualification = []
 
 [dependencies]
-artisan-markdown-index = { path = "../artisan-markdown-index" }
+artisan-markdown-index.workspace = true
 tempfile.workspace = true
 fs2.workspace = true
-anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
-forge-content = { path = "../forge-content" }
+artisan-api.workspace = true
+artisan-paths.workspace = true
+diagnostics.workspace = true
+forge-content.workspace = true
 image = { workspace = true, features = ["gif", "jpeg", "png", "webp"] }
-rusqlite = { workspace = true, features = ["fallible_uint"] }
+rusqlite = { workspace = true, features = ["fallible_uint", "hooks"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
+base64.workspace = true
 regex.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing.workspace = true
 thiserror.workspace = true
 webp.workspace = true
-fff-grep = "=0.9.6"
+icu_casemap.workspace = true
+icu_normalizer.workspace = true
 memchr = "2.8.3"
+notify.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+divan.workspace = true
+flate2.workspace = true
+test-support = { workspace = true, features = ["logs"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[[bench]]
+name = "recall"
+harness = false
+
+[[bench]]
+name = "text_search"
+harness = false
+
+[[bench]]
+name = "retention"
+harness = false
+
+[[bench]]
+name = "content"
+harness = false
+
+[[bench]]
+name = "transcript"
+harness = false
 
 [lints]
 workspace = true

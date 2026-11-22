@@ -1,13 +1,13 @@
 use super::{Funnel, Step};
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of_count, percent};
 use crate::ui::rich::kit::format_number;
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens};
-use aqua_core::{GpuiBackground, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
+use aqua_core::{GpuiBackground, Insets, NamedKey};
 use aqua_text::FontWeight;
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
-use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ impl FunnelState {
     fn sync(&self, id: &str, model: &Funnel) -> (Option<usize>, u64) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.steps.clone(),
+            model: Arc::clone(&model.steps),
             selected: None,
             reveal: None,
             reset: 0,
@@ -48,7 +48,7 @@ impl FunnelState {
                 entry.reveal = None;
                 entry.reset = entry.reset.wrapping_add(1);
             }
-            entry.model = model.steps.clone();
+            entry.model = Arc::clone(&model.steps);
         }
         (entry.selected, entry.reset)
     }
@@ -87,7 +87,14 @@ impl FunnelState {
                     .map_or(0, |index| index.saturating_add(1).min(count - 1)),
             ),
             NamedKey::Enter => Some(entry.selected.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.selected = next;
         entry.reveal = next;
@@ -155,28 +162,33 @@ fn summary(funnel: &Funnel, selected: Option<usize>) -> String {
 }
 
 impl Funnel {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the funnel view takes its text, empty and navigation factories with its state"
+    )]
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: FunnelState,
-        text: TextFactory,
-        empty: EmptyFactory,
-        navigation_frame: NavigationFrame,
+        text: &TextFactory,
+        empty: &EmptyFactory,
+        navigation_frame: &NavigationFrame,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let count = self.steps.len();
         if count == 0 {
             return empty("No steps");
         }
-        let (selected, reset) = states.sync(&id, self);
+        let (selected, reset) = states.sync(id, self);
         let theme = *theme;
         let height = theme.density.control_sm;
         let model = self.clone();
         let row_state = states.clone();
-        let row_id = id.clone();
-        let row_text = text.clone();
-        let row_invalidate = invalidate.clone();
+        let row_id = id.to_owned();
+        let row_text = Rc::clone(text);
+        let row_invalidate = Rc::clone(&invalidate);
         let rows = List::new()
             .items(0..count)
             .key(|index| *index)
@@ -199,7 +211,7 @@ impl Funnel {
                     .to_reference_paint();
                 let state = row_state.clone();
                 let key = row_id.clone();
-                let invalidate = row_invalidate.clone();
+                let invalidate = Rc::clone(&row_invalidate);
                 let name = ui::Box::new()
                     .style(
                         Style::new()
@@ -323,81 +335,24 @@ impl Funnel {
             label.push(' ');
             label.push_str(value);
         }
-        let keyboard = states.clone();
-        let key = id.clone();
-        let mut navigation = ui::Box::new()
-            .width(Length::Pct(100.0))
-            .child(content)
-            .build()
-            .with_key(format!("{id}-navigation"))
-            .role(Role::Group)
-            .focusable(true)
-            .tab_index(0)
-            .aria_label(label)
-            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                    return InputResponse::default();
-                };
-                let Key::Named(code) = key_event.key else {
-                    return InputResponse::default();
-                };
-                if !keyboard.key(
-                    &key,
-                    count,
-                    code,
-                    key_event.modifiers.contains(Modifiers::ALT),
-                ) {
-                    return InputResponse::default();
+        let keyboard = states;
+        let key = id.to_owned();
+        let navigation = navigation_group(
+            ui::Box::new()
+                .width(Length::Pct(100.0))
+                .child(content)
+                .build(),
+            id,
+            label,
+            selection_label,
+            move |code, alt| {
+                let handled = keyboard.key(&key, count, code, alt);
+                if handled {
+                    invalidate();
                 }
-                invalidate();
-                InputResponse {
-                    stop_propagation: true,
-                    ..InputResponse::default()
-                }
-            });
-        if let Some(label) = selection_label {
-            navigation = navigation.aria_value(label);
-        }
+                handled
+            },
+        );
         navigation_frame(navigation, theme.colors.ring.to_reference_paint())
-    }
-}
-
-#[cfg(feature = "test-support")]
-pub struct FunnelFixture {
-    model: Funnel,
-    state: FunnelState,
-}
-#[cfg(feature = "test-support")]
-impl FunnelFixture {
-    pub fn new(json: &str) -> Self {
-        let model = serde_json::from_str(json).expect("valid funnel");
-        let state = FunnelState::default();
-        state.sync("test", &model);
-        Self { model, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        self.model = serde_json::from_str(json).expect("valid funnel");
-        self.state.sync("test", &self.model);
-    }
-    pub fn selected(&self) -> Option<usize> {
-        self.state.sync("test", &self.model).0
-    }
-    pub fn generation(&self) -> u64 {
-        self.state.sync("test", &self.model).1
-    }
-    pub fn hover(&self, index: usize, hovered: bool) -> bool {
-        self.state.hover("test", index, hovered)
-    }
-    pub fn key(&self, code: NamedKey, alt: bool) -> bool {
-        self.state.key("test", self.model.steps.len(), code, alt)
-    }
-    pub fn summary(&self) -> String {
-        summary(&self.model, self.selected())
-    }
-    pub fn pending_reveal(&self) -> Option<(String, usize)> {
-        self.state.pending_reveal("test")
-    }
-    pub fn revealed(&self, key: &str, index: usize) {
-        self.state.revealed("test", key, index);
     }
 }

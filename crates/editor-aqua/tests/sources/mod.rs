@@ -7,12 +7,18 @@ fn raw_rows_preserve_unicode_and_bound_fragments() {
     let rows = raw_rows(&text);
     assert_eq!(
         rows.iter()
-            .map(|range| &text[range.clone()])
+            .map(|range| text
+                .get(range.clone())
+                .expect("the test text slices on a char boundary"))
             .collect::<String>(),
         text
     );
     assert!(rows.iter().all(|range| range.len() <= 1024));
-    assert_eq!(&text[rows[1].clone()], "🙂\n");
+    assert_eq!(
+        text.get(rows[1].clone())
+            .expect("the test text slices on a char boundary"),
+        "🙂\n"
+    );
 }
 
 #[test]

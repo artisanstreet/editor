@@ -1,12 +1,9 @@
 use super::*;
-use std::{
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{Duration, Instant},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn fetcher() -> MediaFetcher {
     MediaFetcher::new("test", |_| {
-        Box::pin(async { Err(source::MediaFailure::Missing) })
+        Box::pin(async { Err(MediaLoadError::Fetch(source::MediaFailure::Missing)) })
     })
 }
 
@@ -41,15 +38,12 @@ fn retained_loader_publishes_after_consumer_drops_and_releases_cache_lease() {
             .is_none()
     );
     drop(consumer);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let image = loop {
-        loader.drain(&assets);
-        if let Some(result) = loader.request(&fetcher, &source, "image", 2, Arc::clone(&wake)) {
-            break result.unwrap();
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(2));
-    };
+    let image =
+        test_support::wait::wait_for("the image to decode", test_support::wait::LIVENESS, || {
+            loader.drain(&assets);
+            loader.request(&fetcher, &source, "image", 2, Arc::clone(&wake))
+        })
+        .unwrap();
     assert!(matches!(
         image.status(),
         ImageStatus::Ready {
@@ -64,7 +58,7 @@ fn retained_loader_publishes_after_consumer_drops_and_releases_cache_lease() {
 }
 
 #[test]
-fn same_source_shares_pending_work_across_owners_and_prunes_only_last_owner() {
+fn same_source_shares_pending_work_and_stops_when_the_last_owner_goes() {
     let loader = Images::new();
     let fetcher = fetcher();
     let first = fetcher.clone().owned_by(&[1], 1);
@@ -83,10 +77,10 @@ fn same_source_shares_pending_work_across_owners_and_prunes_only_last_owner() {
     );
     assert_eq!(loader.state.borrow().jobs.len(), 1);
     fetcher.retain_resources(&[vec![2]]);
-    loader.retain_owners(&[vec![2]]);
+    loader.poll_assets();
     assert_eq!(loader.state.borrow().jobs.len(), 1);
     fetcher.retain_resources(&[]);
-    loader.retain_owners(&[]);
+    loader.poll_assets();
     assert!(loader.state.borrow().jobs.is_empty());
 }
 
@@ -94,7 +88,7 @@ fn same_source_shares_pending_work_across_owners_and_prunes_only_last_owner() {
 fn discarded_generation_cannot_replace_new_cached_result() {
     let fetcher = fetcher().owned_by(&[1], 1);
     let source = image_source();
-    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed);
+    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed().clone());
     let wake: aqua::mailbox::Wake = Arc::new(|| {});
     let Load::Start(old) =
         fetcher
@@ -133,7 +127,7 @@ fn dropping_last_loader_cancels_its_pending_entry() {
             .is_none()
     );
     drop(loader);
-    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed);
+    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed().clone());
     assert!(matches!(
         fetcher
             .resources()
@@ -160,7 +154,7 @@ fn stale_job_cleanup_does_not_cancel_replacement_generation() {
             .is_none()
     );
     old.clear();
-    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed);
+    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed().clone());
     assert!(matches!(
         fetcher
             .resources()
@@ -203,4 +197,71 @@ fn url_cache_entries_are_scoped_to_item_revision() {
             .load::<ImageLoader>(second.owner(), &second_key, 1, 4, wake),
         Load::Ready(Err(ImageError::Decode))
     ));
+}
+
+#[test]
+fn a_remote_image_loads_only_after_its_message_allows_remote_images() {
+    let loader = Images::new();
+    let fetcher = fetcher();
+    let message = fetcher.clone().owned_by(&[1], 1).showing("item-1");
+    let other = fetcher.owned_by(&[2], 1).showing("item-2");
+    let source = MediaSource::from("http://127.0.0.1:9/pixel.png".to_owned());
+    let wake: aqua::mailbox::Wake = Arc::new(|| {});
+    assert!(matches!(
+        loader.request(&message, &source, "image", 1, Arc::clone(&wake)),
+        Some(Err(ImageError::NeedsConsent))
+    ));
+    assert!(
+        loader.state.borrow().jobs.is_empty(),
+        "the image was fetched before the user allowed it"
+    );
+    message.allow_remote();
+    assert!(
+        loader
+            .request(&message, &source, "image", 1, Arc::clone(&wake))
+            .is_none()
+    );
+    assert_eq!(loader.state.borrow().jobs.len(), 1);
+    assert!(matches!(
+        loader.request(&other, &source, "image", 2, wake),
+        Some(Err(ImageError::NeedsConsent))
+    ));
+    loader.clear();
+}
+
+fn forge_error(failure: editor_core::client::CallFailure) -> editor_core::client::CallError {
+    editor_core::client::CallError {
+        method: reqwest::Method::GET,
+        path: "/threads/thread/resource".into(),
+        failure: Box::new(failure),
+    }
+}
+
+#[test]
+fn an_image_too_large_to_carry_says_so_and_offers_no_try_again() {
+    use artisan_api::{ApiError, Failure, Limited, ResourceFailure};
+    use editor_core::client::{CallFailure, ReadBodyError, ResponseError};
+
+    let refused = Failure::Resource(ResourceFailure::TooLarge {
+        subject: Limited::File,
+        actual: Some(60 * 1024 * 1024),
+        limit: artisan_api::TUNNEL_BODY_MAX_BYTES as u64,
+    });
+    let message = refused.to_string();
+    for error in [
+        forge_error(CallFailure::Read(ReadBodyError::TooLarge {
+            limit: artisan_api::TUNNEL_BODY_MAX_BYTES,
+        })),
+        forge_error(CallFailure::Answer(ResponseError::Refused {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            error: ApiError::new(refused, message),
+        })),
+    ] {
+        let shown = ImageError::Load(MediaLoadError::from(error));
+        assert_eq!(shown.summary(), "Too large to preview");
+        assert!(
+            !shown.retryable(),
+            "trying a too-large image again can never work"
+        );
+    }
 }

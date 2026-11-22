@@ -1,5 +1,3 @@
-//! What Claude's tool inputs mean as items.
-
 use super::decoder::str_at;
 use artisan_api::{
     AgentAction, FileChange, FileOp, MessageDirection, PlanStep, Question, QuestionOption,
@@ -12,11 +10,11 @@ use serde_json::Value;
     clippy::expect_used,
     reason = "validate_input has checked every field read here"
 )]
-pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
+pub(crate) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     validate_input(name, input)?;
     let text = |field: &str| {
         str_at(input, field)
-            .expect("validated native tool field")
+            .expect("invariant: validate_input checked this tool field")
             .to_owned()
     };
     let optional = |field: &str| str_at(input, field).map(str::to_owned);
@@ -55,8 +53,10 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             let diff = edits
                 .map(|edit| {
                     diff(
-                        str_at(edit, "old_string").expect("validated old_string"),
-                        str_at(edit, "new_string").expect("validated new_string"),
+                        str_at(edit, "old_string")
+                            .expect("invariant: validate_input checked every MultiEdit old_string"),
+                        str_at(edit, "new_string")
+                            .expect("invariant: validate_input checked every MultiEdit new_string"),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -83,7 +83,6 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
         "WebSearch" => ToolKind::WebSearch {
             query: text("query"),
         },
-        // Forge resolves `to` to the Agent item it names.
         "SendMessage" if optional("to").is_some_and(|to| !to.trim().is_empty()) => {
             ToolKind::AgentMessage {
                 recipient: text("to"),
@@ -105,7 +104,6 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             addresses: Vec::new(),
             targets: Vec::new(),
         },
-        // An agent's id or a background shell's; Forge finds the agent.
         "TaskStop" | "KillShell" => ToolKind::Agents {
             action: AgentAction::Stop,
             addresses: optional("task_id")
@@ -119,6 +117,10 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             cwd: None,
             background: true,
             watch: true,
+        },
+        "Workflow" => ToolKind::Workflow {
+            name: workflow_name(input),
+            input: (!input.is_null()).then(|| input.to_string().into()),
         },
         _ => {
             let input = (!input.is_null()).then(|| input.to_string());
@@ -140,7 +142,24 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     })
 }
 
-pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
+fn workflow_name(input: &Value) -> Option<String> {
+    if let Some(name) = str_at(input, "name") {
+        return Some(name.to_owned());
+    }
+    let script = str_at(input, "script")?;
+    let (_, meta) = script.split_once("meta")?;
+    let (_, rest) = meta.split_once("name")?;
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"' | '`'))?;
+    let (_, name) = rest.split_at(quote.len_utf8());
+    let (name, _) = name.split_once(quote)?;
+    Some(name.to_owned())
+}
+
+pub(crate) fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("Claude tool omitted its name".into());
     }
@@ -212,7 +231,6 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The same unified diff representation used by the other adapters.
 fn diff(old: &str, new: &str) -> String {
     similar::TextDiff::from_lines(old, new)
         .unified_diff()
@@ -223,14 +241,14 @@ fn diff(old: &str, new: &str) -> String {
     clippy::expect_used,
     reason = "callers run validate_input first, which checks these fields"
 )]
-pub fn todo_steps(input: &Value) -> Vec<PlanStep> {
+pub(crate) fn todo_steps(input: &Value) -> Vec<PlanStep> {
     input["todos"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|todo| PlanStep {
             text: (str_at(todo, "content")
-                .expect("validated todo content")
+                .expect("invariant: validate_input checked every TodoWrite content")
                 .to_owned())
             .into(),
             status: match str_at(todo, "status") {
@@ -257,7 +275,7 @@ pub(super) fn questions(input: &Value) -> Vec<Question> {
             id: index.to_string(),
             header: str_at(question, "header").map(str::to_owned),
             text: (str_at(question, "question")
-                .expect("validated question prompt")
+                .expect("invariant: validate_input checked every AskUserQuestion prompt")
                 .to_owned())
             .into(),
             multi_select: question["multiSelect"].as_bool() == Some(true),
@@ -269,7 +287,9 @@ pub(super) fn questions(input: &Value) -> Vec<Question> {
                 .map(|(index, option)| QuestionOption {
                     id: format!("option-{index}"),
                     label: str_at(option, "label")
-                        .expect("validated option label")
+                        .expect(
+                            "invariant: validate_input checked every AskUserQuestion option label",
+                        )
                         .to_owned(),
                     description: (str_at(option, "description").map(str::to_owned)).map(Into::into),
                 })
@@ -280,29 +300,5 @@ pub(super) fn questions(input: &Value) -> Vec<Question> {
 }
 
 #[cfg(test)]
-mod required_input_tests {
-    use super::*;
-    #[test]
-    fn known_native_tools_reject_missing_fields_but_allow_empty_replacement_text() {
-        for name in [
-            "Bash",
-            "Read",
-            "Edit",
-            "Write",
-            "Grep",
-            "Glob",
-            "WebFetch",
-            "WebSearch",
-            "SendMessage",
-        ] {
-            assert!(tool_kind(name, &serde_json::json!({})).is_err(), "{name}");
-        }
-        assert!(
-            tool_kind(
-                "Edit",
-                &serde_json::json!({"file_path":"file","old_string":"","new_string":""})
-            )
-            .is_ok()
-        );
-    }
-}
+#[path = "../../tests/claude/tools/required_input.rs"]
+mod required_input_tests;

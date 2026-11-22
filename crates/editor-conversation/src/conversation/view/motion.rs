@@ -1,12 +1,12 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionMotion, CompactionPhase};
-use editor_ui::motion::MotionCurve;
-use editor_ui::phrase::{PhraseMotion, PhraseOverflow, retained_phrase_or_text};
-use editor_ui::sticker::{self, Sticker};
-use editor_ui::kit::TextRole;
-use editor_ui::theme::ArtisanTheme;
 use aqua_core::GpuiTextColor;
 use aqua_ui::element::Element;
 use artisan_api::ItemId;
+use editor_ui::kit::TextRole;
+use editor_ui::motion::MotionCurve;
+use editor_ui::phrase::{PhraseMotion, PhraseOverflow, retained_phrase_or_text};
+use editor_ui::sticker::{self, Sticker};
+use editor_ui::theme::ArtisanTheme;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -46,11 +46,12 @@ struct EntranceState {
     height: Rc<Cell<f32>>,
 }
 
+#[derive(Debug)]
 pub struct EntranceFrame {
     grow: f32,
     reveal: f32,
     height: Rc<Cell<f32>>,
-    pub settling: bool,
+    settling: bool,
 }
 
 #[derive(Default)]
@@ -68,8 +69,17 @@ pub struct RowMotion {
     refit: Option<Rc<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for RowMotion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowMotion").finish_non_exhaustive()
+    }
+}
+
 impl RowMotion {
-    pub fn rebind_scope(&mut self, scope: &crate::conversation::presentation::PresentationScope) {
+    pub(crate) fn rebind_scope(
+        &mut self,
+        scope: &crate::conversation::presentation::PresentationScope,
+    ) {
         if self.scope.as_ref() != Some(scope) {
             self.phrases.clear();
             self.chevrons.clear();
@@ -84,7 +94,10 @@ impl RowMotion {
         }
     }
 
-    pub fn scope_is(&self, scope: &crate::conversation::presentation::PresentationScope) -> bool {
+    pub(crate) fn scope_is(
+        &self,
+        scope: &crate::conversation::presentation::PresentationScope,
+    ) -> bool {
         self.scope.as_ref() == Some(scope)
     }
     pub fn entrance(
@@ -100,7 +113,7 @@ impl RowMotion {
             height: Rc::new(Cell::new(0.0)),
         });
         let started = state.started?;
-        let height = state.height.clone();
+        let height = Rc::clone(&state.height);
         self.entrance_frame(started, height, reduced_motion, now)
     }
 
@@ -124,7 +137,7 @@ impl RowMotion {
             state.started = None;
         }
         let started = state.started?;
-        let height = state.height.clone();
+        let height = Rc::clone(&state.height);
         self.entrance_frame(started, height, reduced_motion, now)
     }
 
@@ -206,7 +219,7 @@ impl RowMotion {
         reduced_motion: bool,
         now: Instant,
     ) -> Option<Sticker> {
-        let state = self.stickers.entry(key.clone()).or_insert_with(|| StickerState {
+        let state = self.stickers.entry(key).or_insert_with(|| StickerState {
             started: (fresh && !reduced_motion).then_some(now),
         });
         let elapsed = now.saturating_duration_since(state.started?);
@@ -217,7 +230,7 @@ impl RowMotion {
     }
 
     #[must_use]
-    pub fn sticking(&self, now: Instant) -> bool {
+    pub(crate) fn sticking(&self, now: Instant) -> bool {
         self.stickers.values().any(|state| {
             state
                 .started
@@ -225,7 +238,7 @@ impl RowMotion {
         })
     }
 
-    pub fn begin_frame(&mut self) {
+    pub(crate) fn begin_frame(&mut self) {
         self.animating = false;
     }
 
@@ -242,7 +255,7 @@ impl RowMotion {
         key: &str,
         text: String,
         color: GpuiTextColor,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         now: f64,
         reduced_motion: bool,
     ) -> Element {
@@ -256,14 +269,18 @@ impl RowMotion {
         retained_phrase_or_text(
             words.as_deref(),
             text,
-            role.style(&theme),
+            role.style(theme),
             color,
-            role.spec().line,
+            role.line_px(theme),
             overflow,
         )
     }
 
-    pub fn chevron(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the chevron reads its key, open state, drag fraction, size, colour and motion clock"
+    )]
+    pub(crate) fn chevron(
         &mut self,
         key: &str,
         open: bool,
@@ -282,7 +299,7 @@ impl RowMotion {
         let elapsed = now.saturating_duration_since(state.started).as_secs_f64();
         let progress = MotionCurve::SmoothOut.sample_f32(elapsed / 0.25);
         let current = (state.target - state.from).mul_add(progress, state.from);
-        if state.target != target {
+        if state.target.to_bits() != target.to_bits() {
             state.from = current;
             state.target = target;
             state.started = now;
@@ -297,7 +314,7 @@ impl RowMotion {
         editor_ui::icon::disclosure_chevron(fraction.unwrap_or(value), size, color)
     }
 
-    pub fn compaction(
+    pub(crate) fn compaction(
         &mut self,
         id: &ItemId,
         phase: CompactionPhase,
@@ -313,19 +330,13 @@ impl RowMotion {
         self.animating |= moving;
         frame
     }
-
-    pub fn retain(
-        &mut self,
-        phrases: impl Fn(&str) -> bool,
-        compactions: impl Fn(&ItemId) -> bool,
-    ) {
-        self.phrases.retain(|key, _| phrases(key));
-        self.chevrons.retain(|key, _| phrases(key));
-        self.compactions.retain(|id, _| compactions(id));
-    }
 }
 
 impl EntranceFrame {
+    pub const fn settling(&self) -> bool {
+        self.settling
+    }
+
     #[expect(
         clippy::disallowed_methods,
         reason = "the entrance collapses the gap above the row while it grows; the negative margin is motion, not spacing"
@@ -333,7 +344,7 @@ impl EntranceFrame {
     pub fn wrap(self, element: Element, gap: f32, invalidate: Rc<dyn Fn()>) -> Element {
         use aqua_ui::element::{Box as UiBox, Canvas};
         use aqua_ui::style::{Length, Style};
-        let measured = self.height.clone();
+        let measured = Rc::clone(&self.height);
         let probe = Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .on_prepaint(move |tree, node| {
@@ -341,7 +352,7 @@ impl EntranceFrame {
                     return;
                 };
                 if let Some(bounds) = tree.pre_transform_rect(parent)
-                    && measured.replace(bounds.h) != bounds.h
+                    && measured.replace(bounds.h).to_bits() != bounds.h.to_bits()
                 {
                     invalidate();
                 }
@@ -379,7 +390,7 @@ impl EntranceFrame {
     }
 }
 
-pub fn swapped(element: Element, progress: f32) -> Element {
+pub(crate) fn swapped(element: Element, progress: f32) -> Element {
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
     UiBox::new()
@@ -397,7 +408,7 @@ pub fn swapped(element: Element, progress: f32) -> Element {
         .build()
 }
 
-pub fn arrived(element: Element, progress: f32) -> Element {
+pub(crate) fn arrived(element: Element, progress: f32) -> Element {
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
     UiBox::new()

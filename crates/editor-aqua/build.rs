@@ -42,22 +42,18 @@ fn embed_notices() -> Result<(), Box<dyn Error>> {
         .collect::<Result<_, _>>()?;
     bundled.sort();
     files.extend(bundled);
-    files.push(root.join("vendor/highlighting/NOTICE.txt"));
-    files.push(root.join("vendor/mermaid-rs-renderer/LICENSE"));
-    let mut notices = Vec::new();
-    for file in files {
-        println!("cargo:rerun-if-changed={}", file.display());
-        let name = file
-            .strip_prefix(&root)?
-            .display()
-            .to_string()
-            .replace('\\', "/");
-        notices.extend_from_slice(format!("==== {name} ====\n\n").as_bytes());
-        notices.extend_from_slice(&std::fs::read(&file)?);
-        notices.extend_from_slice(b"\n\n");
-    }
-    let out = PathBuf::from(env::var("OUT_DIR")?);
-    std::fs::write(out.join("notices.gz"), artisan_payload::pack(&notices)?)?;
+    files.extend(
+        [
+            "vendor/highlighting/NOTICE.txt",
+            "vendor/mermaid-rs-renderer/LICENSE",
+            "notices/editor.txt",
+            "notices/ae.txt",
+            "notices/forge.txt",
+            "notices/fff-MIT.txt",
+        ]
+        .map(|file| root.join(file)),
+    );
+    artisan_payload::embed_notices("notices.gz", &root, &files)?;
     Ok(())
 }
 

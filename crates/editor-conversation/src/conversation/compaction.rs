@@ -17,7 +17,7 @@ pub enum CompactionPhase {
 }
 
 impl CompactionPhase {
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Running => "Compacting",
             Self::Done => "Compacted",
@@ -129,6 +129,6 @@ fn linear(elapsed: Duration, delay: Duration, duration: Duration) -> f32 {
 }
 
 #[expect(clippy::cast_possible_truncation, reason = "progress stays in 0..=1")]
-pub fn eased(curve: MotionCurve, value: f32) -> f32 {
+pub(crate) fn eased(curve: MotionCurve, value: f32) -> f32 {
     curve.sample(f64::from(value)) as f32
 }

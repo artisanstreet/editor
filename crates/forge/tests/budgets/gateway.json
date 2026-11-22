@@ -1,0 +1,6 @@
+{
+  "idle_wakeups_per_ten_minutes": {
+    "limit": 10,
+    "reason": "the gateway waits on events instead of a timer: its backend's exit, a connection that cannot reach the active generation, the end of an upgrade it found in progress, and a retry every 10 s only while a retired generation is still finishing its runs or a maintenance pass failed; an idle gateway with one generation has none of those, and measured 5 in repeated runs (the measuring sleep itself plus leftovers of the startup health and activation requests), against over 7,000 for the 250 ms maintenance loop it replaced, so a periodic timer of a few minutes or shorter breaks the budget"
+  }
+}

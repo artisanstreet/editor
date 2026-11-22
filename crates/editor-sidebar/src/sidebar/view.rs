@@ -11,6 +11,7 @@ use editor_assets::AssetId;
 
 use super::{
     controller::{PickerIdentity, Sidebar, ThreadMenu},
+    geometry::ThreadPane,
     row::{MenuAction, menu_actions},
 };
 use editor_core::{Core, HostId, HostInstance, Screen};
@@ -86,12 +87,16 @@ pub enum ViewAction {
     CreateProject(PickerIdentity),
     DismissProjectPicker(PickerIdentity),
     RetryProjectIcons,
+    DismissRollbackNotice,
+    RetryThreads,
+    ClearSearch,
     DismissError,
     RailHover(super::rail::Glyph),
     SetDarkMode(bool),
     ThreadViewport {
         host: HostId,
         instance: HostInstance,
+        pane: ThreadPane,
         viewport: aqua_ui::collection_runtime::CollectionViewport,
         visible_projects: Vec<ProjectId>,
     },
@@ -111,16 +116,35 @@ pub enum ViewAction {
     },
 }
 
-fn visible_load_state(sidebar: &Sidebar, core: &Core) -> Option<(Option<String>, bool)> {
-    sidebar
+type PageMark = (Option<editor_core::Problem>, bool, bool);
+
+type EntryRenderer = Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>;
+
+#[derive(PartialEq, Eq)]
+enum SearchMark {
+    Idle,
+    Searching,
+    Failed(editor_core::Problem),
+}
+
+fn visible_load_state(sidebar: &Sidebar, core: &Core) -> (Option<PageMark>, SearchMark) {
+    let page = sidebar
         .host_data(core)
         .filter(|host| host.is_live())
         .map(|host| {
+            let page = host.thread_page(false);
             (
-                host.thread_page(false).error.clone(),
+                page.error().cloned(),
+                page.is_loaded(),
                 host.project_icons_failed(),
             )
-        })
+        });
+    let search = match sidebar.text_search_status() {
+        super::controller::TextSearchStatus::Idle => SearchMark::Idle,
+        super::controller::TextSearchStatus::Searching => SearchMark::Searching,
+        super::controller::TextSearchStatus::Failed(cause) => SearchMark::Failed(cause.clone()),
+    };
+    (page, search)
 }
 
 pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + use<> {
@@ -128,7 +152,7 @@ pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + 
         (
             core.screen().clone(),
             core.workspace_screen().clone(),
-            core.settings.get("dark_mode").cloned(),
+            core.settings().preferences().dark_mode.on(),
         ),
         (
             sidebar.menu.clone(),
@@ -143,7 +167,7 @@ pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + 
             sidebar.open.clone(),
             sidebar.lists.clone(),
         ),
-        visible_load_state(sidebar, core),
+        (visible_load_state(sidebar, core), sidebar.text_search_gap()),
         sidebar.picker.as_ref().map(|picker| {
             (
                 picker.listing.clone(),
@@ -161,12 +185,20 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
         ViewAction::ThreadViewport {
             host,
             instance,
+            pane,
             viewport,
             visible_projects,
         } => {
             let before = visible_load_state(sidebar, core);
-            sidebar.report_thread_viewport(core, host, *instance, *viewport, visible_projects);
-            return before != visible_load_state(sidebar, core);
+            sidebar.report_thread_viewport(
+                core,
+                host,
+                *instance,
+                *pane,
+                *viewport,
+                visible_projects,
+            );
+            before != visible_load_state(sidebar, core)
         }
         ViewAction::ThreadWheel { host, instance } => {
             let before = visible_load_state(sidebar, core);
@@ -177,7 +209,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             {
                 sidebar.page_at_viewport(core, true);
             }
-            return before != visible_load_state(sidebar, core);
+            before != visible_load_state(sidebar, core)
         }
         ViewAction::ThreadDragStarted {
             payload,
@@ -197,7 +229,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
                         position: *position,
                     });
             }
-            return false;
+            false
         }
         ViewAction::ThreadDragEnded {
             host,
@@ -210,12 +242,45 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
                     .effects
                     .push(super::controller::SidebarEffect::HideDragPreview);
             }
-            return false;
+            false
         }
-        _ => {}
+        ViewAction::OpenThread { .. }
+        | ViewAction::NewThread(_)
+        | ViewAction::Search
+        | ViewAction::OpenHit { .. }
+        | ViewAction::Navigate(_)
+        | ViewAction::OpenThreadMenu { .. }
+        | ViewAction::DismissThreadMenu
+        | ViewAction::DismissThreadMenuFor { .. }
+        | ViewAction::ThreadMenuAction { .. }
+        | ViewAction::SubmitRename(_)
+        | ViewAction::SubmitRenameFor { .. }
+        | ViewAction::DismissRename
+        | ViewAction::DismissRenameFor { .. }
+        | ViewAction::ToggleHistory
+        | ViewAction::AddProject
+        | ViewAction::BrowseFolder { .. }
+        | ViewAction::CreateProject(_)
+        | ViewAction::DismissProjectPicker(_)
+        | ViewAction::RetryProjectIcons
+        | ViewAction::DismissRollbackNotice
+        | ViewAction::RetryThreads
+        | ViewAction::ClearSearch
+        | ViewAction::DismissError
+        | ViewAction::RailHover(_)
+        | ViewAction::SetDarkMode(_) => {
+            let before = visible_state(sidebar, core);
+            let animated = apply(sidebar, core, action);
+            animated || before != visible_state(sidebar, core)
+        }
     }
-    let before = visible_state(sidebar, core);
-    let mut animation_started = false;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one exhaustive match over every sidebar action keeps each action next to its host and generation checks"
+)]
+fn apply(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> bool {
     match action {
         ViewAction::OpenThread {
             host,
@@ -233,7 +298,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
         ViewAction::NewThread(project) => sidebar.new_thread(core, project),
         ViewAction::Search => {
             sidebar.search_text(core);
-            sidebar.sync(core, artisan_api::now());
+            sidebar.sync(core, core.clock().timestamp());
         }
         ViewAction::OpenHit {
             host,
@@ -293,7 +358,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
                 .host_data(core)
                 .map(|current| (&current.id, current.instance()))
                 != Some((&host, instance))
-                || core.active_host().map(|current| current.instance()) != Some(instance)
+                || core.active_host().map(editor_core::HostData::instance) != Some(instance)
                 || sidebar.menu_generation != generation
                 || sidebar.menu.as_ref().map(|menu| &menu.thread) != Some(&thread)
             {
@@ -363,39 +428,39 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             }
         }
         ViewAction::RetryProjectIcons => sidebar.retry_project_icons(core),
+        ViewAction::DismissRollbackNotice => sidebar.dismiss_rollback_notice(core),
+        ViewAction::RetryThreads => sidebar.retry_threads(core),
+        ViewAction::ClearSearch => {
+            let now = core.clock().timestamp();
+            sidebar.clear_search(core, now);
+        }
         ViewAction::DismissError => sidebar.error = None,
         ViewAction::RailHover(glyph) => {
-            animation_started = sidebar.rail_motion.play(glyph, std::time::Instant::now());
+            return sidebar.rail_motion.play(glyph, core.clock().now());
         }
-        ViewAction::SetDarkMode(dark) => core.set_setting("dark_mode", dark.into()),
-        ViewAction::ThreadViewport {
-            host,
-            instance,
-            viewport,
-            visible_projects,
-        } => {
-            sidebar.report_thread_viewport(core, &host, instance, viewport, &visible_projects);
-        }
-        ViewAction::ThreadWheel { host, instance } => {
-            if sidebar
-                .host_data(core)
-                .map(|current| (&current.id, current.instance()))
-                == Some((&host, instance))
-            {
-                sidebar.page_at_viewport(core, true);
+        ViewAction::SetDarkMode(dark) => {
+            if let Err(error) = core.set_setting("dark_mode", dark.into()) {
+                tracing::error!(error = %::diagnostics::chain(&error), "saving the theme");
+                sidebar.error = Some(editor_core::Problem::caused_by(
+                    "Couldn't save the theme.",
+                    &error,
+                ));
             }
         }
-        ViewAction::ThreadDragStarted { .. } | ViewAction::ThreadDragEnded { .. } => {}
+        ViewAction::ThreadViewport { .. }
+        | ViewAction::ThreadWheel { .. }
+        | ViewAction::ThreadDragStarted { .. }
+        | ViewAction::ThreadDragEnded { .. } => {}
     }
-    animation_started || before != visible_state(sidebar, core)
+    false
 }
 
-pub fn thread_menu(
+pub(crate) fn thread_menu(
     sidebar: &Sidebar,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport: Size,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Option<(Element, PopupOptions)> {
     let menu = sidebar.menu.as_ref()?;
     let host = sidebar.host_data(core)?;
@@ -418,7 +483,7 @@ pub fn thread_menu(
         .style(Style::new().width(Length::Px(THREAD_MENU_WIDTH)));
     for action in actions {
         if action == MenuAction::Archive {
-            content = content.child(Divider::Rule.build(&theme, Surface::Menu.padding_px()));
+            content = content.child(Divider::Rule.build(theme, Surface::Menu.padding_px()));
         }
         let (id, icon, label, hover) = match action {
             MenuAction::Settle => (
@@ -454,8 +519,8 @@ pub fn thread_menu(
         let selected_host = host.id.clone();
         let selected_instance = host.instance();
         let generation = sidebar.menu_generation;
-        let selected_emit = emit.clone();
-        let item = RowItem::new(id, theme, Row::MenuItem, Surface::Menu, label)
+        let selected_emit = Rc::clone(emit);
+        let item = RowItem::new(id, *theme, Row::MenuItem, Surface::Menu, label)
             .trailing(IconSize::Md.glyph(icon, icon_color.to_reference_paint()))
             .on_activate(move || {
                 selected_emit(ViewAction::ThreadMenuAction {
@@ -464,14 +529,14 @@ pub fn thread_menu(
                     thread: selected_thread.clone(),
                     generation,
                     action,
-                })
+                });
             });
         content = content.child(match hover {
             Hover::Destructive => item.destructive().build(),
             Hover::Neutral => item.build(),
         });
     }
-    let dismiss = emit.clone();
+    let dismiss = Rc::clone(emit);
     let dismiss_host = host.id.clone();
     let dismiss_instance = host.instance();
     let dismiss_generation = sidebar.menu_generation;
@@ -480,7 +545,7 @@ pub fn thread_menu(
             "sidebar-menu",
             "Thread actions",
             menu.position,
-            theme,
+            *theme,
             content.build().with_key("thread-menu-hover-surface"),
             viewport,
             move || {
@@ -488,14 +553,14 @@ pub fn thread_menu(
                     host: dismiss_host.clone(),
                     instance: dismiss_instance,
                     generation: dismiss_generation,
-                })
+                });
             },
         )
         .into_parts(),
     )
 }
 
-pub fn rename_editor(
+pub(crate) fn rename_editor(
     sidebar: &Sidebar,
     core: &Core,
     emit: Rc<dyn Fn(ViewAction)>,
@@ -515,7 +580,7 @@ pub fn rename_editor(
     let mut editor = Editor::new(title, Mode::SingleLine);
     editor.select_all();
     let state = Rc::new(std::cell::RefCell::new(editor));
-    let submitted = state.clone();
+    let submitted = Rc::clone(&state);
     let host_id = host.id.clone();
     let instance = host.instance();
     let generation = sidebar.rename_generation;
@@ -557,10 +622,10 @@ pub fn search_editor(
     )
 }
 
-pub fn rename_dialog(
+pub(crate) fn rename_dialog(
     sidebar: &Sidebar,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     editor: &editor_ui::text::mount::EditorController,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<editor_ui::dialog::Dialog> {
@@ -572,32 +637,37 @@ pub fn rename_dialog(
     let content = editor.element_with_notice_keyed(
         "sidebar-rename-input",
         editor_ui::text::Mode::SingleLine,
-        &theme,
+        theme,
         "Thread title",
         false,
         true,
     );
     Some(
-        editor_ui::dialog::Dialog::new("sidebar-rename", theme, "Rename Thread", content)
+        editor_ui::dialog::Dialog::new("sidebar-rename", *theme, "Rename Thread", content)
             .on_dismiss(move |_| {
                 emit(ViewAction::DismissRenameFor {
                     host: host_id.clone(),
                     instance,
                     thread: thread.clone(),
                     generation,
-                })
+                });
             }),
     )
 }
 
-pub fn project_picker_dialog(
+#[expect(
+    clippy::too_many_lines,
+    reason = "the folder picker dialog lays out its listing, error, busy state and buttons together"
+)]
+pub(crate) fn project_picker_dialog(
     sidebar: &Sidebar,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<editor_ui::dialog::Dialog> {
     use aqua_ui::{JustifyContent, collection::List};
 
+    let theme = *theme;
     let picker = sidebar.visible_picker(core)?;
     let identity = sidebar.picker_identity(core)?;
     let busy = picker.loading || picker.creating;
@@ -615,14 +685,14 @@ pub fn project_picker_dialog(
             )
         }));
     }
-    let row_emit = emit.clone();
+    let row_emit = Rc::clone(&emit);
     let row_picker = identity.clone();
     let list = List::new()
         .items(rows)
         .key(|(path, _, _)| format!("folder-{path}"))
         .row(move |(path, label, icon)| {
             let selected_path = path.clone();
-            let action = row_emit.clone();
+            let action = Rc::clone(&row_emit);
             let picker_identity = row_picker.clone();
             let row = RowItem::new(
                 format!("folder-row-{path}"),
@@ -633,16 +703,16 @@ pub fn project_picker_dialog(
             )
             .leading(IconSize::Md.glyph(*icon, theme.colors.text_muted.to_reference_paint()))
             .disabled(busy);
-            match busy {
-                true => row.build(),
-                false => row
-                    .on_activate(move || {
-                        action(ViewAction::BrowseFolder {
-                            picker: picker_identity.clone(),
-                            path: Some(selected_path.clone()),
-                        })
-                    })
-                    .build(),
+            if busy {
+                row.build()
+            } else {
+                row.on_activate(move || {
+                    action(ViewAction::BrowseFolder {
+                        picker: picker_identity.clone(),
+                        path: Some(selected_path.clone()),
+                    });
+                })
+                .build()
             }
         })
         .style(
@@ -650,7 +720,7 @@ pub fn project_picker_dialog(
                 .height(Length::Px(FOLDER_LIST_HEIGHT))
                 .width(Length::Pct(100.0)),
         )
-        .estimated_row_height(Length::Px(FOLDER_ROW.height().unwrap_or_default()))
+        .estimated_row_height(Length::Px(FOLDER_ROW.height(&theme)))
         .virtualize()
         .build();
     let path = picker
@@ -670,14 +740,11 @@ pub fn project_picker_dialog(
         .child(Surface::Inset.build(&theme, vec![list]));
     if let Some(error) = &picker.error {
         content = content.child(
-            TextRole::Label
-                .text(&theme, error.clone())
-                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .build(),
+            editor_ui::kit::ProblemNotice::new("sidebar-folder-problem", theme, error).build(),
         );
     }
     let can_add = !busy && picker.listing.is_some();
-    let add = emit.clone();
+    let add = Rc::clone(&emit);
     let add_picker = identity.clone();
     let add_button = Button::text(
         "sidebar-folder-add",
@@ -714,34 +781,21 @@ pub fn project_picker_dialog(
 
 pub const ROOT_KEY: &str = "sidebar-root";
 
-pub fn thread_list(
-    sidebar: &Sidebar,
-    core: &Core,
-    viewport_height: f32,
-    render: Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>,
-    emit: Rc<dyn Fn(ViewAction)>,
-) -> Option<Element> {
-    thread_entries(
-        sidebar,
-        core,
-        viewport_height,
-        super::geometry::entries(&sidebar.lists, sidebar.history_visible()),
-        "sidebar-threads",
-        render,
-        emit,
-    )
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a pane's entries are sized from the theme's text scale alongside the sidebar, core, viewport, pane, renderer and emitter"
+)]
 fn thread_entries(
     sidebar: &Sidebar,
     core: &Core,
+    theme: &ArtisanTheme,
     viewport_height: f32,
-    entries: Vec<super::geometry::Entry>,
-    scroller: &'static str,
-    render: Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>,
+    entries: &[super::geometry::Entry],
+    pane: ThreadPane,
+    render: EntryRenderer,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    use super::geometry::{Entry, READ_AHEAD, entry_keys, history_spacer};
+    use super::geometry::{Entry, READ_AHEAD, entry_keys, history_spacer, listed};
     use aqua_ui::{
         collection::List,
         input::{EventPhase, InputKind, InputResponse},
@@ -750,37 +804,42 @@ fn thread_entries(
     let host = sidebar.host_data(core)?;
     let host_id = host.id.clone();
     let instance = host.instance();
-    let spacer = history_spacer(&entries, viewport_height, sidebar.history_fraction);
-    let heights: Vec<_> = entries
-        .iter()
-        .map(|entry| match entry {
-            Entry::Spacer => spacer,
-            _ => entry.height(),
+    let spacer = history_spacer(theme, entries, viewport_height, sidebar.history_fraction);
+    let keys = entry_keys(entries);
+    let items: Vec<_> = listed(entries)
+        .into_iter()
+        .map(|listed| {
+            (
+                keys[listed.entry].clone(),
+                listed.entry,
+                entries[listed.entry].clone(),
+                listed.lead(spacer),
+            )
         })
         .collect();
-    let keys = entry_keys(&entries);
-    let items: Vec<_> = keys
-        .into_iter()
-        .zip(entries.iter().cloned())
-        .enumerate()
-        .map(|(index, (key, entry))| (key, index, entry))
+    let heights: Vec<_> = items
+        .iter()
+        .map(|(_, _, entry, lead)| lead + entry.height(theme))
         .collect();
-    let viewport_entries = Rc::new(entries);
-    let viewport_emit = emit.clone();
+    let viewport_entries: Rc<Vec<Entry>> =
+        Rc::new(items.iter().map(|(_, _, entry, _)| entry.clone()).collect());
+    let viewport_emit = Rc::clone(&emit);
     let viewport_host = host_id.clone();
     let wheel_emit = emit;
     let fraction = sidebar.history_fraction;
     Some(
         List::new()
             .items(items)
-            .key(|(key, _, _)| key.clone())
-            .row(move |(_, index, entry)| render(*index, entry, fraction))
+            .key(|(key, _, _, _)| key.clone())
+            .row(move |(_, index, entry, lead)| led(*lead, render(*index, entry, fraction)))
             .style(
                 Style::new()
                     .width(Length::Pct(100.0))
                     .height(Length::Pct(100.0)),
             )
-            .estimated_row_height(Length::Px(super::geometry::ThreadLayout::Standalone.height()))
+            .estimated_row_height(Length::Px(
+                super::geometry::ThreadLayout::Standalone.height(theme),
+            ))
             .initial_height(move |index| heights.get(index).copied().unwrap_or(0.0))
             .virtualize()
             .overscan_pixels(READ_AHEAD)
@@ -791,18 +850,24 @@ fn thread_entries(
                     .iter()
                     .filter_map(|entry| match entry {
                         Entry::Thread(row, _) => Some(row.project.clone()),
-                        _ => None,
+                        Entry::Hit(_)
+                        | Entry::Project { .. }
+                        | Entry::History
+                        | Entry::Heading(_)
+                        | Entry::Gap(_)
+                        | Entry::Spacer => None,
                     })
                     .collect();
                 viewport_emit(ViewAction::ThreadViewport {
                     host: viewport_host.clone(),
                     instance,
+                    pane,
                     viewport,
                     visible_projects,
                 });
             })
             .build()
-            .with_key(scroller)
+            .with_key(pane.scroller())
             .on_input(InputKind::Scroll, EventPhase::Bubble, move |_| {
                 wheel_emit(ViewAction::ThreadWheel {
                     host: host_id.clone(),
@@ -813,25 +878,38 @@ fn thread_entries(
     )
 }
 
+fn led(lead: f32, row: Element) -> Element {
+    if lead > 0.0 {
+        UiBox::new()
+            .layout("column")
+            .width(Length::Pct(100.0))
+            .child(UiBox::new().height(lead).build().aria_hidden())
+            .child(row)
+            .build()
+    } else {
+        row
+    }
+}
+
 pub type ThreadVisualFactory = Rc<
     dyn Fn(
         &super::list::RowData,
         Option<std::sync::Arc<aqua::images::ImageHandle>>,
-        Option<Option<String>>,
+        editor_ui::project_mark::Forge,
     ) -> super::row::RowVisuals,
 >;
 
 #[derive(Clone)]
 struct ThreadMetadata {
     icon: Option<std::sync::Arc<aqua::images::ImageHandle>>,
-    repository_host: Option<Option<String>>,
+    forge: editor_ui::project_mark::Forge,
     drag: Option<editor_core::DraggedThread>,
 }
 
-pub fn thread_list_view(
+fn thread_list_view(
     sidebar: &Sidebar,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport_height: f32,
     visuals: ThreadVisualFactory,
     emit: Rc<dyn Fn(ViewAction)>,
@@ -842,23 +920,28 @@ pub fn thread_list_view(
         theme,
         viewport_height,
         super::geometry::entries(&sidebar.lists, sidebar.history_visible()),
-        "sidebar-threads",
+        ThreadPane::Inbox,
         visuals,
         emit,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "each thread pane is rendered with its own entries, viewport height, pane and visual factory alongside the sidebar, core, theme and emitter; the pane renderer closure handles thread, project, history and spacer entries in one place"
+)]
 pub fn thread_entries_view(
     sidebar: &Sidebar,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport_height: f32,
     entries: Vec<super::geometry::Entry>,
-    scroller: &'static str,
+    pane: ThreadPane,
     visuals: ThreadVisualFactory,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    use super::geometry::{Entry, history_spacer};
+    use super::geometry::Entry;
     use aqua_core::Transform2D;
     use std::collections::HashMap;
 
@@ -868,7 +951,6 @@ pub fn thread_entries_view(
     let history_index = entries
         .iter()
         .position(|entry| matches!(entry, Entry::History));
-    let spacer = history_spacer(&entries, viewport_height, sidebar.history_fraction);
     let metadata: HashMap<_, _> = entries
         .iter()
         .filter_map(|entry| {
@@ -880,30 +962,35 @@ pub fn thread_entries_view(
                 row.id.clone(),
                 ThreadMetadata {
                     icon: host.project_icon(&row.project),
-                    repository_host: host
-                        .repository(&row.project)
-                        .map(|repository| repository.host.clone()),
+                    forge: editor_ui::project_mark::Forge::of(host.repository(&row.project)),
                     drag: super::row::drag(host.id.clone(), thread),
                 },
             ))
         })
         .collect();
-    let project_marks: HashMap<_, _> = entries.iter().filter_map(|entry| {
-        let Entry::Project { id, .. } = entry else { return None; };
-        Some((id.clone(), editor_ui::project_mark::Mark::of(host, id)))
-    }).collect();
-    let row_entries = entries.clone();
-    let row_emit = emit.clone();
+    let project_marks: HashMap<_, _> = entries
+        .iter()
+        .filter_map(|entry| {
+            let Entry::Project { id, .. } = entry else {
+                return None;
+            };
+            Some((id.clone(), editor_ui::project_mark::Mark::of(host, id)))
+        })
+        .collect();
+    let row_entries = entries;
+    let row_emit = Rc::clone(&emit);
     let row_host = host_id;
+    let row_theme = *theme;
     let renderer = Rc::new(move |index: usize, entry: &Entry, fraction: f32| {
+        let theme = &row_theme;
         let content = match entry {
             Entry::Thread(data, layout) => {
                 let meta = metadata.get(&data.id).cloned().unwrap_or(ThreadMetadata {
                     icon: None,
-                    repository_host: None,
+                    forge: editor_ui::project_mark::Forge::Folder,
                     drag: None,
                 });
-                let row_visuals = visuals(data, meta.icon, meta.repository_host);
+                let row_visuals = visuals(data, meta.icon, meta.forge);
                 super::row::build(
                     data,
                     row_host.clone(),
@@ -912,11 +999,11 @@ pub fn thread_entries_view(
                     row_visuals,
                     *layout,
                     theme,
-                    row_emit.clone(),
+                    &row_emit,
                 )
             }
             Entry::Hit(data) => {
-                let emit = row_emit.clone();
+                let emit = Rc::clone(&row_emit);
                 let host = row_host.clone();
                 let hit = data.clone();
                 super::row::hit(theme, data, move || {
@@ -930,7 +1017,7 @@ pub fn thread_entries_view(
             Entry::Project { id, label } => {
                 let row = RowItem::new(
                     format!("sidebar-project-{id}"),
-                    theme,
+                    *theme,
                     super::geometry::HEADING,
                     super::geometry::LIST,
                     label.clone(),
@@ -940,25 +1027,24 @@ pub fn thread_entries_view(
                     None => row.build(),
                 }
             }
-            Entry::Gap(height) => UiBox::new().height(*height).build(),
-            Entry::Spacer => UiBox::new().height(spacer).build(),
+            Entry::Gap(_) | Entry::Spacer => UiBox::new().build().aria_hidden(),
             Entry::Heading(label) => RowItem::new(
                 format!("sidebar-heading-{label}"),
-                theme,
+                *theme,
                 super::geometry::HEADING,
                 super::geometry::LIST,
                 *label,
             )
             .build(),
-            Entry::History => history_toggle(theme, fraction, row_emit.clone()),
+            Entry::History => history_toggle(theme, fraction, &row_emit),
         };
         if history_index.is_some_and(|history| index > history) {
             UiBox::new()
-                .height(entry.height())
+                .height(entry.height(theme))
                 .clip(true)
                 .child(
                     UiBox::new()
-                        .height(entry.height())
+                        .height(entry.height(theme))
                         .opacity(fraction)
                         .style(Style::new().transform(Transform2D::translate(
                             0.0,
@@ -975,16 +1061,21 @@ pub fn thread_entries_view(
     thread_entries(
         sidebar,
         core,
+        theme,
         viewport_height,
-        row_entries,
-        scroller,
+        &row_entries,
+        pane,
         renderer,
         emit,
     )
 }
 
-pub fn history_toggle(theme: ArtisanTheme, fraction: f32, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    let toggle = emit;
+pub fn history_toggle(
+    theme: &ArtisanTheme,
+    fraction: f32,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let toggle = Rc::clone(emit);
     let caret = editor_ui::icon::disclosure_chevron(
         fraction,
         IconSize::Sm.px(),
@@ -993,11 +1084,11 @@ pub fn history_toggle(theme: ArtisanTheme, fraction: f32, emit: Rc<dyn Fn(ViewAc
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .child(Divider::Rule.build(&theme, 0.0))
+        .child(Divider::Rule.build(theme, 0.0))
         .child(
             RowItem::new(
                 "sidebar-history",
-                theme,
+                *theme,
                 super::geometry::TOGGLE,
                 super::geometry::LIST,
                 "History",
@@ -1013,19 +1104,25 @@ pub fn history_toggle(theme: ArtisanTheme, fraction: f32, emit: Rc<dyn Fn(ViewAc
         .build()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sidebar frame takes the viewport, visibility, motion preference and clock from the workspace each frame"
+)]
 pub fn build(
     sidebar: &Sidebar,
     core: &Core,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     viewport: Size,
     visible: bool,
     reduced_motion: bool,
     now: std::time::Instant,
     visuals: ThreadVisualFactory,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     if let Screen::Settings(page) = sidebar.screen(core) {
-        let navigate = emit.clone();
+        let navigate = Rc::clone(emit);
+        let navigate_to: Rc<dyn Fn(editor_core::SettingsPage)> =
+            Rc::new(move |page| navigate(ViewAction::Navigate(Screen::Settings(page))));
         return super::settings_nav::build(
             sidebar.host_data(core),
             *page,
@@ -1033,10 +1130,10 @@ pub fn build(
             &sidebar.settings_motion,
             now,
             reduced_motion,
-            Rc::new(move |page| navigate(ViewAction::Navigate(Screen::Settings(page)))),
+            &navigate_to,
         );
     }
-    let rail = super::rail::build(sidebar, core, theme, now, emit.clone());
+    let rail = super::rail::build(sidebar, core, theme, now, emit);
     let mut column = UiBox::new()
         .layout("column")
         .height(Length::Pct(100.0))
@@ -1050,7 +1147,7 @@ pub fn build(
     if visible {
         let list_height =
             (viewport.h - editor_ui::chrome::TITLEBAR_HEIGHT - COLUMN_GAP.px()).max(0.0);
-        let list = thread_list_view(sidebar, core, theme, list_height, visuals, emit.clone())
+        let list = thread_list_view(sidebar, core, theme, list_height, visuals, Rc::clone(emit))
             .unwrap_or_else(|| UiBox::new().style(Style::new().flex_grow(1.0)).build());
         column = column.child(
             UiBox::new()
@@ -1071,18 +1168,27 @@ pub fn build(
         );
         if let Some(host) = sidebar.host_data(core) {
             if host.is_live()
-                && let Some(error) = &host.thread_page(false).error
+                && let Some(error) = host.thread_page(false).error()
             {
-                column = column.child(error_text(&theme, error.clone()));
+                column = column.child(problem_with_action(
+                    theme,
+                    ("sidebar-threads-problem", error),
+                    (
+                        "sidebar-threads-retry",
+                        "Try again",
+                        ViewAction::RetryThreads,
+                    ),
+                    emit,
+                ));
             }
             if host.project_icons_failed() {
-                let retry = emit.clone();
+                let retry = Rc::clone(emit);
                 column = column.child(
                     Button::text(
                         "sidebar-metadata-retry",
-                        theme,
+                        *theme,
                         ButtonTone::Neutral,
-                        "Retry project icons",
+                        "Load project icons again",
                     )
                     .on_activate(move |_| retry(ViewAction::RetryProjectIcons))
                     .build(),
@@ -1090,23 +1196,12 @@ pub fn build(
             }
         }
         if let Some(error) = &sidebar.error {
-            let dismiss = emit.clone();
-            column = column.child(
-                UiBox::new()
-                    .layout("column")
-                    .child(error_text(&theme, error.clone()))
-                    .child(
-                        Button::text(
-                            "sidebar-error-dismiss",
-                            theme,
-                            ButtonTone::Quiet,
-                            "Dismiss",
-                        )
-                        .on_activate(move |_| dismiss(ViewAction::DismissError))
-                        .build(),
-                    )
-                    .build(),
-            );
+            column = column.child(problem_with_action(
+                theme,
+                ("sidebar-problem", error),
+                ("sidebar-error-dismiss", "Dismiss", ViewAction::DismissError),
+                emit,
+            ));
         }
     }
     UiBox::new()
@@ -1118,9 +1213,18 @@ pub fn build(
         .with_key(ROOT_KEY)
 }
 
-fn error_text(theme: &ArtisanTheme, error: String) -> Element {
-    TextRole::Caption
-        .text(theme, error)
-        .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
+fn problem_with_action(
+    theme: &ArtisanTheme,
+    (key, problem): (&'static str, &editor_core::Problem),
+    (button, label, action): (&'static str, &'static str, ViewAction),
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let emit = Rc::clone(emit);
+    editor_ui::kit::ProblemNotice::new(key, *theme, problem)
+        .action(
+            Button::text(button, *theme, ButtonTone::Neutral, label)
+                .on_activate(move |_| emit(action.clone()))
+                .build(),
+        )
         .build()
 }

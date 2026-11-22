@@ -10,11 +10,13 @@ use aqua_core::{
 use super::kit::{Inset, Radius};
 use super::theme::{ArtisanTheme, Elevation, Oklch, ShadowLayer};
 
+#[derive(Debug)]
 pub struct TabCardStrip {
     pub reveal: f32,
     pub content: aqua_ui::element::Element,
 }
 
+#[derive(Debug)]
 pub struct TabCard {
     pub id: String,
     pub tab: aqua_ui::element::Element,
@@ -23,6 +25,10 @@ pub struct TabCard {
 }
 
 impl TabCard {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the tab card's prepaint and paint closures capture this theme copy"
+    )]
     pub fn build(
         self,
         theme: ArtisanTheme,
@@ -36,7 +42,7 @@ impl TabCard {
             .map_or(0.0, |strip| strip.reveal.clamp(0.0, 1.0));
         let tab_key = aqua_ui::tree::hash_key(Key::from(format!("{}-tab", self.id)));
         let width = Rc::new(std::cell::Cell::new(None));
-        let prepaint_width = width.clone();
+        let prepaint_width = Rc::clone(&width);
         let probe = Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .on_prepaint(move |tree, canvas| {
@@ -125,16 +131,16 @@ pub const TAB_CARD_PADDING_PX: f32 = Inset::Edge.px();
 pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
 const TAB_RADIUS: f32 = Radius::Panel.px();
 const FILLET_RADIUS: f32 = Inset::Frame.px();
-pub const CARD_RADIUS: f32 = Radius::Panel.px();
+const CARD_RADIUS: f32 = Radius::Panel.px();
 const RIM: f32 = 0.09;
 const SHEET_TO_SIDEBAR: f32 = 0.47;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryKey {
-    pub size: Size,
-    pub tab_width: f32,
-    pub radius: f32,
-    pub reveal: f32,
+    size: Size,
+    tab_width: f32,
+    radius: f32,
+    reveal: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -144,23 +150,23 @@ pub struct GeometryCache {
 }
 
 impl GeometryCache {
-    pub fn get(&mut self, key: GeometryKey) -> Rc<Geometry> {
+    fn get(&mut self, key: GeometryKey) -> Rc<Geometry> {
         if self.key != Some(key) {
             self.paths = Rc::new(Geometry::new(key));
             self.key = Some(key);
         }
-        self.paths.clone()
+        Rc::clone(&self.paths)
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
-    pub shell: Vec<PathCommand>,
-    pub edge: Vec<PathCommand>,
+    shell: Vec<PathCommand>,
+    edge: Vec<PathCommand>,
 }
 
 impl Geometry {
-    pub fn new(key: GeometryKey) -> Self {
+    fn new(key: GeometryKey) -> Self {
         let bounds = Rect::from_origin_size(Point::ZERO, key.size);
         let mut shell = trace_silhouette(bounds, key.tab_width, key.radius);
         if let Some(right) = strip_right(bounds, key.tab_width, key.reveal) {
@@ -168,10 +174,7 @@ impl Geometry {
         }
         let edge_bounds = Rect::from_edges(0.5, 0.5, key.size.w - 0.5, key.size.h - 0.5);
         let edge = trace_silhouette(edge_bounds, key.tab_width - 1.0, key.radius - 0.5);
-        Self {
-            shell,
-            edge,
-        }
+        Self { shell, edge }
     }
 }
 
@@ -215,7 +218,7 @@ fn trace_silhouette(bounds: Rect, tab_width: f32, radius: f32) -> Vec<PathComman
 fn strip_right(bounds: Rect, tab_width: f32, reveal: f32) -> Option<f32> {
     let start = bounds.x + tab_width + TAB_RADIUS;
     let end = bounds.right();
-    (reveal > 0.0 && end > start).then(|| start + (end - start) * reveal.min(1.0))
+    (reveal > 0.0 && end > start).then(|| (end - start).mul_add(reveal.min(1.0), start))
 }
 
 #[derive(Clone, Copy)]
@@ -277,21 +280,21 @@ fn trace_strip(bounds: Rect, tab_width: f32, radius: f32, right: f32) -> Vec<Pat
 
 #[derive(Clone, Debug)]
 pub struct ShadowPass {
-    pub bounds: Rect,
-    pub corners: CornerRadii,
-    pub layer: ShadowLayer,
-    pub clip: Rect,
+    bounds: Rect,
+    corners: CornerRadii,
+    layer: ShadowLayer,
+    clip: Rect,
 }
 #[derive(Clone, Debug)]
 pub struct PathPass {
-    pub transformed_window_logical_bounds: Rect,
-    pub path: Arc<GpuiPath>,
+    transformed_window_logical_bounds: Rect,
+    path: Arc<GpuiPath>,
 }
 #[derive(Clone, Debug)]
 pub struct PreparedTabCard {
-    pub shadows: Vec<ShadowPass>,
-    pub backdrop: aqua_core::DisplayItem,
-    pub paths: Vec<PathPass>,
+    shadows: Vec<ShadowPass>,
+    backdrop: aqua_core::DisplayItem,
+    paths: Vec<PathPass>,
 }
 
 fn outside(rect: Rect, reach: Rect) -> [Rect; 4] {
@@ -304,19 +307,19 @@ fn outside(rect: Rect, reach: Rect) -> [Rect; 4] {
 }
 
 fn card_fills(theme: &ArtisanTheme) -> Vec<GpuiBackground> {
-    let glass = crate::ui::kit::surface::glass::fills(
-        theme,
-        crate::ui::kit::surface::glass::Shade::Clear,
-    );
-    let settle = match theme.colors.mode.is_dark() {
-        true => Some(GpuiBackground::Solid(
+    let glass =
+        crate::ui::kit::surface::glass::fills(theme, crate::ui::kit::surface::glass::Shade::Clear);
+    let settle = theme.colors.mode.is_dark().then(|| {
+        GpuiBackground::Solid(
             Oklch::new(0.0, 0.0, 0.0)
                 .with_alpha(SHEET_TO_SIDEBAR)
                 .to_reference_paint(),
-        )),
-        false => None,
-    };
-    settle.into_iter().chain(glass.into_iter().take(2)).collect()
+        )
+    });
+    settle
+        .into_iter()
+        .chain(glass.into_iter().take(2))
+        .collect()
 }
 
 fn background(from: Oklch, to: Oklch, angle: f32, end: f32) -> GpuiBackground {
@@ -337,7 +340,7 @@ fn background(from: Oklch, to: Oklch, angle: f32, end: f32) -> GpuiBackground {
 }
 
 impl PreparedTabCard {
-    pub fn display_items(&self) -> Vec<aqua_core::DisplayItem> {
+    fn display_items(&self) -> Vec<aqua_core::DisplayItem> {
         use aqua_core::DisplayItem;
         let mut items = Vec::new();
         for shadow in &self.shadows {
@@ -355,13 +358,17 @@ impl PreparedTabCard {
         for path in &self.paths {
             items.push(DisplayItem::GpuiPath {
                 transformed_window_logical_bounds: path.transformed_window_logical_bounds,
-                path: path.path.clone(),
+                path: Arc::clone(&path.path),
             });
         }
         items
     }
 
-    pub fn new(
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one tab card constructor wiring its strip and geometry"
+    )]
+    fn new(
         theme: &ArtisanTheme,
         bounds: Rect,
         tab_width: f32,
@@ -430,7 +437,7 @@ impl PreparedTabCard {
                 bounds.x,
                 bounds.y,
                 right,
-                bottom + (-layer.spread_radius).max(0.0) * 2.0,
+                (-layer.spread_radius).max(0.0).mul_add(2.0, bottom),
             );
             for clip in outside(body, reach) {
                 shadows.push(ShadowPass {

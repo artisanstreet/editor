@@ -16,16 +16,24 @@ pub struct RepositoryContext {
     working: bool,
 }
 
+impl std::fmt::Debug for RepositoryContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepositoryContext").finish_non_exhaustive()
+    }
+}
+
 impl RepositoryContext {
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.selected = None;
     }
 
-    pub fn sync(&mut self, core: &mut Core) {
+    pub(crate) fn sync(&mut self, core: &mut Core) {
         let (host_id, thread, project) = match core.screen() {
             Screen::Thread { host, thread } => (Some(host.clone()), Some(thread.clone()), None),
             Screen::NewThread { host, project } => (Some(host.clone()), None, project.clone()),
-            _ => (None, None, None),
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => {
+                (None, None, None)
+            }
         };
         let Some(host) = host_id.as_ref().and_then(|id| core.host(id)) else {
             self.selected = None;
@@ -56,12 +64,11 @@ impl RepositoryContext {
         self.thread = thread;
         self.working = working;
         self.selected = selected;
-        if refresh {
-            if let Some(selected) = &self.selected {
-                if let Some(host) = core.host_mut_if_instance(&selected.host, selected.instance) {
-                    host.load_repository(&selected.project, true);
-                }
-            }
+        if refresh
+            && let Some(selected) = &self.selected
+            && let Some(host) = core.host_mut_if_instance(&selected.host, selected.instance)
+        {
+            host.load_repository(&selected.project, true);
         }
     }
 }

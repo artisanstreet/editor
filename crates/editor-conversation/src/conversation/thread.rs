@@ -1,13 +1,14 @@
+use super::shared::Shared;
 use super::viewport::{Effect, Fetch, Input, Jump, State, Viewport};
-use editor_core::ResidentBytes as _;
 use artisan_api::{
     Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, ThreadId, WorkSpan,
 };
+use editor_core::ResidentBytes as _;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-pub const PAGE: u32 = 100;
-pub const ROWS_PAGE: u32 = 40;
+pub(crate) const PAGE: u32 = 100;
+pub(crate) const ROWS_PAGE: u32 = 40;
 const WINDOW_MAX: usize = 800;
 const WINDOW_KEEP: usize = 600;
 const WINDOW_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -15,52 +16,123 @@ const WINDOW_KEEP_BYTES: usize = 6 * 1024 * 1024;
 
 const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(2);
 
+#[derive(Clone, Debug)]
+pub struct LiveText {
+    pub(crate) epoch: u64,
+    pub(crate) text: Arc<ropey::Rope>,
+}
+
+impl LiveText {
+    pub(crate) fn of(snapshot: &editor_core::LiveSnapshot) -> Self {
+        Self {
+            epoch: snapshot.epoch,
+            text: Arc::clone(&snapshot.text),
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && Arc::ptr_eq(&self.text, &other.text)
+    }
+}
+
 #[derive(Clone, Debug, Default, Hash)]
 pub struct ItemUi {
     pub expanded: Option<bool>,
     pub arrived: Option<std::time::Instant>,
     pub chain_open: Option<bool>,
-    pub sending: bool,
-
-    pub error: Option<String>,
 }
 
-impl ItemUi {
-    pub(crate) fn fresh(&self) -> bool {
-        self.arrived
-            .is_some_and(|arrived| arrived.elapsed() < FRESH_FOR)
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AnswerState {
+    Sending,
+    Failed(String),
+}
+
+impl AnswerState {
+    #[must_use]
+    pub(crate) const fn sending(&self) -> bool {
+        matches!(self, Self::Sending)
+    }
+
+    #[must_use]
+    pub(crate) fn error(&self) -> Option<&str> {
+        match self {
+            Self::Sending => None,
+            Self::Failed(error) => Some(error),
+        }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AnswerRequest(pub(crate) u64);
+
+#[derive(Clone, Debug)]
+pub(crate) enum ItemAnswer {
+    Sending {
+        request: AnswerRequest,
+        _task: Arc<tokio_util::task::AbortOnDropHandle<()>>,
+    },
+    Failed(String),
+}
+
+impl ItemAnswer {
+    #[must_use]
+    pub(crate) fn state(&self) -> AnswerState {
+        match self {
+            Self::Sending { .. } => AnswerState::Sending,
+            Self::Failed(error) => AnswerState::Failed(error.clone()),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn sending(&self) -> bool {
+        matches!(self, Self::Sending { .. })
+    }
+
+    #[must_use]
+    pub(crate) fn sent_by(&self, sent: AnswerRequest) -> bool {
+        matches!(self, Self::Sending { request, .. } if *request == sent)
+    }
+}
+
+impl ItemUi {
+    pub(crate) fn fresh(&self, now: std::time::Instant) -> bool {
+        self.arrived
+            .is_some_and(|arrived| now.saturating_duration_since(arrived) < FRESH_FOR)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ThreadView {
-    pub thread: ThreadId,
-    pub context: HashMap<ItemId, Arc<Item>>,
-    pub items: BTreeMap<Seq, Arc<Item>>,
-    pub work: BTreeMap<Seq, WorkSpan>,
-    positions: HashMap<ItemId, Seq>,
+    pub(crate) thread: ThreadId,
+    pub context: Shared<HashMap<ItemId, Arc<Item>>>,
+    pub items: Shared<BTreeMap<Seq, Arc<Item>>>,
+    pub(crate) work: Shared<BTreeMap<Seq, WorkSpan>>,
+    positions: Shared<HashMap<ItemId, Seq>>,
     resident_bytes: usize,
-    pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
+    pub(crate) live: Shared<HashMap<LiveTarget, LiveText>>,
     pub viewport: Viewport,
-    pub ui: HashMap<ItemId, ItemUi>,
-    pub work_open: HashMap<RunId, bool>,
-    pub runs: HashMap<RunId, Run>,
+    pub ui: Shared<HashMap<ItemId, ItemUi>>,
+    pub(crate) answers: Shared<HashMap<ItemId, ItemAnswer>>,
+    pub(crate) work_open: Shared<HashMap<RunId, bool>>,
+    pub runs: Shared<HashMap<RunId, Run>>,
 }
 
 impl ThreadView {
     pub fn open(thread: ThreadId) -> (Self, Vec<Effect>) {
         let mut view = Self {
             thread,
-            context: HashMap::new(),
-            items: BTreeMap::new(),
-            work: BTreeMap::new(),
-            positions: HashMap::new(),
+            context: Shared::default(),
+            items: Shared::default(),
+            work: Shared::default(),
+            positions: Shared::default(),
             resident_bytes: 0,
-            live: HashMap::new(),
+            live: Shared::default(),
             viewport: Viewport::default(),
-            ui: HashMap::new(),
-            work_open: HashMap::new(),
-            runs: HashMap::new(),
+            ui: Shared::default(),
+            answers: Shared::default(),
+            work_open: Shared::default(),
+            runs: Shared::default(),
         };
         let effects = view.handle(&Input::Open);
         (view, effects)
@@ -73,30 +145,55 @@ impl ThreadView {
     }
 
     pub(crate) fn reset(&mut self) -> Vec<Effect> {
-        self.items.clear();
-        self.work.clear();
-        self.positions.clear();
+        self.items = Shared::default();
+        self.work = Shared::default();
+        self.positions = Shared::default();
         self.resident_bytes = 0;
-        self.live.clear();
-        self.ui.clear();
-        self.work_open.clear();
-        self.runs.clear();
+        self.live = Shared::default();
+        self.ui = Shared::default();
+        self.answers = Shared::default();
+        self.work_open = Shared::default();
+        self.runs = Shared::default();
         self.handle(&Input::Open)
+    }
+
+    pub(crate) fn abandon_answers(&mut self) {
+        self.answers.retain(|_, answer| !answer.sending());
     }
 
     pub(crate) fn resume(&mut self) -> Vec<Effect> {
         self.handle(&Input::Resume)
     }
 
-    pub const fn resident_bytes(&self) -> usize {
+    pub(crate) fn parked_bytes(&self) -> usize {
+        let items = self.items.len() + self.context.len();
         self.resident_bytes
+            + self
+                .context
+                .values()
+                .map(|item| item.resident_bytes())
+                .sum::<usize>()
+            + self
+                .live
+                .values()
+                .map(|live| live.text.capacity())
+                .sum::<usize>()
+            + items * size_of::<Item>()
+            + self.items.len() * size_of::<(Seq, Arc<Item>)>()
+            + self.context.capacity() * size_of::<(ItemId, Arc<Item>)>()
+            + self.work.len() * size_of::<(Seq, WorkSpan)>()
+            + self.positions.capacity() * size_of::<(ItemId, Seq)>()
+            + self.ui.capacity() * size_of::<(ItemId, ItemUi)>()
+            + self.answers.capacity() * size_of::<(ItemId, ItemAnswer)>()
+            + self.work_open.capacity() * size_of::<(RunId, bool)>()
+            + self.runs.capacity() * size_of::<(RunId, Run)>()
     }
 
     pub(crate) fn remember_run(&mut self, run: Run) {
         if run.thread_id == self.thread
-            && self.runs.get(&run.id).is_none_or(|old| old.seq <= run.seq)
+            && self.runs.get(&run.id).is_none_or(|old| old.seq < run.seq)
         {
-            self.runs.insert(run.id.clone(), run);
+            self.runs.make_mut().insert(run.id.clone(), run);
         }
     }
 
@@ -148,17 +245,23 @@ impl ThreadView {
                 Some(known) if known.seq > item.seq || *known == item => return false,
                 _ => {}
             }
-            if let Some(old) = self.items.remove(&position) {
+            if let Some(old) = self.items.make_mut().remove(&position) {
                 self.resident_bytes -= old.resident_bytes();
             }
         }
         self.resident_bytes += item.resident_bytes();
-        self.positions.insert(item.id.clone(), item.position);
-        self.items.insert(item.position, item);
+        self.positions
+            .make_mut()
+            .insert(item.id.clone(), item.position);
+        self.items.make_mut().insert(item.position, item);
         true
     }
 
-    pub fn apply_item(&mut self, item: impl Into<Arc<Item>>, watched: bool) -> bool {
+    pub fn apply_item(
+        &mut self,
+        item: impl Into<Arc<Item>>,
+        watched_at: Option<std::time::Instant>,
+    ) -> bool {
         let item = item.into();
         if item.thread_id != self.thread {
             return false;
@@ -171,7 +274,7 @@ impl ThreadView {
             {
                 return false;
             }
-            self.context.insert(item.id.clone(), item);
+            self.context.make_mut().insert(item.id.clone(), item);
             return true;
         }
         let known = self.positions.contains_key(&item.id);
@@ -183,13 +286,13 @@ impl ThreadView {
         if !known && item.folds_into_work() && self.unloaded_at(item.position).is_some() {
             return false;
         }
-        let arrived = !known && watched;
+        let arrived = watched_at.filter(|_| !known);
         let id = item.id.clone();
         if !self.upsert(item) {
             return false;
         }
-        if arrived {
-            self.ui.entry(id).or_default().arrived = Some(std::time::Instant::now());
+        if let Some(at) = arrived {
+            self.ui.make_mut().entry(id).or_default().arrived = Some(at);
         }
         self.trim_window(None);
         true
@@ -225,10 +328,25 @@ impl ThreadView {
             .max();
         let fetch = match fetch {
             Fetch::Refresh if !refreshes(first, newest, page.more) => Fetch::Tail,
-            fetch => fetch,
+            fetch @ (Fetch::Tail
+            | Fetch::Refresh
+            | Fetch::Older { .. }
+            | Fetch::Newer { .. }
+            | Fetch::At { .. }) => fetch,
         };
+        let newer: Vec<Arc<Item>> = page
+            .items
+            .iter()
+            .filter_map(|item| {
+                let known = self.items.get(self.positions.get(&item.id)?)?;
+                (known.seq > item.seq).then(|| Arc::clone(known))
+            })
+            .collect();
         if fetch == Fetch::Refresh {
-            let kept = |position: Seq| first.is_none_or(|first| position < first);
+            let kept = |position: Seq| {
+                first.is_none_or(|first| position < first)
+                    || last.is_some_and(|last| position > last)
+            };
             self.items.retain(|position, _| kept(*position));
             self.work
                 .retain(|_, span| kept(span.first) && kept(span.last));
@@ -247,12 +365,15 @@ impl ThreadView {
             self.ui.retain(|id, _| self.positions.contains_key(id));
         }
         for span in page.work {
-            self.work.insert(span.first, span);
+            self.work.make_mut().insert(span.first, span);
         }
         for item in page.items {
             if item.thread_id == self.thread {
                 self.upsert(Arc::new(item));
             }
+        }
+        for item in newer {
+            self.upsert(item);
         }
         let mut effects = self.handle(&Input::Loaded {
             fetch,
@@ -277,7 +398,7 @@ impl ThreadView {
     }
 
     pub(crate) fn apply_work(&mut self, first: Seq, page: ItemsPage) -> bool {
-        let Some(span) = self.work.get_mut(&first) else {
+        let Some(span) = self.work.make_mut().get_mut(&first) else {
             return false;
         };
         let oldest = page.items.first().map(|item| item.position);
@@ -290,7 +411,7 @@ impl ThreadView {
                     .max(1);
             }
             None => {
-                self.work.remove(&first);
+                self.work.make_mut().remove(&first);
             }
         }
         for run in page.runs {
@@ -307,6 +428,10 @@ impl ThreadView {
 
     pub(crate) fn page_failed(&mut self) -> Vec<Effect> {
         self.handle(&Input::LoadFailed)
+    }
+
+    pub(crate) fn retry_page(&mut self, fetch: Fetch) -> Vec<Effect> {
+        self.handle(&Input::Retry(fetch))
     }
 
     pub(crate) fn jump(&mut self, jump: Jump) -> Vec<Effect> {
@@ -328,11 +453,10 @@ impl ThreadView {
             State::Following { .. } | State::Jumping { .. } => None,
         };
         let (shown_len, shown_bytes) = shown.clone().map_or((0, 0), |shown| {
-            self.items
-                .range(shown)
-                .fold((0, 0), |(len, bytes), (_, item)| {
-                    (len + 1, bytes + item.resident_bytes())
-                })
+            self.items.range(shown.clone()).fold(
+                (self.work.range(shown).count(), 0),
+                |(len, bytes), (_, item)| (len + 1, bytes + item.resident_bytes()),
+            )
         });
         let page = PAGE as usize;
         let slack = WINDOW_MAX_BYTES - WINDOW_KEEP_BYTES;
@@ -344,19 +468,22 @@ impl ThreadView {
             WINDOW_MAX_BYTES.max(shown_bytes + slack),
             WINDOW_KEEP_BYTES.max(shown_bytes + slack / 2),
         );
-        if self.items.len() <= max && self.resident_bytes <= max_bytes {
+        if self.entries() <= max && self.resident_bytes <= max_bytes {
             return;
         }
-        let mut before = shown.as_ref().map_or(self.items.len(), |shown| {
-            self.items.range(..*shown.start()).count()
-        });
+        let mut before = shown.as_ref().map_or_else(
+            || self.entries(),
+            |shown| {
+                self.items.range(..*shown.start()).count()
+                    + self.work.range(..*shown.start()).count()
+            },
+        );
         let mut after = shown.as_ref().map_or(0, |shown| {
-            self.items
-                .range((
-                    std::ops::Bound::Excluded(*shown.end()),
-                    std::ops::Bound::Unbounded,
-                ))
-                .count()
+            let later = (
+                std::ops::Bound::Excluded(*shown.end()),
+                std::ops::Bound::Unbounded,
+            );
+            self.items.range(later).count() + self.work.range(later).count()
         });
         let (mut older, mut newer) = (false, false);
         if let Some(evict_older) = evict_older {
@@ -366,20 +493,14 @@ impl ThreadView {
                 before = 0;
             }
         }
-        while self.items.len() > 1
+        while self.entries() > 1
             && (before + after) > 0
-            && (self.items.len() > keep || self.resident_bytes > keep_bytes)
+            && (self.entries() > keep || self.resident_bytes > keep_bytes)
         {
             let take_older = before > after;
-            let removed = if take_older {
-                self.items.pop_first()
-            } else {
-                self.items.pop_last()
-            };
-            let Some((_, item)) = removed else { break };
-            self.resident_bytes -= item.resident_bytes();
-            self.positions.remove(&item.id);
-            self.ui.remove(&item.id);
+            if !self.evict(take_older) {
+                break;
+            }
             if take_older {
                 older = true;
                 before -= 1;
@@ -388,12 +509,14 @@ impl ThreadView {
                 after -= 1;
             }
         }
-        if older && let Some(&oldest) = self.items.keys().next() {
-            self.work.retain(|_, span| span.first > oldest);
+        let first_item = self.items.keys().next().copied();
+        let first_span = self.work.keys().next().copied();
+        if older && let Some(oldest) = first_item.into_iter().chain(first_span).min() {
             self.handle(&Input::EvictedOlder { oldest });
         }
-        if newer && let Some(&last) = self.items.keys().next_back() {
-            self.work.retain(|_, span| span.last < last);
+        let last_item = self.items.keys().next_back().copied();
+        let last_span = self.work.values().next_back().map(|span| span.last);
+        if newer && let Some(last) = last_item.into_iter().chain(last_span).max() {
             self.handle(&Input::EvictedNewer { last });
         }
         let runs: std::collections::HashSet<_> = self
@@ -406,18 +529,57 @@ impl ThreadView {
         self.runs.retain(|run, _| runs.contains(run));
     }
 
-    pub(crate) fn update_live(
-        &mut self,
-        target: &LiveTarget,
-        text: Option<Arc<ropey::Rope>>,
-    ) -> bool {
+    fn entries(&self) -> usize {
+        self.items.len() + self.work.len()
+    }
+
+    fn evict(&mut self, older: bool) -> bool {
+        let (item, span) = if older {
+            (
+                self.items.keys().next().copied(),
+                self.work.keys().next().copied(),
+            )
+        } else {
+            (
+                self.items.keys().next_back().copied(),
+                self.work.keys().next_back().copied(),
+            )
+        };
+        let from_items = match (item, span) {
+            (Some(item), Some(span)) => (item < span) == older,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return false,
+        };
+        if !from_items {
+            if older {
+                self.work.make_mut().pop_first();
+            } else {
+                self.work.make_mut().pop_last();
+            }
+            return true;
+        }
+        let removed = if older {
+            self.items.make_mut().pop_first()
+        } else {
+            self.items.make_mut().pop_last()
+        };
+        if let Some((_, item)) = removed {
+            self.resident_bytes -= item.resident_bytes();
+            self.positions.remove(&item.id);
+            self.ui.remove(&item.id);
+        }
+        true
+    }
+
+    pub(crate) fn update_live(&mut self, target: &LiveTarget, text: Option<LiveText>) -> bool {
         match (self.live.get(target), &text) {
-            (Some(old), Some(next)) if Arc::ptr_eq(old, next) => return false,
+            (Some(old), Some(next)) if old.same(next) => return false,
             (None, None) => return false,
             _ => {}
         }
         if let Some(text) = text {
-            self.live.insert(target.clone(), text);
+            self.live.make_mut().insert(target.clone(), text);
         } else {
             self.live.remove(target);
         }
@@ -426,31 +588,29 @@ impl ThreadView {
 
     pub(crate) fn set_live<'a>(
         &mut self,
-        targets: impl Iterator<Item = (&'a LiveTarget, &'a Arc<ropey::Rope>)>,
+        targets: impl Iterator<Item = (&'a LiveTarget, &'a editor_core::LiveSnapshot)>,
     ) -> bool {
-        let live: HashMap<LiveTarget, Arc<ropey::Rope>> = targets
-            .map(|(target, text)| (target.clone(), Arc::clone(text)))
+        let live: HashMap<LiveTarget, LiveText> = targets
+            .map(|(target, snapshot)| (target.clone(), LiveText::of(snapshot)))
             .collect();
         if live.len() == self.live.len()
-            && live.iter().all(|(target, text)| {
-                self.live
-                    .get(target)
-                    .is_some_and(|old| Arc::ptr_eq(old, text))
-            })
+            && live
+                .iter()
+                .all(|(target, text)| self.live.get(target).is_some_and(|old| old.same(text)))
         {
             return false;
         }
-        self.live = live;
+        self.live = Shared::new(live);
         true
     }
 }
 
 #[must_use]
-pub fn refreshes(first: Option<Seq>, newest: Option<Seq>, more: bool) -> bool {
+fn refreshes(first: Option<Seq>, newest: Option<Seq>, more: bool) -> bool {
     !more || matches!((first, newest), (Some(first), Some(newest)) if first <= newest)
 }
 
-pub const fn work_query(span: &WorkSpan) -> ItemsQuery {
+pub(crate) const fn work_query(span: &WorkSpan) -> ItemsQuery {
     ItemsQuery {
         before: Some(span.last.saturating_add(1)),
         after: Some(span.first.saturating_sub(1)),
@@ -458,7 +618,7 @@ pub const fn work_query(span: &WorkSpan) -> ItemsQuery {
     }
 }
 
-pub const fn query(fetch: Fetch, limit: u32) -> ItemsQuery {
+pub(crate) const fn query(fetch: Fetch, limit: u32) -> ItemsQuery {
     let (before, after) = match fetch {
         Fetch::Tail | Fetch::Refresh => (None, None),
         Fetch::Older { before } => (Some(before), None),
@@ -471,3 +631,7 @@ pub const fn query(fetch: Fetch, limit: u32) -> ItemsQuery {
         limit: Some(limit),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/thread.rs"]
+mod tests;

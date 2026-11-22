@@ -1,10 +1,11 @@
 use super::adapter::read_boundary;
 use super::controller::Conversation;
 use super::fold::{Row, RowKey};
-use editor_core::{Core, HostId, HostInstance};
 use aqua_core::Rect;
 use artisan_api::{Item, Seq, ThreadId};
+use editor_core::{Core, HostId, HostInstance};
 
+#[derive(Debug)]
 pub struct ReadCandidate {
     host: HostId,
     instance: HostInstance,
@@ -16,7 +17,7 @@ pub struct ReadCandidate {
 
 impl ReadCandidate {
     #[cfg(feature = "qualification")]
-    pub fn observed_seq(&self) -> Seq {
+    pub(crate) fn observed_seq(&self) -> Seq {
         self.seq
     }
 }
@@ -41,7 +42,7 @@ pub fn evidence(
     )
 }
 
-pub fn capture(
+pub(crate) fn capture(
     conversation: &Conversation,
     core: &Core,
     row: &Row,
@@ -75,7 +76,7 @@ pub fn painted(bounds: Rect, clip: Rect, window_active: bool, revealed: bool) ->
         && bounds.bottom() <= clip.bottom()
 }
 
-pub fn acknowledge(
+pub(crate) fn acknowledge(
     candidate: ReadCandidate,
     conversation: &Conversation,
     core: &mut Core,

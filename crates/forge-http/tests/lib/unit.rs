@@ -1,0 +1,1947 @@
+use super::*;
+use artisan_api::{
+    CreateProject, CreateThread, EngineConfig, EngineId, Envelope, Event, ItemId, PairRequest,
+    ProjectId, RunStatus, SendMessage, State, ThreadId,
+};
+use std::time::Duration;
+
+pub(crate) struct Device {
+    http: reqwest::Client,
+    base: String,
+}
+
+fn device(forge_certificate: &str, address: SocketAddr) -> Device {
+    let identity = Identity::generate("artisan-editor").unwrap();
+    let config =
+        tls::client_config(&identity, &tls::fingerprint_of(forge_certificate).unwrap()).unwrap();
+    let http = reqwest::Client::builder()
+        .use_preconfigured_tls(config)
+        .build()
+        .unwrap();
+    Device {
+        http,
+        base: format!("https://localhost:{}", address.port()),
+    }
+}
+
+impl Device {
+    pub(crate) fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
+    pub(crate) const fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+}
+
+pub(crate) async fn paired(store: &Store, address: SocketAddr, name: &str) -> Device {
+    let invite = invite(store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: name.into(),
+    };
+    let paired = editor
+        .http
+        .post(editor.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert!(paired.status().is_success());
+    editor
+}
+
+pub(crate) async fn forge() -> (tempfile::TempDir, SocketAddr, Store) {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(ServeConfig {
+        data_dir: dir.path().join("forge"),
+        listen: "127.0.0.1:0".parse().unwrap(),
+    })
+    .await
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let store = server.store().clone();
+    tokio::spawn(server.run());
+    (dir, address, store)
+}
+
+pub(crate) async fn read_events(
+    response: reqwest::Response,
+    what: &str,
+    stop: impl Fn(&Envelope) -> bool,
+) -> Vec<Envelope> {
+    test_support::sse::read_until(response.bytes_stream(), what, Duration::from_secs(10), stop)
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
+async fn a_paired_device_sends_a_message_and_follows_the_run() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+
+    let refused = editor.http.get(editor.url("/state")).send().await.unwrap();
+    assert_eq!(refused.status(), 401);
+
+    let pair = PairRequest {
+        code: invite.code.to_lowercase(),
+        device_name: "laptop".into(),
+    };
+    let paired = editor
+        .http
+        .post(editor.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paired.status(), 200);
+    let again = editor
+        .http
+        .post(editor.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), 401, "a code works once");
+
+    let body = editor
+        .http
+        .get(editor.url("/state"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let forge_key = identity(&store).await.unwrap().key;
+    assert!(
+        !body.contains(forge_key.expose()),
+        "Forge's private key never reaches a client"
+    );
+    let state: State = serde_json::from_str(&body).unwrap();
+    let since = state.head;
+
+    let missing_project = CreateThread {
+        id: ThreadId::new(),
+        project_id: ProjectId::new(),
+        config: EngineConfig::new(EngineId::Claude),
+        title: None,
+        parent_thread_id: None,
+        spawned_by: None,
+    };
+    let missing = editor
+        .http
+        .post(editor.url("/threads"))
+        .json(&missing_project)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    assert_eq!(
+        missing
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Project(artisan_api::ProjectFailure::NotFound {
+            project: missing_project.project_id.clone(),
+        }),
+    );
+    assert_eq!(store.head(), since, "canonical rejection performs no write");
+
+    let refused_skill = editor
+        .http
+        .post(editor.url("/skills/no-such-artisan-skill/disable"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused_skill.status(), 409);
+    assert_eq!(
+        refused_skill
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Extension(artisan_api::ExtensionFailure::Unmanaged {
+            skill: "no-such-artisan-skill".into(),
+        }),
+    );
+    assert_eq!(store.head(), since, "extension refusal performs no write");
+
+    let project = CreateProject {
+        id: ProjectId::new(),
+        path: std::env::temp_dir().display().to_string(),
+        name: None,
+    };
+    assert!(
+        editor
+            .http
+            .post(editor.url("/projects"))
+            .json(&project)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let thread = CreateThread {
+        id: ThreadId::new(),
+        project_id: project.id.clone(),
+        config: EngineConfig::new(EngineId::Claude),
+        title: None,
+        parent_thread_id: None,
+        spawned_by: None,
+    };
+    assert!(
+        editor
+            .http
+            .post(editor.url("/threads"))
+            .json(&thread)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let message = SendMessage {
+        draft: None,
+        id: ItemId::new(),
+        text: "hello".into(),
+        images: Vec::new(),
+        config: None,
+    };
+    let sent = editor
+        .http
+        .post(editor.url(&format!("/threads/{}/messages", thread.id)))
+        .json(&message)
+        .send()
+        .await
+        .unwrap();
+    assert!(sent.status().is_success());
+
+    let stream = editor
+        .http
+        .get(editor.url(&format!("/events?since={since}")))
+        .send()
+        .await
+        .unwrap();
+    let events = read_events(
+        stream,
+        "the failed run",
+        |envelope| matches!(&envelope.event, Event::Run { run } if run.status() == RunStatus::Failed),
+    )
+    .await;
+    assert!(matches!(events[0].event, Event::Hello { .. }));
+    let failed = events.iter().find_map(|envelope| {
+        if let Event::Run { run } = &envelope.event
+            && run.status() == RunStatus::Failed
+        {
+            run.error()
+        } else {
+            None
+        }
+    });
+    assert_eq!(failed, Some("Claude Code is not installed"));
+    let seqs: Vec<_> = events.iter().filter_map(|envelope| envelope.seq).collect();
+    assert!(
+        seqs.windows(2).all(|pair| pair[0] < pair[1]),
+        "stored changes arrive in seq order"
+    );
+    assert!(seqs.first().is_some_and(|first| *first > since));
+
+    let last = *seqs.last().unwrap();
+    let stream = editor
+        .http
+        .get(editor.url(&format!("/events?since={last}")))
+        .send()
+        .await
+        .unwrap();
+    let events = read_events(stream, "the engine status after resuming", |envelope| {
+        matches!(envelope.event, Event::Engine { .. })
+    })
+    .await;
+    assert!(
+        matches!(events[0].event, Event::Hello { .. }),
+        "a resumed stream opens with Hello"
+    );
+    assert!(
+        matches!(
+            events.last().map(|envelope| &envelope.event),
+            Some(Event::Engine { .. })
+        ),
+        "a resumed stream still delivers live engine status"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|envelope| envelope.seq.is_none_or(|seq| seq > last)),
+        "resume cannot replay any old change"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
+async fn rich_resources_use_the_paired_forge_project_and_reject_non_regular_files() {
+    let (dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+    assert!(
+        editor
+            .http
+            .post(editor.url("/pair"))
+            .json(&PairRequest {
+                code: invite.code,
+                device_name: "resource fixture".into(),
+            })
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let project_dir = dir.path().join("owning-forge-project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let filename = project_dir.join("reference with spaces.txt");
+    std::fs::write(&filename, b"owned by this Forge\n").unwrap();
+    let project = CreateProject {
+        id: ProjectId::new(),
+        path: project_dir.display().to_string(),
+        name: None,
+    };
+    assert!(
+        editor
+            .http
+            .post(editor.url("/projects"))
+            .json(&project)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let thread = CreateThread {
+        id: ThreadId::new(),
+        project_id: project.id,
+        config: EngineConfig::new(EngineId::Claude),
+        title: None,
+        parent_thread_id: None,
+        spawned_by: None,
+    };
+    assert!(
+        editor
+            .http
+            .post(editor.url("/threads"))
+            .json(&thread)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let endpoint = editor.url(&format!("/threads/{}/resource", thread.id));
+    for path in [
+        "reference with spaces.txt".to_owned(),
+        url::Url::from_file_path(&filename).unwrap().to_string(),
+    ] {
+        let response = editor
+            .http
+            .get(&endpoint)
+            .query(&[("path", path)])
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(
+            &response.bytes().await.unwrap()[..],
+            b"owned by this Forge\n"
+        );
+    }
+    let directory = editor
+        .http
+        .get(&endpoint)
+        .query(&[("path", ".")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(directory.status(), 400);
+    let oversized = project_dir.join("oversized.bin");
+    std::fs::File::create(&oversized)
+        .unwrap()
+        .set_len(129 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        editor
+            .http
+            .get(&endpoint)
+            .query(&[("path", "oversized.bin")])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        editor
+            .http
+            .get(&endpoint)
+            .query(&[("path", "missing.bin")])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    let shown = [
+        ("path", "reference with spaces.txt"),
+        ("item", "0196f3f0-0000-7000-8000-000000000001"),
+    ];
+    let first_view = editor
+        .http
+        .get(&endpoint)
+        .query(&shown)
+        .send()
+        .await
+        .unwrap();
+    assert!(first_view.status().is_success());
+    std::fs::remove_file(&filename).unwrap();
+    for query in [&shown[..], &shown[..1]] {
+        assert_eq!(
+            editor
+                .http
+                .get(&endpoint)
+                .query(query)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404,
+            "a reply from after capture-at-publish shows the file as it is now"
+        );
+    }
+    #[cfg(unix)]
+    {
+        let fifo = project_dir.join("waiting-pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            editor
+                .http
+                .get(&endpoint)
+                .query(&[("path", "waiting-pipe")])
+                .send(),
+        )
+        .await
+        .expect("FIFO must be rejected before waiting for a writer")
+        .unwrap();
+        assert_eq!(response.status(), 400);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
+async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: "refusals".into(),
+    };
+    let paired = editor.http.post(editor.url("/pair")).json(&pair);
+    assert!(paired.send().await.unwrap().status().is_success());
+
+    let missing = editor
+        .http
+        .get(editor.url("/threads/no-such-thread"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    let error: artisan_api::ApiError = missing.json().await.unwrap();
+    assert_eq!(
+        error.failure,
+        artisan_api::Failure::Thread(artisan_api::ThreadFailure::NotFound {
+            thread: ThreadId("no-such-thread".into()),
+        })
+    );
+
+    let answer = artisan_api::Answer::Approval {
+        decision: artisan_api::Decision::AllowOnce,
+    };
+    let unknown = editor
+        .http
+        .post(editor.url("/items/no-such-item/answer"))
+        .json(&answer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+    assert_eq!(
+        unknown
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Thread(artisan_api::ThreadFailure::ItemNotFound {
+            item: ItemId("no-such-item".into()),
+        })
+    );
+
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/refusals".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            title: None,
+            config: EngineConfig::new(EngineId::Claude),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let said = store
+        .upsert_item(forge_store::NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::AssistantMessage {
+                text: "done".into(),
+                phase: artisan_api::Phase::Final,
+            },
+        })
+        .await
+        .unwrap();
+    let stale = editor
+        .http
+        .post(editor.url(&format!("/items/{}/answer", said.id)))
+        .json(&answer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 409);
+    assert_eq!(
+        stale.json::<artisan_api::ApiError>().await.unwrap().failure,
+        artisan_api::Failure::Run(artisan_api::RunFailure::AnswerRefused {
+            item: Some(said.id.clone()),
+            reason: artisan_api::AnswerRefusal::NotAnApproval,
+        })
+    );
+    let not_a_question = editor
+        .http
+        .post(editor.url(&format!("/items/{}/answer", said.id)))
+        .json(&artisan_api::Answer::Question {
+            answers: Vec::new(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        not_a_question.status(),
+        409,
+        "the store's refusal reaches the Editor as a conflict"
+    );
+    assert_eq!(
+        not_a_question
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Run(artisan_api::RunFailure::AnswerRefused {
+            item: Some(said.id.clone()),
+            reason: artisan_api::AnswerRefusal::NotAQuestion,
+        })
+    );
+
+    let raw = editor
+        .http
+        .put(editor.url("/settings/global_prompt"))
+        .json(&serde_json::json!("unversioned"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), 400);
+    assert!(
+        matches!(
+            raw.json::<artisan_api::ApiError>().await.unwrap().failure,
+            artisan_api::Failure::Setting(artisan_api::SettingFailure::OwnRoute { key, .. })
+                if key == "global_prompt"
+        ),
+        "a setting with its own route names that route"
+    );
+    assert_ne!(
+        store.setting("global_prompt").await.unwrap(),
+        Some(serde_json::json!("unversioned"))
+    );
+
+    let off = editor
+        .http
+        .put(editor.url("/settings/you_should_know"))
+        .json(&serde_json::json!(false))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(off.status(), 204);
+    assert_eq!(
+        store.setting("you_should_know").await.unwrap(),
+        Some(serde_json::json!(false))
+    );
+    let garbled = editor
+        .http
+        .put(editor.url("/settings/suggestions"))
+        .json(&serde_json::json!("off"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(garbled.status(), 400);
+    assert!(
+        matches!(
+            garbled.json::<artisan_api::ApiError>().await.unwrap().failure,
+            artisan_api::Failure::Setting(artisan_api::SettingFailure::InvalidValue { key, .. })
+                if key == "suggestions"
+        ),
+        "a garbled value names its setting"
+    );
+
+    for key in [
+        "summary_titles",
+        "continue_after_restart",
+        "retry_when_overloaded",
+        "continue_after_usage_limit",
+    ] {
+        let off = editor
+            .http
+            .put(editor.url(&format!("/settings/{key}")))
+            .json(&serde_json::json!(false))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(off.status(), 204, "{key}");
+        assert_eq!(
+            store.setting(key).await.unwrap(),
+            Some(serde_json::json!(false))
+        );
+    }
+    let claude_ai = editor
+        .http
+        .put(editor.url("/settings/claude_transport"))
+        .json(&serde_json::json!("claude_ai"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claude_ai.status(), 204);
+    assert_eq!(
+        store.setting("claude_transport").await.unwrap(),
+        Some(serde_json::json!("claude_ai"))
+    );
+    let unknown = editor
+        .http
+        .put(editor.url("/settings/claude_transport"))
+        .json(&serde_json::json!("carrier pigeon"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_editor_turns_computer_use_on_through_the_settings_route() {
+    let (_dir, address, store) = forge().await;
+    let editor = paired(&store, address, "computer use").await;
+    let on = editor
+        .http
+        .put(editor.url("/settings/computer_use"))
+        .json(&serde_json::json!(true))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(on.status(), 204);
+    let state: State = editor
+        .http
+        .get(editor.url("/state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        state.settings.get("computer_use"),
+        Some(&serde_json::json!(true))
+    );
+    let garbled = editor
+        .http
+        .put(editor.url("/settings/computer_use"))
+        .json(&serde_json::json!("on"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(garbled.status(), 400);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_store_answers_content_reads_as_internal_while_bad_ranges_stay_client_errors() {
+    let (dir, address, store) = forge().await;
+    let editor = paired(&store, address, "broken store").await;
+    let source = artisan_api::ContentRef::from_text("a stored source").id;
+    let get = |path: String| {
+        let request = editor.http.get(editor.url(&path));
+        async move { request.send().await.unwrap() }
+    };
+    let bad_page = format!("/content/{source}/index?format=markdown&limit=0");
+    let rejected = get(bad_page.clone()).await;
+    assert_eq!(rejected.status(), 400);
+    let error: artisan_api::ApiError = rejected.json().await.unwrap();
+    assert_eq!(error.code, artisan_api::ErrorCode::BadRequest);
+    let disk = rusqlite::Connection::open(dir.path().join("forge").join("forge.sqlite3")).unwrap();
+    disk.execute_batch(include_str!("hide_content.sql"))
+        .unwrap();
+    for path in [
+        format!("/content/{source}/index?format=markdown"),
+        format!("/content/{source}"),
+        format!("/content/{source}/records"),
+    ] {
+        let response = get(path.clone()).await;
+        let status = response.status();
+        let error: artisan_api::ApiError = response.json().await.unwrap();
+        assert_eq!(status, 500, "{path}: {}", error.message);
+        assert_eq!(error.code, artisan_api::ErrorCode::Internal, "{path}");
+    }
+    assert_eq!(get(bad_page).await.status(), 400);
+    assert_eq!(
+        get(format!("/content/{source}?limit=1")).await.status(),
+        400
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_editors_get_item_pages_zstd_compressed_but_events_stay_plain() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let identity = Identity::generate("artisan-editor").unwrap();
+    let fingerprint = tls::fingerprint_of(&invite.forge_certificate).unwrap();
+    let client = |zstd: bool| {
+        reqwest::Client::builder()
+            .use_preconfigured_tls(tls::client_config(&identity, &fingerprint).unwrap())
+            .zstd(zstd)
+            .build()
+            .unwrap()
+    };
+    let (editor, wire) = (client(true), client(false));
+    let url = |path: &str| format!("https://localhost:{}{path}", address.port());
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: "compression".into(),
+    };
+    let paired = editor.post(url("/pair")).json(&pair).send().await.unwrap();
+    assert!(paired.status().is_success());
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/compression".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            title: None,
+            config: EngineConfig::new(EngineId::Claude),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    for reply in 0..40 {
+        store
+            .upsert_item(forge_store::NewItem {
+                id: ItemId::new(),
+                thread_id: thread.id.clone(),
+                run_id: None,
+                parent_id: None,
+                native_id: None,
+                status: artisan_api::Status::Done,
+                kind: artisan_api::ItemKind::AssistantMessage {
+                    text: format!("Reply {reply}: the build passed and the tests are green.")
+                        .into(),
+                    phase: artisan_api::Phase::Final,
+                },
+            })
+            .await
+            .unwrap();
+    }
+    let items = url(&format!("/threads/{}/items?limit=40", thread.id));
+
+    let compressed = wire.get(&items).header("accept-encoding", "zstd");
+    let compressed = compressed.send().await.unwrap();
+    assert_eq!(compressed.headers()["content-encoding"], "zstd");
+    let compressed = compressed.bytes().await.unwrap().len();
+    let plain = wire.get(&items).send().await.unwrap();
+    assert!(plain.headers().get("content-encoding").is_none());
+    let plain = plain.bytes().await.unwrap();
+    assert!(
+        compressed * 3 < plain.len(),
+        "{compressed} compressed bytes for {} plain",
+        plain.len()
+    );
+
+    let page: artisan_api::ItemsPage = editor
+        .get(&items)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let expected: artisan_api::ItemsPage = serde_json::from_slice(&plain).unwrap();
+    assert_eq!(page.items.len(), 40);
+    assert_eq!(page.items, expected.items);
+
+    let events = wire
+        .get(url("/events?since=0"))
+        .header("accept-encoding", "zstd")
+        .send()
+        .await
+        .unwrap();
+    assert!(events.headers().get("content-encoding").is_none());
+}
+
+const EDITOR_ANSWER_BYTES: usize = 32 * 1024 * 1024;
+
+fn largest_config() -> EngineConfig {
+    let mut config = EngineConfig::new(EngineId::Claude);
+    config
+        .options
+        .insert("note".to_owned(), serde_json::Value::String(String::new()));
+    let room = forge_store::MAX_CONFIG_BYTES - serde_json::to_vec(&config).unwrap().len();
+    config.options.insert(
+        "note".to_owned(),
+        serde_json::Value::String("o".repeat(room)),
+    );
+    config
+}
+
+async fn fill_settings(store: &Store) {
+    let mut chunk = 1024 * 1024;
+    let mut index = 0;
+    while chunk > 0 {
+        let saved = store
+            .set_setting(
+                format!("filler_{index}"),
+                serde_json::Value::String("s".repeat(chunk)),
+            )
+            .await;
+        index += 1;
+        if saved.is_err() {
+            chunk /= 2;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_starting_state_fits_the_editor_with_every_collection_full() {
+    let (_dir, address, store) = forge().await;
+    let editor = paired(&store, address, "full").await;
+    let existing = store.state().await.unwrap().projects.len();
+    let projects =
+        futures::future::try_join_all((existing..forge_store::MAX_LIVE_PROJECTS).map(|index| {
+            store.create_project(CreateProject {
+                id: ProjectId::new(),
+                path: format!(
+                    "/{index:p>width$}",
+                    width = forge_store::MAX_PROJECT_PATH_BYTES - 1
+                ),
+                name: Some("n".repeat(forge_store::MAX_PROJECT_NAME_BYTES)),
+            })
+        }))
+        .await
+        .unwrap();
+    fill_settings(&store).await;
+    let config = largest_config();
+    let threads = futures::future::try_join_all((0..400).map(|_| {
+        store.create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: projects[0].id.clone(),
+            config: config.clone(),
+            title: Some("t".repeat(forge_store::MAX_TITLE_BYTES)),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+    }))
+    .await
+    .unwrap();
+    futures::future::try_join_all(threads.iter().map(|thread| {
+        store.upsert_run(artisan_api::Run {
+            config: Some(config.clone()),
+            id: artisan_api::RunId::new(),
+            thread_id: thread.id.clone(),
+            engine: EngineId::Claude,
+            model: config.model.clone(),
+            state: artisan_api::RunState::Running,
+            usage: artisan_api::Usage::default(),
+            session_id: Some(artisan_api::RunId::new().to_string()),
+            seq: 0,
+            input_cutoff: 0,
+            started_at: 0,
+            continuation: None,
+        })
+    }))
+    .await
+    .unwrap();
+
+    let body = editor
+        .http()
+        .get(editor.url("/state"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(
+        body.len() <= EDITOR_ANSWER_BYTES,
+        "the starting state is {} bytes; the Editor reads at most {EDITOR_ANSWER_BYTES}",
+        body.len()
+    );
+    let state: State = serde_json::from_slice(&body).unwrap();
+    assert_eq!(state.projects.len(), forge_store::MAX_LIVE_PROJECTS);
+    assert!(
+        state
+            .runs
+            .iter()
+            .filter(|run| matches!(run.state, artisan_api::RunState::Running))
+            .count()
+            >= 400,
+        "every live run is in the starting state"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_that_never_finishes_tls_is_dropped_and_frees_its_slot() {
+    let identity = Identity::generate("artisan-forge").unwrap();
+    let acceptor =
+        tokio_rustls::TlsAcceptor::from(Arc::new(tls::server_config(&identity).unwrap()));
+    let handshakes = handshakes::Handshakes::new(1, 1);
+    let peer: SocketAddr = "192.0.2.7:50000".parse().unwrap();
+    let (_silent_client, socket) = tokio::io::duplex(4096);
+    let dir = tempfile::tempdir().unwrap();
+    let connection = serve_connection(
+        socket,
+        peer,
+        acceptor,
+        handshakes.admit(peer.ip()).unwrap(),
+        axum::Router::new(),
+        Store::open(dir.path()).unwrap(),
+        CancellationToken::new(),
+    );
+    tokio::time::timeout(Duration::from_secs(600), connection)
+        .await
+        .expect("a silent client held its TLS handshake open forever");
+    handshakes.admit(peer.ip()).unwrap();
+}
+
+struct Served {
+    _dir: tempfile::TempDir,
+    store: Store,
+    handshakes: handshakes::Handshakes,
+    peer: SocketAddr,
+    device: Identity,
+    connection: tokio::task::JoinHandle<()>,
+}
+
+impl Served {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        Self {
+            _dir: dir,
+            store,
+            handshakes: handshakes::Handshakes::new(1, 1),
+            peer: "192.0.2.7:50000".parse().unwrap(),
+            device: Identity::generate("artisan-editor").unwrap(),
+            connection: tokio::spawn(async {}),
+        }
+    }
+
+    async fn pair(&self) {
+        self.store
+            .add_device(
+                "editor".to_owned(),
+                forge_store::DeviceCertificate::from_der(
+                    self.device.certificate_der().unwrap().as_ref(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn connect(&mut self) -> tokio_rustls::client::TlsStream<tokio::io::DuplexStream> {
+        use tokio_rustls::rustls::pki_types::ServerName;
+        let forge = Identity::generate("artisan-forge").unwrap();
+        let acceptor =
+            tokio_rustls::TlsAcceptor::from(Arc::new(tls::server_config(&forge).unwrap()));
+        let (client, socket) = tokio::io::duplex(64 * 1024);
+        self.connection = tokio::spawn(serve_connection(
+            socket,
+            self.peer,
+            acceptor,
+            self.handshakes.admit(self.peer.ip()).unwrap(),
+            axum::Router::new(),
+            self.store.clone(),
+            CancellationToken::new(),
+        ));
+        let fingerprint = tls::fingerprint(forge.certificate_der().unwrap().as_ref());
+        let mut config = tls::client_config(&self.device, &fingerprint).unwrap();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from("localhost").unwrap(), client)
+            .await
+            .unwrap()
+    }
+
+    async fn ends(self) -> handshakes::Handshakes {
+        tokio::time::timeout(Duration::from_secs(600), self.connection)
+            .await
+            .expect("Forge kept the connection open forever")
+            .unwrap();
+        self.handshakes
+    }
+}
+
+async fn answered(stream: &mut tokio_rustls::client::TlsStream<tokio::io::DuplexStream>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    stream
+        .write_all(b"GET /nothing HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    while !answer.ends_with(b"\r\n\r\n") {
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).await.unwrap();
+        answer.extend_from_slice(&byte);
+    }
+    assert!(answer.starts_with(b"HTTP/1.1 404"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unpaired_device_is_disconnected_and_frees_its_slot_unless_it_pairs() {
+    let mut served = Served::new();
+    let mut stream = served.connect().await;
+    answered(&mut stream).await;
+    assert!(
+        served.handshakes.admit(served.peer.ip()).is_err(),
+        "an unpaired connection gave up its slot once its handshake finished"
+    );
+    let handshakes = served.ends().await;
+    handshakes.admit("192.0.2.7".parse().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_device_that_pairs_meanwhile_keeps_its_connection() {
+    let mut served = Served::new();
+    let mut stream = served.connect().await;
+    answered(&mut stream).await;
+    served.pair().await;
+    tokio::time::pause();
+    tokio::time::sleep(UNPAIRED_LIFETIME / 2).await;
+    answered(&mut stream).await;
+    tokio::time::sleep(UNPAIRED_LIFETIME / 2 + Duration::from_secs(1)).await;
+    answered(&mut stream).await;
+    served.handshakes.admit(served.peer.ip()).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_paired_device_that_stalls_inside_its_request_headers_is_disconnected() {
+    use tokio::io::AsyncWriteExt as _;
+    let mut served = Served::new();
+    served.pair().await;
+    let mut stream = served.connect().await;
+    answered(&mut stream).await;
+    served.handshakes.admit(served.peer.ip()).unwrap();
+    stream
+        .write_all(b"GET /nothing HTTP/1.1\r\nHost: loc")
+        .await
+        .unwrap();
+    served.ends().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connections_beyond_the_handshake_bound_are_refused() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (_dir, address, _store) = forge().await;
+    let mut connections = Vec::new();
+    for _ in 0..=handshakes::PER_PEER {
+        connections.push(tokio::net::TcpStream::connect(address).await.unwrap());
+    }
+    let reads = connections.iter_mut().map(|connection| {
+        Box::pin(async move {
+            let mut byte = [0_u8; 1];
+            connection.read(&mut byte).await
+        })
+    });
+    let (read, _, still_waiting) =
+        tokio::time::timeout(Duration::from_secs(5), futures::future::select_all(reads))
+            .await
+            .expect(
+                "one connection past the bound is refused instead of waiting for a handshake slot",
+            );
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a refused connection is closed: {read:?}"
+    );
+    drop(still_waiting);
+    let mut answered = 0;
+    for connection in &mut connections {
+        let mut reply = [0_u8; 64];
+        let served = connection.write_all(b"not a TLS hello\r\n").await.is_ok()
+            && matches!(
+                tokio::time::timeout(Duration::from_secs(5), connection.read(&mut reply)).await,
+                Ok(Ok(read)) if read > 0
+            );
+        answered += usize::from(served);
+    }
+    assert_eq!(
+        answered,
+        handshakes::PER_PEER,
+        "every connection within the bound is still served, and only the one past it is refused"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpaired_client_cannot_make_forge_read_a_large_pairing_request() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let stranger = device(&invite.forge_certificate, address);
+    let oversized = PairRequest {
+        code: invite.code.clone(),
+        device_name: "x".repeat(64 * 1024),
+    };
+    let refused = stranger
+        .http
+        .post(stranger.url("/pair"))
+        .json(&oversized)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 413);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: "laptop".into(),
+    };
+    let paired = stranger
+        .http
+        .post(stranger.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        paired.status(),
+        200,
+        "the refused request did not spend the code"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_images_are_never_stored_by_shared_caches() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: "images".into(),
+    };
+    let paired = editor
+        .http
+        .post(editor.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert!(paired.status().is_success());
+    let blob: artisan_api::BlobRef = editor
+        .http
+        .put(editor.url("/blobs"))
+        .body(
+            webp::Encoder::from_rgb(&[7, 7, 7], 1, 1)
+                .encode_lossless()
+                .to_vec(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let image = editor
+        .http
+        .get(editor.url(&format!("/blobs/{}", blob.hash)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(image.status(), 200);
+    let cache = image.headers()["cache-control"].to_str().unwrap();
+    let directives: Vec<&str> = cache.split(',').map(str::trim).collect();
+    assert!(
+        directives.contains(&"private") && directives.contains(&"no-store"),
+        "a shared cache may keep the user's image: {cache}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
+    use std::sync::Arc;
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path().join("forge");
+    let store = Store::open(&data).unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: directory.path().display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Claude),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let input = SendMessage {
+        id: ItemId::new(),
+        text: "must stay pending".into(),
+        images: Vec::new(),
+        config: None,
+        draft: None,
+    };
+    let input_id = input.id.clone();
+    store
+        .send_message(thread.id.clone(), input, forge_store::Acceptance::default())
+        .await
+        .unwrap();
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let marker = Arc::new(());
+    let owner = Arc::downgrade(&marker);
+    let harness_for: forge_runs::HarnessFor = Arc::new(move |engine| {
+        let _: &Arc<()> = &marker;
+        forge_engines::harness(engine)
+    });
+    let result = start_with_harness(
+        ServeConfig {
+            data_dir: data.clone(),
+            listen: occupied.local_addr().unwrap(),
+        },
+        harness_for,
+        forge_store::Environment::system(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the occupied listener rejects this controller"
+    );
+    test_support::wait::eventually(
+        "a failed startup to release the Hub's dispatcher and status owners",
+        test_support::wait::LIVENESS,
+        || async { owner.upgrade().is_none() },
+    )
+    .await;
+    assert!(
+        store.state().await.unwrap().runs.is_empty(),
+        "a failed bind must not claim pending inputs"
+    );
+    assert_eq!(
+        store.item(&input_id).await.unwrap().unwrap().status,
+        artisan_api::Status::Running
+    );
+    test_support::wait::eventually(
+        "a failed startup to release its temporary instance lock",
+        test_support::wait::LIVENESS,
+        || async { lock_data_dir(&data).is_ok() },
+    )
+    .await;
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
+    use std::os::unix::fs::PermissionsExt as _;
+    struct ReleaseOnDrop(PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            std::fs::write(&self.0, "").unwrap();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("forge");
+    let install = |engine: &str, script: &str| {
+        let root = data.join("engines").join(engine);
+        let version = root.join("versions/1.0.0");
+        std::fs::create_dir_all(&version).unwrap();
+        let binary = version.join(if engine == "codex" {
+            "vendor/x86_64-unknown-linux-musl/bin/codex"
+        } else {
+            engine
+        });
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("current"), "1.0.0").unwrap();
+        binary
+    };
+    let claude = install(
+        "claude",
+        "#!/bin/sh\n: > \"$0.started\"\nwhile [ ! -e \"$0.release\" ]; do sleep 0.02; done\nprintf '{\"loggedIn\":false}'\n",
+    );
+    let codex = install(
+        "codex",
+        "#!/bin/sh\n: > \"$0.started\"\nprintf 'not logged in\\n'\n",
+    );
+    let marker = |binary: &Path, suffix: &str| {
+        let mut path = binary.as_os_str().to_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    };
+    let release = ReleaseOnDrop(marker(&claude, ".release"));
+    let server = start(ServeConfig {
+        data_dir: data,
+        listen: "127.0.0.1:0".parse().unwrap(),
+    })
+    .await
+    .unwrap();
+    test_support::wait::eventually(
+        "Codex's startup refresh to begin while slow Claude is still probing",
+        test_support::wait::LIVENESS,
+        || async { marker(&claude, ".started").exists() && marker(&codex, ".started").exists() },
+    )
+    .await;
+    drop(release);
+    drop(server);
+}
+
+async fn stored<T, F: Future<Output = Option<T>>>(
+    what: &str,
+    store: &Store,
+    mut found: impl FnMut() -> F,
+) -> T {
+    let mut changes = store.subscribe();
+    let waiting = async {
+        loop {
+            if let Some(value) = found().await {
+                return value;
+            }
+            match changes.recv().await {
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    panic!("the store closed while waiting for {what}")
+                }
+            }
+        }
+    };
+    tokio::time::timeout(test_support::wait::LIVENESS, waiting)
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}
+
+struct McpScripted;
+
+async fn mcp(
+    http: &reqwest::Client,
+    url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    let reply: serde_json::Value = http
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .json(&serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    reply["result"].clone()
+}
+
+fn ids(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| span.len() == 36 && span.matches('-').count() == 4)
+        .map(str::to_owned)
+        .collect()
+}
+
+async fn tool(
+    http: &reqwest::Client,
+    url: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> String {
+    let result = mcp(
+        http,
+        url,
+        "tools/call",
+        serde_json::json!({ "name": name, "arguments": arguments }),
+    )
+    .await;
+    assert_eq!(result["isError"], false, "{name} failed: {result}");
+    result["content"][0]["text"].as_str().unwrap().to_owned()
+}
+
+impl forge_engines::Harness for McpScripted {
+    fn run(
+        &self,
+        turn: forge_engines::Turn,
+        io: forge_engines::RunIo,
+    ) -> futures::future::BoxFuture<'static, forge_engines::Outcome> {
+        Box::pin(async move {
+            use forge_engines::EngineEvent;
+            io.emit(EngineEvent::InputAccepted {
+                id: turn.input.id.clone(),
+            })
+            .await;
+            let answer = if turn.engine == EngineId::Codex {
+                format!("child heard: {}", turn.input.text)
+            } else if turn.input.text == "recall" {
+                let url = turn
+                    .launch
+                    .gateway_mcp
+                    .iter()
+                    .find(|(name, _)| name == "artisan")
+                    .map(|(_, url)| url.clone())
+                    .expect("a Claude thread is launched with the Artisan MCP");
+                let http = reqwest::Client::new();
+                let hello = mcp(
+                    &http,
+                    &url,
+                    "initialize",
+                    serde_json::json!({ "protocolVersion": "2025-06-18" }),
+                )
+                .await;
+                assert_eq!(hello["serverInfo"]["name"], "artisan");
+                io.emit(EngineEvent::Item {
+                    key: "search".to_owned(),
+                    parent: None,
+                    status: artisan_api::Status::Done,
+                    kind: artisan_api::ItemKind::Tool {
+                        tool: artisan_api::ToolKind::Mcp {
+                            server: "artisan".into(),
+                            tool: "threads_search".into(),
+                            input: Some(r#"{"query":"zebra-42"}"#.into()),
+                        },
+                        title: None,
+                        output: None,
+                        exit_code: None,
+                        approval: None,
+                    },
+                })
+                .await;
+                let found = tool(
+                    &http,
+                    &url,
+                    "threads_search",
+                    serde_json::json!({ "query": "zebra-42" }),
+                )
+                .await;
+                let spawned = tool(
+                    &http,
+                    &url,
+                    "agent_spawn",
+                    serde_json::json!({ "task": "echo", "prompt": "say hi", "harness": "codex" }),
+                )
+                .await;
+                let waited = tool(
+                    &http,
+                    &url,
+                    "agent_wait",
+                    serde_json::json!({ "agents": ids(&spawned), "timeout_seconds": 20 }),
+                )
+                .await;
+                format!("FOUND {found}\nWAITED {waited}")
+            } else if turn.input.text == "background" {
+                let url = turn
+                    .launch
+                    .gateway_mcp
+                    .iter()
+                    .find(|(name, _)| name == "artisan")
+                    .map(|(_, url)| url.clone())
+                    .unwrap();
+                tool(
+                    &reqwest::Client::new(),
+                    &url,
+                    "agent_spawn",
+                    serde_json::json!({ "task": "echo later", "prompt": "later", "harness": "codex", "background": true }),
+                )
+                .await
+            } else {
+                format!("noted: {}", turn.input.text)
+            };
+            io.emit(EngineEvent::Item {
+                key: "reply".to_owned(),
+                parent: None,
+                status: artisan_api::Status::Done,
+                kind: artisan_api::ItemKind::AssistantMessage {
+                    text: answer.into(),
+                    phase: artisan_api::Phase::Final,
+                },
+            })
+            .await;
+            forge_engines::Outcome::done()
+        })
+    }
+}
+
+#[derive(Default)]
+struct CachedCodexServer {
+    addresses: Arc<std::sync::Mutex<std::collections::HashMap<ThreadId, String>>>,
+}
+
+async fn raw_mcp_call(url: &str, name: &str) -> serde_json::Value {
+    let answer = reqwest::Client::new()
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": { "query": "anything" } },
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = answer.status().as_u16();
+    let body = answer.text().await.unwrap();
+    serde_json::from_str(&body)
+        .unwrap_or_else(|_| serde_json::json!({ "status": status, "body": body }))
+}
+
+impl forge_engines::Harness for CachedCodexServer {
+    fn run(
+        &self,
+        turn: forge_engines::Turn,
+        io: forge_engines::RunIo,
+    ) -> futures::future::BoxFuture<'static, forge_engines::Outcome> {
+        let launched = turn
+            .launch
+            .gateway_mcp
+            .iter()
+            .find(|(name, _)| name == "artisan")
+            .map(|(_, url)| url.clone())
+            .expect("a Codex thread is launched with the Artisan MCP");
+        let url = self
+            .addresses
+            .lock()
+            .unwrap()
+            .entry(turn.thread_id.clone())
+            .or_insert(launched)
+            .clone();
+        Box::pin(async move {
+            use forge_engines::EngineEvent;
+            io.emit(EngineEvent::InputAccepted {
+                id: turn.input.id.clone(),
+            })
+            .await;
+            io.emit(EngineEvent::Session {
+                id: format!("codex-{}", turn.thread_id),
+            })
+            .await;
+            let reply = raw_mcp_call(&url, "threads_search").await;
+            io.emit(EngineEvent::Item {
+                key: "reply".to_owned(),
+                parent: None,
+                status: artisan_api::Status::Done,
+                kind: artisan_api::ItemKind::AssistantMessage {
+                    text: serde_json::json!({ "turn": turn.input.text, "reply": reply })
+                        .to_string()
+                        .into(),
+                    phase: artisan_api::Phase::Final,
+                },
+            })
+            .await;
+            forge_engines::Outcome::done()
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_codex_server_that_keeps_its_first_gateway_address_reaches_artisan_on_every_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("forge");
+    let root = data.join("engines").join(EngineId::Codex.to_string());
+    let binary = root
+        .join("versions/1.0.0")
+        .join(forge_engines::host_entry(EngineId::Codex).unwrap());
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(&binary, "").unwrap();
+    std::fs::write(root.join("current"), "1.0.0").unwrap();
+    let codex = Arc::new(CachedCodexServer::default());
+    let addresses = Arc::clone(&codex.addresses);
+    let harness: Arc<dyn forge_engines::Harness> = codex;
+    let server = start_with_harness(
+        ServeConfig {
+            data_dir: data.clone(),
+            listen: "127.0.0.1:0".parse().unwrap(),
+        },
+        Arc::new(move |_| Arc::clone(&harness)),
+        forge_store::Environment::system(),
+    )
+    .await
+    .unwrap();
+    let hub = server.hub.clone();
+    let store = server.store().clone();
+    tokio::spawn(server.run());
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: data.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id.clone(),
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let turn = |text: &str| {
+        let (hub, store, thread) = (hub.clone(), store.clone(), thread.id.clone());
+        let message = SendMessage {
+            draft: None,
+            id: ItemId::new(),
+            text: text.to_owned(),
+            images: Vec::new(),
+            config: None,
+        };
+        async move {
+            let before = store.last_reply(&thread).await.unwrap();
+            hub.send_message(&thread, message).await.unwrap();
+            let reply = stored("the turn's reply", &store, || async {
+                store
+                    .last_reply(&thread)
+                    .await
+                    .unwrap()
+                    .filter(|reply| Some(reply) != before.as_ref())
+            })
+            .await;
+            test_support::wait::eventually("the turn to end", test_support::wait::LIVENESS, || {
+                std::future::ready(!hub.is_live(&thread))
+            })
+            .await;
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap()["reply"].clone()
+        }
+    };
+
+    let first = turn("first").await;
+    assert!(first["result"].is_object(), "{first}");
+    let cached = addresses.lock().unwrap()[&thread.id].clone();
+    let between = raw_mcp_call(&cached, "threads_search").await;
+    assert_eq!(between["error"]["code"], -32001, "{between}");
+    assert!(
+        between["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no live run")),
+        "{between}"
+    );
+    let second = turn("second").await;
+
+    assert!(
+        second["result"].is_object(),
+        "the second turn's call on the cached address reaches Artisan: {second}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
+async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("forge");
+    for engine in [EngineId::Claude, EngineId::Codex] {
+        let root = data.join("engines").join(engine.to_string());
+        let binary = root
+            .join("versions/1.0.0")
+            .join(forge_engines::host_entry(engine).unwrap());
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "").unwrap();
+        std::fs::write(root.join("current"), "1.0.0").unwrap();
+    }
+    let harness: Arc<dyn forge_engines::Harness> = Arc::new(McpScripted);
+    let server = start_with_harness(
+        ServeConfig {
+            data_dir: data.clone(),
+            listen: "127.0.0.1:0".parse().unwrap(),
+        },
+        Arc::new(move |_| Arc::clone(&harness)),
+        forge_store::Environment::system(),
+    )
+    .await
+    .unwrap();
+    let hub = server.hub.clone();
+    let store = server.store().clone();
+    tokio::spawn(server.run());
+
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: data.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let new_thread = || CreateThread {
+        id: ThreadId::new(),
+        project_id: project.id.clone(),
+        config: EngineConfig::new(EngineId::Claude),
+        title: None,
+        parent_thread_id: None,
+        spawned_by: None,
+    };
+    let send = |text: &str| SendMessage {
+        draft: None,
+        id: ItemId::new(),
+        text: text.to_owned(),
+        images: Vec::new(),
+        config: None,
+    };
+    let replied = |thread: ThreadId| {
+        let store = store.clone();
+        async move {
+            stored("the thread's reply", &store, || async {
+                store.last_reply(&thread).await.unwrap()
+            })
+            .await
+        }
+    };
+
+    let earlier = store.create_thread(new_thread()).await.unwrap();
+    hub.send_message(&earlier.id, send("The deploy key lives at secret/zebra-42"))
+        .await
+        .unwrap();
+    replied(earlier.id.clone()).await;
+
+    let asking = store.create_thread(new_thread()).await.unwrap();
+    hub.send_message(&asking.id, send("recall")).await.unwrap();
+    let reply = replied(asking.id.clone()).await;
+
+    let (found, waited) = reply.split_once("\nWAITED ").unwrap();
+    assert!(
+        found.contains("zebra-42"),
+        "search shows the match: {found}"
+    );
+    let hits = ids(found);
+    assert!(!hits.is_empty(), "each hit names its item: {found}");
+    for hit in hits {
+        assert_eq!(
+            store
+                .item(&ItemId::from(hit))
+                .await
+                .unwrap()
+                .unwrap()
+                .thread_id,
+            earlier.id,
+            "search finds the earlier thread, not its own call: {found}"
+        );
+    }
+    assert!(
+        waited.contains("child heard: say hi"),
+        "the Codex agent's reply comes back: {waited}"
+    );
+
+    let items = store
+        .transcript_page(
+            &asking.id,
+            None,
+            artisan_api::ItemsQuery {
+                before: None,
+                after: None,
+                limit: Some(50),
+            },
+        )
+        .await
+        .unwrap()
+        .items;
+    let (engine, child) = items
+        .iter()
+        .find_map(|item| {
+            if let artisan_api::ItemKind::Agent { engine, thread, .. } = &item.kind {
+                Some((*engine, thread.clone()))
+            } else {
+                None
+            }
+        })
+        .expect("the parent shows the agent");
+    assert_eq!(engine, Some(EngineId::Codex), "with its harness");
+    let child = child.expect("and opens its own thread");
+    assert_eq!(
+        store.thread(&child).await.unwrap().unwrap().config.engine,
+        EngineId::Codex
+    );
+    assert_eq!(
+        store.last_reply(&child).await.unwrap().as_deref(),
+        Some("child heard: say hi"),
+        "the agent starts from its prompt alone"
+    );
+
+    let background = store.create_thread(new_thread()).await.unwrap();
+    hub.send_message(&background.id, send("background"))
+        .await
+        .unwrap();
+    let report = stored("the agent's result", &store, || async {
+        let items = store
+            .transcript_page(
+                &background.id,
+                None,
+                artisan_api::ItemsQuery {
+                    before: None,
+                    after: None,
+                    limit: Some(50),
+                },
+            )
+            .await
+            .unwrap()
+            .items;
+        items.into_iter().find_map(|item| {
+            if let artisan_api::ItemKind::UserMessage {
+                text,
+                from_agent: Some(agent),
+                ..
+            } = item.kind
+            {
+                Some((text, agent))
+            } else {
+                None
+            }
+        })
+    })
+    .await;
+
+    assert!(
+        report.0.inline().unwrap().contains("child heard: later"),
+        "{:?}",
+        report.0
+    );
+    assert!(matches!(
+        store.item(&report.1).await.unwrap().unwrap().kind,
+        artisan_api::ItemKind::Agent {
+            engine: Some(EngineId::Codex),
+            ..
+        }
+    ));
+}
+
+async fn titled(store: &Store, title: &str) {
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/app".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Claude),
+            title: Some(title.into()),
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn forge_rolls_back_a_newer_database_and_tells_editors_until_one_dismisses_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("forge");
+    titled(&Store::open(&data).unwrap(), "Before the upgrade").await;
+    let database = data.join("forge.sqlite3");
+    let backup = data.join(format!("forge.sqlite3.schema-{}", Store::schema_version()));
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute(include_str!("back_up.sql"), [backup.to_str().unwrap()])
+        .unwrap();
+    titled(&Store::open(&data).unwrap(), "After the upgrade").await;
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(include_str!("stamp_newer.sql"))
+        .unwrap();
+
+    let server = start(ServeConfig {
+        data_dir: data.clone(),
+        listen: "127.0.0.1:0".parse().unwrap(),
+    })
+    .await
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let store = server.store().clone();
+    tokio::spawn(server.run());
+    let editor = paired(&store, address, "laptop").await;
+    let state = || async {
+        editor
+            .http
+            .get(editor.url("/state"))
+            .send()
+            .await
+            .unwrap()
+            .json::<State>()
+            .await
+            .unwrap()
+    };
+
+    let before = state().await;
+    let titles: Vec<_> = before
+        .threads
+        .iter()
+        .filter_map(|thread| thread.title.as_deref())
+        .collect();
+    assert_eq!(titles, ["Before the upgrade"]);
+    let rollback = before
+        .database_rollback
+        .expect("the Editor is told the database went back");
+    assert_eq!(rollback.found, 1000);
+    assert_eq!(
+        rollback.restored,
+        u32::try_from(Store::schema_version()).unwrap()
+    );
+    assert!(Path::new(&rollback.set_aside).is_file());
+
+    let dismissed = editor
+        .http
+        .delete(editor.url("/database-rollback"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dismissed.status(), 204);
+    assert_eq!(state().await.database_rollback, None);
+}

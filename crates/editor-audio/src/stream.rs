@@ -1,17 +1,15 @@
-//! Bounded decoder producer. The maintained decoder owns format/seek logic;
-//! the channel owns backpressure and keeps cancellation responsive while paused.
-use crate::decode::StreamDecoder;
+use crate::decode::{SeekAudioError, StreamDecoder};
 use crate::output::Output;
 use crate::state::Shared;
 use crossbeam_channel::{Receiver, Sender, bounded, select};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub enum PcmEvent {
+pub(crate) enum PcmEvent {
     Data { epoch: u64, samples: Vec<f32> },
     End { epoch: u64 },
 }
-pub struct StreamState {
+pub(crate) struct StreamState {
     pub(crate) pcm: Receiver<PcmEvent>,
     pub(crate) signal: Sender<()>,
     pub(crate) epoch: u64,
@@ -29,32 +27,35 @@ impl StreamState {
         Self {
             pcm,
             signal,
-            duration,
             epoch: 0,
             seek: None,
+            duration,
             start: 0,
             ended: false,
         }
     }
 }
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StartStreamError {
+    #[error("Audio contains no samples")]
+    Empty,
+}
+
 const QUEUE_CHUNKS: usize = 8;
 
-pub fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
+pub(crate) fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
     let first = match decoder.chunk() {
         Ok(samples) if !samples.is_empty() => decoder.audio(samples),
         Ok(_) => {
-            shared
-                .lock()
-                .fail(generation, "Audio contains no samples".to_owned());
+            shared.lock().fail(generation, &StartStreamError::Empty);
             return;
         }
         Err(error) => {
-            shared.lock().fail(generation, error);
+            shared.lock().fail(generation, &error);
             return;
         }
     };
     let (pcm, received) = bounded(QUEUE_CHUNKS);
-    // One wakeup is sufficient; pending seek position lives in the shared state.
     let (signal, commands) = bounded(1);
     let state = StreamState::new(received, signal, decoder.duration);
     {
@@ -65,7 +66,7 @@ pub fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
         match Output::open(Arc::clone(shared), generation, format) {
             Ok(output) => inner.attach(output),
             Err(error) => {
-                inner.fail(generation, error);
+                inner.fail(generation, &error);
                 return;
             }
         }
@@ -95,7 +96,7 @@ fn produce(
                 }
                 Ok(None) => continue,
                 Err(error) => {
-                    shared.lock().fail(generation, error);
+                    shared.lock().fail(generation, &error);
                     return;
                 }
             }
@@ -105,7 +106,7 @@ fn produce(
                 Ok(Some(next)) => epoch = next,
                 Ok(None) => {}
                 Err(error) => {
-                    shared.lock().fail(generation, error);
+                    shared.lock().fail(generation, &error);
                     return;
                 }
             }
@@ -116,7 +117,7 @@ fn produce(
         let samples = match decoder.chunk() {
             Ok(samples) => samples,
             Err(error) => {
-                shared.lock().fail(generation, error);
+                shared.lock().fail(generation, &error);
                 return;
             }
         };
@@ -126,7 +127,6 @@ fn produce(
         } else {
             PcmEvent::Data { epoch, samples }
         };
-        // A seek or stop interrupts a full queue. No polling heartbeat or busy wait.
         select! {
             send(pcm, event) -> result => { if result.is_err() { return; } ended = eof; }
             recv(commands) -> command => {
@@ -134,7 +134,7 @@ fn produce(
                 match apply_seek(shared, generation, decoder) {
                     Ok(Some(next)) => { epoch = next; ended = false; }
                     Ok(None) => {}
-                    Err(error) => { shared.lock().fail(generation, error); return; }
+                    Err(error) => { shared.lock().fail(generation, &error); return; }
                 }
             }
         }
@@ -144,7 +144,7 @@ fn apply_seek(
     shared: &Shared,
     generation: u64,
     decoder: &mut StreamDecoder,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, SeekAudioError> {
     let Some((epoch, position)) = shared.lock().take_seek(generation) else {
         return Ok(None);
     };

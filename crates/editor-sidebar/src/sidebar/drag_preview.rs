@@ -9,17 +9,18 @@ use aqua_ui::{
 use editor_core::{DraggedThread, HostInstance};
 use editor_ui::theme::ArtisanTheme;
 
-pub fn preview_position(snapshot: &DragSnapshot) -> Point {
+fn preview_position(snapshot: &DragSnapshot) -> Point {
     Point::new(
         snapshot.pointer.position.x - snapshot.cursor_offset.x,
         snapshot.pointer.position.y - snapshot.cursor_offset.y,
     )
 }
 
-pub fn preview(title: &str, theme: ArtisanTheme) -> Element {
+fn preview(title: &str, theme: &ArtisanTheme) -> Element {
     super::row::drag_preview(title, theme).exclude_from_hit_testing()
 }
 
+#[derive(Debug)]
 pub struct DragPreviewHost {
     overlay: OverlayId,
     source: NodeId,
@@ -34,7 +35,7 @@ impl DragPreviewHost {
         owner: NodeId,
         instance: HostInstance,
         snapshot: &DragSnapshot,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> Result<Option<Self>, String> {
         let Some(payload) = snapshot.payload.get::<DraggedThread>().cloned() else {
             return Ok(None);

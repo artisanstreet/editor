@@ -1,7 +1,4 @@
-//! The Marketplace's directories: skills.sh's search, and fetching one of
-//! its skills from the GitHub repository that publishes it.
-
-use anyhow::{Context as _, Result, ensure};
+use crate::expansion::{Expansion, ExpansionError, Limits};
 use artisan_api::Listing;
 use serde::Deserialize;
 use std::fs;
@@ -9,12 +6,15 @@ use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 const SKILLS_SH: &str = "skills.sh";
-/// skills.sh itself; Forge's tests point the search at a stub.
 pub const SKILLS_SH_URL: &str = "https://skills.sh";
-/// A repository's tarball; larger ones are refused rather than unpacked.
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
-/// A file inside it; larger ones are skipped.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const UNPACK_LIMITS: Limits = Limits {
+    bytes: 512 * 1024 * 1024,
+    files: 50_000,
+    folders: 20_000,
+    spare_space: 256 * 1024 * 1024,
+};
 
 #[derive(Deserialize)]
 struct Search {
@@ -31,28 +31,43 @@ struct Hit {
     installs: u64,
 }
 
-/// skills.sh's best matches for `query`, most relevant first.
-///
-/// # Errors
-///
-/// When skills.sh can't be reached or answers something else.
+#[derive(Debug, thiserror::Error)]
+pub enum SearchSkillsError {
+    #[error("reaching skills.sh at {url}")]
+    Reach {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("skills.sh refused the search")]
+    Refused(#[source] reqwest::Error),
+    #[error("reading skills.sh's answer")]
+    Body(#[source] reqwest::Error),
+    #[error("reading skills.sh's answer")]
+    Decode(#[source] serde_json::Error),
+}
+
 pub async fn search_skills(
     http: &reqwest::Client,
     base: &str,
     query: &str,
-) -> Result<Vec<Listing>> {
+) -> Result<Vec<Listing>, SearchSkillsError> {
+    let url = format!("{base}/api/search");
     let bytes = http
-        .get(format!("{base}/api/search"))
+        .get(&url)
         .query(&[("q", query), ("limit", "20")])
         .send()
         .await
-        .context("reaching skills.sh")?
+        .map_err(|source| SearchSkillsError::Reach {
+            url: url.clone(),
+            source,
+        })?
         .error_for_status()
-        .context("skills.sh refused the search")?
+        .map_err(SearchSkillsError::Refused)?
         .bytes()
         .await
-        .context("reading skills.sh's answer")?;
-    let search: Search = serde_json::from_slice(&bytes).context("reading skills.sh's answer")?;
+        .map_err(SearchSkillsError::Body)?;
+    let search: Search = serde_json::from_slice(&bytes).map_err(SearchSkillsError::Decode)?;
     Ok(search
         .skills
         .into_iter()
@@ -67,15 +82,58 @@ pub async fn search_skills(
         .collect())
 }
 
-/// Downloads the repository behind a skills.sh listing into `scratch` and
-/// returns the folder of the skill it names: the one whose `SKILL.md` has
-/// that name, else the folder of that name.
-///
-/// # Errors
-///
-/// Phrased for the user: an id that isn't skills.sh's, an unreachable or
-/// oversized repository, or a repository without that skill.
-pub async fn fetch_skill(http: &reqwest::Client, id: &str, scratch: &Path) -> Result<PathBuf> {
+#[derive(Debug, thiserror::Error)]
+pub enum FetchSkillError {
+    #[error("That isn't a skills.sh listing.")]
+    NotListing { id: String },
+    #[error("Couldn't reach {repository} on GitHub.")]
+    Reach {
+        repository: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("GitHub has no repository {repository}.")]
+    NoRepository {
+        repository: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("{repository} is too large to install from.")]
+    TooLarge { repository: String },
+    #[error("Couldn't download {repository}.")]
+    Download {
+        repository: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("unpack {repository}")]
+    Unpack {
+        repository: String,
+        #[source]
+        source: UnpackError,
+    },
+    #[error("wait for the {repository} unpacking task")]
+    Task {
+        repository: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("search {repository} for {skill}")]
+    Search {
+        repository: String,
+        skill: String,
+        #[source]
+        source: walkdir::Error,
+    },
+    #[error("{repository} has no skill named {skill}.")]
+    NoSkill { repository: String, skill: String },
+}
+
+pub async fn fetch_skill(
+    http: &reqwest::Client,
+    id: &str,
+    scratch: &Path,
+) -> Result<PathBuf, FetchSkillError> {
     let (owner, repo, skill) = id
         .strip_prefix("skills.sh:")
         .and_then(|rest| {
@@ -83,44 +141,83 @@ pub async fn fetch_skill(http: &reqwest::Client, id: &str, scratch: &Path) -> Re
             Some((parts.next()?, parts.next()?, parts.next()?))
         })
         .filter(|(owner, repo, skill)| valid_part(owner) && valid_part(repo) && valid_part(skill))
-        .context("That isn't a skills.sh listing.")?;
-    let url = format!("https://codeload.github.com/{owner}/{repo}/tar.gz/HEAD");
+        .ok_or_else(|| FetchSkillError::NotListing { id: id.to_owned() })?;
+    let repository = format!("{owner}/{repo}");
+    let url = format!("https://codeload.github.com/{repository}/tar.gz/HEAD");
     let response = http
         .get(&url)
         .send()
         .await
-        .with_context(|| format!("Couldn't reach {owner}/{repo} on GitHub."))?
+        .map_err(|source| FetchSkillError::Reach {
+            repository: repository.clone(),
+            source,
+        })?
         .error_for_status()
-        .with_context(|| format!("GitHub has no repository {owner}/{repo}."))?;
-    ensure!(
-        response
-            .content_length()
-            .is_none_or(|length| length <= MAX_ARCHIVE_BYTES),
-        "{owner}/{repo} is too large to install from."
-    );
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("Couldn't download {owner}/{repo}."))?;
-    ensure!(
-        bytes.len() as u64 <= MAX_ARCHIVE_BYTES,
-        "{owner}/{repo} is too large to install from."
-    );
+        .map_err(|source| FetchSkillError::NoRepository {
+            repository: repository.clone(),
+            source,
+        })?;
+    let bytes = download(response, MAX_ARCHIVE_BYTES, &repository).await?;
     let root = scratch.join("repository");
     let unpack_root = root.clone();
-    tokio::task::spawn_blocking(move || unpack(&bytes, &unpack_root))
+    tokio::task::spawn_blocking(move || unpack(&bytes, &unpack_root, UNPACK_LIMITS))
         .await
-        .context("unpacking task")??;
-    find_skill(&root, skill)?.with_context(|| format!("{owner}/{repo} has no skill named {skill}."))
+        .map_err(|source| FetchSkillError::Task {
+            repository: repository.clone(),
+            source,
+        })?
+        .map_err(|source| FetchSkillError::Unpack {
+            repository: repository.clone(),
+            source,
+        })?;
+    find_skill(&root, skill)
+        .map_err(|source| FetchSkillError::Search {
+            repository: repository.clone(),
+            skill: skill.to_owned(),
+            source,
+        })?
+        .ok_or_else(|| FetchSkillError::NoSkill {
+            repository,
+            skill: skill.to_owned(),
+        })
 }
 
-/// A `<owner>/<repo>` source, split.
+async fn download(
+    mut response: reqwest::Response,
+    limit: u64,
+    repository: &str,
+) -> Result<Vec<u8>, FetchSkillError> {
+    let too_large = || FetchSkillError::TooLarge {
+        repository: repository.to_owned(),
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
+    {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|source| FetchSkillError::Download {
+            repository: repository.to_owned(),
+            source,
+        })?
+    {
+        if (bytes.len() + chunk.len()) as u64 > limit {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 fn repository(source: &str) -> Option<(&str, &str)> {
     let (owner, repo) = source.split_once('/')?;
     (valid_part(owner) && valid_part(repo)).then_some((owner, repo))
 }
 
-/// One GitHub owner, repository or skill name: no separators, no dots alone.
 fn valid_part(part: &str) -> bool {
     !part.is_empty()
         && part != "."
@@ -130,14 +227,44 @@ fn valid_part(part: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
-/// Unpacks the regular files of a GitHub tarball under `root`, without its
-/// `<repo>-<commit>/` top folder. Links and paths that leave `root` are
-/// skipped.
-fn unpack(bytes: &[u8], root: &Path) -> Result<()> {
-    fs::create_dir_all(root)?;
+#[derive(Debug, thiserror::Error)]
+pub enum UnpackError {
+    #[error("create {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("reading the repository")]
+    Read(#[source] std::io::Error),
+    #[error("the repository is too large to unpack")]
+    TooLarge(#[source] ExpansionError),
+    #[error("unpacking {}", member.display())]
+    Member {
+        member: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn unpack(bytes: &[u8], root: &Path, limits: Limits) -> Result<(), UnpackError> {
+    let create = |path: &Path| {
+        fs::create_dir_all(path).map_err(|source| UnpackError::Create {
+            path: path.to_owned(),
+            source,
+        })
+    };
+    create(root)?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
-    for entry in archive.entries().context("reading the repository")? {
-        let mut entry = entry.context("reading the repository")?;
+    let mut expansion = Expansion::new(root, limits);
+    for entry in archive.entries().map_err(UnpackError::Read)? {
+        let mut entry = entry.map_err(UnpackError::Read)?;
         if !matches!(
             entry.header().entry_type(),
             tar::EntryType::Regular | tar::EntryType::Continuous
@@ -145,7 +272,7 @@ fn unpack(bytes: &[u8], root: &Path) -> Result<()> {
         {
             continue;
         }
-        let path = entry.path()?.into_owned();
+        let path = entry.path().map_err(UnpackError::Read)?.into_owned();
         let mut components = path.components();
         components.next();
         let relative: PathBuf = components.collect();
@@ -156,22 +283,26 @@ fn unpack(bytes: &[u8], root: &Path) -> Result<()> {
         {
             continue;
         }
+        expansion
+            .admit_file(&relative, entry.size())
+            .map_err(UnpackError::TooLarge)?;
         let to = root.join(&relative);
         if let Some(parent) = to.parent() {
-            fs::create_dir_all(parent)?;
+            create(parent)?;
         }
         let mut data = Vec::new();
         entry
             .read_to_end(&mut data)
-            .with_context(|| format!("unpacking {}", relative.display()))?;
-        fs::write(&to, data)?;
+            .map_err(|source| UnpackError::Member {
+                member: relative,
+                source,
+            })?;
+        fs::write(&to, data).map_err(|source| UnpackError::Write { path: to, source })?;
     }
     Ok(())
 }
 
-/// The folder under `root` whose `SKILL.md` names `skill`, else one named
-/// `skill` with a `SKILL.md`.
-fn find_skill(root: &Path, skill: &str) -> Result<Option<PathBuf>> {
+fn find_skill(root: &Path, skill: &str) -> Result<Option<PathBuf>, walkdir::Error> {
     let mut by_folder = None;
     for entry in walkdir::WalkDir::new(root).max_depth(8).follow_links(false) {
         let entry = entry?;
@@ -181,8 +312,14 @@ fn find_skill(root: &Path, skill: &str) -> Result<Option<PathBuf>> {
         let Some(folder) = entry.path().parent() else {
             continue;
         };
-        let text = fs::read_to_string(entry.path()).unwrap_or_default();
-        if crate::customise::skill_name(&text).as_deref() == Some(skill) {
+        let named = match fs::read_to_string(entry.path()) {
+            Ok(text) => crate::customise::skill_name(&text),
+            Err(error) => {
+                tracing::debug!(path = %entry.path().display(), %error, "skip an unreadable SKILL.md");
+                None
+            }
+        };
+        if named.as_deref() == Some(skill) {
             return Ok(Some(folder.to_path_buf()));
         }
         if by_folder.is_none() && folder.file_name().is_some_and(|name| name == skill) {
@@ -193,45 +330,9 @@ fn find_skill(root: &Path, skill: &str) -> Result<Option<PathBuf>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "../tests/marketplace/download.rs"]
+mod download_tests;
 
-    fn tarball(files: &[(&str, &str)]) -> Vec<u8> {
-        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
-            Vec::new(),
-            flate2::Compression::fast(),
-        ));
-        for (path, text) in files {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(text.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, path, text.as_bytes())
-                .unwrap();
-        }
-        builder.into_inner().unwrap().finish().unwrap()
-    }
-
-    #[test]
-    fn a_listed_skill_is_found_by_its_name_inside_the_repository() {
-        let dir = tempfile::tempdir().unwrap();
-        let bytes = tarball(&[
-            ("skills-abc123/README.md", "# Skills"),
-            (
-                "skills-abc123/skills/frontend/SKILL.md",
-                "---\nname: frontend-design\ndescription: Design\n---\n",
-            ),
-            ("skills-abc123/skills/frontend/notes.md", "notes"),
-            (
-                "skills-abc123/skills/pdf/SKILL.md",
-                "---\nname: pdf\ndescription: PDFs\n---\n",
-            ),
-        ]);
-        unpack(&bytes, dir.path()).unwrap();
-        let folder = find_skill(dir.path(), "frontend-design").unwrap().unwrap();
-        assert_eq!(folder, dir.path().join("skills/frontend"));
-        assert!(folder.join("notes.md").is_file());
-        assert!(find_skill(dir.path(), "missing").unwrap().is_none());
-    }
-}
+#[cfg(test)]
+#[path = "../tests/marketplace/unit.rs"]
+mod tests;

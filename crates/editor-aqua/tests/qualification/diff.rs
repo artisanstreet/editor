@@ -1,33 +1,190 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::{Path, PathBuf},
+};
 
-pub struct Screen {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
+#[derive(Debug)]
+pub(crate) enum DiffError {
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Decode {
+        path: PathBuf,
+        source: image::ImageError,
+    },
+    Encode {
+        path: PathBuf,
+        source: image::ImageError,
+    },
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Malformed {
+        path: PathBuf,
+        source: MalformedScreen,
+    },
+    Gate {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    Manifest {
+        path: PathBuf,
+        line: usize,
+    },
+    FileName {
+        path: PathBuf,
+    },
+}
+
+impl fmt::Display for DiffError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read { path, source } => write!(f, "reading {}: {source}", path.display()),
+            Self::Decode { path, source } => {
+                write!(f, "decoding {}: {source}", path.display())
+            }
+            Self::Encode { path, source } => {
+                write!(f, "encoding {}: {source}", path.display())
+            }
+            Self::Write { path, source } => write!(f, "writing {}: {source}", path.display()),
+            Self::Malformed { path, source } => write!(f, "{}: {source}", path.display()),
+            Self::Gate { path, source } => {
+                write!(f, "tolerance gate {}: {source}", path.display())
+            }
+            Self::Manifest { path, line } => {
+                write!(
+                    f,
+                    "screen manifest {} line {line}: no screen name",
+                    path.display()
+                )
+            }
+            Self::FileName { path } => write!(f, "{}: no screen name", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for DiffError {}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MalformedScreen {
+    Empty {
+        width: u32,
+        height: u32,
+    },
+    Length {
+        width: u32,
+        height: u32,
+        bytes: usize,
+    },
+}
+
+impl fmt::Display for MalformedScreen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { width, height } => write!(f, "empty {width}x{height} screen"),
+            Self::Length {
+                width,
+                height,
+                bytes,
+            } => write!(
+                f,
+                "{bytes} bytes do not fill a {width}x{height} RGBA screen"
+            ),
+        }
+    }
+}
+
+pub(crate) struct Screen {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
 }
 
 impl Screen {
-    pub fn read(path: &Path) -> Result<Self, String> {
-        let image = image::open(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?
-            .into_rgba8();
+    pub(crate) fn new(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self, MalformedScreen> {
+        if width == 0 || height == 0 {
+            return Err(MalformedScreen::Empty { width, height });
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4));
+        if expected != Some(rgba.len()) {
+            return Err(MalformedScreen::Length {
+                width,
+                height,
+                bytes: rgba.len(),
+            });
+        }
         Ok(Self {
-            width: image.width(),
-            height: image.height(),
-            rgba: image.into_raw(),
+            width,
+            height,
+            rgba,
         })
+    }
+
+    pub(crate) fn read(path: &Path) -> Result<Self, DiffError> {
+        let image = image::open(path)
+            .map_err(|source| DiffError::Decode {
+                path: path.to_owned(),
+                source,
+            })?
+            .into_rgba8();
+        Self::new(image.width(), image.height(), image.into_raw()).map_err(|source| {
+            DiffError::Malformed {
+                path: path.to_owned(),
+                source,
+            }
+        })
+    }
+
+    fn pixels(&self) -> &[[u8; 4]] {
+        self.rgba.as_chunks::<4>().0
     }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Tolerance {
-    pub channel_threshold: u8,
-    pub max_ratio: f64,
+#[serde(try_from = "RawTolerance")]
+pub(crate) struct Tolerance {
+    channel_threshold: u8,
+    max_ratio: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub struct Bounds {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTolerance {
+    channel_threshold: u8,
+    max_ratio: f64,
+}
+
+impl TryFrom<RawTolerance> for Tolerance {
+    type Error = String;
+
+    fn try_from(raw: RawTolerance) -> Result<Self, Self::Error> {
+        Self::new(raw.channel_threshold, raw.max_ratio)
+    }
+}
+
+impl Tolerance {
+    pub(crate) fn new(channel_threshold: u8, max_ratio: f64) -> Result<Self, String> {
+        if (0.0..=1.0).contains(&max_ratio) {
+            Ok(Self {
+                channel_threshold,
+                max_ratio,
+            })
+        } else {
+            Err(format!(
+                "max_ratio {max_ratio} is not a share between 0 and 1"
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Bounds {
     pub left: u32,
     pub top: u32,
     pub right: u32,
@@ -35,7 +192,7 @@ pub struct Bounds {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub struct Difference {
+pub(crate) struct Difference {
     pub pixels: u64,
     pub differing: u64,
     pub ratio: f64,
@@ -44,13 +201,13 @@ pub struct Difference {
     pub bounds: Option<Bounds>,
 }
 
-#[derive(Debug, PartialEq)]
-pub struct SizeMismatch {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SizeMismatch {
     pub reference: (u32, u32),
     pub candidate: (u32, u32),
 }
 
-pub fn compare(
+pub(crate) fn compare(
     reference: &Screen,
     candidate: &Screen,
     channel_threshold: u8,
@@ -67,9 +224,9 @@ pub fn compare(
     let mut max_channel_delta = 0u8;
     let mut bounds: Option<Bounds> = None;
     for (index, (left, right)) in reference
-        .rgba
-        .as_chunks::<4>().0.iter()
-        .zip(candidate.rgba.as_chunks::<4>().0.iter())
+        .pixels()
+        .iter()
+        .zip(candidate.pixels())
         .enumerate()
     {
         let deltas = [0, 1, 2, 3].map(|channel| left[channel].abs_diff(right[channel]));
@@ -78,7 +235,8 @@ pub fn compare(
         max_channel_delta = max_channel_delta.max(worst);
         if worst > channel_threshold {
             differing += 1;
-            let (x, y) = ((index % width) as u32, (index / width) as u32);
+            let x = u32::try_from(index % width).expect("invariant: screenshot columns fit in u32");
+            let y = u32::try_from(index / width).expect("invariant: screenshot rows fit in u32");
             bounds = Some(bounds.map_or(
                 Bounds {
                     left: x,
@@ -99,31 +257,34 @@ pub fn compare(
     Ok(Difference {
         pixels,
         differing,
-        ratio: differing as f64 / pixels as f64,
-        mean_channel_error: total_error as f64 / (pixels * 4 * 255) as f64,
+        ratio: test_support::float::ratio(differing, pixels),
+        mean_channel_error: test_support::float::ratio(total_error, pixels * 4 * 255),
         max_channel_delta,
         bounds,
     })
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct Gate {
+#[serde(deny_unknown_fields)]
+pub(crate) struct Gate {
     pub default: Tolerance,
     #[serde(default)]
     pub screens: BTreeMap<String, Tolerance>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-pub enum Outcome {
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum Outcome {
     Pass,
     OverTolerance,
     SizeMismatch,
+    MissingReference,
     MissingCandidate,
-    Unreadable,
+    Unlisted,
+    Unreadable { cause: String },
 }
 
 #[derive(Debug, Serialize)]
-pub struct ScreenReport {
+pub(crate) struct ScreenReport {
     pub screen: String,
     pub outcome: Outcome,
     pub tolerance: Tolerance,
@@ -131,44 +292,58 @@ pub struct ScreenReport {
 }
 
 impl Gate {
-    pub fn tolerance(&self, screen: &str) -> Tolerance {
+    pub(crate) fn tolerance(&self, screen: &str) -> Tolerance {
         self.screens.get(screen).copied().unwrap_or(self.default)
     }
 
-    pub fn judge(
+    fn report(
+        &self,
+        screen: &str,
+        outcome: Outcome,
+        difference: Option<Difference>,
+    ) -> ScreenReport {
+        ScreenReport {
+            screen: screen.to_owned(),
+            outcome,
+            tolerance: self.tolerance(screen),
+            difference,
+        }
+    }
+
+    pub(crate) fn judge(
         &self,
         screen: &str,
         reference: &Screen,
-        candidate: Option<Result<Screen, String>>,
+        candidate: Option<Result<Screen, DiffError>>,
     ) -> ScreenReport {
         let tolerance = self.tolerance(screen);
-        let report = |outcome, difference| ScreenReport {
-            screen: screen.to_owned(),
-            outcome,
-            tolerance,
-            difference,
-        };
         match candidate {
-            None => report(Outcome::MissingCandidate, None),
-            Some(Err(_)) => report(Outcome::Unreadable, None),
+            None => self.report(screen, Outcome::MissingCandidate, None),
+            Some(Err(error)) => self.report(
+                screen,
+                Outcome::Unreadable {
+                    cause: error.to_string(),
+                },
+                None,
+            ),
             Some(Ok(candidate)) => {
                 match compare(reference, &candidate, tolerance.channel_threshold) {
-                    Err(_) => report(Outcome::SizeMismatch, None),
+                    Err(_) => self.report(screen, Outcome::SizeMismatch, None),
                     Ok(difference) if difference.ratio <= tolerance.max_ratio => {
-                        report(Outcome::Pass, Some(difference))
+                        self.report(screen, Outcome::Pass, Some(difference))
                     }
-                    Ok(difference) => report(Outcome::OverTolerance, Some(difference)),
+                    Ok(difference) => self.report(screen, Outcome::OverTolerance, Some(difference)),
                 }
             }
         }
     }
 }
 
-pub fn passed(reports: &[ScreenReport]) -> bool {
+pub(crate) fn passed(reports: &[ScreenReport]) -> bool {
     !reports.is_empty() && reports.iter().all(|report| report.outcome == Outcome::Pass)
 }
 
-pub fn table(reports: &[ScreenReport]) -> String {
+pub(crate) fn table(reports: &[ScreenReport]) -> String {
     let mut lines = vec![format!(
         "{:<28} {:<14} {:>10} {:>10} {:>9} {:>9}",
         "screen", "outcome", "ratio", "limit", "mean err", "max delta"
@@ -197,14 +372,18 @@ pub fn table(reports: &[ScreenReport]) -> String {
     lines.join("\n")
 }
 
-pub fn heat_map(reference: &Screen, candidate: &Screen, channel_threshold: u8) -> Option<Screen> {
+pub(crate) fn heat_map(
+    reference: &Screen,
+    candidate: &Screen,
+    channel_threshold: u8,
+) -> Option<Screen> {
     (reference.width == candidate.width && reference.height == candidate.height).then(|| Screen {
         width: reference.width,
         height: reference.height,
         rgba: reference
-            .rgba
-            .as_chunks::<4>().0.iter()
-            .zip(candidate.rgba.as_chunks::<4>().0.iter())
+            .pixels()
+            .iter()
+            .zip(candidate.pixels())
             .flat_map(|(left, right)| {
                 let worst = (0..4)
                     .map(|channel| left[channel].abs_diff(right[channel]))
@@ -221,41 +400,97 @@ pub fn heat_map(reference: &Screen, candidate: &Screen, channel_threshold: u8) -
     })
 }
 
-pub fn gate_from(path: &Path) -> Result<Gate, String> {
-    serde_json::from_slice(
-        &std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?,
-    )
-    .map_err(|error| format!("{}: {error}", path.display()))
+pub(crate) fn gate_from(path: &Path) -> Result<Gate, DiffError> {
+    let bytes = std::fs::read(path).map_err(|source| DiffError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|source| DiffError::Gate {
+        path: path.to_owned(),
+        source,
+    })
 }
 
-fn write_png(screen: &Screen, path: &Path) -> Result<(), String> {
+pub(crate) fn required_screens(manifest: &Path) -> Result<BTreeSet<String>, DiffError> {
+    let text = std::fs::read_to_string(manifest).map_err(|source| DiffError::Read {
+        path: manifest.to_owned(),
+        source,
+    })?;
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(
+            |(index, line)| match line.split('|').next().map(str::trim) {
+                Some(name) if !name.is_empty() => Ok(name.to_owned()),
+                _ => Err(DiffError::Manifest {
+                    path: manifest.to_owned(),
+                    line: index + 1,
+                }),
+            },
+        )
+        .collect()
+}
+
+fn write_png(screen: &Screen, path: &Path) -> Result<(), DiffError> {
     image::RgbaImage::from_raw(screen.width, screen.height, screen.rgba.clone())
-        .ok_or_else(|| "screen buffer does not match its dimensions".to_owned())?
+        .expect("invariant: a Screen's buffer fills its dimensions")
         .save(path)
-        .map_err(|error| format!("{}: {error}", path.display()))
+        .map_err(|source| DiffError::Encode {
+            path: path.to_owned(),
+            source,
+        })
 }
 
-pub fn judge_directory(
+fn png_stems(directory: &Path) -> Result<BTreeSet<String>, DiffError> {
+    let read = |source| DiffError::Read {
+        path: directory.to_owned(),
+        source,
+    };
+    let mut stems = BTreeSet::new();
+    for entry in std::fs::read_dir(directory).map_err(read)? {
+        let path = entry.map_err(read)?.path();
+        if path.extension().is_some_and(|extension| extension == "png") {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| DiffError::FileName { path: path.clone() })?;
+            stems.insert(stem.to_owned());
+        }
+    }
+    Ok(stems)
+}
+
+fn clear_heat_map(directory: &Path, name: &str) -> Result<(), DiffError> {
+    let path = directory.join(format!("{name}.png"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(DiffError::Write { path, source }),
+    }
+}
+
+pub(crate) fn judge_directory(
     gate: &Gate,
+    required: &BTreeSet<String>,
     reference: &Path,
     candidate: &Path,
     heat_maps: Option<&Path>,
-) -> Result<Vec<ScreenReport>, String> {
-    let mut names: Vec<_> = std::fs::read_dir(reference)
-        .map_err(|error| format!("{}: {error}", reference.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "png"))
-        .collect();
-    names.sort();
+) -> Result<Vec<ScreenReport>, DiffError> {
+    let baselines = png_stems(reference)?;
     let mut reports = Vec::new();
-    for path in names {
-        let name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| format!("{}: no file name", path.display()))?
-            .to_owned();
-        let reference_screen = Screen::read(&path)?;
+    for name in required.union(&baselines) {
+        if let Some(directory) = heat_maps {
+            clear_heat_map(directory, name)?;
+        }
+        if !required.contains(name) {
+            reports.push(gate.report(name, Outcome::Unlisted, None));
+            continue;
+        }
+        if !baselines.contains(name) {
+            reports.push(gate.report(name, Outcome::MissingReference, None));
+            continue;
+        }
+        let reference_screen = Screen::read(&reference.join(format!("{name}.png")))?;
         let candidate_path = candidate.join(format!("{name}.png"));
         let candidate_screen = candidate_path
             .exists()
@@ -264,15 +499,18 @@ pub fn judge_directory(
             (Some(Ok(screen)), Some(_)) => heat_map(
                 &reference_screen,
                 screen,
-                gate.tolerance(&name).channel_threshold,
+                gate.tolerance(name).channel_threshold,
             ),
             _ => None,
         };
-        let report = gate.judge(&name, &reference_screen, candidate_screen);
+        let report = gate.judge(name, &reference_screen, candidate_screen);
         if let (Some(heat), Some(directory), false) =
             (heat, heat_maps, report.outcome == Outcome::Pass)
         {
-            std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+            std::fs::create_dir_all(directory).map_err(|source| DiffError::Write {
+                path: directory.to_owned(),
+                source,
+            })?;
             write_png(&heat, &directory.join(format!("{name}.png")))?;
         }
         reports.push(report);

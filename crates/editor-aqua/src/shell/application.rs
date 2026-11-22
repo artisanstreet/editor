@@ -1,5 +1,6 @@
 use crate::shell::host::{Shell, ShellResources, ShellUpdates, set_window_scale};
 use crate::shell::native_notifications::NativeNotifications;
+use crate::shell::refresh::{Cause, Invalidation, Refresh};
 use aqua::prelude::{
     A11yActionRequest, A11yNode, AquaWindowId, CursorIcon, DragRegions, FrameReason, InputEvent,
     Instant, ManagedUiApp, NodeId, ObservedWindowState, Scene, WindowEvent,
@@ -7,8 +8,42 @@ use aqua::prelude::{
 use aqua::{AppCtx, Application, ExternalFrame, UiApp};
 use aqua_ui::element::Element;
 
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("the account workspace is gone")]
+    NoWorkspace,
+    #[error("Forge {host} is gone")]
+    HostGone { host: crate::core::HostId },
+    #[error("the conversation's Forge lifetime is gone")]
+    ConversationGone,
+    #[error("thread {thread} on Forge {host} has no action scope")]
+    NoActionScope {
+        host: crate::core::HostId,
+        thread: artisan_api::ThreadId,
+    },
+    #[error("configure the conversation rows")]
+    Rows(#[source] crate::conversation::view::factory::ConfigureRowsError),
+    #[error("the conversation composer is not mounted")]
+    NoComposer,
+    #[error("the composer has no Forge lifetime on {host}")]
+    ComposerHostGone { host: crate::core::HostId },
+    #[error("register the {surface} for selection")]
+    Selection {
+        surface: &'static str,
+        #[source]
+        source: aqua_text::document::SelectionSourceError,
+    },
+    #[error("show the inspector")]
+    Inspector(#[source] crate::inspector::BuildInspectorError),
+    #[error("show the resource preview")]
+    ResourcePreview(#[source] crate::shell::resource_preview::view::UnpreparedError),
+}
+
 pub trait SectionViews {
-    fn advance_glides(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
+    fn take_invalidation(&mut self) -> Invalidation {
+        Invalidation::default()
+    }
+    fn advance_glides(&mut self, _shell: &mut Shell, _ui: &mut UiApp, _now: Instant) -> bool {
         false
     }
     fn glide_active(&self) -> bool {
@@ -32,12 +67,19 @@ pub trait SectionViews {
     ) -> bool {
         false
     }
-    fn pre_input(&mut self, _ui: &mut UiApp, _input: &InputEvent) -> Option<bool> {
+    fn pre_input(
+        &mut self,
+        _shell: &Shell,
+        _ui: &mut UiApp,
+        _input: &InputEvent,
+        _now: Instant,
+    ) -> Option<bool> {
         None
     }
     fn open_composer_images(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
         false
     }
+    fn reader_moved_transcript(&mut self) {}
     fn resize_needs_rebuild(&self, _shell: &Shell, _window: &ObservedWindowState) -> bool {
         true
     }
@@ -70,7 +112,7 @@ pub trait SectionViews {
         shell: &mut Shell,
         ui: &mut UiApp,
         window: &ObservedWindowState,
-    ) -> anyhow::Result<Element>;
+    ) -> Result<Element, BuildError>;
     fn input(
         &mut self,
         shell: &mut Shell,
@@ -107,33 +149,40 @@ pub trait SectionViews {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationStart {
+    Disabled,
+    Pending,
+    Started,
+}
+
 pub struct ShellApplication<V> {
     pub shell: Shell,
     pub views: V,
-    ui: ManagedUiApp,
-    notifications: Option<NativeNotifications>,
-    notifications_started: bool,
-    notifications_enabled: bool,
-    initial: Option<ShellUpdates>,
-    mounted: bool,
-    font_popup: Option<crate::ui::popover::AnimatedPickerHost>,
-    streaming_popup: Option<crate::ui::popover::AnimatedPickerHost>,
-    retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
-    usage_deadline: Option<Instant>,
-    fit_launch: bool,
-    render_tap: Option<std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>>>,
+    pub ui: ManagedUiApp,
+    pub notifications: Option<NativeNotifications>,
+    pub notifications_start: NotificationStart,
+    pub initial: Option<ShellUpdates>,
+    pub mounted: bool,
+    pub font_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub streaming_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub text_size_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub contrast_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub usage_deadline: Option<Instant>,
+    pub fit_launch: bool,
+    #[cfg(feature = "capture")]
+    pub render_tap: Option<std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>>>,
+}
+
+impl<V> std::fmt::Debug for ShellApplication<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellApplication").finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "qualification")]
 impl ShellApplication<crate::shell::root::RootViews> {
-    pub fn arm_qualification_paint(&mut self, generation: u64) -> bool {
-        self.views.arm_qualification_paint(&self.shell, generation)
-    }
-
-    pub fn qualification_paint(&self) -> Option<crate::qualification::observation::Paint> {
-        self.views.qualification_paint(&self.shell)
-    }
-
     pub fn qualification_observation(
         &self,
     ) -> Option<crate::qualification::observation::Observation> {
@@ -143,13 +192,24 @@ impl ShellApplication<crate::shell::root::RootViews> {
 }
 
 impl<V: SectionViews> ShellApplication<V> {
+    fn apply_motion_policy(&mut self, ctx: &AppCtx<'_>) {
+        let policy = match self.shell.preferences.motion() {
+            editor_ui::theme::Motion::Reduced => aqua_ui::motion::ReducedMotion::Reduce,
+            editor_ui::theme::Motion::Full => aqua_ui::motion::ReducedMotion::Full,
+        };
+        self.ui
+            .ui_mut()
+            .host_mut()
+            .motion_mut()
+            .set_reduced_motion(policy, ctx.now().as_secs_f64());
+    }
+
     fn refresh_sections(
         &mut self,
         ctx: &mut AppCtx<'_>,
         id: AquaWindowId,
-        refresh: super::refresh::Refresh,
+        refresh: Refresh,
     ) -> bool {
-        use super::refresh::Refresh;
         if !self.mounted {
             return false;
         }
@@ -162,16 +222,14 @@ impl<V: SectionViews> ShellApplication<V> {
             refresh,
             Refresh::Transcript | Refresh::Sections | Refresh::FrameSections
         );
-        let sidebar_done = match sidebar_frame {
-            true => self
-                .views
-                .refresh_sidebar_frame(&self.shell, self.ui.ui_mut(), &window),
-            false => {
-                !sidebar
-                    || self
-                        .views
-                        .refresh_sidebar(&self.shell, self.ui.ui_mut(), &window)
-            }
+        let sidebar_done = if sidebar_frame {
+            self.views
+                .refresh_sidebar_frame(&self.shell, self.ui.ui_mut(), &window)
+        } else {
+            !sidebar
+                || self
+                    .views
+                    .refresh_sidebar(&self.shell, self.ui.ui_mut(), &window)
         };
         let transcript_done = !transcript
             || self
@@ -189,6 +247,8 @@ impl<V: SectionViews> ShellApplication<V> {
         for popup in [
             &mut self.font_popup,
             &mut self.streaming_popup,
+            &mut self.text_size_popup,
+            &mut self.contrast_popup,
             &mut self.retention_popup,
         ]
         .into_iter()
@@ -196,7 +256,7 @@ impl<V: SectionViews> ShellApplication<V> {
         {
             if popup.is_open(self.ui.ui()) {
                 if let Err(error) = popup.advance(self.ui.ui_mut(), ctx.now().as_secs_f64()) {
-                    tracing::warn!(%error, "could not animate settings popup");
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not animate settings popup");
                 }
                 if popup.is_animating(self.ui.ui()) {
                     ctx.request_frame(id, FrameReason::ANIMATION);
@@ -210,10 +270,10 @@ impl<V: SectionViews> ShellApplication<V> {
             .and_then(|workspace| workspace.composer.as_mut())
         {
             if let Err(error) = owner.advance_popups(self.ui.ui_mut(), ctx.now().as_secs_f64()) {
-                tracing::warn!(%error, "could not advance composer popup");
+                tracing::warn!(error = %diagnostics::chain(&error), "could not advance composer popup");
             }
             owner.advance_note_ticker(self.ui.ui_mut(), ctx.now().as_secs_f64());
-            owner.advance_primary(self.ui.ui_mut(), std::time::Instant::now());
+            owner.advance_primary(self.ui.ui_mut(), self.shell.core.clock().now());
             if owner.needs_animation(self.ui.ui()) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
@@ -222,7 +282,7 @@ impl<V: SectionViews> ShellApplication<V> {
             self.ui.ui().host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let frame = editor_ui::kit::hover::live::advance(
             self.ui.ui_mut(),
-            std::time::Instant::now(),
+            self.shell.core.clock().now(),
             reduced,
         );
         if frame.changed || frame.animating {
@@ -235,7 +295,7 @@ impl<V: SectionViews> ShellApplication<V> {
         Self::from_shell(shell, initial, resources, views)
     }
 
-    pub fn opening(
+    pub(crate) fn opening(
         files: crate::core::EditorFiles,
         resources: ShellResources,
         views: V,
@@ -249,7 +309,7 @@ impl<V: SectionViews> ShellApplication<V> {
     pub fn for_qualification(core: crate::core::Core, resources: ShellResources, views: V) -> Self {
         let (shell, initial) = Shell::for_qualification(core, resources.images.clone());
         let mut app = Self::from_shell(shell, initial, resources, views);
-        app.notifications_enabled = false;
+        app.notifications_start = NotificationStart::Disabled;
         app
     }
 
@@ -264,34 +324,38 @@ impl<V: SectionViews> ShellApplication<V> {
             views,
             ui: resources.into_managed(),
             notifications: None,
-            notifications_started: false,
-            notifications_enabled: true,
+            notifications_start: NotificationStart::Pending,
             initial: Some(initial),
             mounted: false,
             font_popup: None,
             streaming_popup: None,
+            text_size_popup: None,
+            contrast_popup: None,
             retention_popup: None,
             usage_deadline: None,
             fit_launch: false,
+            #[cfg(feature = "capture")]
             render_tap: None,
         }
     }
 
-    pub fn tap_render(
+    #[cfg(all(windows, feature = "capture"))]
+    pub(crate) fn tap_render(
         &mut self,
     ) -> std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>> {
-        self.render_tap.get_or_insert_with(Default::default).clone()
+        std::rc::Rc::clone(self.render_tap.get_or_insert_with(Default::default))
     }
 
-    pub fn fitting_launch_to_display(mut self) -> Self {
+    pub(crate) fn fitting_launch_to_display(mut self) -> Self {
         self.fit_launch = true;
         self
     }
 
-    fn start_notifications(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) -> bool {
-        if !self.notifications_enabled || std::mem::replace(&mut self.notifications_started, true) {
+    fn start_notifications(&mut self, ctx: &AppCtx<'_>, id: AquaWindowId) -> bool {
+        if self.notifications_start != NotificationStart::Pending {
             return false;
         }
+        self.notifications_start = NotificationStart::Started;
         match NativeNotifications::new() {
             Ok(notifications) => {
                 notifications.bind(ctx, id);
@@ -306,17 +370,28 @@ impl<V: SectionViews> ShellApplication<V> {
         }
     }
 
-    fn update(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, updates: ShellUpdates) {
+    fn update(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, updates: ShellUpdates) -> bool {
+        let mut failed = false;
         for effect in updates.settings_platform_effects {
             match effect {
                 crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
-                        tracing::warn!(%error, "could not open URL");
+                        self.shell.failures.link(url, &error);
+                        failed = true;
+                    }
+                }
+                crate::shell::workspace::SettingsPlatformEffect::OpenNotices => {
+                    if let Err(error) = crate::setup::open_notices() {
+                        self.shell.failures.notices(&error);
+                        failed = true;
                     }
                 }
                 crate::shell::workspace::SettingsPlatformEffect::CopyText(text) => {
                     if let Err(error) = ctx.clipboard().set_text(text) {
-                        tracing::warn!(%error, "could not copy text");
+                        self.shell
+                            .failures
+                            .copy(crate::shell::action_failure::CopySubject::Text, &error);
+                        failed = true;
                     }
                 }
             }
@@ -327,20 +402,12 @@ impl<V: SectionViews> ShellApplication<V> {
             begin_theme_transition(ctx, id, dark, reduced);
         }
         if updates.preferences_changed {
-            if let Some(reduced) = self.shell.preferences.reduced_motion {
-                let policy = if reduced {
-                    aqua_ui::motion::ReducedMotion::Reduce
-                } else {
-                    aqua_ui::motion::ReducedMotion::Full
-                };
-                self.ui
-                    .ui_mut()
-                    .host_mut()
-                    .motion_mut()
-                    .set_reduced_motion(policy, ctx.now().as_secs_f64());
-            }
+            self.apply_motion_policy(ctx);
             if let Err(error) = self.shell.apply_preferences(ctx, id) {
-                tracing::error!(%error, "could not apply window preferences");
+                tracing::error!(
+                    error = %::diagnostics::chain(&error),
+                    "could not apply window preferences"
+                );
             }
         }
         if !updates.notifications.is_empty() {
@@ -349,23 +416,33 @@ impl<V: SectionViews> ShellApplication<V> {
         if let Some(center) = &mut self.notifications {
             for effects in updates.notifications {
                 if let Err(error) = center.apply(effects, &self.shell, ctx, id) {
-                    tracing::warn!(%error, "could not apply notification effects");
+                    tracing::warn!(
+                        error = %::diagnostics::chain(&error),
+                        "could not apply notification effects"
+                    );
                 }
             }
         }
+        failed
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one rebuild pass: popups, views, mount and the frame request in order"
+    )]
     fn rebuild(
         &mut self,
         ctx: &mut AppCtx<'_>,
         id: AquaWindowId,
         reason: FrameReason,
-        causes: &[&'static str],
+        invalidation: &Invalidation,
     ) {
         let _tm = Tm::new("rebuild");
         let _rebuild_span = crate::core::diagnostics::rebuild_stats::span("rb_total");
-        self.shell.live.flushed(std::time::Instant::now());
-        crate::core::diagnostics::rebuild_stats::record_rebuild(causes);
+        self.shell.live.flushed(self.shell.core.clock().now());
+        let mut reasons = invalidation.labels();
+        reasons.extend(crate::core::diagnostics::rebuild_stats::take_notes());
+        crate::core::diagnostics::rebuild_stats::record_rebuild(&reasons);
         let Some(window) = ctx.window_state(id).cloned() else {
             return;
         };
@@ -406,10 +483,14 @@ impl<V: SectionViews> ShellApplication<V> {
         drop(build_span);
         aqua_core::checkpoint::reach();
         let element = match built {
-            Ok(element) => element,
+            Ok(element) => window_root(element),
             Err(error) => {
-                tracing::error!(%error, "could not build Editor view");
-                self.show_failure(&error.to_string(), ctx, id, reason);
+                let problem = crate::core::Problem::caused_by(
+                    "Something went wrong drawing this view.",
+                    &error,
+                );
+                tracing::error!(error = ?problem.detail(), "could not build Editor view");
+                self.show_failure(&problem, ctx, id, reason);
                 self.shell.bind(ctx, id);
                 return;
             }
@@ -438,12 +519,12 @@ impl<V: SectionViews> ShellApplication<V> {
                     workspace.sync_marketplace_ui(self.ui.ui_mut());
                     workspace.sync_editor_ui(self.ui.ui_mut(), settings_visible);
                     workspace
-                        .sync_terminal_dialog(self.ui.ui_mut(), self.shell.preferences.theme());
+                        .sync_terminal_dialog(self.ui.ui_mut(), &self.shell.preferences.theme());
                     workspace.inspector.reveal_tail(self.ui.ui_mut());
                     if workspace.sync_composer_popups(
                         &self.shell.core,
                         self.ui.ui_mut(),
-                        self.shell.preferences.theme(),
+                        &self.shell.preferences.theme(),
                         &assets,
                         ctx.now().as_secs_f64(),
                     ) {
@@ -457,7 +538,7 @@ impl<V: SectionViews> ShellApplication<V> {
                     crate::core::Screen::Usage
                 ) {
                     let deadline = *self.usage_deadline.get_or_insert_with(|| {
-                        ctx.now() + crate::sidebar::usage_controller::CLOCK_INTERVAL
+                        ctx.now() + crate::sidebar::usage::controller::CLOCK_INTERVAL
                     });
                     ctx.request_animation_deadline(id, deadline);
                 } else {
@@ -470,17 +551,17 @@ impl<V: SectionViews> ShellApplication<V> {
                     .and_then(|workspace| workspace.sidebar.next_tick())
                 {
                     let delay = std::time::Duration::from_millis(
-                        u64::try_from(at.saturating_sub(artisan_api::now())).unwrap_or(0),
+                        u64::try_from(at.saturating_sub(self.shell.core.clock().timestamp()))
+                            .unwrap_or(0),
                     );
                     ctx.request_animation_deadline(id, ctx.now() + delay);
                 }
-                if let Some(deadline) = self
+                if let Some(delay) = self
                     .shell
                     .entry
                     .workspace()
-                    .and_then(|workspace| workspace.conversation.landing_deadline())
+                    .and_then(|workspace| workspace.conversation.landing_wait())
                 {
-                    let delay = deadline.saturating_duration_since(std::time::Instant::now());
                     ctx.request_animation_deadline(id, ctx.now() + delay);
                 }
                 if !was_mounted || self.ui.ui().tree().invalidation_epoch() != epoch {
@@ -489,7 +570,15 @@ impl<V: SectionViews> ShellApplication<V> {
             }
             Err(error) => {
                 tracing::error!(%error, "could not mount Editor view");
-                self.show_failure(&error.to_string(), ctx, id, reason);
+                self.show_failure(
+                    &crate::core::Problem::caused_by(
+                        "Something went wrong drawing this view.",
+                        &error,
+                    ),
+                    ctx,
+                    id,
+                    reason,
+                );
             }
         }
         self.shell.bind(ctx, id);
@@ -513,7 +602,7 @@ impl<V: SectionViews> ShellApplication<V> {
             return false;
         }
         crate::core::diagnostics::rebuild_stats::record_event("transcript_subtree");
-        self.shell.live.flushed(std::time::Instant::now());
+        self.shell.live.flushed(self.shell.core.clock().now());
         self.views
             .mounted(&mut self.shell, self.ui.ui_mut(), ctx, id);
         if self.ui.ui().tree().invalidation_epoch() != epoch {
@@ -523,14 +612,37 @@ impl<V: SectionViews> ShellApplication<V> {
         true
     }
 
+    fn refresh_drained(
+        &mut self,
+        ctx: &mut AppCtx<'_>,
+        id: AquaWindowId,
+        refresh: Refresh,
+    ) -> bool {
+        match refresh {
+            Refresh::None | Refresh::Workspace => false,
+            Refresh::Transcript => self.refresh_transcript(ctx, id, FrameReason::INPUT),
+            Refresh::Sidebar | Refresh::SidebarFrame => self.refresh_sections(ctx, id, refresh),
+            Refresh::Sections | Refresh::FrameSections => {
+                let refreshed = self.refresh_sections(ctx, id, refresh);
+                if refreshed {
+                    self.shell.live.flushed(self.shell.core.clock().now());
+                    self.views
+                        .mounted(&mut self.shell, self.ui.ui_mut(), ctx, id);
+                    self.shell.bind(ctx, id);
+                }
+                refreshed
+            }
+        }
+    }
+
     fn show_failure(
         &mut self,
-        message: &str,
+        problem: &crate::core::Problem,
         ctx: &mut AppCtx<'_>,
         id: AquaWindowId,
         reason: FrameReason,
     ) {
-        let card = failure_card(message, self.shell.preferences.theme());
+        let card = failure_card(problem, &self.shell.preferences.theme());
         let shown = if self.mounted {
             self.ui.ui_mut().refresh(vec![card])
         } else {
@@ -547,19 +659,26 @@ impl<V: SectionViews> ShellApplication<V> {
         let Some(workspace) = self.shell.entry.workspace() else {
             close_popup(self.ui.ui_mut(), &mut self.font_popup);
             close_popup(self.ui.ui_mut(), &mut self.streaming_popup);
+            close_popup(self.ui.ui_mut(), &mut self.text_size_popup);
+            close_popup(self.ui.ui_mut(), &mut self.contrast_popup);
             close_popup(self.ui.ui_mut(), &mut self.retention_popup);
             return;
         };
         let settings_open = matches!(self.shell.core.screen(), crate::core::Screen::Settings(_));
-        let font_open = settings_open && workspace.settings.font_select.borrow().open;
-        let streaming_open = settings_open && workspace.settings.streaming_select.borrow().open;
-        let retention_open = settings_open && workspace.settings.retention_select.borrow().open;
+        let font_open = settings_open && workspace.settings.font_select.borrow().is_open();
+        let streaming_open =
+            settings_open && workspace.settings.streaming_select.borrow().is_open();
+        let text_size_open =
+            settings_open && workspace.settings.text_size_select.borrow().is_open();
+        let contrast_open = settings_open && workspace.settings.contrast_select.borrow().is_open();
+        let retention_open =
+            settings_open && workspace.settings.retention_select.borrow().is_open();
         let theme = self.shell.preferences.theme();
         let font = font_open.then(|| {
             crate::settings::view::font_menu(
                 &workspace.settings,
                 &self.shell.core,
-                theme,
+                &theme,
                 workspace.settings_emit(),
             )
             .into_parts()
@@ -568,7 +687,25 @@ impl<V: SectionViews> ShellApplication<V> {
             crate::settings::view::streaming_menu(
                 &workspace.settings,
                 &self.shell.core,
-                theme,
+                &theme,
+                workspace.settings_emit(),
+            )
+            .into_parts()
+        });
+        let text_size = text_size_open.then(|| {
+            crate::settings::view::text_size_menu(
+                &workspace.settings,
+                &self.shell.core,
+                &theme,
+                workspace.settings_emit(),
+            )
+            .into_parts()
+        });
+        let contrast = contrast_open.then(|| {
+            crate::settings::view::high_contrast_menu(
+                &workspace.settings,
+                &self.shell.core,
+                &theme,
                 workspace.settings_emit(),
             )
             .into_parts()
@@ -578,7 +715,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 crate::settings::archive_view::retention_menu(
                     &workspace.settings,
                     host,
-                    theme,
+                    &theme,
                     workspace.settings_emit(),
                 )
                 .into_parts()
@@ -586,31 +723,31 @@ impl<V: SectionViews> ShellApplication<V> {
         } else {
             None
         };
-        sync_popup(
-            self.ui.ui_mut(),
-            &mut self.font_popup,
-            "settings-font-set",
-            font,
-            now,
-        );
-        sync_popup(
-            self.ui.ui_mut(),
-            &mut self.streaming_popup,
-            "settings-streaming-mode",
-            streaming,
-            now,
-        );
-        sync_popup(
-            self.ui.ui_mut(),
-            &mut self.retention_popup,
-            "settings-thread-retention",
-            retention,
-            now,
-        );
+        let ui = self.ui.ui_mut();
+        for (popup, key, content) in [
+            (&mut self.font_popup, "settings-font-set", font),
+            (
+                &mut self.streaming_popup,
+                "settings-streaming-mode",
+                streaming,
+            ),
+            (&mut self.text_size_popup, "settings-text-size", text_size),
+            (&mut self.contrast_popup, "settings-high-contrast", contrast),
+            (
+                &mut self.retention_popup,
+                "settings-thread-retention",
+                retention,
+            ),
+        ] {
+            sync_popup(ui, popup, key, content, now);
+        }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one drain pass over shell, views and native effects with shared timing"
+    )]
     fn drain(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sections_changed: bool) {
-        let tm_pre = Tm::new("drain.pre");
         for control in self.shell.titlebar.take_actions() {
             let request = match control {
                 aqua::prelude::CaptionControl::Minimize => {
@@ -629,41 +766,38 @@ impl<V: SectionViews> ShellApplication<V> {
             }
         }
         let active = ctx.window_state(id).is_some_and(|window| window.focused);
-        if let Some(notifications) = &mut self.notifications {
-            if let Err(error) = notifications.drain(&mut self.shell, ctx, id) {
-                tracing::warn!(%error, "could not activate notification");
-            }
+        if let Some(notifications) = &mut self.notifications
+            && let Err(error) = notifications.drain(&mut self.shell, ctx, id)
+        {
+            tracing::warn!(
+                error = %::diagnostics::chain(&error),
+                "could not activate notification"
+            );
         }
-        drop(tm_pre);
-        let mut causes: Vec<&'static str> = Vec::new();
-        let tm_workspace = Tm::new("drain.workspace");
-        let mut domain_changed = mark(&mut causes, "sections", sections_changed);
-        if sections_changed {
-            causes.extend(crate::core::diagnostics::rebuild_stats::take_notes());
-        }
-        domain_changed |= mark(&mut causes, "titlebar", self.shell.titlebar.take_changed());
-        domain_changed |= mark(
-            &mut causes,
-            "view_events",
+        let mut causes = Invalidation::default();
+        let noted = self.views.take_invalidation();
+        let mut domain_changed = causes.note(Cause::Sections, sections_changed) | !noted.is_empty();
+        causes.extend(noted);
+        domain_changed |= causes.note(Cause::Titlebar, self.shell.titlebar.take_changed());
+        domain_changed |= causes.note(
+            Cause::ViewEvents,
             self.views
                 .take_events(&mut self.shell, self.ui.ui(), ctx, id),
         );
         if let Some(workspace) = self.shell.entry.workspace_mut() {
-            domain_changed |= mark(
-                &mut causes,
-                "code_actions",
-                workspace.drain_code_actions(&self.shell.core, ctx, id),
+            domain_changed |= causes.note(
+                Cause::CodeActions,
+                workspace.drain_code_actions(&self.shell.core, &mut self.shell.failures, ctx, id),
             );
-            domain_changed |= mark(
-                &mut causes,
-                "question_source",
+            domain_changed |= causes.note(
+                Cause::QuestionSource,
                 workspace.drain_question_source(&self.shell.core, &self.shell.dialogs, ctx, id),
             );
-            domain_changed |= mark(
-                &mut causes,
-                "inspector",
+            domain_changed |= causes.note(
+                Cause::Inspector,
                 workspace.drain_inspector(
                     &mut self.shell.core,
+                    &mut self.shell.failures,
                     &self.shell.dialogs,
                     self.ui.ui_mut(),
                     ctx,
@@ -674,29 +808,23 @@ impl<V: SectionViews> ShellApplication<V> {
                 ctx.request_frame(id, FrameReason::INPUT);
             }
         }
-        drop(tm_workspace);
         let drain_span = crate::core::diagnostics::rebuild_stats::span("shell_drain");
-        let tm_shell = Tm::new("drain.shell");
-        let updates = self.shell.drain(active, self.ui.ui_mut());
-        drop(tm_shell);
+        let mut updates = self.shell.drain(active, self.ui.ui_mut());
         drop(drain_span);
-        domain_changed |= mark(&mut causes, "shell_updates", updates.changed);
-        domain_changed |= mark(
-            &mut causes,
-            "composer_image",
+        let drained = std::mem::take(&mut updates.causes);
+        domain_changed |= !drained.is_empty();
+        causes.extend(drained);
+        domain_changed |= causes.note(
+            Cause::ComposerImage,
             self.views
                 .open_composer_images(&mut self.shell, self.ui.ui_mut()),
         );
-        let live_only = updates.live_only;
-        if let Some(wait) = self.shell.live.remaining(std::time::Instant::now()) {
+        if let Some(wait) = self.shell.live.remaining(self.shell.core.clock().now()) {
             ctx.request_animation_deadline(id, ctx.now() + wait);
         }
         aqua_core::checkpoint::reach();
-        let tm_update = Tm::new("drain.update");
-        self.update(ctx, id, updates);
-        drop(tm_update);
+        domain_changed |= causes.note(Cause::WorkspaceActions, self.update(ctx, id, updates));
         aqua_core::checkpoint::reach();
-        let tm_sync = Tm::new("drain.sync");
         if let Some(workspace) = self.shell.entry.workspace_mut() {
             workspace.sync_marketplace_ui(self.ui.ui_mut());
             let settings_visible =
@@ -704,31 +832,26 @@ impl<V: SectionViews> ShellApplication<V> {
             workspace.sync_editor_ui(self.ui.ui_mut(), settings_visible);
             if workspace.sync_composer_tooltip(
                 self.ui.ui_mut(),
-                self.shell.preferences.theme(),
-                std::time::Instant::now(),
+                &self.shell.preferences.theme(),
+                self.shell.core.clock().now(),
             ) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
             if let Some(deadline) = workspace
                 .composer
                 .as_ref()
-                .and_then(|owner| owner.tooltip_deadline())
+                .and_then(editor_composer::view::ComposerOwner::tooltip_deadline)
             {
-                let delay = deadline.saturating_duration_since(std::time::Instant::now());
+                let delay = deadline.saturating_duration_since(self.shell.core.clock().now());
                 ctx.request_animation_deadline(id, ctx.now() + delay);
             }
         }
-        drop(tm_sync);
         self.shell.bind(ctx, id);
         if !self.mounted {
-            causes.push("unmounted");
+            causes.note(Cause::Unmounted, true);
         }
-        if domain_changed || !self.mounted {
-            let transcript_only =
-                live_only && self.mounted && causes.as_slice() == ["shell_updates"];
-            if !(transcript_only && self.refresh_transcript(ctx, id, FrameReason::INPUT)) {
-                self.rebuild(ctx, id, FrameReason::INPUT, &causes);
-            }
+        if (domain_changed || !self.mounted) && !self.refresh_drained(ctx, id, causes.refresh()) {
+            self.rebuild(ctx, id, FrameReason::INPUT, &causes);
         }
     }
 }
@@ -762,12 +885,14 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if let Some(window) = ctx.window_state(id) {
             let ui = self.ui.ui_mut();
             ui.set_viewport(
-                window.inner_size.width as f32,
-                window.inner_size.height as f32,
-                window.scale_factor as f32,
+                crate::measure::narrow(window.inner_size.width),
+                crate::measure::narrow(window.inner_size.height),
+                crate::measure::narrow(window.scale_factor),
             );
-            set_window_scale(ui, window.scale_factor as f32);
+            set_window_scale(ui, crate::measure::narrow(window.scale_factor));
         }
+        self.shell.preferences.system =
+            editor_ui::preferences::SystemAccess::from_os(ctx.system_preferences());
         self.shell.bind(ctx, id);
         if let Some(updates) = self.initial.take() {
             self.update(ctx, id, updates);
@@ -792,21 +917,18 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn on_animation_frame(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, _now: Instant) {
         let _tm = Tm::new("animation");
-        let now = std::time::Instant::now();
         let landed = self
             .shell
             .entry
             .workspace_mut()
-            .is_some_and(|workspace| workspace.conversation.expire_landing(now));
+            .is_some_and(|workspace| workspace.conversation.expire_landing());
         let animated = self
             .views
             .animate(&mut self.shell, self.ui.ui_mut(), ctx, id);
-        let mut causes = crate::core::diagnostics::rebuild_stats::take_notes();
-        if landed {
-            causes.push("landing_expiry");
-        }
+        let mut causes = self.views.take_invalidation();
+        causes.note(Cause::LandingExpiry, landed);
         if animated | landed {
-            let refresh = super::refresh::Refresh::from_causes(&causes);
+            let refresh = causes.refresh();
             if !self.refresh_sections(ctx, id, refresh) {
                 self.rebuild(ctx, id, FrameReason::ANIMATION, &causes);
             }
@@ -815,20 +937,26 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if self
             .shell
             .live
-            .remaining(now)
+            .remaining(self.shell.core.clock().now())
             .is_some_and(|wait| wait.is_zero())
         {
             self.drain(ctx, id, false);
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one frame-completion pass: notifications, qualification, refresh and pacing"
+    )]
     fn on_frame_completed(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sequence: u64) {
         #[cfg(feature = "qualification")]
-        if !self.notifications_enabled {
-            if let Err(error) =
+        if self.notifications_start == NotificationStart::Disabled
+            && let Err(error) =
                 crate::qualification::observation::record_native_state(&self.shell, sequence)
-            {
-                tracing::warn!(%error, "could not record qualification state");
-            }
+        {
+            tracing::warn!(
+                error = %::diagnostics::chain(&error),
+                "could not record qualification state"
+            );
         }
         let _tm = Tm::new("fc");
         let _span = crate::core::diagnostics::rebuild_stats::span("on_fc");
@@ -846,8 +974,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         }
         let viewport = ctx.window_state(id).map(|window| {
             aqua_core::Size::new(
-                window.inner_size.width as f32,
-                window.inner_size.height as f32,
+                crate::measure::narrow(window.inner_size.width),
+                crate::measure::narrow(window.inner_size.height),
             )
         });
         let theme = self.shell.preferences.theme();
@@ -863,33 +991,29 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 (composer.picker.menu == Some(crate::composer::picker::Menu::Model))
                     .then(|| (composer.target.host().clone(), composer.host_instance()))
             };
-            if let (Some(viewport), Some((host_id, Some(instance)))) = (viewport, identity) {
-                if let Some(host) = self.shell.core.host_if_instance(&host_id, instance) {
-                    match owner.model_menu(
-                        theme,
-                        host,
-                        viewport,
-                        crate::shell::wheel::kept_offset(
-                            self.ui.ui(),
-                            crate::ui::scroll::MODEL_MENU,
-                        )
-                        .y,
-                        &images,
-                        std::time::Instant::now(),
-                    ) {
-                        Ok(content) => {
-                            if let Err(error) = owner.refresh_popup_content(
-                                crate::composer::view::PopupKind::Model,
-                                self.ui.ui_mut(),
-                                content,
-                                ctx.now().as_secs_f64(),
-                            ) {
-                                tracing::warn!(%error, "could not refresh composer model popup");
-                            }
+            if let (Some(viewport), Some((host_id, Some(instance)))) = (viewport, identity)
+                && let Some(host) = self.shell.core.host_if_instance(&host_id, instance)
+            {
+                match owner.model_menu(
+                    &theme,
+                    host,
+                    viewport,
+                    crate::shell::wheel::kept_offset(self.ui.ui(), crate::ui::scroll::MODEL_MENU).y,
+                    &images,
+                    self.shell.core.clock().now(),
+                ) {
+                    Ok(content) => {
+                        if let Err(error) = owner.refresh_popup_content(
+                            crate::composer::view::PopupKind::Model,
+                            self.ui.ui_mut(),
+                            content,
+                            ctx.now().as_secs_f64(),
+                        ) {
+                            tracing::warn!(error = %diagnostics::chain(&error), "could not refresh composer model popup");
                         }
-                        Err(error) => {
-                            tracing::warn!(%error, "could not build composer model popup")
-                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not build composer model popup");
                     }
                 }
             }
@@ -907,32 +1031,29 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         let usage_elapsed = self
             .usage_deadline
             .is_some_and(|deadline| ctx.now() >= deadline);
-        let mut causes: Vec<&'static str> = Vec::new();
-        let notes = crate::core::diagnostics::rebuild_stats::take_notes();
-        let mut refresh = mark(&mut causes, "views_frame", views_changed);
-        if views_changed {
-            causes.extend(notes);
-        }
-        refresh |= mark(&mut causes, "popup_animating", popup_animating);
-        refresh |= mark(&mut causes, "usage_clock", usage_elapsed);
+        let mut causes = Invalidation::default();
+        let noted = self.views.take_invalidation();
+        let mut refresh = causes.note(Cause::ViewsFrame, views_changed) | !noted.is_empty();
+        causes.extend(noted);
+        refresh |= causes.note(Cause::PopupAnimating, popup_animating);
+        refresh |= causes.note(Cause::UsageClock, usage_elapsed);
         if usage_elapsed {
             self.usage_deadline =
-                Some(ctx.now() + crate::sidebar::usage_controller::CLOCK_INTERVAL);
+                Some(ctx.now() + crate::sidebar::usage::controller::CLOCK_INTERVAL);
         }
         if let Some(workspace) = self.shell.entry.workspace_mut() {
-            if workspace.sync_composer_tooltip(self.ui.ui_mut(), theme, std::time::Instant::now()) {
+            if workspace.sync_composer_tooltip(
+                self.ui.ui_mut(),
+                &theme,
+                self.shell.core.clock().now(),
+            ) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
-            refresh |= mark(
-                &mut causes,
-                "code_actions",
-                workspace.drain_code_actions(&self.shell.core, ctx, id),
+            refresh |= causes.note(
+                Cause::CodeActions,
+                workspace.drain_code_actions(&self.shell.core, &mut self.shell.failures, ctx, id),
             );
-            refresh |= mark(
-                &mut causes,
-                "code_frame",
-                workspace.take_code_frame(ctx.now()),
-            );
+            refresh |= causes.note(Cause::CodeFrame, workspace.take_code_frame(ctx.now()));
             if workspace
                 .markdown
                 .borrow()
@@ -940,42 +1061,39 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
-            refresh |= mark(
-                &mut causes,
-                "inspector_tick",
-                workspace.inspector.tick(ctx.now()),
-            );
+            refresh |= causes.note(Cause::InspectorTick, workspace.inspector.tick(ctx.now()));
             let reduced = self.ui.ui().host().motion().reduced_motion()
                 == aqua_ui::motion::ReducedMotion::Reduce;
-            let now = std::time::Instant::now();
+            let now = self.shell.core.clock().now();
             let sidebar_moving = workspace.sidebar.advance_motion(now, reduced)
                 | workspace.settings_sidebar.advance_motion(now, reduced);
             if sidebar_moving {
                 ctx.request_frame(id, FrameReason::ANIMATION);
-                refresh = mark(&mut causes, "sidebar_motion", true);
+                refresh = causes.note(Cause::SidebarMotion, true);
             }
             if workspace
                 .sidebar
                 .next_tick()
-                .is_some_and(|at| at <= artisan_api::now())
+                .is_some_and(|at| at <= self.shell.core.clock().timestamp())
             {
-                workspace.sidebar.sync(&self.shell.core, artisan_api::now());
-                refresh = mark(&mut causes, "sidebar_tick", true);
-            }
-            refresh |= mark(
-                &mut causes,
-                "landing_expiry",
                 workspace
-                    .conversation
-                    .expire_landing(std::time::Instant::now()),
+                    .sidebar
+                    .sync(&self.shell.core, self.shell.core.clock().timestamp());
+                refresh = causes.note(Cause::SidebarTick, true);
+            }
+            refresh |= causes.note(
+                Cause::LandingExpiry,
+                workspace.conversation.expire_landing(),
             );
-            refresh |= mark(
-                &mut causes,
-                "marketplace_animation",
-                workspace.marketplace.needs_animation(),
-            );
+            if workspace.marketplace.needs_animation() {
+                crate::shell::wheel::repaint(
+                    self.ui.ui_mut(),
+                    crate::marketplace::view::LOADING_KEY,
+                );
+                ctx.request_frame(id, FrameReason::ANIMATION);
+            }
         }
-        if refresh && !self.refresh_sections(ctx, id, super::refresh::Refresh::from_causes(&causes)) {
+        if refresh && !self.refresh_sections(ctx, id, causes.refresh()) {
             self.rebuild(ctx, id, FrameReason::ANIMATION, &causes);
         }
     }
@@ -992,6 +1110,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     fn take_output(&mut self, id: AquaWindowId) -> aqua::RuntimeOutput {
         let _tm = Tm::new("take");
         let output = self.ui.take_output(id);
+        #[cfg(feature = "capture")]
         if let Some(tap) = &self.render_tap {
             tap.borrow_mut().extend(output.render.iter().cloned());
         }
@@ -1016,7 +1135,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             self.shell.dialogs.clear();
         }
         if let WindowEvent::ScaleChanged(_, scale) = event {
-            set_window_scale(self.ui.ui_mut(), *scale as f32);
+            set_window_scale(self.ui.ui_mut(), crate::measure::narrow(*scale));
         }
         match event {
             WindowEvent::Resized(..) => {
@@ -1027,32 +1146,48 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 self.drain(ctx, id, rebuild);
             }
             WindowEvent::ScaleChanged(..) => self.drain(ctx, id, true),
+            WindowEvent::ThemeChanged(..) => {
+                let system =
+                    editor_ui::preferences::SystemAccess::from_os(ctx.system_preferences());
+                if self.shell.preferences.system != system {
+                    self.shell.preferences.system = system;
+                    self.apply_motion_policy(ctx);
+                    self.drain(ctx, id, true);
+                }
+            }
             WindowEvent::Focused(_, focused) => {
                 self.drain(ctx, id, true);
                 if *focused {
                     ctx.request_frame(id, FrameReason::ANIMATION);
                 }
             }
-            _ => {}
+            WindowEvent::CloseRequested(_)
+            | WindowEvent::Occluded(..)
+            | WindowEvent::RedrawRequested(_)
+            | WindowEvent::Destroyed(_) => {}
         }
     }
-    fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, input: &InputEvent) {
+    fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, event: &InputEvent) {
         let _tm = Tm::new("input");
         for popup in [
             &mut self.font_popup,
             &mut self.streaming_popup,
+            &mut self.text_size_popup,
+            &mut self.contrast_popup,
             &mut self.retention_popup,
         ]
         .into_iter()
         .flatten()
         {
-            match popup.request_dismissal(self.ui.ui_mut(), input) {
+            match popup.request_dismissal(self.ui.ui_mut(), event) {
                 Ok(true) => {
                     ctx.request_frame(id, FrameReason::ANIMATION);
                     return;
                 }
                 Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "could not dismiss settings popup"),
+                Err(error) => {
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not dismiss settings popup");
+                }
             }
         }
         let dismissed = {
@@ -1062,10 +1197,10 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 .workspace_mut()
                 .and_then(|workspace| workspace.composer.as_mut())
                 .is_some_and(|owner| {
-                    match owner.dismiss_popups_for_event(self.ui.ui_mut(), input) {
+                    match owner.dismiss_popups_for_event(self.ui.ui_mut(), event) {
                         Ok(consumed) => consumed,
                         Err(error) => {
-                            tracing::warn!(%error, "could not dismiss composer popup");
+                            tracing::warn!(error = %diagnostics::chain(&error), "could not dismiss composer popup");
                             false
                         }
                     }
@@ -1081,18 +1216,16 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             let _tm = Tm::new("input.route");
             let pre = {
                 let _tm = Tm::new("input.pre");
-                self.views.pre_input(self.ui.ui_mut(), input)
+                self.views
+                    .pre_input(&self.shell, self.ui.ui_mut(), event, ctx.now())
             };
-            match pre {
-                Some(consumed) => {
-                    glided = matches!(input, InputEvent::Scroll { .. });
-                    consumed
-                }
-                None => {
-                    let _tm = Tm::new("input.ui");
-                    self.ui.on_input(ctx, id, input);
-                    self.ui.ui().last_input_consumed()
-                }
+            if let Some(consumed) = pre {
+                glided = matches!(event, InputEvent::Scroll { .. });
+                consumed
+            } else {
+                let _tm = Tm::new("input.ui");
+                self.ui.on_input(ctx, id, event);
+                self.ui.ui().last_input_consumed()
             }
         };
         let terminal_changed = {
@@ -1105,7 +1238,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         let changed = terminal_changed | {
             let _tm = Tm::new("input.views");
             self.views
-                .input(&mut self.shell, self.ui.ui_mut(), ctx, id, input, consumed)
+                .input(&mut self.shell, self.ui.ui_mut(), ctx, id, event, consumed)
         };
         if glided && !changed {
             return;
@@ -1130,7 +1263,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         id: AquaWindowId,
         request: &A11yActionRequest,
     ) {
+        let moves = moves_the_transcript(self.ui.ui(), request);
         self.ui.on_a11y_action(ctx, id, request);
+        if moves {
+            self.views.reader_moved_transcript();
+        }
         self.drain(ctx, id, false);
     }
     fn prepare_accessibility(
@@ -1146,6 +1283,9 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     fn a11y_nodes_for(&self, id: AquaWindowId) -> Option<(NodeId, NodeId, Vec<A11yNode>)> {
         self.ui.a11y_nodes_for(id)
     }
+    fn a11y_revision_for(&self, id: AquaWindowId) -> Option<u64> {
+        self.ui.ui().a11y_revision_for(id)
+    }
     fn chrome_regions(&self, window: &ObservedWindowState) -> Option<DragRegions> {
         self.shell
             .titlebar
@@ -1154,7 +1294,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn externals(&mut self, frame: &mut ExternalFrame<'_>) {
         let _tm = Tm::new("ext");
-        self.views.advance_glides(&mut self.shell, self.ui.ui_mut());
+        self.views
+            .advance_glides(&mut self.shell, self.ui.ui_mut(), frame.now);
         let supported = Some(false);
         if self.shell.meshes_supported.replace(supported) != supported {
             self.shell.meshes_changed.set(true);
@@ -1163,15 +1304,15 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if self
             .shell
             .live
-            .remaining(std::time::Instant::now())
+            .remaining(self.shell.core.clock().now())
             .is_some_and(|wait| wait.is_zero())
         {
             let _queued = self.shell.core.wake_mailbox().sender().send(());
         }
         crate::core::diagnostics::open_timing::externals_begin();
-        let started = std::time::Instant::now();
+        let started = crate::shell::stopwatch::Stopwatch::start();
         self.ui.externals(frame);
-        crate::core::diagnostics::open_timing::scene(started.elapsed());
+        crate::core::diagnostics::open_timing::scene(started.measured());
     }
     fn build_scene(&mut self, window: &ObservedWindowState, now: Instant) -> Option<Instant> {
         let _tm = Tm::new("scene");
@@ -1185,6 +1326,30 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn reactive_runtime_for(&self, id: AquaWindowId) -> Option<&aqua_reactive::Runtime> {
         self.ui.reactive_runtime_for(id)
+    }
+}
+
+fn moves_the_transcript(ui: &UiApp, request: &A11yActionRequest) -> bool {
+    use aqua_protocol::A11yAction;
+    let Some(transcript) = crate::shell::wheel::keyed_node(ui, "conversation-transcript") else {
+        return false;
+    };
+    match request.action {
+        A11yAction::Scroll(_) | A11yAction::SetScrollOffset => request.node == transcript,
+        A11yAction::ScrollIntoView => {
+            std::iter::successors(Some(request.node), |node| ui.tree().get(*node)?.parent)
+                .any(|node| node == transcript)
+        }
+        A11yAction::Press
+        | A11yAction::Focus
+        | A11yAction::SetValue
+        | A11yAction::ReplaceSelectedText
+        | A11yAction::Expand
+        | A11yAction::Collapse
+        | A11yAction::Increment
+        | A11yAction::Decrement
+        | A11yAction::ShowContextMenu
+        | A11yAction::Other(_) => false,
     }
 }
 
@@ -1205,16 +1370,16 @@ fn sync_popup(
         *slot = None;
     }
     let Some((element, options)) = content else {
-        if let Some(popup) = slot.as_mut().filter(|popup| !popup.is_closing()) {
-            if let Err(error) = popup.begin_close(ui, now) {
-                tracing::warn!(%error, "could not close settings popup");
-            }
+        if let Some(popup) = slot.as_mut().filter(|popup| !popup.is_closing())
+            && let Err(error) = popup.begin_close(ui, now)
+        {
+            tracing::warn!(error = %diagnostics::chain(&error), "could not close settings popup");
         }
         return;
     };
     if let Some(popup) = slot.as_mut() {
         if let Err(error) = popup.refresh_content(ui, element) {
-            tracing::warn!(%error, "could not refresh settings popup");
+            tracing::warn!(error = %diagnostics::chain(&error), "could not refresh settings popup");
         }
         return;
     }
@@ -1228,7 +1393,9 @@ fn sync_popup(
     }
     match crate::ui::popover::AnimatedPickerHost::open_options(ui, owner, element, options, now) {
         Ok(popup) => *slot = Some(popup),
-        Err(error) => tracing::warn!(%error, "could not open settings popup"),
+        Err(error) => {
+            tracing::warn!(error = %diagnostics::chain(&error), "could not open settings popup");
+        }
     }
 }
 
@@ -1256,91 +1423,85 @@ fn fit_launch_to_display(ctx: &mut AppCtx<'_>, id: AquaWindowId) {
     }
 }
 
-fn failure_card(message: &str, theme: crate::ui::theme::ArtisanTheme) -> Element {
-    use crate::ui::kit::{Space, Spaced, Surface, TextRole, Tone, pane::sheet};
+fn failure_card(problem: &crate::core::Problem, theme: &crate::ui::theme::ArtisanTheme) -> Element {
+    use crate::ui::kit::pane::sheet;
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
     const WIDTH: f32 = 480.0;
-    let body = UiBox::new()
-        .layout("column")
-        .spaced(Space::S8)
-        .child(
-            TextRole::Title
-                .text(&theme, "Something went wrong drawing this view")
-                .build(),
-        )
-        .child(
-            TextRole::Caption
-                .text(&theme, message.to_owned())
-                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                .build(),
-        )
-        .build();
-    let card = Surface::Callout(Tone::Danger)
-        .build(&theme, vec![body])
-        .style(Style::new().width(Length::Px(WIDTH)));
-    UiBox::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .layout("column")
-        .style(
-            Style::new()
-                .align(aqua_ui::AlignItems::CENTER)
-                .justify(aqua_ui::JustifyContent::CENTER),
-        )
-        .style(sheet(&theme))
-        .child(card)
+    let card = crate::ui::kit::ProblemNotice::new("view-failure-problem", *theme, problem)
         .build()
+        .style(Style::new().width(Length::Px(WIDTH)));
+    window_root(
+        UiBox::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
+            .layout("column")
+            .style(
+                Style::new()
+                    .align(aqua_ui::AlignItems::CENTER)
+                    .justify(aqua_ui::JustifyContent::CENTER),
+            )
+            .style(sheet(theme))
+            .child(card)
+            .build(),
+    )
 }
 
-pub(crate) struct Tm(
-    &'static str,
-    std::time::Instant,
-    aqua::profile::alloc::HeapCounts,
-    crate::core::diagnostics::rebuild_stats::Span,
-);
+fn window_root(element: Element) -> Element {
+    element
+        .role(aqua_core::Role::Group)
+        .aria_label(crate::shell::host::WINDOW_NAME)
+        .aria_language(crate::shell::host::INTERFACE_LANGUAGE)
+}
+
+pub(crate) struct Tm {
+    name: &'static str,
+    started: crate::shell::stopwatch::Stopwatch,
+    heap: aqua::profile::alloc::HeapCounts,
+    _span: crate::core::diagnostics::rebuild_stats::Span,
+}
+const DEFAULT_THRESHOLD_MS: f64 = 3.0;
+
 impl Tm {
-    pub(crate) fn threshold_ms() -> f64 {
+    fn threshold_ms() -> f64 {
         static VALUE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-        *VALUE.get_or_init(|| {
-            std::env::var("AQUA_TM_MS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(3.0)
+        *VALUE.get_or_init(|| match std::env::var("AQUA_TM_MS") {
+            Err(std::env::VarError::NotPresent) => DEFAULT_THRESHOLD_MS,
+            Err(error) => {
+                tracing::warn!(%error, "AQUA_TM_MS is unreadable; timing spans over 3 ms");
+                DEFAULT_THRESHOLD_MS
+            }
+            Ok(value) => value.parse().unwrap_or_else(|error| {
+                tracing::warn!(%error, value, "AQUA_TM_MS is not a number; timing spans over 3 ms");
+                DEFAULT_THRESHOLD_MS
+            }),
         })
     }
 
     pub(crate) fn new(name: &'static str) -> Self {
         crate::core::diagnostics::rebuild_stats::record_event(name);
-        Self(
+        Self {
             name,
-            std::time::Instant::now(),
-            aqua::profile::alloc::snapshot(),
-            crate::core::diagnostics::rebuild_stats::span(name),
-        )
+            started: crate::shell::stopwatch::Stopwatch::start(),
+            heap: aqua::profile::alloc::snapshot(),
+            _span: crate::core::diagnostics::rebuild_stats::span(name),
+        }
     }
 }
 impl Drop for Tm {
     fn drop(&mut self) {
-        let ms = self.1.elapsed().as_secs_f64() * 1000.0;
+        let ms = self.started.measured().as_secs_f64() * 1000.0;
         if aqua::profile::enabled() {
-            let heap = aqua::profile::alloc::snapshot().since(self.2);
+            let heap = aqua::profile::alloc::snapshot().since(self.heap);
             if ms > 0.25 || heap.allocs > 8 {
-                let name = self.0;
+                let name = self.name;
                 aqua::profile::note(|| format!("{name}={ms:.2}ms/a{}", heap.allocs));
             }
         }
         if ms > Self::threshold_ms() {
-            tracing::info!(target: "tm", what = self.0, ms);
+            tracing::info!(target: "tm", what = self.name, ms);
         }
     }
-}
-
-fn mark(causes: &mut Vec<&'static str>, name: &'static str, changed: bool) -> bool {
-    if changed {
-        causes.push(name);
-    }
-    changed
 }
 
 #[cfg(all(test, feature = "qualification"))]

@@ -213,7 +213,10 @@ fn claude_500k_compaction_becomes_the_500k_context_choice() {
             .specification(requested.engine, &[])
             .visible_choices(ModelAxis::Context, &resolved.effective, false)
             .iter()
-            .any(|choice| choice.binding == ConfigBinding::Context(Some(500_000)) && choice.label == "500K")
+            .any(
+                |choice| choice.binding == ConfigBinding::Context(Some(500_000))
+                    && choice.label == "500K"
+            )
     );
     assert_eq!(resolved.requested, requested);
 }
@@ -279,7 +282,8 @@ fn custom_compaction_windows_respect_reported_capacity_and_version() {
             .iter()
             .any(|choice| choice.id == "2000000")
     );
-    assert!(model_customizations(&serde_json::json!({"version": 2, "rules": []})).is_err());
+    model_customizations(&serde_json::json!({"version": 2, "rules": []}))
+        .expect_err("an unknown customization version is refused");
 }
 
 #[test]
@@ -414,10 +418,32 @@ fn light_has_one_native_binding_and_preserves_an_existing_minimal_selection() {
     let config = config(EngineId::Codex, &model.id);
     let spec = model.specification(config.engine, &[]);
     let choices = spec.visible_choices(ModelAxis::Thinking, &config, false);
-    assert_eq!(choices.iter().filter(|choice| choice.semantic == ChoiceSemantic::Intensity(ThinkingLevel::Light)).count(), 1);
-    assert_eq!(choices[1].binding.apply(&config).effort.as_deref(), Some("low"));
-    let minimal = EngineConfig { effort:Some("minimal".into()), ..config };
+    assert_eq!(
+        choices
+            .iter()
+            .filter(|choice| choice.semantic == ChoiceSemantic::Intensity(ThinkingLevel::Light))
+            .count(),
+        1
+    );
+    assert_eq!(
+        choices[1].binding.apply(&config).effort.as_deref(),
+        Some("low")
+    );
+    let minimal = EngineConfig {
+        effort: Some("minimal".into()),
+        ..config
+    };
     let choices = spec.visible_choices(ModelAxis::Thinking, &minimal, false);
-    assert_eq!(choices.iter().find(|choice| choice.binding.selected(&minimal)).unwrap().label, "Light");
-    assert_eq!(spec.resolve(&minimal).effective.effort.as_deref(), Some("minimal"));
+    assert_eq!(
+        choices
+            .iter()
+            .find(|choice| choice.binding.selected(&minimal))
+            .unwrap()
+            .label,
+        "Light"
+    );
+    assert_eq!(
+        spec.resolve(&minimal).effective.effort.as_deref(),
+        Some("minimal")
+    );
 }

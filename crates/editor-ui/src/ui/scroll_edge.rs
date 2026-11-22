@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Instant;
 
-pub const SCROLL_EDGE_HEIGHT: f32 = 24.0;
+const SCROLL_EDGE_HEIGHT: f32 = 24.0;
 const SCROLL_EDGE_RAMP: f32 = 16.0;
 const SETTLED: f32 = 0.01;
 
@@ -24,7 +24,7 @@ pub enum EdgePaint {
 }
 
 #[must_use]
-pub fn target(hidden: f32) -> f32 {
+fn target(hidden: f32) -> f32 {
     (hidden / SCROLL_EDGE_RAMP).clamp(0.0, 1.0)
 }
 
@@ -76,6 +76,12 @@ enum Entrance {
 pub struct ScrollEdges {
     fades: Rc<[Cell<EdgeFade>; 2]>,
     entrance: Rc<[Cell<Entrance>; 2]>,
+}
+
+impl std::fmt::Debug for ScrollEdges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScrollEdges").finish_non_exhaustive()
+    }
 }
 
 impl PartialEq for ScrollEdges {
@@ -203,7 +209,7 @@ impl ScrollEdges {
         (
             EdgeFade {
                 shown: target
-                    * super::motion::MotionCurve::EaseInOut.sample(f64::from(progress)) as f32,
+                    * super::motion::MotionCurve::EaseInOut.sample_f32(f64::from(progress)),
                 at: moving.then_some(now),
             },
             moving,
@@ -254,6 +260,10 @@ impl ScrollEdges {
             .exclude_from_hit_testing()
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "advancing an edge reads its band, paint kind, colour, hidden amount, motion and clock"
+    )]
     pub fn advance(
         &self,
         ui: &mut aqua::UiApp,
@@ -268,12 +278,12 @@ impl ScrollEdges {
         let (fade, moving) = self.advance_fade(edge, target(hidden), reduced, now);
         let previous = self.fade(edge);
         self.fades[slot(edge)].set(fade);
-        if previous.shown() != fade.shown() {
-            if let Some(mut paint) = ui.tree().paint(band) {
-                edge_style(paint_kind, edge, color, fade.shown())
-                    .apply_to(&mut LayoutStyle::default(), &mut paint);
-                ui.tree_mut().set_paint(band, paint);
-            }
+        if previous.shown().to_bits() != fade.shown().to_bits()
+            && let Some(mut paint) = ui.tree().paint(band)
+        {
+            edge_style(paint_kind, edge, color, fade.shown())
+                .apply_to(&mut LayoutStyle::default(), &mut paint);
+            ui.tree_mut().set_paint(band, paint);
         }
         moving
     }
@@ -286,7 +296,7 @@ pub struct Hidden {
 }
 
 #[must_use]
-pub fn hidden_in(ui: &aqua::UiApp, scroller: NodeId) -> Option<Hidden> {
+fn hidden_in(ui: &aqua::UiApp, scroller: NodeId) -> Option<Hidden> {
     let offset = ui.tree().scroll_offset(scroller)?;
     let viewport = ui.tree().rect(scroller)?;
     let content = ui.tree().content_size(scroller)?;
@@ -303,7 +313,7 @@ pub fn keyed(ui: &aqua::UiApp, key: &str) -> Option<NodeId> {
     ui.tree().sole_node_with_key(key)
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct EdgeBands {
     pub scroll: &'static str,
     pub top: &'static str,
@@ -327,7 +337,7 @@ impl EdgeBands {
     }
 
     #[must_use]
-    pub fn bands(&self) -> [Element; 2] {
+    pub(crate) fn bands(&self) -> [Element; 2] {
         [
             self.edges.band(self.top, Edge::Top, self.color),
             self.edges.band(self.bottom, Edge::Bottom, self.color),
@@ -335,6 +345,7 @@ impl EdgeBands {
     }
 }
 
+#[derive(Debug)]
 pub struct EdgeSurface<'a> {
     pub edges: &'a ScrollEdges,
     pub scroller: &'a str,

@@ -35,15 +35,13 @@ async fn custom_compaction_survives_persistence_and_invalid_customizations_are_r
         .await
         .unwrap();
     assert_eq!(saved, requested);
-    assert!(
-        store
-            .set_setting(
-                MODEL_CUSTOMIZATIONS_KEY.into(),
-                json!({"version":99,"rules":[]})
-            )
-            .await
-            .is_err()
-    );
+    store
+        .set_setting(
+            MODEL_CUSTOMIZATIONS_KEY.into(),
+            json!({"version":99,"rules":[]}),
+        )
+        .await
+        .expect_err("an unknown customization version is refused");
     assert_eq!(
         store.setting(MODEL_CUSTOMIZATIONS_KEY).await.unwrap(),
         Some(rules)
@@ -68,6 +66,9 @@ async fn saving_default_does_not_pin_a_reported_effort_or_variant() {
         .await
         .unwrap()
         .unwrap();
-    let restored = artisan_api::saved_model_config(&setting, EngineId::Codex, &model.id).unwrap();
+    let remembered: std::collections::BTreeMap<String, EngineConfig> =
+        serde_json::from_value(setting).unwrap();
+    let restored =
+        artisan_api::saved_model_config(&remembered, EngineId::Codex, &model.id).unwrap();
     assert_eq!(restored.effort, None);
 }

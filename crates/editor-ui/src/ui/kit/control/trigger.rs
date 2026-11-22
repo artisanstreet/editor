@@ -18,7 +18,7 @@ pub enum TriggerSize {
 
 impl TriggerSize {
     #[must_use]
-    pub const fn height(self) -> f32 {
+    const fn height(self) -> f32 {
         match self {
             Self::Md => 32.0,
             Self::Sm => 28.0,
@@ -26,6 +26,7 @@ impl TriggerSize {
     }
 }
 
+#[derive(Debug)]
 pub enum Lead {
     Glyph(AssetId),
     Avatar(Element),
@@ -44,7 +45,17 @@ pub struct Trigger {
     on_activate: Option<Box<dyn Fn()>>,
 }
 
+impl std::fmt::Debug for Trigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Trigger").finish_non_exhaustive()
+    }
+}
+
 impl Trigger {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the trigger stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,
@@ -86,12 +97,6 @@ impl Trigger {
     #[must_use]
     pub const fn open(mut self, open: bool) -> Self {
         self.open = open;
-        self
-    }
-
-    #[must_use]
-    pub const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
 

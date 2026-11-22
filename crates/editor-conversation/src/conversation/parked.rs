@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+#[derive(Debug)]
 pub struct Shelf<K, V> {
     entries: VecDeque<(K, V, usize)>,
     count: usize,

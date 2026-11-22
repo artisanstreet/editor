@@ -1,16 +1,9 @@
-use crate::conversation::content::{SourceAction, SourceField, SourceOwners};
+use crate::conversation::content::SourceField;
 use crate::conversation::presentation::PresentationScope;
-use crate::conversation::questions::{QuestionCollection, QuestionCollectionAction};
-use editor_core::Core;
-use editor_ui::theme::ArtisanTheme;
 use aqua_text::document::SelectionSource;
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use aqua_ui::collection::{BatchedCollectionRow, SelectionBatchOwner, SelectionSourceBatch};
-use aqua_ui::collection_runtime::PreparedCollectionRow;
-use aqua_ui::element::Element;
-use artisan_api::{CollectionRef, Item};
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -18,6 +11,14 @@ pub enum ResourceKey {
     Source(artisan_api::ItemId, SourceField),
     Questions(artisan_api::ItemId),
     QuestionDetail(artisan_api::ItemId),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BatchRowError {
+    #[error("the conversation presentation belongs to another thread or host")]
+    StaleScope,
+    #[error("the selection document of {key:?} changed without releasing its owner")]
+    DocumentChanged { key: ResourceKey },
 }
 
 struct ResourceBatch {
@@ -33,6 +34,13 @@ pub struct ResourceBatches {
     entries: HashMap<ResourceKey, ResourceBatch>,
 }
 
+impl std::fmt::Debug for ResourceBatches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceBatches").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub struct BatchRelease {
     document: SelectionDocumentId,
     owner: SelectionBatchOwner,
@@ -40,7 +48,7 @@ pub struct BatchRelease {
 }
 
 impl BatchRelease {
-    pub fn apply(self, app: &mut aqua::UiApp) {
+    pub(crate) fn apply(self, app: &mut aqua::UiApp) {
         app.release_selection_batch_owner(self.document, self.owner);
         if let Some(source) = self.source {
             app.unregister_selection_source_in(self.document, source);
@@ -48,7 +56,7 @@ impl BatchRelease {
     }
 }
 
-fn same_source(left: &Option<SelectionSource>, right: &Option<SelectionSource>) -> bool {
+fn same_source(left: Option<&SelectionSource>, right: Option<&SelectionSource>) -> bool {
     match (left, right) {
         (Some(a), Some(b)) => {
             a.id == b.id
@@ -63,7 +71,7 @@ fn same_source(left: &Option<SelectionSource>, right: &Option<SelectionSource>) 
 }
 
 impl ResourceBatches {
-    pub fn set_scope(&mut self, scope: &PresentationScope) -> bool {
+    pub(crate) fn set_scope(&mut self, scope: &PresentationScope) -> bool {
         if self.scope.as_ref().is_some_and(|current| current != scope) {
             return false;
         }
@@ -71,7 +79,7 @@ impl ResourceBatches {
         true
     }
 
-    pub fn take_releases(&mut self) -> Vec<BatchRelease> {
+    pub(crate) fn take_releases(&mut self) -> Vec<BatchRelease> {
         self.scope = None;
         self.entries
             .drain()
@@ -83,53 +91,22 @@ impl ResourceBatches {
             .collect()
     }
 
-    pub fn retain_deferred(
+    pub(crate) fn retain_deferred(
         &mut self,
         keep: &std::collections::HashSet<ResourceKey>,
     ) -> Vec<BatchRelease> {
-        let keys: Vec<_> = self
-            .entries
-            .keys()
-            .filter(|key| !keep.contains(*key))
-            .cloned()
-            .collect();
-        keys.into_iter()
-            .filter_map(|key| self.entries.remove(&key))
+        let (released, kept): (HashMap<_, _>, HashMap<_, _>) = std::mem::take(&mut self.entries)
+            .into_iter()
+            .partition(|(key, _)| !keep.contains(key));
+        self.entries = kept;
+        released
+            .into_values()
             .map(|entry| BatchRelease {
                 document: entry.batch.document(),
                 owner: entry.owner,
                 source: entry.source.map(|source| source.id),
             })
             .collect()
-    }
-    pub fn from_prepared(
-        &mut self,
-        scope: &PresentationScope,
-        key: ResourceKey,
-        document: SelectionDocumentId,
-        prepared: PreparedCollectionRow,
-    ) -> anyhow::Result<BatchedCollectionRow> {
-        let mut sources = prepared.selection_sources.into_iter();
-        let selection = match sources.next() {
-            Some((actual, source)) => {
-                anyhow::ensure!(actual == document, "conversation source document mismatch");
-                Some(source)
-            }
-            None => None,
-        };
-        anyhow::ensure!(
-            sources.next().is_none(),
-            "conversation source has more than one selection source"
-        );
-        self.row(
-            scope,
-            key,
-            document,
-            editor_sources::ContentView {
-                element: prepared.element,
-                selection,
-            },
-        )
     }
 
     pub fn rebind(&mut self, app: &mut aqua::UiApp, scope: Option<PresentationScope>) {
@@ -145,20 +122,21 @@ impl ResourceBatches {
         key: ResourceKey,
         document: SelectionDocumentId,
         view: editor_sources::ContentView,
-    ) -> anyhow::Result<BatchedCollectionRow> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
-        anyhow::ensure!(
-            self.entries
-                .get(&key)
-                .is_none_or(|entry| entry.batch.document() == document),
-            "conversation source document changed without releasing its owner"
-        );
+    ) -> Result<BatchedCollectionRow, BatchRowError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BatchRowError::StaleScope);
+        }
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.batch.document() != document)
+        {
+            return Err(BatchRowError::DocumentChanged { key });
+        }
         let source = view.selection;
         let changed = self.entries.get(&key).is_none_or(|entry| {
-            entry.batch.document() != document || !same_source(&entry.source, &source)
+            entry.batch.document() != document
+                || !same_source(entry.source.as_ref(), source.as_ref())
         });
         if changed {
             let (owner, revision) = self.entries.get(&key).map_or_else(
@@ -183,18 +161,14 @@ impl ResourceBatches {
         let entry = self
             .entries
             .get(&key)
-            .ok_or_else(|| anyhow::anyhow!("conversation source batch is unavailable"))?;
+            .expect("invariant: a source batch is recorded before its row is returned");
         Ok(BatchedCollectionRow {
             element: view.element,
             batches: vec![Arc::clone(&entry.batch)],
         })
     }
 
-    pub fn retain(
-        &mut self,
-        app: &mut aqua::UiApp,
-        mut retained: impl FnMut(&ResourceKey) -> bool,
-    ) {
+    fn retain(&mut self, app: &mut aqua::UiApp, mut retained: impl FnMut(&ResourceKey) -> bool) {
         self.entries.retain(|key, entry| {
             if retained(key) {
                 return true;
@@ -211,72 +185,4 @@ impl ResourceBatches {
         self.retain(app, |_| false);
         self.scope = None;
     }
-}
-
-fn prepared(
-    document: SelectionDocumentId,
-    view: editor_sources::ContentView,
-) -> PreparedCollectionRow {
-    PreparedCollectionRow {
-        element: view.element,
-        selection_sources: view
-            .selection
-            .into_iter()
-            .map(|source| (document, source))
-            .collect(),
-    }
-}
-
-pub fn stored_source(
-    owners: &mut SourceOwners,
-    current: &PresentationScope,
-    core: &Core,
-    scope: &PresentationScope,
-    item: &Item,
-    field: SourceField,
-    theme: ArtisanTheme,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    emit: Rc<dyn Fn(SourceAction)>,
-) -> anyhow::Result<PreparedCollectionRow> {
-    anyhow::ensure!(
-        scope == current && core.host_if_instance(&scope.host, scope.instance).is_some(),
-        "stale conversation presentation scope"
-    );
-    anyhow::ensure!(
-        owners.open(core, &scope.host, scope.instance, item, field.clone()),
-        "stored conversation source is unavailable"
-    );
-    let view = owners
-        .view(&item.id, &field, theme, document, source_id, emit)
-        .ok_or_else(|| anyhow::anyhow!("stored conversation source is unavailable"))?;
-    Ok(prepared(document, view))
-}
-
-pub fn stored_questions(
-    owner: &mut QuestionCollection,
-    current: &PresentationScope,
-    core: &Core,
-    scope: &PresentationScope,
-    item: &Item,
-    source: &CollectionRef,
-    theme: ArtisanTheme,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    stored_detail: Option<Element>,
-    emit: Rc<dyn Fn(QuestionCollectionAction)>,
-) -> anyhow::Result<PreparedCollectionRow> {
-    anyhow::ensure!(
-        scope == current && core.host_if_instance(&scope.host, scope.instance).is_some(),
-        "stale conversation presentation scope"
-    );
-    anyhow::ensure!(
-        owner.open(core, &scope.host, scope.instance, &item.id, source),
-        "stored questions are unavailable"
-    );
-    let view = owner
-        .view(theme, document, source_id, stored_detail, emit)
-        .map_err(anyhow::Error::msg)?
-        .ok_or_else(|| anyhow::anyhow!("stored questions are unavailable"))?;
-    Ok(prepared(document, view))
 }

@@ -8,7 +8,13 @@ fn the_first_delta_applies_and_the_following_ones_wait_for_the_interval() {
     assert!(throttle.arrive(start));
     assert!(!throttle.arrive(start + (INTERVAL / 3)));
     assert!(!throttle.arrive(start + (INTERVAL * 2 / 3)));
-    assert!(!throttle.due(start + INTERVAL - Duration::from_millis(1)));
+    assert!(
+        !throttle.due(
+            (start + INTERVAL)
+                .checked_sub(Duration::from_millis(1))
+                .unwrap()
+        )
+    );
     assert!(throttle.due(start + INTERVAL));
     assert!(!throttle.due(start + INTERVAL * 2));
 }
@@ -23,7 +29,7 @@ fn a_deferred_delta_reports_how_long_it_still_waits() {
     assert!(!throttle.arrive(start + (INTERVAL / 2)));
     assert_eq!(
         throttle.remaining(start + (INTERVAL / 2)),
-        Some(INTERVAL - (INTERVAL / 2))
+        Some(INTERVAL.checked_sub(INTERVAL / 2).unwrap())
     );
     assert_eq!(
         throttle.remaining(start + INTERVAL * 2),

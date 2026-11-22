@@ -40,23 +40,7 @@ pub enum Feedback {
     Success(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Link {
-    Terms,
-    Privacy,
-    Recover,
-}
-
-impl Link {
-    #[must_use]
-    pub const fn path(self) -> &'static str {
-        match self {
-            Self::Terms => "/terms",
-            Self::Privacy => "/privacy",
-            Self::Recover => "/recover",
-        }
-    }
-}
+pub use editor_core::AccountLink as Link;
 
 #[must_use]
 pub fn view_of(phase: &AccountPhase, problem: Option<EmailProblem>) -> View {
@@ -68,21 +52,26 @@ pub fn view_of(phase: &AccountPhase, problem: Option<EmailProblem>) -> View {
             provider: *provider,
         },
         AccountPhase::Pending { .. } => View::Waiting,
-        AccountPhase::EmailApproved { approval, rejected } => match (approval.totp_required, rejected) {
-            (true, Some(factor)) => View::SecondFactor {
-                step: Step::Rejected(*factor),
-            },
-            (true, None) => View::SecondFactor {
-                step: Step::Entering,
-            },
-            (false, _) => View::Approved,
-        },
-        AccountPhase::Finalizing { approval, .. } => match approval.totp_required {
-            true => View::SecondFactor {
-                step: Step::Verifying,
-            },
-            false => View::Finishing,
-        },
+        AccountPhase::EmailApproved { approval, rejected } => {
+            match (approval.totp_required, rejected) {
+                (true, Some(factor)) => View::SecondFactor {
+                    step: Step::Rejected(*factor),
+                },
+                (true, None) => View::SecondFactor {
+                    step: Step::Entering,
+                },
+                (false, _) => View::Approved,
+            }
+        }
+        AccountPhase::Finalizing { approval, .. } => {
+            if approval.totp_required {
+                View::SecondFactor {
+                    step: Step::Verifying,
+                }
+            } else {
+                View::Finishing
+            }
+        }
         AccountPhase::Error { message } => View::Failed {
             message: message.clone(),
         },
@@ -167,9 +156,9 @@ pub fn checked_email(value: &str) -> Result<&str, EmailProblem> {
     let shaped = email.split_once('@').is_some_and(|(local, domain)| {
         !local.is_empty()
             && !domain.contains('@')
-            && domain
-                .split_once('.')
-                .is_some_and(|(name, tld)| !name.is_empty() && !tld.is_empty() && !tld.ends_with('.'))
+            && domain.split_once('.').is_some_and(|(name, tld)| {
+                !name.is_empty() && !tld.is_empty() && !tld.ends_with('.')
+            })
             && !email.chars().any(char::is_whitespace)
     });
     match (email.is_empty(), shaped) {

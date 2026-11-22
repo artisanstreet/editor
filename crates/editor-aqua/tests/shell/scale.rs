@@ -1,7 +1,7 @@
 use aqua::prelude::{AquaWindowId, InputEvent, ObservedWindowState, WindowEvent, WindowOptions};
 use aqua::{AppCtx, Application, Aqua, AquaConfig, UiApp};
 use aqua_ui::element::{Box as UiBox, Element, Text};
-use editor_aqua::core::{Core, EditorFiles};
+use editor_aqua::core::EditorFiles;
 use editor_aqua::shell::{
     application::{SectionViews, ShellApplication},
     host::{Shell, ShellResources},
@@ -19,11 +19,11 @@ impl SectionViews for Probe {
         _: &mut Shell,
         ui: &mut UiApp,
         window: &ObservedWindowState,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, editor_aqua::shell::application::BuildError> {
         self.runtime.push((ui.scale(), ui.viewport()));
         let changed = ui
             .tree_mut()
-            .set_gpui_layout_scale(Some(window.scale_factor as f32));
+            .set_gpui_layout_scale(Some(test_support::float::narrow(window.scale_factor)));
         self.scale_was_already_applied
             .borrow_mut()
             .push((window.scale_factor, !changed));
@@ -57,11 +57,11 @@ fn scale_change_reaches_layout_before_the_rebuild() {
     };
     let seen = Rc::new(RefCell::new(Vec::new()));
     let views = Probe {
-        scale_was_already_applied: seen.clone(),
+        scale_was_already_applied: Rc::clone(&seen),
         runtime: Vec::new(),
     };
     let mut app = ShellApplication::new(files.clone(), ShellResources::new(1.0).unwrap(), views);
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     app.shell.core = core;
     app.shell.entry.sync(&app.shell.core);
@@ -82,6 +82,10 @@ fn scale_change_reaches_layout_before_the_rebuild() {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one DPI scenario walked through resize and scale change"
+)]
 fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_change() {
     for initial_scale in [1.25_f64, 2.0] {
         let directory = tempfile::tempdir().unwrap();
@@ -94,7 +98,7 @@ fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_cha
         };
         let mut app =
             ShellApplication::new(files.clone(), ShellResources::new(1.0).unwrap(), views);
-        let mut core = Core::for_tests(files).unwrap();
+        let mut core = test_support::editor::core::test_core(&files.dir);
         core.set_image_assets(app.shell.images().clone());
         app.shell.core = core;
         app.shell.entry.sync(&app.shell.core);
@@ -117,7 +121,8 @@ fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_cha
         );
         assert!(
             app.views.runtime.iter().all(|(scale, viewport)| {
-                *scale == initial_scale as f32 && *viewport == aqua_core::Size::new(800.0, 600.0)
+                (f64::from(*scale) - initial_scale).abs() <= test_support::float::TOLERANCE
+                    && *viewport == aqua_core::Size::new(800.0, 600.0)
             }),
             "the observed viewport and scale must be installed before the first build"
         );
@@ -136,7 +141,10 @@ fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_cha
         let initial = bounds(&mut app, &aqua, &observed);
         assert_eq!(
             (initial.w, initial.h),
-            (80.0 * initial_scale as f32, 40.0 * initial_scale as f32),
+            (
+                80.0 * test_support::float::narrow(initial_scale),
+                40.0 * test_support::float::narrow(initial_scale)
+            ),
             "initial accessibility bounds must use physical pixels"
         );
 
@@ -152,11 +160,18 @@ fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_cha
         );
         assert_eq!(
             app.views.runtime.last(),
-            Some(&(initial_scale as f32, aqua_core::Size::new(960.0, 720.0))),
+            Some(&(
+                test_support::float::narrow(initial_scale),
+                aqua_core::Size::new(960.0, 720.0)
+            )),
             "ordinary resize must update the logical viewport while retaining scale"
         );
 
-        observed.scale_factor = if initial_scale == 1.25 { 2.0 } else { 1.25 };
+        observed.scale_factor = if (initial_scale - 1.25).abs() <= test_support::float::TOLERANCE {
+            2.0
+        } else {
+            1.25
+        };
         aqua.dispatch_window_event(
             &mut app,
             id,
@@ -166,15 +181,15 @@ fn startup_scale_drives_physical_accessibility_bounds_through_resize_and_dpi_cha
         assert_eq!(
             (changed.w, changed.h),
             (
-                80.0 * observed.scale_factor as f32,
-                40.0 * observed.scale_factor as f32
+                80.0 * test_support::float::narrow(observed.scale_factor),
+                40.0 * test_support::float::narrow(observed.scale_factor)
             ),
             "a DPI transition must update physical accessibility bounds"
         );
         assert_eq!(
             app.views.runtime.last(),
             Some(&(
-                observed.scale_factor as f32,
+                test_support::float::narrow(observed.scale_factor),
                 aqua_core::Size::new(960.0, 720.0)
             )),
             "a DPI transition must preserve the logical viewport"

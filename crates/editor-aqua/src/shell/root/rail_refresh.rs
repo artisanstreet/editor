@@ -6,7 +6,6 @@ use crate::shell::thread_navigation::{self, Refresh};
 use aqua::prelude::{AquaWindowId, FrameReason};
 use aqua::{AppCtx, UiApp};
 use aqua_ui::collection_runtime::CollectionViewport;
-use std::time::Instant;
 
 pub(super) struct Rail<'a> {
     pub(super) navigation: &'a mut thread_navigation::ThreadNavigation,
@@ -24,20 +23,17 @@ impl Rail<'_> {
         core: &Core,
         viewport: CollectionViewport,
     ) -> bool {
-        match self.navigation.refresh(
-            ui,
-            conversation,
-            core,
-            viewport,
-            Instant::now(),
-        ) {
+        match self
+            .navigation
+            .refresh(ui, conversation, core, viewport, core.clock().now())
+        {
             Ok(Refresh::InPlace) => {
                 ctx.request_frame(window, FrameReason::ANIMATION);
                 false
             }
             Ok(Refresh::Rebuild) => true,
             Err(error) => {
-                tracing::warn!(%error, "could not refresh turn navigator");
+                tracing::warn!(error = %diagnostics::chain(&error), "could not refresh turn navigator");
                 true
             }
         }
@@ -68,21 +64,28 @@ impl Rail<'_> {
 impl RootViews {
     pub(super) fn refresh_navigation(
         &mut self,
-        shell: &mut Shell,
+        shell: &Shell,
         ui: &mut UiApp,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
         let (Some(workspace), Some(viewport)) =
-            (shell.entry.workspace(), self.transcript_viewport)
+            (shell.entry.workspace(), self.scroll.transcript_viewport)
         else {
             return false;
         };
         Rail {
-            navigation: &mut self.navigation,
-            marker: &mut self.navigation_marker,
-            transcript_viewport: self.transcript_viewport,
+            navigation: &mut self.navigation_views.navigation,
+            marker: &mut self.navigation_views.navigation_marker,
+            transcript_viewport: self.scroll.transcript_viewport,
         }
-        .refresh_in_place(ui, ctx, window, &workspace.conversation, &shell.core, viewport)
+        .refresh_in_place(
+            ui,
+            ctx,
+            window,
+            &workspace.conversation,
+            &shell.core,
+            viewport,
+        )
     }
 }

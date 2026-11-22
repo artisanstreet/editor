@@ -2,21 +2,42 @@ mod enrollment;
 
 use crate::core::{
     access::{self, EntryGate, OnboardingRecord},
+    config_file,
     delivery::{AdmissionOrder, Delivery},
-    hosts::{EditorFiles, read_json, write_json},
+    hosts::EditorFiles,
     runtime::runtime,
     services::Services,
 };
-use anyhow::{Context as _, Result};
-use artisan_account::browser::{self, Arrival, Handoff, Problem};
 pub use artisan_account::browser::Provider;
+use artisan_account::browser::{self, Callback, Handoff, Problem, ReceiveError};
 use artisan_account::network::{AccountProfile, CoreSessionClient, NetworkError, SessionToken};
-use enrollment::AeBinding;
 pub use enrollment::LocalForge;
+use enrollment::{AeBinding, BindForgeError};
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroUsize, time::Duration};
 
-const BROWSER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const CORE_URL_OVERRIDE: &str = "AST_CORE_BASE_URL";
+const BROWSER_TIMEOUT: Duration = Duration::from_mins(10);
+pub const AUTH_ORIGIN: &str = "https://auth.artisan.st";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountLink {
+    Terms,
+    Privacy,
+    Recover,
+}
+
+impl AccountLink {
+    #[must_use]
+    pub fn url(self) -> String {
+        let path = match self {
+            Self::Terms => "/terms",
+            Self::Privacy => "/privacy",
+            Self::Recover => "/recover",
+        };
+        format!("{AUTH_ORIGIN}{path}")
+    }
+}
 use tokio_util::task::AbortOnDropHandle;
 
 pub type AccountMachine = artisan_account::network::MachineEntry;
@@ -76,7 +97,10 @@ impl SecondFactor {
     #[must_use]
     pub fn parse(input: &str) -> Option<Self> {
         let code = input.trim();
-        match (code.is_empty(), code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())) {
+        match (
+            code.is_empty(),
+            code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
+        ) {
             (true, _) => None,
             (false, true) => Some(Self::Authenticator(code.to_owned())),
             (false, false) => Some(Self::Recovery(code.to_owned())),
@@ -90,6 +114,22 @@ impl SecondFactor {
             Self::Recovery(_) => Factor::Recovery,
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum StartBrowserSignInError {
+    #[error("make the browser hand-off secrets")]
+    Handoff(#[source] getrandom::Error),
+    #[error("listen for the browser's redirect")]
+    Listen(#[source] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AccountRequestError {
+    #[error("remove the Forge")]
+    RemoveForge(#[source] NetworkError),
+    #[error("sign out everywhere")]
+    SignOutEverywhere(#[source] NetworkError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,51 +169,14 @@ enum Message {
         tokio::sync::oneshot::Sender<()>,
     ),
     Finalized(u64, Result<SessionToken, NetworkError>),
-    BrowserFailed(u64, String),
+    BrowserFailed(u64, Provider, BrowserFailure),
     Synced(
         u64,
         Result<AccountProfile, NetworkError>,
         tokio::sync::oneshot::Sender<()>,
     ),
-    Binding(u64, Result<AeBinding>, bool),
+    Binding(u64, Result<AeBinding, BindForgeError>, bool),
     Request(u64, Result<(), NetworkError>, bool),
-}
-
-#[cfg(feature = "test-support")]
-pub struct TestAccountTransitions {
-    sender: crate::core::delivery::DeliverySender<Message>,
-    generation: u64,
-}
-#[cfg(feature = "test-support")]
-impl TestAccountTransitions {
-    pub async fn profile(&self, profile: AccountProfile) {
-        let (applied, _) = tokio::sync::oneshot::channel();
-        assert!(
-            self.sender
-                .send(Message::Synced(self.generation, Ok(profile), applied))
-                .await
-                .is_ok(),
-            "account closed before the test transition was delivered"
-        );
-    }
-    pub async fn transport_failure(&self) {
-        drop(self.transport_failure_ack().await);
-    }
-    pub async fn transport_failure_ack(&self) -> tokio::sync::oneshot::Receiver<()> {
-        let (applied, acknowledged) = tokio::sync::oneshot::channel();
-        assert!(
-            self.sender
-                .send(Message::Synced(
-                    self.generation,
-                    Err(NetworkError::Transport),
-                    applied
-                ))
-                .await
-                .is_ok(),
-            "account closed before the test transition was delivered"
-        );
-        acknowledged
-    }
 }
 
 pub(crate) struct AccountEvents {
@@ -181,8 +184,10 @@ pub(crate) struct AccountEvents {
 }
 impl Drop for AccountEvents {
     fn drop(&mut self) {
-        if let Some(applied) = self.applied.take() {
-            let _ = applied.send(());
+        if let Some(applied) = self.applied.take()
+            && applied.send(()).is_err()
+        {
+            tracing::debug!("the account task stopped waiting for its transition to apply");
         }
     }
 }
@@ -196,7 +201,7 @@ pub struct Account {
     session: Option<SessionToken>,
     onboarding: Option<OnboardingRecord>,
     binding: Option<AeBinding>,
-    last_error: Option<String>,
+    last_error: Option<crate::core::Problem>,
     delivery: Delivery<Message>,
     sign_in: Option<AbortOnDropHandle<()>>,
     sync: Option<AbortOnDropHandle<()>>,
@@ -209,6 +214,17 @@ pub struct Account {
     events: crate::core::store::Effects,
 }
 
+fn core_url_override() -> Option<String> {
+    match std::env::var(CORE_URL_OVERRIDE) {
+        Ok(url) => Some(url),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(%error, "read {CORE_URL_OVERRIDE}; using the saved or default Core URL");
+            None
+        }
+    }
+}
+
 impl Account {
     pub(crate) fn new(
         files: EditorFiles,
@@ -217,23 +233,33 @@ impl Account {
         order: AdmissionOrder,
         effects: crate::core::store::Effects,
     ) -> Self {
-        let (stored, unreadable) = match read_json::<AccountFile>(&files.dir.join("account.json")) {
-            Ok(stored) => (stored, None),
-            Err(error) => (AccountFile::default(), Some(error)),
-        };
+        let (stored, unreadable) =
+            match config_file::read::<AccountFile>(&files.dir.join("account.json")) {
+                Ok(stored) => (stored, None),
+                Err(error) => (AccountFile::default(), Some(error)),
+            };
         let base_url = services
             .core_url
             .clone()
             .or(stored.base_url)
-            .or_else(|| std::env::var("AST_CORE_BASE_URL").ok())
+            .or_else(core_url_override)
             .filter(|url| !url.trim().is_empty())
             .unwrap_or_else(|| "https://api.artisan.st".to_owned());
-        let http = CoreSessionClient::new(&base_url).expect("Core HTTP client builds");
+        let http = CoreSessionClient::new(&base_url).expect(
+            "invariant: a rustls client with fixed settings and bundled roots always builds",
+        );
         let session = stored.session_token.map(SessionToken::new);
         let phase = match (unreadable, &session, stored.profile) {
-            (Some(error), _, _) => AccountPhase::Error {
-                message: format!("Couldn't read the saved sign-in: {error:#}"),
-            },
+            (Some(error), _, _) => {
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "couldn't read the saved sign-in"
+                );
+                AccountPhase::Error {
+                    message: "Couldn't read the sign-in saved on this device. Sign in again."
+                        .to_owned(),
+                }
+            }
             (None, Some(_), Some(profile)) => AccountPhase::Authenticated {
                 profile,
                 verified: false,
@@ -251,7 +277,12 @@ impl Account {
             onboarding: None,
             binding: None,
             last_error: None,
-            delivery: Delivery::with_order(NonZeroUsize::new(64).unwrap(), wake, order),
+            delivery: Delivery::with_order(
+                NonZeroUsize::new(64)
+                    .expect("invariant: the account delivery capacity is non-zero"),
+                wake,
+                order,
+            ),
             sign_in: None,
             sync: None,
             forge: None,
@@ -272,23 +303,20 @@ impl Account {
         this
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn test_sync_sender(&mut self) -> TestAccountTransitions {
-        self.sync = None;
-        self.sync_generation = self.sync_generation.wrapping_add(1);
-        TestAccountTransitions {
-            sender: self.delivery.sender(),
-            generation: self.sync_generation,
-        }
-    }
-
     pub fn phase(&self) -> &AccountPhase {
         &self.phase
     }
     pub fn profile(&self) -> Option<&AccountProfile> {
         match &self.phase {
             AccountPhase::Authenticated { profile, .. } => Some(profile),
-            _ => None,
+            AccountPhase::SignedOut
+            | AccountPhase::Restoring
+            | AccountPhase::Requesting
+            | AccountPhase::Browser { .. }
+            | AccountPhase::Pending { .. }
+            | AccountPhase::EmailApproved { .. }
+            | AccountPhase::Finalizing { .. }
+            | AccountPhase::Error { .. } => None,
         }
     }
     pub fn machines(&self) -> Vec<AccountMachine> {
@@ -296,14 +324,11 @@ impl Account {
             .map(|profile| access::live_machines(profile).cloned().collect())
             .unwrap_or_default()
     }
-    pub fn entry_gate(&self) -> EntryGate {
+    pub(crate) fn entry_gate(&self) -> EntryGate {
         access::entry_gate(&self.phase)
     }
-    pub fn last_error(&self) -> Option<&str> {
-        self.last_error.as_deref()
-    }
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    pub const fn last_error(&self) -> Option<&crate::core::Problem> {
+        self.last_error.as_ref()
     }
     pub fn local_forge(&self) -> LocalForge {
         match (&self.binding, self.profile()) {
@@ -328,11 +353,11 @@ impl Account {
     pub(crate) fn services(&self) -> &Services {
         &self.services
     }
-    fn changed(&mut self) {
+    fn changed(&self) {
         self.events.account(AccountEvent::Changed);
     }
-    fn persist(&self) -> Result<()> {
-        write_json(
+    fn persist(&self) -> Result<(), config_file::WriteConfigError> {
+        config_file::write(
             &self.files.dir.join("account.json"),
             &AccountFile {
                 base_url: Some(self.base_url.clone()),
@@ -350,13 +375,17 @@ impl Account {
             Ok(record) => self.onboarding = record,
             Err(error) => {
                 self.onboarding = None;
-                self.last_error = Some(format!("{error:#}"));
+                self.last_error = Some(crate::core::Problem::caused_by(
+                    "Couldn't read your account's setup progress.",
+                    &error,
+                ));
             }
         }
     }
-    pub(crate) fn report(&mut self, error: &anyhow::Error) {
-        tracing::warn!("{error:#}");
-        self.last_error = Some(format!("{error:#}"));
+    pub(crate) fn report(&mut self, headline: &str, error: &dyn std::error::Error) {
+        let problem = crate::core::Problem::caused_by(headline, error);
+        tracing::warn!(error = ?problem.detail(), "account step failed");
+        self.last_error = Some(problem);
         self.changed();
     }
     fn clear_session(&mut self) {
@@ -372,7 +401,10 @@ impl Account {
         self.forge_generation += 1;
         self.request_generation += 1;
         if let Err(error) = self.persist() {
-            self.last_error = Some(format!("{error:#}"));
+            self.last_error = Some(crate::core::Problem::caused_by(
+                "Couldn't save your sign-in on this device.",
+                &error,
+            ));
         }
         self.changed();
     }
@@ -432,10 +464,8 @@ impl Account {
                         _ => SignInStatus::Expired,
                     }
                 });
-                let done = !matches!(
-                    &result,
-                    Err(NetworkError::Transport) | Ok(SignInStatus::Waiting)
-                );
+                let done = !matches!(&result, Ok(SignInStatus::Waiting))
+                    && !result.as_ref().is_err_and(NetworkError::is_unreachable);
                 let (applied, acknowledged) = tokio::sync::oneshot::channel();
                 if sender
                     .send(Message::Status(
@@ -459,12 +489,19 @@ impl Account {
 
     pub fn sign_in_with(&mut self, provider: Provider, auth_origin: &str) -> Option<String> {
         let started = Handoff::generate()
-            .map_err(|error| anyhow::anyhow!("{error}"))
-            .and_then(|handoff| Ok((handoff, browser::bind()?)));
+            .map_err(StartBrowserSignInError::Handoff)
+            .and_then(|handoff| {
+                browser::bind()
+                    .map(|bound| (handoff, bound))
+                    .map_err(StartBrowserSignInError::Listen)
+            });
         let (handoff, (listener, port)) = match started {
             Ok(started) => started,
             Err(error) => {
-                tracing::warn!("couldn't start browser sign-in: {error:#}");
+                tracing::warn!(
+                    "couldn't start browser sign-in: {}",
+                    ::diagnostics::chain(&error)
+                );
                 self.phase = AccountPhase::Error {
                     message: format!("Couldn't start {} sign-in. Try again.", provider.name()),
                 };
@@ -482,26 +519,23 @@ impl Account {
         self.last_error = None;
         self.changed();
         self.sign_in = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let arrival = tokio::time::timeout(
-                BROWSER_TIMEOUT,
-                browser::receive(listener, handoff.state(), &origin),
-            )
-            .await;
-            let message = match arrival {
-                Ok(Ok(Arrival::Code(code))) => Message::Finalized(
+            let callback =
+                browser::receive(listener, handoff.state(), &origin, BROWSER_TIMEOUT).await;
+            let message = match callback {
+                Ok(Callback::Code(code)) => Message::Finalized(
                     generation,
                     http.desktop_redeem(&code, handoff.verifier())
                         .await
                         .map(|(_, token)| token),
                 ),
-                Ok(Ok(Arrival::Problem(problem))) => {
-                    Message::BrowserFailed(generation, problem.message(provider))
+                Ok(Callback::Problem(problem)) => {
+                    Message::BrowserFailed(generation, provider, BrowserFailure::Problem(problem))
                 }
-                Ok(Ok(Arrival::Unrelated)) | Ok(Err(_)) | Err(_) => {
-                    Message::BrowserFailed(generation, Problem::Unfinished.message(provider))
+                Err(error) => {
+                    Message::BrowserFailed(generation, provider, BrowserFailure::Receive(error))
                 }
             };
-            let _ = sender.send(message).await;
+            sender.offer(message).await;
         })));
         Some(url)
     }
@@ -528,14 +562,14 @@ impl Account {
                 .magic_finalize(&id, &secret, totp.as_deref(), recovery.as_deref())
                 .await
                 .map(|(_, token)| token);
-            let _ = sender.send(Message::Finalized(generation, result)).await;
+            sender.offer(Message::Finalized(generation, result)).await;
         })));
     }
     pub fn clear_rejection(&mut self) {
-        if let AccountPhase::EmailApproved { rejected, .. } = &mut self.phase {
-            if rejected.take().is_some() {
-                self.changed();
-            }
+        if let AccountPhase::EmailApproved { rejected, .. } = &mut self.phase
+            && rejected.take().is_some()
+        {
+            self.changed();
         }
     }
     pub fn dismiss_error(&mut self) {
@@ -578,7 +612,10 @@ impl Account {
             let http = self.http.clone();
             runtime().spawn(async move {
                 if let Err(error) = http.revoke_current(&session).await {
-                    tracing::warn!("couldn't revoke the session at Core: {error:#}");
+                    tracing::warn!(
+                        "couldn't revoke the session at Core: {}",
+                        ::diagnostics::chain(&error)
+                    );
                 }
             });
         }
@@ -604,8 +641,8 @@ impl Account {
                 Some(id) => http.revoke_machine(&session, &id).await,
                 None => http.revoke_all_sessions(&session).await,
             };
-            let _ = sender
-                .send(Message::Request(generation, result, remove))
+            sender
+                .offer(Message::Request(generation, result, remove))
                 .await;
         })));
     }
@@ -619,8 +656,8 @@ impl Account {
         );
         self.forge = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = enrollment::read_status(&ae, &core).await;
-            let _ = sender
-                .send(Message::Binding(generation, result, false))
+            sender
+                .offer(Message::Binding(generation, result, false))
                 .await;
         })));
     }
@@ -631,7 +668,7 @@ impl Account {
         let replace = matches!(self.local_forge(), LocalForge::Revoked { .. });
         self.forge_generation += 1;
         let generation = self.forge_generation;
-        let (ae, core, http, sender) = (
+        let (ae, core_url, http, sender) = (
             self.services.ae.clone(),
             self.base_url.clone(),
             self.http.clone(),
@@ -640,32 +677,33 @@ impl Account {
         self.last_error = None;
         self.forge = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = async {
-                let mut args = vec!["account", "--core", &core, "enroll", "--json"];
+                let mut args = vec!["account", "--core_url", &core_url, "enroll", "--json"];
                 if replace {
                     args.push("--replace");
                 }
+                let printed = ae.run(&args).await.map_err(BindForgeError::Enroll)?;
                 let enrollment: enrollment::Enrollment =
-                    serde_json::from_str(&ae.run(&args).await?)
-                        .context("read what `ae account enroll` printed")?;
+                    serde_json::from_str(&printed).map_err(BindForgeError::ReadEnrollment)?;
                 let code = artisan_account::normalise_code(&enrollment.code);
-                http.claim_enrollment(&session, &code).await?;
-                enrollment::read_status(&ae, &core).await
+                http.claim_enrollment(&session, &code)
+                    .await
+                    .map_err(BindForgeError::Claim)?;
+                enrollment::read_status(&ae, &core_url).await
             }
-            .await
-            .context("enroll this machine's Forge");
-            let _ = sender
-                .send(Message::Binding(generation, result, false))
+            .await;
+            sender
+                .offer(Message::Binding(generation, result, false))
                 .await;
         })));
     }
-    pub fn claim_code(&mut self, code: String) {
+    pub fn claim_code(&mut self, code: &str) {
         let Some(session) = self.session.clone() else {
             return;
         };
-        let code = artisan_account::normalise_code(&code);
+        let code = artisan_account::normalise_code(code);
         self.forge_generation += 1;
         let generation = self.forge_generation;
-        let (ae, core, http, sender) = (
+        let (ae, core_url, http, sender) = (
             self.services.ae.clone(),
             self.base_url.clone(),
             self.http.clone(),
@@ -674,13 +712,14 @@ impl Account {
         self.last_error = None;
         self.forge = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = async {
-                http.claim_enrollment(&session, &code).await?;
-                enrollment::read_status(&ae, &core).await
+                http.claim_enrollment(&session, &code)
+                    .await
+                    .map_err(BindForgeError::Claim)?;
+                enrollment::read_status(&ae, &core_url).await
             }
-            .await
-            .context("claim the Forge's code");
-            let _ = sender
-                .send(Message::Binding(generation, result, false))
+            .await;
+            sender
+                .offer(Message::Binding(generation, result, false))
                 .await;
         })));
     }
@@ -707,218 +746,291 @@ impl Account {
                     "--account-id",
                     &account_id,
                 ])
-                .await?;
+                .await
+                .map_err(|source| BindForgeError::Confirm {
+                    account: account_id.clone(),
+                    source,
+                })?;
                 enrollment::read_status(&ae, &core).await
             }
-            .await
-            .context("confirm this machine's Forge");
-            let _ = sender
-                .send(Message::Binding(generation, result, true))
+            .await;
+            sender
+                .offer(Message::Binding(generation, result, true))
                 .await;
         })));
     }
-    #[cfg(feature = "test-support")]
-    pub(crate) fn sign_in_for_tests(&mut self, profile: AccountProfile, machine_id: String) {
-        self.sign_in = None;
-        self.sync = None;
-        self.forge = None;
-        self.request = None;
-        self.sign_generation = self.sign_generation.wrapping_add(1);
-        self.sync_generation = self.sync_generation.wrapping_add(1);
-        self.forge_generation = self.forge_generation.wrapping_add(1);
-        self.request_generation = self.request_generation.wrapping_add(1);
-        self.session = Some(SessionToken::new("test-session".to_owned()));
-        self.onboarding = Some(OnboardingRecord {
-            account_id: profile.account_id.clone(),
-            base_url: self.base_url.clone(),
-            machine_id,
-        });
-        self.binding = Some(enrollment::AeBinding::Unenrolled);
-        self.phase = AccountPhase::Authenticated {
-            profile,
-            verified: true,
-        };
-        self.changed();
-    }
-
     pub(crate) fn peek_order(&mut self) -> Option<u64> {
         self.delivery.peek_order()
     }
+    pub(crate) fn admitted(&self) -> usize {
+        self.delivery.admitted()
+    }
     pub(crate) fn drain(&mut self) -> AccountEvents {
-        let mut acknowledgement = None;
-        for message in self.delivery.drain_one().into_iter() {
-            match message {
-                Message::Requested(generation, email, result, applied)
-                    if generation == self.sign_generation =>
-                {
-                    acknowledgement = Some(applied);
-                    match result {
-                        Ok((request_id, request_secret, expires_at)) => {
-                            self.phase = AccountPhase::Pending {
-                                request_id,
-                                request_secret,
-                                email,
-                                expires_at,
-                            };
-                            self.changed();
-                        }
-                        Err(error) => self.fail_sign_in(&error),
-                    }
-                }
-                Message::Status(generation, id, secret, result, applied)
-                    if generation == self.sign_generation =>
-                {
-                    acknowledgement = Some(applied);
-                    match result {
-                        Err(NetworkError::Transport) => {}
-                        Err(error) => self.fail_sign_in(&error),
-                        Ok(SignInStatus::Waiting) => {}
-                        Ok(SignInStatus::Approved {
-                            email,
-                            totp_required,
-                        }) => {
-                            self.phase = AccountPhase::EmailApproved {
-                                approval: Approval {
-                                    request_id: id,
-                                    request_secret: secret,
-                                    email,
-                                    totp_required,
-                                },
-                                rejected: None,
-                            };
-                            self.changed();
-                        }
-                        Ok(SignInStatus::Expired) => {
-                            self.phase = AccountPhase::Error {
-                                message: "That sign-in request expired. Request a new link."
-                                    .to_owned(),
-                            };
-                            self.changed();
-                        }
-                    }
-                }
-                Message::Finalized(generation, result) if generation == self.sign_generation => {
-                    match result {
-                        Ok(token) => {
-                            self.session = Some(token);
-                            self.phase = AccountPhase::Restoring;
-                            if let Err(error) = self.persist() {
-                                self.last_error = Some(format!("{error:#}"));
-                            }
-                            self.changed();
-                            self.refresh();
-                        }
-                        Err(error) => match (&self.phase, &error) {
-                            (
-                                AccountPhase::Finalizing {
-                                    approval,
-                                    factor: Some(factor),
-                                },
-                                NetworkError::Core { code, .. },
-                            ) if code == "forbidden" => {
-                                self.phase = AccountPhase::EmailApproved {
-                                    approval: approval.clone(),
-                                    rejected: Some(factor.kind()),
-                                };
-                                self.changed();
-                            }
-                            _ => self.fail_sign_in(&error),
-                        },
-                    }
-                }
-                Message::BrowserFailed(generation, message) if generation == self.sign_generation => {
-                    self.sign_in = None;
-                    self.phase = AccountPhase::Error { message };
-                    self.changed();
-                }
-                Message::Synced(generation, result, applied)
-                    if generation == self.sync_generation =>
-                {
-                    acknowledgement = Some(applied);
-                    match result {
-                        Ok(profile) => {
-                            let switched = self
-                                .profile()
-                                .is_none_or(|old| old.account_id != profile.account_id);
-                            self.phase = AccountPhase::Authenticated {
-                                profile,
-                                verified: true,
-                            };
-                            if switched {
-                                self.load_onboarding();
-                            }
-                            if let Err(error) = self.persist() {
-                                self.last_error = Some(format!("{error:#}"));
-                            }
-                            if self.binding.is_none() && self.forge.is_none() {
-                                self.refresh_local_forge();
-                            }
-                            self.events.account(AccountEvent::Synced);
-                            self.changed();
-                        }
-                        Err(error) if is_session_invalid(&error) => self.clear_session(),
-                        Err(error) => {
-                            tracing::warn!(?error, "Core unreachable; keeping the saved session");
-                            if let AccountPhase::Authenticated { verified, .. } = &mut self.phase {
-                                *verified = false;
-                            }
-                            self.changed();
-                        }
-                    }
-                }
-                Message::Binding(generation, result, refresh)
-                    if generation == self.forge_generation =>
-                {
-                    self.forge = None;
-                    match result {
-                        Ok(binding) => {
-                            self.binding = Some(binding);
-                            self.changed();
-                            if refresh {
-                                self.refresh();
-                            }
-                        }
-                        Err(error) => self.report(&error),
-                    }
-                }
-                Message::Request(generation, result, remove)
-                    if generation == self.request_generation =>
-                {
-                    self.request = None;
-                    match result {
-                        Ok(()) if remove => self.refresh(),
-                        Ok(()) => self.clear_session(),
-                        Err(error) if is_session_invalid(&error) => self.clear_session(),
-                        Err(error) => self.report(&anyhow::Error::new(error).context(if remove {
-                            "remove the Forge"
-                        } else {
-                            "sign out everywhere"
-                        })),
-                    }
-                }
-                _ => {}
+        let applied = self
+            .delivery
+            .drain_one()
+            .and_then(|message| self.apply(message));
+        AccountEvents { applied }
+    }
+    fn apply(&mut self, message: Message) -> Option<tokio::sync::oneshot::Sender<()>> {
+        match message {
+            Message::Requested(generation, email, result, applied)
+                if generation == self.sign_generation =>
+            {
+                self.requested(email, result);
+                Some(applied)
+            }
+            Message::Status(generation, id, secret, result, applied)
+                if generation == self.sign_generation =>
+            {
+                self.status(id, secret, result);
+                Some(applied)
+            }
+            Message::Finalized(generation, result) if generation == self.sign_generation => {
+                self.finalized(result);
+                None
+            }
+            Message::BrowserFailed(generation, provider, failure)
+                if generation == self.sign_generation =>
+            {
+                self.sign_in = None;
+                self.phase = AccountPhase::Error {
+                    message: failure.message(provider),
+                };
+                self.changed();
+                None
+            }
+            Message::Synced(generation, result, applied) if generation == self.sync_generation => {
+                self.synced(result);
+                Some(applied)
+            }
+            Message::Binding(generation, result, refresh)
+                if generation == self.forge_generation =>
+            {
+                self.bound(result, refresh);
+                None
+            }
+            Message::Request(generation, result, remove)
+                if generation == self.request_generation =>
+            {
+                self.request_finished(result, remove);
+                None
+            }
+            Message::Requested(..)
+            | Message::Status(..)
+            | Message::Finalized(..)
+            | Message::BrowserFailed(..)
+            | Message::Synced(..)
+            | Message::Binding(..)
+            | Message::Request(..) => None,
+        }
+    }
+    fn requested(&mut self, email: String, result: Result<(String, String, String), NetworkError>) {
+        match result {
+            Ok((request_id, request_secret, expires_at)) => {
+                self.phase = AccountPhase::Pending {
+                    request_id,
+                    request_secret,
+                    email,
+                    expires_at,
+                };
+                self.changed();
+            }
+            Err(error) => self.fail_sign_in(&error),
+        }
+    }
+    fn status(&mut self, id: String, secret: String, result: Result<SignInStatus, NetworkError>) {
+        match result {
+            Err(error) if error.is_unreachable() => {}
+            Err(error) => self.fail_sign_in(&error),
+            Ok(SignInStatus::Waiting) => {}
+            Ok(SignInStatus::Approved {
+                email,
+                totp_required,
+            }) => {
+                self.phase = AccountPhase::EmailApproved {
+                    approval: Approval {
+                        request_id: id,
+                        request_secret: secret,
+                        email,
+                        totp_required,
+                    },
+                    rejected: None,
+                };
+                self.changed();
+            }
+            Ok(SignInStatus::Expired) => {
+                self.phase = AccountPhase::Error {
+                    message: "That sign-in request expired. Request a new link.".to_owned(),
+                };
+                self.changed();
             }
         }
-        AccountEvents {
-            applied: acknowledgement,
+    }
+    fn finalized(&mut self, result: Result<SessionToken, NetworkError>) {
+        match result {
+            Ok(token) => {
+                self.session = Some(token);
+                self.phase = AccountPhase::Restoring;
+                if let Err(error) = self.persist() {
+                    self.last_error = Some(crate::core::Problem::caused_by(
+                        "Couldn't save your sign-in on this device.",
+                        &error,
+                    ));
+                }
+                self.changed();
+                self.refresh();
+            }
+            Err(error) => match (&self.phase, &error) {
+                (
+                    AccountPhase::Finalizing {
+                        approval,
+                        factor: Some(factor),
+                    },
+                    NetworkError::Core { code, .. },
+                ) if code == "forbidden" => {
+                    self.phase = AccountPhase::EmailApproved {
+                        approval: approval.clone(),
+                        rejected: Some(factor.kind()),
+                    };
+                    self.changed();
+                }
+                _ => self.fail_sign_in(&error),
+            },
+        }
+    }
+    fn synced(&mut self, result: Result<AccountProfile, NetworkError>) {
+        match result {
+            Ok(profile) => {
+                let switched = self
+                    .profile()
+                    .is_none_or(|old| old.account_id != profile.account_id);
+                self.phase = AccountPhase::Authenticated {
+                    profile,
+                    verified: true,
+                };
+                if switched {
+                    self.load_onboarding();
+                }
+                if let Err(error) = self.persist() {
+                    self.last_error = Some(crate::core::Problem::caused_by(
+                        "Couldn't save your sign-in on this device.",
+                        &error,
+                    ));
+                }
+                if self.binding.is_none() && self.forge.is_none() {
+                    self.refresh_local_forge();
+                }
+                self.events.account(AccountEvent::Synced);
+                self.changed();
+            }
+            Err(error) if is_session_invalid(&error) => self.clear_session(),
+            Err(error) => {
+                tracing::warn!(?error, "Core unreachable; keeping the saved session");
+                if let AccountPhase::Authenticated { verified, .. } = &mut self.phase {
+                    *verified = false;
+                }
+                self.changed();
+            }
+        }
+    }
+    fn bound(&mut self, result: Result<AeBinding, BindForgeError>, refresh: bool) {
+        self.forge = None;
+        match result {
+            Ok(binding) => {
+                self.binding = Some(binding);
+                self.changed();
+                if refresh {
+                    self.refresh();
+                }
+            }
+            Err(error) => self.report("Couldn't connect this Forge to your account.", &error),
+        }
+    }
+    fn request_finished(&mut self, result: Result<(), NetworkError>, remove: bool) {
+        self.request = None;
+        match result {
+            Ok(()) if remove => self.refresh(),
+            Ok(()) => self.clear_session(),
+            Err(error) if is_session_invalid(&error) => self.clear_session(),
+            Err(source) if remove => self.report(
+                "Couldn't remove this Forge from your account.",
+                &AccountRequestError::RemoveForge(source),
+            ),
+            Err(source) => self.report(
+                "Couldn't sign out everywhere.",
+                &AccountRequestError::SignOutEverywhere(source),
+            ),
         }
     }
 }
 
-pub fn is_session_invalid(error: &NetworkError) -> bool {
+#[derive(Debug)]
+enum BrowserFailure {
+    Problem(Problem),
+    Receive(ReceiveError),
+}
+
+impl BrowserFailure {
+    fn message(&self, provider: Provider) -> String {
+        match self {
+            Self::Problem(problem) => problem.message(provider),
+            Self::Receive(error) => {
+                tracing::warn!(
+                    provider = provider.name(),
+                    "browser sign-in failed: {}",
+                    ::diagnostics::chain(error)
+                );
+                match error {
+                    ReceiveError::TimedOut { .. } => Problem::Unfinished.message(provider),
+                    ReceiveError::Listen(_) | ReceiveError::Accept(_) => format!(
+                        "Couldn't receive the {} sign-in from your browser. Press the button to try again.",
+                        provider.name()
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn is_session_invalid(error: &NetworkError) -> bool {
     matches!(error, NetworkError::Core { code, .. } if matches!(code.as_str(), "unauthorized" | "gone"))
 }
 fn plain_failure(error: &NetworkError) -> String {
-    match error {
-        NetworkError::Core { code, .. } => match code.as_str() {
-            "bad_request" => "Core could not use that request. Check the email address.",
-            "unauthorized" => "That sign-in link is invalid or already used.",
-            "forbidden" => "The email link is not approved yet, or the second factor is missing.",
-            "gone" => "That sign-in request expired. Request a new link.",
-            "rate_limited" => "Too many attempts. Wait a while and try again.",
-            _ => "Core could not do that right now. Try again in a bit.",
-        },
-        NetworkError::Transport => "Could not reach Core. Check the connection and try again.",
+    match error.core_code() {
+        Some("bad_request") => "Core could not use that request. Check the email address.",
+        Some("unauthorized") => "That sign-in link is invalid or already used.",
+        Some("forbidden") => "The email link is not approved yet, or the second factor is missing.",
+        Some("gone") => "That sign-in request expired. Request a new link.",
+        Some("rate_limited") => "Too many attempts. Wait a while and try again.",
+        Some(_) => "Core could not do that right now. Try again in a bit.",
+        None => "Could not reach Core. Check the connection and try again.",
     }
     .to_owned()
+}
+
+impl std::fmt::Debug for AccountPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::SignedOut => "SignedOut",
+            Self::Restoring => "Restoring",
+            Self::Requesting => "Requesting",
+            Self::Browser { .. } => "Browser",
+            Self::Pending { .. } => "Pending",
+            Self::EmailApproved { .. } => "EmailApproved",
+            Self::Finalizing { .. } => "Finalizing",
+            Self::Authenticated { .. } => "Authenticated",
+            Self::Error { .. } => "Error",
+        };
+        f.debug_struct(name).finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for Account {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account")
+            .field("phase", &self.phase)
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }

@@ -9,3 +9,6 @@ mod settings_nav;
 
 #[path = "sidebar/geometry.rs"]
 mod geometry;
+
+#[path = "sidebar/usage/view.rs"]
+mod usage_view;

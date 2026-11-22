@@ -11,19 +11,31 @@ use aqua_ui::{
 };
 use editor_assets::AssetId;
 
-use super::{
-    asset::source_asset_glyph,
-    button::{Button, ButtonVariant},
-    motion::MotionCurve,
-    theme::ArtisanTheme,
-};
+use super::{asset::source_asset_glyph, button::Button, motion::MotionCurve, theme::ArtisanTheme};
 
 const HOLD: Duration = Duration::from_millis(1_500);
 const SWAP: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub struct CopyRequest {
+    text: String,
+    controller: CodeCopyController,
+}
+
+impl CopyRequest {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn copied(&self, now: Instant) -> Instant {
+        self.controller.copied(now);
+        now + HOLD
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum CopyEffect {
-    Clipboard(String),
+    Clipboard(CopyRequest),
     RequestFrame,
     WakeAt(Instant),
 }
@@ -35,7 +47,7 @@ pub struct CopyFrame {
     pub wake_at: Option<Instant>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CodeCopyController {
     copied_at: Rc<Cell<Option<Instant>>>,
 }
@@ -81,7 +93,17 @@ pub struct CodeCopyButton {
     effect: Rc<dyn Fn(CopyEffect)>,
 }
 
+impl std::fmt::Debug for CodeCopyButton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeCopyButton").finish_non_exhaustive()
+    }
+}
+
 impl CodeCopyButton {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the copy button stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         id: impl Into<Key>,
         source: impl Into<String>,
@@ -134,14 +156,12 @@ impl CodeCopyButton {
         let effect = self.effect;
         let source = self.source;
         Button::icon(self.id, self.theme, AssetId::TABLER_COPY, "Copy code")
-            .variant(ButtonVariant::Ghost)
             .icon_slot(icon.build())
             .on_activate(move |_| {
-                let now = Instant::now();
-                controller.copied(now);
-                effect(CopyEffect::Clipboard(source.clone()));
-                effect(CopyEffect::RequestFrame);
-                effect(CopyEffect::WakeAt(now + HOLD));
+                effect(CopyEffect::Clipboard(CopyRequest {
+                    text: source.clone(),
+                    controller: controller.clone(),
+                }));
             })
             .build()
     }

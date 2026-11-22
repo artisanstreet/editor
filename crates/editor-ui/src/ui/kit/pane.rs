@@ -13,7 +13,7 @@ pub enum Seam {
 
 impl Seam {
     #[must_use]
-    pub fn insets(self) -> Insets {
+    fn insets(self) -> Insets {
         match self {
             Self::Around => Insets::uniform(LINE),
             Self::TopLeft => Insets {

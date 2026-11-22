@@ -11,10 +11,10 @@ pub enum Face {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextSpec {
-    pub size: f32,
-    pub line: f32,
+    size: f32,
+    line: f32,
     pub weight: FontWeight,
-    pub face: Face,
+    face: Face,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -38,16 +38,6 @@ const fn sans(size: f32, line: f32, weight: FontWeight) -> TextSpec {
 }
 
 impl TextRole {
-    pub const ALL: [Self; 7] = [
-        Self::Caption,
-        Self::Label,
-        Self::LabelStrong,
-        Self::Title,
-        Self::Prose,
-        Self::Code,
-        Self::Heading,
-    ];
-
     #[must_use]
     pub const fn spec(self) -> TextSpec {
         match self {
@@ -71,6 +61,11 @@ impl TextRole {
     }
 
     #[must_use]
+    pub fn line_px(self, theme: &ArtisanTheme) -> f32 {
+        theme.typography.size(self.spec().line)
+    }
+
+    #[must_use]
     pub fn style(self, theme: &ArtisanTheme) -> TextStyle {
         let spec = self.spec();
         let family = match spec.face {
@@ -79,12 +74,17 @@ impl TextRole {
         };
         TextStyle {
             families: vec![FontFamily::Named(family.to_owned())],
-            size_px: spec.size,
-            line_height_px: spec.line,
+            size_px: theme.typography.size(spec.size),
+            line_height_px: self.line_px(theme),
             weight: spec.weight,
             letter_spacing_em: match self {
                 Self::Prose => Some(theme.typography.tracking_em),
-                _ => None,
+                Self::Caption
+                | Self::Label
+                | Self::LabelStrong
+                | Self::Title
+                | Self::Code
+                | Self::Heading => None,
             },
             ..TextStyle::default()
         }

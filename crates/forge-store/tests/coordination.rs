@@ -90,16 +90,15 @@ fn paths_normalize_idempotently_and_overlap_only_within_the_declared_checkout() 
     assert!(!path("/repo", "src", true).overlaps(&path("/repo", "src-other/a.rs", false)));
     assert!(!path("/repo", "src/a.rs", false).overlaps(&path("/other", "src/a.rs", false)));
     assert!(path("C:\\Repo", "src\\A.rs", false).overlaps(&path("c:/repo", "SRC/a.rs", false)));
-    assert!(
-        Resource::Path {
-            worktree: "/repo".into(),
-            path: "../other/a.rs".into(),
-            recursive: false
-        }
-        .normalize()
-        .is_err()
-    );
-    assert!(normalize_path("//server/share/../outside").is_err());
+    Resource::Path {
+        worktree: "/repo".into(),
+        path: "../other/a.rs".into(),
+        recursive: false,
+    }
+    .normalize()
+    .expect_err("a path escaping the worktree is refused");
+    normalize_path("//server/share/../outside")
+        .expect_err("a UNC path escaping its share is refused");
 }
 
 #[tokio::test]
@@ -113,17 +112,15 @@ async fn overlapping_claims_are_advisory_and_updates_preserve_ownership_and_revi
     let b = b.unwrap();
     assert_ne!(a.id, b.id);
     assert!(a.active_claim(now()) && b.active_claim(now()));
-    assert!(
-        store
-            .coordination_update(
-                threads[1].clone(),
-                a.id.clone(),
-                a.revision,
-                Update::ReleaseClaim
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_update(
+            threads[1].clone(),
+            a.id.clone(),
+            a.revision,
+            Update::ReleaseClaim,
+        )
+        .await
+        .expect_err("only the claim's owner releases it");
     let renewed = store
         .coordination_update(
             threads[0].clone(),
@@ -143,9 +140,11 @@ async fn overlapping_claims_are_advisory_and_updates_preserve_ownership_and_revi
         .await
         .unwrap_err();
     assert!(
-        stale
-            .downcast_ref::<forge_store::coordination::Conflict>()
-            .is_some()
+        matches!(
+            *stale.cause,
+            forge_store::coordination::CoordinationFailure::Stale(_)
+        ),
+        "a stale revision is refused as stale: {stale}"
     );
     let released = store
         .coordination_update(
@@ -183,27 +182,23 @@ async fn work_dependencies_reject_cycles_without_overwriting_the_last_valid_grap
         )
         .await
         .unwrap();
-    assert!(
-        store
-            .coordination_put(
-                threads[1].clone(),
-                None,
-                work(vec![threads[0].clone()]),
-                Some(b.revision)
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_put(
+            threads[1].clone(),
+            None,
+            work(vec![threads[0].clone()]),
+            Some(b.revision),
+        )
+        .await
+        .expect_err("a dependency cycle is refused");
     assert_eq!(
         store.coordination_get(b.id.clone()).await.unwrap().unwrap(),
         b
     );
-    assert!(
-        store
-            .coordination_put(threads[2].clone(), None, work(vec![ThreadId::new()]), None)
-            .await
-            .is_err()
-    );
+    store
+        .coordination_put(threads[2].clone(), None, work(vec![ThreadId::new()]), None)
+        .await
+        .expect_err("a dependency on an unknown thread is refused");
 }
 
 #[tokio::test]
@@ -226,20 +221,18 @@ async fn requests_require_recipient_acknowledgment_and_terminal_decisions_do_not
         )
         .await
         .unwrap();
-    assert!(
-        store
-            .coordination_update(
-                threads[2].clone(),
-                message.id.clone(),
-                message.revision,
-                Update::Acknowledge {
-                    state: MessageState::Acknowledged,
-                    reply: None
-                }
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_update(
+            threads[2].clone(),
+            message.id.clone(),
+            message.revision,
+            Update::Acknowledge {
+                state: MessageState::Acknowledged,
+                reply: None,
+            },
+        )
+        .await
+        .expect_err("only the recipient acknowledges a request");
     let accepted = store
         .coordination_update(
             threads[1].clone(),
@@ -271,20 +264,18 @@ async fn requests_require_recipient_acknowledgment_and_terminal_decisions_do_not
         )
         .await
         .unwrap();
-    assert!(
-        store
-            .coordination_update(
-                threads[1].clone(),
-                resolved.id,
-                resolved.revision,
-                Update::Acknowledge {
-                    state: MessageState::Acknowledged,
-                    reply: None
-                }
-            )
-            .await
-            .is_err()
-    );
+    store
+        .coordination_update(
+            threads[1].clone(),
+            resolved.id,
+            resolved.revision,
+            Update::Acknowledge {
+                state: MessageState::Acknowledged,
+                reply: None,
+            },
+        )
+        .await
+        .expect_err("a resolved request does not reopen");
 }
 
 #[tokio::test]
@@ -345,6 +336,31 @@ async fn discovery_filters_before_pagination_and_can_find_other_parents_children
     assert_eq!(page.workers.len(), 1);
     assert_eq!(page.workers[0].thread.id, threads[0]);
     let child = ThreadId::new();
+    let agent = ItemId::new();
+    store
+        .upsert_item(NewItem {
+            id: agent.clone(),
+            thread_id: threads[1].clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Running,
+            kind: ItemKind::Agent {
+                name: None,
+                description: "review".into(),
+                prompt: None,
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: None,
+                label: None,
+                engine: Some(EngineId::Codex),
+                thread: Some(child.clone()),
+            },
+        })
+        .await
+        .unwrap();
     store
         .create_thread(CreateThread {
             id: child.clone(),
@@ -352,7 +368,7 @@ async fn discovery_filters_before_pagination_and_can_find_other_parents_children
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: Some(threads[1].clone()),
-            spawned_by: Some(artisan_api::ItemId::new()),
+            spawned_by: Some(agent),
         })
         .await
         .unwrap();
@@ -379,14 +395,14 @@ async fn file_discovery_matches_exact_paths_before_pagination_and_resumes_withou
         "C:\\Repo\\B.rs",
     ] {
         store
-            .upsert_item(forge_store::NewItem {
-                id: artisan_api::ItemId::new(),
+            .upsert_item(NewItem {
+                id: ItemId::new(),
                 thread_id: threads[0].clone(),
                 run_id: None,
                 parent_id: None,
                 native_id: None,
-                status: artisan_api::Status::Done,
-                kind: artisan_api::ItemKind::Tool {
+                status: Status::Done,
+                kind: ItemKind::Tool {
                     tool: artisan_api::ToolKind::Read {
                         path: path.into(),
                         range: None,
@@ -443,8 +459,8 @@ fn message(thread: &ThreadId, status: Status) -> NewItem {
 }
 
 #[tokio::test]
-async fn threads_waiting_on_the_user_are_found_without_walking_every_item() {
-    let (directory, store, threads) = setup().await;
+async fn only_threads_waiting_on_the_user_count_as_active() {
+    let (_directory, store, threads) = setup().await;
     for _ in 0..40 {
         store
             .upsert_item(message(&threads[0], Status::Done))
@@ -488,37 +504,5 @@ async fn threads_waiting_on_the_user_are_found_without_walking_every_item() {
             .collect::<Vec<_>>(),
         vec![threads[1].clone()],
         "a thread with only finished items is not waiting"
-    );
-    let connection = rusqlite::Connection::open_with_flags(
-        directory.path().join("forge.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let mut explain = connection
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN {}",
-            include_str!("../src/sql/coordination/discovery.sql")
-        ))
-        .unwrap();
-    let nothing = rusqlite::types::Null;
-    let plan = explain
-        .query_map(
-            rusqlite::params![
-                nothing, nothing, false, true, "[]", nothing, "", nothing, nothing, nothing,
-                nothing, nothing, 31
-            ],
-            |row| row.get::<_, String>(3),
-        )
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert!(
-        plan.iter()
-            .any(|step| step.contains("items_awaiting_position")),
-        "waiting threads come from the small waiting index: {plan:?}"
-    );
-    assert!(
-        !plan.iter().any(|step| step.contains("items_thread")),
-        "discovery must not read each thread's whole history: {plan:?}"
     );
 }

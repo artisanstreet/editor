@@ -5,7 +5,7 @@ use super::viewport::Input;
 use aqua_ui::collection::{CollectionRevealAlignment, FollowMode, FollowState};
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct SmoothScroll {
     pub destination: Option<f32>,
     pub frame: Option<Instant>,
@@ -27,6 +27,14 @@ impl SmoothScroll {
         self.frame = None;
     }
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the flags are independent frame conditions from separate owners; the step is the one place that combines them"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the scroll stepper reads every follow, landing and disclosure flag of the current frame"
+    )]
     pub fn step(
         &mut self,
         following: bool,
@@ -82,7 +90,11 @@ pub fn wants_older(viewport_height: f32, scroll_offset: f32) -> bool {
     viewport_height > 0.0 && -scroll_offset < 1200.0
 }
 
-pub fn scrolled(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scroll observation needs the viewport geometry plus the source-prefix and gap flags at once"
+)]
+pub(crate) fn scrolled(
     conversation: &Conversation,
     top: usize,
     viewport_height: f32,
@@ -125,20 +137,17 @@ pub fn scrolled(
     inputs
 }
 
-pub fn gap_visible(rows: &[(Row, u64)], revealed_count: usize, last_below_viewport: bool) -> bool {
+pub(crate) fn gap_visible(
+    rows: &[(Row, u64)],
+    revealed_count: usize,
+    last_below_viewport: bool,
+) -> bool {
     revealed_count > 0
         && matches!(rows.get(revealed_count - 1), Some((Row::Gap, _)))
         && !last_below_viewport
 }
 
-pub fn row_destination(
-    collection: &aqua_ui::collection_runtime::CollectionState,
-    index: usize,
-) -> Option<f32> {
-    (index < collection.len()).then(|| -collection.offset_of(index))
-}
-
-pub const TRANSCRIPT: &str = "conversation-transcript";
+const TRANSCRIPT: &str = "conversation-transcript";
 
 pub fn following_tail(ui: &aqua::UiApp) -> bool {
     ui.is_collection_following_tail(TRANSCRIPT) == Some(true)

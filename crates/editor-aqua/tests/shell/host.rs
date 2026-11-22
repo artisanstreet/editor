@@ -1,6 +1,8 @@
-use artisan_api::{ItemId, LiveTarget, ThreadId};
+use artisan_api::{Item, ItemId, ItemKind, LiveTarget, Phase, Status, ThreadId};
 use editor_aqua::core::{CoreEvent, HostEvent, HostId};
-use editor_aqua::shell::host::event_changes_view;
+use editor_aqua::shell::host::event_cause;
+use editor_aqua::shell::refresh::Refresh;
+use std::sync::Arc;
 
 fn host(name: &str) -> HostId {
     HostId(name.to_owned())
@@ -29,22 +31,71 @@ fn host_event(host_name: &str, event: HostEvent) -> CoreEvent {
     }
 }
 
-#[test]
-fn live_deltas_of_the_open_thread_rebuild() {
-    let watched = (host("a"), thread("open"));
-    assert!(event_changes_view(&live("a", "open"), Some(&watched)));
+fn stored(host_name: &str, thread_name: &str, status: Status) -> CoreEvent {
+    host_event(
+        host_name,
+        HostEvent::Item(Arc::new(Item {
+            id: ItemId::from("reply"),
+            thread_id: thread(thread_name),
+            run_id: None,
+            position: Default::default(),
+            seq: Default::default(),
+            parent_id: None,
+            status,
+            created_at: Default::default(),
+            updated_at: Default::default(),
+            kind: ItemKind::AssistantMessage {
+                text: "An answer".to_owned().into(),
+                phase: Phase::Final,
+            },
+        })),
+    )
+}
+
+fn refresh(
+    event: &CoreEvent,
+    watched: Option<&(HostId, ThreadId)>,
+    on_screen: bool,
+) -> Option<Refresh> {
+    event_cause(event, watched, on_screen).map(editor_aqua::shell::refresh::Cause::refresh)
 }
 
 #[test]
-fn live_deltas_of_other_threads_do_not_rebuild() {
+fn live_deltas_of_the_open_thread_refresh_only_the_transcript() {
     let watched = (host("a"), thread("open"));
-    assert!(!event_changes_view(&live("a", "other"), Some(&watched)));
-    assert!(!event_changes_view(&live("b", "open"), Some(&watched)));
-    assert!(!event_changes_view(&live("a", "open"), None));
+    assert_eq!(
+        refresh(&live("a", "open"), Some(&watched), true),
+        Some(Refresh::Transcript)
+    );
 }
 
 #[test]
-fn thread_summaries_of_other_threads_rebuild_the_lists() {
+fn stored_updates_to_the_open_thread_refresh_only_the_transcript() {
+    let watched = (host("a"), thread("open"));
+    for status in [Status::Running, Status::Done] {
+        assert_eq!(
+            refresh(&stored("a", "open", status), Some(&watched), true),
+            Some(Refresh::Transcript)
+        );
+    }
+}
+
+#[test]
+fn updates_to_threads_not_shown_change_nothing() {
+    let watched = (host("a"), thread("open"));
+    for event in [
+        live("a", "other"),
+        live("b", "open"),
+        stored("a", "other", Status::Done),
+        stored("b", "open", Status::Running),
+    ] {
+        assert_eq!(refresh(&event, Some(&watched), true), None);
+    }
+    assert_eq!(refresh(&live("a", "open"), None, true), None);
+}
+
+#[test]
+fn other_threads_changing_refresh_the_sidebar_and_transcript_beside_an_open_thread() {
     let watched = (host("a"), thread("open"));
     for event in [
         HostEvent::ThreadChanged {
@@ -54,20 +105,43 @@ fn thread_summaries_of_other_threads_rebuild_the_lists() {
             thread_id: thread("other"),
         },
     ] {
-        assert!(event_changes_view(
-            &host_event("a", event),
-            Some(&watched)
-        ));
+        assert_eq!(
+            refresh(&host_event("a", event), Some(&watched), true),
+            Some(Refresh::Sections)
+        );
     }
 }
 
 #[test]
-fn host_wide_and_core_events_rebuild() {
+fn thread_changes_off_the_thread_screen_or_to_the_open_thread_rebuild_the_window() {
     let watched = (host("a"), thread("open"));
-    assert!(event_changes_view(
-        &host_event("a", HostEvent::Changed),
-        Some(&watched)
-    ));
-    assert!(event_changes_view(&CoreEvent::SettingsChanged, None));
-    assert!(event_changes_view(&CoreEvent::ScreenChanged, None));
+    let other = || HostEvent::ThreadChanged {
+        thread_id: thread("other"),
+    };
+    let open = || HostEvent::ThreadChanged {
+        thread_id: thread("open"),
+    };
+    assert_eq!(
+        refresh(&host_event("a", other()), Some(&watched), false),
+        Some(Refresh::Workspace)
+    );
+    assert_eq!(
+        refresh(&host_event("a", open()), Some(&watched), true),
+        Some(Refresh::Workspace)
+    );
+}
+
+#[test]
+fn host_wide_and_core_events_rebuild_the_window() {
+    let watched = (host("a"), thread("open"));
+    for event in [
+        host_event("a", HostEvent::Changed),
+        CoreEvent::SettingsChanged,
+        CoreEvent::ScreenChanged,
+    ] {
+        assert_eq!(
+            refresh(&event, Some(&watched), true),
+            Some(Refresh::Workspace)
+        );
+    }
 }

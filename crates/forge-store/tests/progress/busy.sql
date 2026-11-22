@@ -1,0 +1,2 @@
+WITH RECURSIVE counted(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counted WHERE n < 200000)
+SELECT count(*) FROM counted

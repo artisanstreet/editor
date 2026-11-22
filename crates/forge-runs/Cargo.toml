@@ -2,15 +2,19 @@
 name = "forge-runs"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Live runs: start, steer, answer and cancel engine runs, and turn engine events into stored items."
 
+[lib]
+doctest = false
+
 [dependencies]
-anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
-forge-content = { path = "../forge-content" }
-forge-engines = { path = "../forge-engines" }
-forge-store = { path = "../forge-store" }
+artisan-api.workspace = true
+diagnostics.workspace = true
+forge-content.workspace = true
+forge-engines.workspace = true
+forge-store.workspace = true
 fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,10 +28,27 @@ hex.workspace = true
 tracing.workspace = true
 dirs.workspace = true
 pulldown-cmark.workspace = true
+sha2.workspace = true
+uuid.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
 [dev-dependencies]
+axum.workspace = true
 futures.workspace = true
+rusqlite.workspace = true
+test-support = { workspace = true, features = ["tokio", "http", "logs"] }
 image = { workspace = true, features = ["png"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

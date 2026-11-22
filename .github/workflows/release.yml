@@ -1,7 +1,7 @@
 name: Release
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   schedule:
     - cron: '0 22 * * *'
     - cron: '0 23 * * *'
@@ -19,6 +19,11 @@ on:
 permissions:
   contents: read
   actions: read
+env:
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-cpu=x86-64-v3 -C target-feature=+crt-static
+  CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+  ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
+  CARGO_BUILD_JOBS: 2
 concurrency:
   group: release
   cancel-in-progress: false
@@ -63,8 +68,23 @@ jobs:
           if grep -qx 'skip=true' "$GITHUB_OUTPUT"; then exit 0; fi
           sha="$(git rev-parse "$RELEASE_REF^{commit}")"
           python3 src/release.py gate --repository "$GITHUB_REPOSITORY" --sha "$sha"
-  unix:
+  advisories:
     needs: select
+    if: needs.select.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Dependency advisories
+        run: nix shell --inputs-from . nixpkgs#cargo-deny --command cargo deny --locked check advisories
+  unix:
+    needs: [select, advisories]
     if: needs.select.outputs.skip != 'true'
     strategy:
       fail-fast: false
@@ -91,10 +111,6 @@ jobs:
       RELEASE_VERSION: ${{ needs.select.outputs.version }}
       EDITOR_COMMIT: ${{ needs.select.outputs.sha }}
       ARTISAN_COMMIT: ${{ needs.select.outputs.sha }}
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-cpu=x86-64-v3 -C target-feature=+crt-static
-      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
-      ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
-      CARGO_BUILD_JOBS: 2
       RELEASE_TARGET: ${{ matrix.target }}
       RELEASE_OS: ${{ matrix.os }}
       RELEASE_ARCH: ${{ matrix.arch }}
@@ -103,29 +119,9 @@ jobs:
         with:
           ref: ${{ needs.select.outputs.sha }}
           persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: ./.github/actions/release-build
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
-          restore-keys: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
-      - name: Prepare the native build
-        run: |
-          key="$(python3 src/release.py key)"
-          echo "ARTISAN_RELEASE_PUBLIC_KEY_HEX=$key" >> "$GITHUB_ENV"
-          python3 src/release.py stamp --version "$RELEASE_VERSION"
-          rustup target add "$RELEASE_TARGET"
-          rustup show
-      - name: Build Forge
-        run: cargo build --locked --release --target "$RELEASE_TARGET" -p forge
-      - name: Build ae carrying Forge
-        run: ARTISAN_FORGE_PAYLOAD="$PWD/target/$RELEASE_TARGET/release/forge" cargo build --locked --release --target "$RELEASE_TARGET" -p ae
-      - name: Check the installer version contract
-        run: |
-          actual="$("target/$RELEASE_TARGET/release/ae" --version)"
-          [[ "$actual" == "ae $RELEASE_VERSION ($ARTISAN_COMMIT, $RELEASE_TARGET)" ]]
+          target: ${{ matrix.target }}
       - name: Package ae
         run: python3 src/release.py package --binaries "target/$RELEASE_TARGET/release" --output dist --app ae --os "$RELEASE_OS" --arch "$RELEASE_ARCH"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -133,6 +129,15 @@ jobs:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: symbols-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            target/${{ matrix.target }}/release/*.dwp
+            target/${{ matrix.target }}/release/*.dSYM
+          if-no-files-found: error
+          retention-days: 90
   windows:
     needs: [select, unix]
     strategy:
@@ -159,10 +164,6 @@ jobs:
       RELEASE_VERSION: ${{ needs.select.outputs.version }}
       EDITOR_COMMIT: ${{ needs.select.outputs.sha }}
       ARTISAN_COMMIT: ${{ needs.select.outputs.sha }}
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-cpu=x86-64-v3 -C target-feature=+crt-static
-      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
-      ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
-      CARGO_BUILD_JOBS: 2
       RELEASE_TARGET: ${{ matrix.target }}
       RELEASE_OS: ${{ matrix.os }}
       RELEASE_ARCH: ${{ matrix.arch }}
@@ -171,33 +172,13 @@ jobs:
         with:
           ref: ${{ needs.select.outputs.sha }}
           persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
-          restore-keys: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
-      - name: Prepare the native build
-        run: |
-          key="$(python3 src/release.py key)"
-          echo "ARTISAN_RELEASE_PUBLIC_KEY_HEX=$key" >> "$GITHUB_ENV"
-          python3 src/release.py stamp --version "$RELEASE_VERSION"
-          rustup target add "$RELEASE_TARGET"
-          rustup show
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-linux-${{ matrix.arch }}
           path: linux
-      - name: Build Forge
-        run: cargo build --locked --release --target "$RELEASE_TARGET" -p forge
-      - name: Build ae carrying Forge
-        run: ARTISAN_FORGE_PAYLOAD="$(cygpath -m "$PWD")/target/$RELEASE_TARGET/release/forge.exe" cargo build --locked --release --target "$RELEASE_TARGET" -p ae
-      - name: Check the installer version contract
-        run: |
-          actual="$("target/$RELEASE_TARGET/release/ae.exe" --version)"
-          [[ "$actual" == "ae $RELEASE_VERSION ($ARTISAN_COMMIT, $RELEASE_TARGET)" ]]
+      - uses: ./.github/actions/release-build
+        with:
+          target: ${{ matrix.target }}
       - name: Locate Windows shader compilers
         shell: pwsh
         run: |
@@ -218,6 +199,13 @@ jobs:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: symbols-${{ matrix.os }}-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/*.pdb
+          if-no-files-found: error
+          retention-days: 90
   assemble:
     needs: [select, unix, windows]
     runs-on: ubuntu-24.04
@@ -230,6 +218,15 @@ jobs:
         with:
           pattern: release-*
           path: downloads
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - name: Describe each shipped binary's dependencies
+        env:
+          RELEASE_VERSION: ${{ needs.select.outputs.version }}
+        run: |
+          python3 src/release.py stamp --version "$RELEASE_VERSION"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" cargo cyclonedx --format json --spec-version 1.5 --target all
       - name: Validate and assemble the complete release
         env:
           RELEASE_VERSION: ${{ needs.select.outputs.version }}
@@ -240,6 +237,7 @@ jobs:
           name: release-complete-unsigned
           path: dist/
           if-no-files-found: error
+          retention-days: 7
   publish:
     needs: [select, assemble]
     environment: release
@@ -268,6 +266,7 @@ jobs:
           ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
         run: python3 src/release.py sign --output dist
       - name: Publish the verified release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.ARTISAN_RELEASE_GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.select.outputs.tag }}
@@ -276,32 +275,61 @@ jobs:
           ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
         run: |
           test -n "$GH_TOKEN"
+          immutable="$(python3 src/release.py tag --version "$RELEASE_VERSION")"
           listed="$(python3 src/release.py assets --output dist)"
           mapfile -t assets <<< "$listed"
           if [[ "$RELEASE_TAG" == nightly ]]; then
-            immutable="nightly-$RELEASE_SHA"
             if gh release view "$immutable" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > immutable-draft; then
               if [[ "$(cat immutable-draft)" == true ]]; then
                 gh release upload "$immutable" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-                gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
               fi
             else
               gh release create "$immutable" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --prerelease --latest=false --draft --title "Artisan nightly $RELEASE_VERSION" --notes "Source commit: $RELEASE_SHA"
-              gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
             fi
-            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$immutable" --jq .sha)"
+            gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          else
+            [[ "$immutable" == "$RELEASE_TAG" ]]
+            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
             [[ "$actual" == "$RELEASE_SHA" ]]
-            gh release download "$immutable" --repo "$GITHUB_REPOSITORY" --dir immutable-release
-            python3 src/release.py verify --output immutable-release --sha "$RELEASE_SHA"
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > existing-draft; then
+              if [[ "$(cat existing-draft)" == true ]]; then
+                gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+              fi
+            else
+              gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Artisan $RELEASE_VERSION" --generate-notes
+            fi
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          fi
+          actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$immutable" --jq .sha)"
+          [[ "$actual" == "$RELEASE_SHA" ]]
+          gh release download "$immutable" --repo "$GITHUB_REPOSITORY" --dir immutable-release
+          python3 src/release.py verify --output immutable-release --sha "$RELEASE_SHA"
+          if [[ "$RELEASE_TAG" == nightly ]]; then
             if ! gh release view nightly --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
               gh release create nightly --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --prerelease --latest=false --draft --title 'Artisan nightly' --notes 'Nightly builds from successful master CI.'
             fi
+            current=""
+            if gh release view nightly --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx release.json; then
+              gh release download nightly --repo "$GITHUB_REPOSITORY" --pattern release.json --dir current-nightly
+              current="$(jq -r .version current-nightly/release.json)"
+            fi
+            if [[ "$(python3 src/release.py advances --candidate "$RELEASE_VERSION" --current "$current")" != true ]]; then
+              echo "The nightly channel already points at $current; leaving it there."
+              exit 0
+            fi
             listed="$(python3 src/release.py assets --output immutable-release)"
             mapfile -t rolling <<< "$listed"
+            files=()
+            pointer=""
+            for asset in "${rolling[@]}"; do
+              if [[ "$asset" == immutable-release/release.json#* ]]; then pointer="$asset"; else files+=("$asset"); fi
+            done
+            test -n "$pointer"
+            gh release upload nightly "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload nightly "$pointer" --repo "$GITHUB_REPOSITORY" --clobber
             gh release view nightly --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r stale; do
               if [[ ! -e "immutable-release/$stale" ]]; then gh release delete-asset nightly "$stale" --repo "$GITHUB_REPOSITORY" --yes; fi
             done
-            gh release upload nightly "${rolling[@]}" --repo "$GITHUB_REPOSITORY" --clobber
             stable="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --exclude-drafts --json tagName --jq '[.[] | select(.tagName != "nightly")] | length')"
             if [[ "$stable" == 0 ]]; then
               gh release edit nightly --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest --title "Artisan nightly $RELEASE_VERSION"
@@ -310,13 +338,18 @@ jobs:
             fi
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$RELEASE_SHA" -F force=true
           else
-            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
-            [[ "$actual" == "$RELEASE_SHA" ]]
-            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > existing-draft; then
-              [[ "$(cat existing-draft)" == true ]]
-              gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            if latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2> latest-error)"; then
+              current=""
+              if [[ "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then current="${latest#v}"; fi
+            elif grep -q 'HTTP 404' latest-error; then
+              current=""
             else
-              gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Artisan $RELEASE_VERSION" --generate-notes
+              cat latest-error >&2
+              exit 1
             fi
-            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+            if [[ "$(python3 src/release.py advances --candidate "$RELEASE_VERSION" --current "$current")" == true ]]; then
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --latest
+            else
+              echo "The latest release is already $current; $RELEASE_VERSION stays published without becoming the latest."
+            fi
           fi

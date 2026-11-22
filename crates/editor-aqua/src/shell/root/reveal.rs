@@ -6,6 +6,9 @@ use crate::sidebar::list::HitRow;
 use aqua::UiApp;
 use aqua_core::NodeId;
 use aqua_ui::tree::NodeKind;
+use icu_casemap::CaseMapper;
+use icu_normalizer::DecomposingNormalizerBorrowed;
+use icu_normalizer::properties::CanonicalCombiningClassMapBorrowed;
 use std::time::{Duration, Instant};
 
 const PATIENCE: Duration = Duration::from_secs(8);
@@ -29,31 +32,95 @@ enum Stage {
 
 pub(super) struct Reveal {
     hit: HitRow,
+    needle: String,
     stage: Stage,
     until: Instant,
 }
 
 impl Reveal {
-    pub(super) fn new(hit: HitRow) -> Self {
+    pub(super) fn new(hit: HitRow, now: Instant) -> Self {
+        let needle = fold(&hit.needle);
         Self {
             hit,
+            needle,
             stage: Stage::Opening,
-            until: Instant::now() + PATIENCE,
+            until: now + PATIENCE,
         }
     }
 }
 
+fn fold(text: &str) -> String {
+    let folded = CaseMapper::new().fold_string(text);
+    DecomposingNormalizerBorrowed::new_nfd()
+        .normalize(&folded)
+        .into_owned()
+}
+
 pub fn find_ignoring_case(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
-    let start = text
-        .to_ascii_lowercase()
-        .find(&needle.to_ascii_lowercase())?;
-    Some(start..start + needle.len())
+    find_folded(text, &fold(needle))
+}
+
+struct Folded {
+    text: String,
+    clusters: Vec<(usize, usize)>,
+}
+
+impl Folded {
+    fn new(text: &str) -> Self {
+        let classes = CanonicalCombiningClassMapBorrowed::new();
+        let mut starts: Vec<usize> = text
+            .char_indices()
+            .filter(|(offset, character)| *offset == 0 || classes.get_u8(*character) == 0)
+            .map(|(offset, _)| offset)
+            .collect();
+        starts.push(text.len());
+        let mut folded = String::with_capacity(text.len());
+        let mut clusters = Vec::with_capacity(starts.len());
+        for pair in starts.windows(2) {
+            let [start, end] = *pair else {
+                unreachable!("invariant: windows(2) yields pairs");
+            };
+            clusters.push((folded.len(), start));
+            folded.push_str(&fold(
+                text.get(start..end)
+                    .expect("invariant: cluster starts fall on char boundaries"),
+            ));
+        }
+        clusters.push((folded.len(), text.len()));
+        Self {
+            text: folded,
+            clusters,
+        }
+    }
+
+    fn original(&self, folded: usize) -> Option<usize> {
+        match self.clusters.binary_search_by_key(&folded, |(at, _)| *at) {
+            Ok(index) => self.clusters.get(index).map(|(_, original)| *original),
+            Err(_inside_a_cluster) => None,
+        }
+    }
+}
+
+fn find_folded(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let folded = Folded::new(text);
+    folded.clusters.iter().find_map(|(at, start)| {
+        folded
+            .text
+            .get(*at..)
+            .filter(|rest| rest.starts_with(needle))
+            .and_then(|_| folded.original(at + needle.len()))
+            .map(|end| *start..end)
+    })
 }
 
 pub fn estimated_row(rows: &[usize], depth: (u32, u32)) -> Option<usize> {
     let last = rows.len().checked_sub(1)?;
     let share = f64::from(depth.0) / f64::from(depth.1.max(1));
-    let index = (share.clamp(0.0, 1.0) * last as f64).round() as usize;
+    let index =
+        crate::measure::saturate_row((share.clamp(0.0, 1.0) * crate::measure::index(last)).round());
     rows.get(index.min(last)).copied()
 }
 
@@ -71,39 +138,39 @@ fn shown_match(
     ui: &UiApp,
     conversation: &Conversation,
     hit: &HitRow,
+    needle: &str,
 ) -> Option<(NodeId, std::ops::Range<usize>)> {
     item_rows(conversation, hit).into_iter().find_map(|index| {
         let key = crate::conversation::view::transcript::row_key_hash(
             &conversation.rows.get(index)?.0.key(),
         );
         let mut pending = vec![ui.tree().sole_node_with_key(key)?];
-        let mut texts = Vec::new();
         while let Some(node) = pending.pop() {
             let record = ui.tree().get(node)?;
             pending.extend(record.children.iter().rev().copied());
-            if let NodeKind::Text(text) = &record.kind {
-                texts.push((node, find_ignoring_case(text.text(), &hit.needle)));
+            if let NodeKind::Text(text) = &record.kind
+                && let Some(found) = find_folded(text.text(), needle)
+            {
+                return Some((node, found));
             }
         }
-        texts
-            .into_iter()
-            .find_map(|(node, found)| Some((node, found?)))
+        None
     })
 }
 
 impl RootViews {
     pub(super) fn advance_reveal(&mut self, shell: &mut Shell, ui: &mut UiApp) -> Progress {
-        let Some(reveal) = self.reveal.as_mut() else {
+        let Some(reveal) = self.navigation_views.reveal.as_mut() else {
             return Progress::Idle;
         };
-        let now = Instant::now();
+        let now = shell.core.clock().now();
         if now >= reveal.until {
             tracing::info!(
                 thread = %reveal.hit.thread,
                 item = %reveal.hit.item,
                 "gave up selecting a search hit in the transcript"
             );
-            self.reveal = None;
+            self.navigation_views.reveal = None;
             return Progress::Idle;
         }
         let core = &shell.core;
@@ -132,13 +199,12 @@ impl RootViews {
             }
             Stage::Jumped(_) | Stage::Deepened => {}
         }
-        if let Some((node, range)) = shown_match(ui, conversation, &reveal.hit) {
-            return match ui.select_text(node, range) {
-                true => {
-                    self.reveal = None;
-                    Progress::Acted
-                }
-                false => Progress::Waiting,
+        if let Some((node, range)) = shown_match(ui, conversation, &reveal.hit, &reveal.needle) {
+            return if ui.select_text(node, range) {
+                self.navigation_views.reveal = None;
+                Progress::Acted
+            } else {
+                Progress::Waiting
             };
         }
         if let Stage::Jumped(at) = reveal.stage

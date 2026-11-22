@@ -48,6 +48,7 @@ impl StickerFrame {
         let glue = MotionCurve::EaseInOut.sample_f32((t - GLUE_START) / GLUE);
         let curl = 1.0 - MotionCurve::SmoothOut.sample_f32((t - CURL_START) / CURL);
         let press = ((t - PRESS_START) / (1.0 - PRESS_START)).clamp(0.0, 1.0);
+        #[expect(clippy::cast_possible_truncation, reason = "a sine is in -1..=1")]
         let press = (press * std::f64::consts::PI).sin() as f32 * PRESS_SCALE;
         Self {
             opacity: MotionCurve::EaseOut.sample_f32(t / FADE),
@@ -57,10 +58,9 @@ impl StickerFrame {
             curl,
         }
     }
-
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sticker {
     pub elapsed: Duration,
 }
@@ -70,8 +70,13 @@ const STEPS: u32 = 24;
 fn keys<T>(value: impl Fn(StickerFrame) -> T) -> Vec<Key<T>> {
     (0..=STEPS)
         .map(|step| {
+            #[expect(clippy::cast_precision_loss, reason = "STEPS is 24")]
             let at = step as f32 / STEPS as f32;
-            Key::new(at, value(StickerFrame::at(DURATION.mul_f32(at))), Easing::Linear)
+            Key::new(
+                at,
+                value(StickerFrame::at(DURATION.mul_f32(at))),
+                Easing::Linear,
+            )
         })
         .collect()
 }
@@ -96,7 +101,7 @@ impl Sticker {
     }
 
     #[must_use]
-    pub fn style(self) -> Style {
+    pub(crate) fn style(self) -> Style {
         Style::new().timeline(
             self.timeline()
                 .scale((1.0, 0.0), keys(|frame| frame.scale))
@@ -107,10 +112,16 @@ impl Sticker {
     }
 
     #[must_use]
-    pub fn layers(self, theme: &ArtisanTheme, corners: CornerRadii, curl: bool) -> Vec<Element> {
-        let air = match theme.colors.mode.is_dark() {
-            true => Oklch::new(1.0, 0.0, 0.0),
-            false => Oklch::new(0.0, 0.0, 0.0),
+    pub(crate) fn layers(
+        self,
+        theme: &ArtisanTheme,
+        corners: CornerRadii,
+        curl: bool,
+    ) -> Vec<Element> {
+        let air = if theme.colors.mode.is_dark() {
+            Oklch::new(1.0, 0.0, 0.0)
+        } else {
+            Oklch::new(0.0, 0.0, 0.0)
         };
         let sweep = self
             .timeline()
@@ -183,14 +194,14 @@ fn triangle(bounds: Rect, points: [Point; 3], background: GpuiBackground) -> Dis
 fn dog_ear(theme: &ArtisanTheme, curl: Timeline) -> Element {
     let edge = CURL_EDGE;
     let page = theme.colors.background;
-    let face = theme.colors.gray.step(match theme.colors.mode.is_dark() {
-        true => 6,
-        false => 2,
-    });
-    let fold = theme.colors.gray.step(match theme.colors.mode.is_dark() {
-        true => 3,
-        false => 5,
-    });
+    let face = theme
+        .colors
+        .gray
+        .step(if theme.colors.mode.is_dark() { 6 } else { 2 });
+    let fold = theme
+        .colors
+        .gray
+        .step(if theme.colors.mode.is_dark() { 3 } else { 5 });
     Canvas::new()
         .style(
             Style::new()

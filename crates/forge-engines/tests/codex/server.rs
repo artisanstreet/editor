@@ -1,0 +1,386 @@
+use super::*;
+use std::time::Duration;
+
+async fn run_steering(turn: Turn, steers: &[&str]) -> (crate::Outcome, Vec<EngineEvent>) {
+    let (inputs, inbox) = mpsc::channel(8);
+    let (events, mut received) = mpsc::channel(1024);
+    let io = RunIo {
+        inbox,
+        events,
+        cancel: CancellationToken::new(),
+    };
+    let mut steers = steers.iter();
+    let mut out = Vec::new();
+    let driven = async {
+        let harness = crate::codex::CodexHarness.run(turn, io);
+        tokio::pin!(harness);
+        loop {
+            tokio::select! {
+                outcome = &mut harness => break outcome,
+                Some(event) = received.recv() => {
+                    if matches!(event, EngineEvent::InputAccepted { .. }) {
+                        for text in steers.by_ref() {
+                            let steer = UserInput { text: (*text).to_owned(), ..UserInput::default() };
+                            inputs.send(Input::Steer(steer)).await.unwrap();
+                        }
+                    }
+                    out.push(event);
+                }
+            }
+        }
+    };
+    let outcome = tokio::time::timeout(Duration::from_secs(20), driven)
+        .await
+        .expect("the run ends");
+    (outcome, out)
+}
+
+async fn until_codex_read(fixture: &Fixture, needle: &str) {
+    test_support::wait::eventually(
+        &format!("Codex to read {needle}"),
+        test_support::wait::LIVENESS,
+        || async { fixture.input().contains(needle) },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_codex_server_that_stops_reading_still_delivers_other_threads_replies() {
+    let fixture = Fixture::new();
+    let other = tokio::spawn(run(fixture.turn("slow", None)));
+    until_codex_read(&fixture, "\"text\":\"slow\"").await;
+    let flood = "x".repeat(4 * 1024 * 1024);
+    let jammed = tokio::spawn({
+        let turn = fixture.turn("jam", None);
+        async move { run_steering(turn, &[flood.as_str()]).await }
+    });
+    until_codex_read(&fixture, "\"text\":\"jam\"").await;
+    fixture.release_slow();
+    let (outcome, events) = tokio::time::timeout(Duration::from_secs(10), other)
+        .await
+        .expect("a stalled write for one thread must not stop replies to another")
+        .unwrap();
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    let thread = session(&events);
+    assert!(format!("{events:?}").contains(&format!("reply on {thread} to slow")));
+    jammed.abort();
+}
+
+#[tokio::test]
+async fn a_stalled_handoff_does_not_hold_up_codex_threads_of_another_home() {
+    let fixture = Fixture::new();
+    let stalling = |text: &str, session: Option<&str>| {
+        let mut turn = fixture.turn(text, session);
+        turn.launch
+            .env
+            .push(("ARTISAN_TEST_STALL_RELEASE".into(), "1".into()));
+        turn
+    };
+    let (_, events) = run(stalling("hello", None)).await;
+    let thread = session(&events);
+    let busy = crate::codex::server::attach(&stalling("busy", None))
+        .await
+        .unwrap();
+    let config = fixture.root.join("home/.codex/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "# changed launch\n").unwrap();
+    let resumed = stalling("again", Some(&thread));
+    let handoff =
+        tokio::spawn(async move { crate::codex::server::attach(&resumed).await.map(drop) });
+    until_codex_read(&fixture, "thread/unsubscribe").await;
+    let mut elsewhere = fixture.turn("hello", None);
+    elsewhere.home = fixture.root.join("other-home");
+    let attached = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::codex::server::attach(&elsewhere),
+    )
+    .await
+    .expect("a thread in another home attaches while the handoff waits");
+    assert!(attached.is_ok(), "{:?}", attached.err());
+    assert!(
+        !handoff.is_finished(),
+        "the handoff still waits on its release"
+    );
+    handoff.abort();
+    drop(busy);
+}
+
+#[tokio::test]
+async fn image_steers_during_a_stalled_turn_start_fill_the_queue_and_the_rest_wait() {
+    let fixture = Fixture::with(&[("ARTISAN_TEST_START_DELAY_MS", "1000")]);
+    let image = fixture.root.join("image.webp");
+    std::fs::write(&image, b"pixels").unwrap();
+    let sent = super::super::MAX_QUEUED + 8;
+    let (inputs, inbox) = mpsc::channel(sent);
+    for index in 0..sent {
+        let steer = UserInput {
+            id: artisan_api::ItemId::from(format!("steer-{index:02}")),
+            text: format!("steer {index:02}."),
+            images: vec![image.clone()],
+        };
+        inputs.send(Input::Steer(steer)).await.unwrap();
+    }
+    let (events, mut received) = mpsc::channel(1024);
+    let io = RunIo {
+        inbox,
+        events,
+        cancel: CancellationToken::new(),
+    };
+    let harness = crate::codex::CodexHarness.run(fixture.turn("hello", None), io);
+    let outcome = tokio::time::timeout(Duration::from_secs(20), harness)
+        .await
+        .expect("the run ends");
+    drop(inputs);
+
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    let mut accepted = Vec::new();
+    while let Ok(event) = received.try_recv() {
+        if let EngineEvent::InputAccepted { id } = event {
+            accepted.push(id.to_string());
+        }
+    }
+    let admitted: Vec<String> = (0..super::super::MAX_QUEUED)
+        .map(|index| format!("steer-{index:02}"))
+        .collect();
+    assert_eq!(
+        accepted
+            .iter()
+            .filter(|id| id.starts_with("steer-"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        admitted,
+        "only the steers that fit the queue were taken"
+    );
+    let input = fixture.input();
+    assert!(input.contains(&format!("steer {:02}.", super::super::MAX_QUEUED - 1)));
+    assert!(
+        (super::super::MAX_QUEUED..sent)
+            .all(|index| !input.contains(&format!("steer {index:02}."))),
+        "a held steer reached Codex"
+    );
+}
+
+#[tokio::test]
+async fn image_steers_while_codex_reads_nothing_stay_within_the_budget_and_the_rest_wait() {
+    let fixture = Fixture::new();
+    let (logs, _capturing) = test_support::logs::capture();
+    let image = fixture.root.join("image.webp");
+    std::fs::File::create(&image)
+        .unwrap()
+        .set_len(45 * 1024 * 1024)
+        .unwrap();
+    let steers: Vec<UserInput> = (0..4)
+        .map(|index| UserInput {
+            id: artisan_api::ItemId::from(format!("steer-{index}")),
+            text: format!("steer {index}."),
+            images: if index < 3 {
+                vec![image.clone()]
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+    let (inputs, inbox) = mpsc::channel(steers.len());
+    let (events, mut received) = mpsc::channel(1024);
+    let harness = tokio::spawn(crate::codex::CodexHarness.run(
+        fixture.turn("jam", None),
+        RunIo {
+            inbox,
+            events,
+            cancel: CancellationToken::new(),
+        },
+    ));
+    let mut accepted = Vec::new();
+    while accepted.is_empty() {
+        if let EngineEvent::InputAccepted { id } =
+            received.recv().await.expect("the jammed turn starts")
+        {
+            accepted.push(id.to_string());
+        }
+    }
+    for steer in steers {
+        inputs.send(Input::Steer(steer)).await.unwrap();
+    }
+    test_support::wait::eventually(
+        "Codex to hold the steers past the image budget",
+        test_support::wait::LIVENESS,
+        || {
+            std::future::ready(
+                logs.text()
+                    .matches("the steer waits for the next run")
+                    .count()
+                    == 2,
+            )
+        },
+    )
+    .await;
+    fixture.release_jam();
+    let outcome = tokio::time::timeout(Duration::from_secs(20), harness)
+        .await
+        .expect("the run ends once Codex reads again")
+        .unwrap();
+    drop(inputs);
+
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    while let Ok(event) = received.try_recv() {
+        if let EngineEvent::InputAccepted { id } = event {
+            accepted.push(id.to_string());
+        }
+    }
+    assert_eq!(
+        accepted[1..],
+        ["steer-0", "steer-1"],
+        "only the steers within the image budget were taken"
+    );
+    let input = fixture.input();
+    let next_turn = input
+        .lines()
+        .rfind(|line| line.contains("\"turn/start\""))
+        .unwrap();
+    let (first, second) = (
+        next_turn
+            .find("steer 0.")
+            .expect("the first steer is delivered"),
+        next_turn
+            .find("steer 1.")
+            .expect("the second steer is delivered"),
+    );
+    assert!(first < second, "the steers keep their order");
+    assert!(
+        !input.contains("steer 2.") && !input.contains("steer 3."),
+        "a held steer reached Codex"
+    );
+}
+
+#[tokio::test]
+async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
+    let fixture = Fixture::new();
+    let ((outcome, _), ()) = tokio::join!(
+        run_steering(fixture.turn("slow", None), &["first steer", "second steer"]),
+        fixture.release_slow_once_read("second steer"),
+    );
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    let next_turn = fixture
+        .input()
+        .lines()
+        .rfind(|line| line.contains("\"turn/start\""))
+        .unwrap()
+        .to_owned();
+    let (first, second) = (
+        next_turn
+            .find("first steer")
+            .expect("the first steer is in the next turn"),
+        next_turn
+            .find("second steer")
+            .expect("the second steer is in the next turn"),
+    );
+    assert!(first < second, "{next_turn}");
+}
+
+#[tokio::test]
+async fn a_turn_whose_reader_falls_far_behind_codex_still_gets_its_whole_reply() {
+    let fixture = Fixture::new();
+    let (logs, _capturing) = test_support::logs::capture();
+    let (_inputs, inbox) = mpsc::channel(8);
+    let (events, mut received) = mpsc::channel(1);
+    let harness = tokio::spawn(crate::codex::CodexHarness.run(
+        fixture.turn("flood", None),
+        RunIo {
+            inbox,
+            events,
+            cancel: CancellationToken::new(),
+        },
+    ));
+    let mut streamed = loop {
+        let event = received.recv().await.expect("the turn streams its reply");
+        if let EngineEvent::Live { text, .. } = &event {
+            break text.len();
+        }
+    };
+    let taken_before_the_reader_blocked = 3;
+    let unread_limit = 32;
+    let in_flight = 2;
+    let most_written = taken_before_the_reader_blocked + unread_limit + in_flight;
+    test_support::wait::eventually(
+        "Forge to stop reading Codex while the run reads nothing",
+        test_support::wait::LIVENESS,
+        || std::future::ready(logs.text().contains("Forge stopped reading Codex")),
+    )
+    .await;
+    test_support::wait::eventually(
+        "Codex to write what Forge read before it stopped",
+        test_support::wait::LIVENESS,
+        || {
+            std::future::ready(
+                fixture.flooded_mib() >= taken_before_the_reader_blocked + unread_limit,
+            )
+        },
+    )
+    .await;
+    let written = fixture.flooded_mib();
+    assert!(
+        written <= most_written,
+        "Codex wrote {written} MiB while the run read none, so Forge buffered it all"
+    );
+    assert!(
+        !logs.text().contains("Forge reads Codex again"),
+        "Forge read Codex again although the run had read nothing more"
+    );
+
+    let mib = 1024 * 1024;
+    while let Some(event) = received.recv().await {
+        if let EngineEvent::Live { text, .. } = &event {
+            streamed += text.len();
+        }
+        let written = fixture.flooded_mib();
+        let read = streamed / mib;
+        assert!(
+            written <= most_written + read,
+            "Codex wrote {written} MiB while the run had read {read} MiB, so Forge buffered past its limit"
+        );
+    }
+    let outcome = harness.await.unwrap();
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    assert_eq!(streamed, 48 * mib, "every delta reaches the run");
+}
+
+#[tokio::test]
+async fn a_refused_turn_tells_the_user_why_but_keeps_codexs_words_out_of_the_log() {
+    let fixture = Fixture::new();
+    let (logs, _capturing) = test_support::logs::capture();
+
+    let (outcome, _) = run_steering(fixture.turn("refuse with a secret", None), &[]).await;
+
+    let failure = outcome.failure().map(|failure| failure.message.clone());
+    assert!(
+        failure
+            .as_deref()
+            .is_some_and(|message| message.contains("REFLECTED-SENTINEL")),
+        "the user isn't told why Codex refused the turn: {failure:?}"
+    );
+    let logged = logs.text();
+    assert!(
+        logged.contains("Codex run failed") && !logged.contains("REFLECTED-SENTINEL"),
+        "{logged}"
+    );
+}

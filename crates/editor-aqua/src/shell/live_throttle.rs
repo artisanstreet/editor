@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 pub const INTERVAL: Duration = Duration::from_micros(16_667);
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct LiveThrottle {
     applied: Option<Instant>,
     deferred: bool,

@@ -1,12 +1,9 @@
-//! `forge`: Artisan Forge. Serves its data folder to paired Editors until
-//! stopped. `ae forge start` runs it as a service; run by hand it logs to
-//! the terminal. On Windows it has no console (its autostart would open
-//! one), so it always logs to `forge.log` in its data folder.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use anyhow::{Context, Result};
 use artisan_paths::App;
 use clap::Parser;
+#[cfg(unix)]
+use diagnostics::Destination;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -14,7 +11,6 @@ use std::path::PathBuf;
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
-/// `0.4.2 (abc1234, x86_64-unknown-linux-gnu)`
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -24,19 +20,34 @@ const LONG_VERSION: &str = concat!(
     ")"
 );
 
+const LOG_LIMIT: diagnostics::Limit = diagnostics::Limit {
+    bytes: 16 * 1024 * 1024,
+    archives: 4,
+};
+
 #[derive(Parser)]
 #[command(name = "forge", version = LONG_VERSION, about = "Artisan Forge")]
 struct Cli {
-    /// The data folder (default: Forge's folder under Artisan Street).
-    #[arg(long, value_name = "DIR")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "The data folder (default: Forge's folder under Artisan Street)"
+    )]
     data: Option<PathBuf>,
-    /// Where to listen (default: `listen` in the data folder's config.json,
-    /// else 127.0.0.1:47900).
-    #[arg(long, value_name = "ADDRESS")]
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        help = "Where to listen (default: `listen` in the data folder's config.json, else 127.0.0.1:47900)"
+    )]
     listen: Option<SocketAddr>,
-    /// Append the log to this file instead of the terminal.
-    #[arg(long, value_name = "FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Append the log to this file instead of the terminal"
+    )]
     log: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    schema_version: bool,
     #[cfg(unix)]
     #[arg(long, hide = true)]
     backend: bool,
@@ -50,32 +61,133 @@ struct Cli {
 
 fn main() -> std::process::ExitCode {
     let mut cli = Cli::parse();
-    if cfg!(windows) && cli.log.is_none() {
-        cli.log = cli
-            .data
-            .clone()
-            .or_else(|| App::Forge.data().ok())
-            .map(|data| data.join("forge.log"));
+    if cli.schema_version {
+        use std::io::Write as _;
+        let version = serde_json::to_string(&forge_store::admin::StorageVersion::this_forge())
+            .expect("invariant: the storage version encodes as JSON");
+        return match writeln!(std::io::stdout(), "{version}") {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                report(format_args!("print the storage version: {error}"));
+                std::process::ExitCode::FAILURE
+            }
+        };
     }
-    if let Err(error) = init_tracing(cli.log.as_deref()) {
-        eprintln!("error: {error:#}");
-        return std::process::ExitCode::FAILURE;
+    let data = cli.data.clone().map_or_else(|| App::Forge.data(), Ok);
+    if cfg!(windows)
+        && cli.log.is_none()
+        && let Ok(data) = &data
+    {
+        cli.log = Some(data.join("forge.log"));
     }
-    match run(cli) {
+    let recent = match init_tracing(cli.log.as_deref()) {
+        Ok(recent) => recent,
+        Err(error) => {
+            report(format_args!("{}", diagnostics::chain(&error)));
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let data_dir = match data {
+        Ok(dir) => dir,
+        Err(error) => {
+            tracing::error!("find Forge's data folder: {error}");
+            report(format_args!("find Forge's data folder: {error}"));
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    diagnostics::CrashReporter {
+        app: App::Forge,
+        version: LONG_VERSION,
+        data: data_dir.clone(),
+        recent,
+    }
+    .install();
+    match run(&cli, data_dir) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!("{error:#}");
-            eprintln!("error: {error:#}");
+            let chain = diagnostics::chain(&error);
+            tracing::error!(error = chain, "Forge stopped");
+            report(format_args!("{chain}"));
             std::process::ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
-    let data_dir = match cli.data {
-        Some(dir) => dir,
-        None => App::Forge.data().context("find Forge's data folder")?,
-    };
+#[expect(
+    clippy::print_stderr,
+    reason = "the Forge command reports why it could not run on stderr"
+)]
+fn report(error: std::fmt::Arguments<'_>) {
+    eprintln!("error: {error}");
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RunError {
+    #[error(transparent)]
+    Listen(#[from] forge_http::ConfiguredListenError),
+    #[error("start the async runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error(transparent)]
+    Start(#[from] forge_http::StartError),
+    #[error(transparent)]
+    Platform(#[from] PlatformError),
+}
+
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+enum PlatformError {
+    #[error("open the runtime registry in {}", data.display())]
+    Registry {
+        data: PathBuf,
+        #[source]
+        source: forge_runs::runtime::RegistryFileError,
+    },
+    #[error("a backend Forge needs --ready-file")]
+    NoReadyFile,
+    #[error("write the readiness file {}", path.display())]
+    Ready {
+        path: PathBuf,
+        #[source]
+        source: forge_runs::runtime::RegistryFileError,
+    },
+    #[error("find this Forge executable")]
+    Executable(#[source] std::io::Error),
+    #[error(transparent)]
+    Gateway(#[from] forge_http::upgrade::ServeError),
+}
+
+#[cfg(not(unix))]
+#[derive(Debug, thiserror::Error)]
+enum PlatformError {
+    #[error("remove {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write {}", path.display())]
+    WritePid {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("watch {} for a stop request", path.display())]
+    WatchStop {
+        path: PathBuf,
+        #[source]
+        source: notify::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TracingError {
+    #[error(transparent)]
+    Open(#[from] diagnostics::OpenLogError),
+    #[error(transparent)]
+    Subscribe(#[from] diagnostics::SubscribeError),
+}
+
+fn run(cli: &Cli, data_dir: PathBuf) -> Result<(), RunError> {
     let listen = match cli.listen {
         Some(listen) => listen,
         None => forge_http::configured_listen(&data_dir)?,
@@ -112,39 +224,157 @@ fn run(cli: Cli) -> Result<()> {
         #[cfg(feature = "dhat-heap")]
         drop(profiler);
     };
-    let runtime = tokio::runtime::Runtime::new().context("start the async runtime")?;
+    let runtime = tokio::runtime::Runtime::new().map_err(RunError::Runtime)?;
     let config = forge_http::ServeConfig { data_dir, listen };
     #[cfg(unix)]
     {
         runtime.block_on(async move {
             if cli.backend {
-                let registry = forge_runs::runtime::Registry::open(&config.data_dir)?;
+                let registry =
+                    forge_runs::runtime::Registry::open(&config.data_dir).map_err(|source| {
+                        PlatformError::Registry {
+                            data: config.data_dir.clone(),
+                            source,
+                        }
+                    })?;
                 let server = forge_http::start_generation(config, registry).await?;
                 let ready = cli
                     .ready_file
-                    .context("backend requires a readiness destination")?;
+                    .as_deref()
+                    .ok_or(PlatformError::NoReadyFile)?;
                 forge_http::upgrade::write(
-                    &ready,
+                    ready,
                     &server
                         .hub()
                         .generation()
-                        .context("backend generation missing")?
-                        .member,
-                )?;
-                server.run_until(stop).await
+                        .expect("invariant: a backend Forge runs as a generation")
+                        .member(),
+                )
+                .map_err(|source| PlatformError::Ready {
+                    path: ready.to_owned(),
+                    source,
+                })?;
+                server.run_until(stop).await;
+                Ok(())
             } else {
-                forge_http::upgrade::serve(config, cli.handoff, stop).await
+                let log = cli
+                    .log
+                    .clone()
+                    .map_or(Destination::Stderr, Destination::File);
+                let binary = std::env::current_exe()
+                    .and_then(|binary| binary.canonicalize())
+                    .map_err(PlatformError::Executable)?;
+                forge_http::upgrade::serve(config, binary, cli.handoff.clone(), log, stop)
+                    .await
+                    .map_err(|error| PlatformError::from(error).into())
             }
         })
     }
     #[cfg(not(unix))]
     {
-        runtime.block_on(forge_http::serve(config, stop))
+        runtime.block_on(serve_recorded(config, stop))
     }
 }
 
-/// Resolves when the service manager or the terminal asks Forge to stop
-/// (SIGTERM, SIGINT, Ctrl+C), so live runs settle before it exits.
+#[cfg(not(unix))]
+async fn serve_recorded(
+    config: forge_http::ServeConfig,
+    stop: impl Future<Output = ()>,
+) -> Result<(), RunError> {
+    let stop_file = config.data_dir.join("forge.stop");
+    let pid_file = config.data_dir.join("forge.pid");
+    let own = std::process::id();
+    let forge = forge_http::start(config).await?;
+    let stop_watch = StopWatch::start(&stop_file)?;
+    std::fs::write(&pid_file, own.to_string()).map_err(|source| PlatformError::WritePid {
+        path: pid_file.clone(),
+        source,
+    })?;
+    forge
+        .run_until(async {
+            tokio::select! {
+                () = stop => {},
+                () = stop_watch.requested(&stop_file, own) => tracing::info!("asked to stop by {}", stop_file.display()),
+            }
+        })
+        .await;
+    remove_if_present(&pid_file)?;
+    remove_if_present(&stop_file)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn remove_if_present(path: &std::path::Path) -> Result<(), PlatformError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(PlatformError::Remove {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+#[cfg(not(unix))]
+struct StopWatch {
+    _watcher: notify::RecommendedWatcher,
+    changes: tokio::sync::watch::Receiver<()>,
+}
+
+#[cfg(not(unix))]
+impl StopWatch {
+    fn start(path: &std::path::Path) -> Result<Self, PlatformError> {
+        use notify::Watcher as _;
+        let watching = |source| PlatformError::WatchStop {
+            path: path.to_owned(),
+            source,
+        };
+        let (signal, changes) = tokio::sync::watch::channel(());
+        let mut watcher =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if let Err(error) = event {
+                    tracing::warn!(%error, "watching for a stop request");
+                }
+                signal.send_replace(());
+            })
+            .map_err(watching)?;
+        let folder = path.parent().unwrap_or(path);
+        watcher
+            .watch(folder, notify::RecursiveMode::NonRecursive)
+            .map_err(watching)?;
+        Ok(Self {
+            _watcher: watcher,
+            changes,
+        })
+    }
+
+    async fn requested(mut self, path: &std::path::Path, own: u32) {
+        while !names(path, own) {
+            if self.changes.changed().await.is_err() {
+                unreachable!("invariant: the stop watch outlives its own sender");
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn names(path: &std::path::Path, own: u32) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match text.trim().parse::<u32>() {
+            Ok(pid) => pid == own,
+            Err(error) => {
+                tracing::debug!(%error, "waiting for a whole stop request");
+                false
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "read the stop request");
+            false
+        }
+    }
+}
+
 async fn stop_requested() {
     #[cfg(unix)]
     {
@@ -173,28 +403,12 @@ async fn stop_requested() {
     tracing::info!("asked to stop");
 }
 
-/// Info and up, unless `RUST_LOG` says otherwise. Under systemd stderr is
-/// the journal.
-fn init_tracing(log: Option<&std::path::Path>) -> Result<()> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(false);
+fn init_tracing(log: Option<&std::path::Path>) -> Result<diagnostics::RecentLines, TracingError> {
     match log {
         Some(path) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-            }
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .with_context(|| format!("open {}", path.display()))?;
-            builder.with_writer(std::sync::Mutex::new(file)).init();
+            let file = diagnostics::log_file::open(path, LOG_LIMIT)?;
+            Ok(diagnostics::subscribe("info", std::sync::Mutex::new(file))?)
         }
-        None => builder.with_writer(std::io::stderr).init(),
+        None => Ok(diagnostics::subscribe("info", std::io::stderr)?),
     }
-    Ok(())
 }

@@ -1,8 +1,6 @@
 use artisan_api::{McpMutation, McpServer};
-use std::collections::BTreeMap;
-
-pub const MCP_SERVERS_KEY: &str = "mcp_servers";
-pub const MANAGE_SKILLS_SELECTOR: &str = "settings-manage-skills";
+use editor_core::{HostInstance, Problem};
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerFields {
@@ -15,17 +13,20 @@ pub struct ServerFields {
 }
 
 impl ServerFields {
-    pub fn from_server(server: &McpServer) -> Self {
+    fn from_server(server: &McpServer) -> Self {
         Self {
             name: server.name.clone(),
             command: server.command.clone(),
-            args: serde_json::to_string(&server.args).unwrap_or_default(),
+            args: serde_json::to_string(&server.args)
+                .expect("invariant: a list of strings always serializes"),
             url: server.url.clone().unwrap_or_default(),
-            env: serde_json::to_string(&server.env).unwrap_or_default(),
+            env: serde_json::to_string(&server.env)
+                .expect("invariant: a map of strings always serializes"),
             headers: if server.headers.is_empty() {
                 String::new()
             } else {
-                serde_json::to_string(&server.headers).unwrap_or_default()
+                serde_json::to_string(&server.headers)
+                    .expect("invariant: a map of strings always serializes")
             },
         }
     }
@@ -33,10 +34,11 @@ impl ServerFields {
     pub fn parse(&self, previous: Option<&McpServer>) -> Result<McpServer, String> {
         let name = self.name.trim().to_owned();
         let url = self.url.trim().to_owned();
+        let command = self.command.trim().to_owned();
         if name.is_empty() {
             return Err("Give the server a name.".into());
         }
-        if self.command.is_empty() == url.is_empty() {
+        if command.is_empty() == url.is_empty() {
             return Err("Specify either a program or an HTTP URL.".into());
         }
         let args: Vec<String> = if self.args.trim().is_empty() {
@@ -67,7 +69,7 @@ impl ServerFields {
         }
         Ok(McpServer {
             name,
-            command: self.command.clone(),
+            command,
             args,
             env,
             url: (!url.is_empty()).then_some(url),
@@ -77,45 +79,127 @@ impl ServerFields {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum McpEditing {
+    New,
+    Existing(McpServer),
+}
+
+impl McpEditing {
+    fn previous(&self) -> Option<McpServer> {
+        match self {
+            Self::New => None,
+            Self::Existing(server) => Some(server.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ParkedForm {
+    instance: HostInstance,
+    editing: Option<McpEditing>,
+    fields: ServerFields,
+    saving: bool,
+    error: Option<Problem>,
+    generation: u64,
+}
+
+impl ParkedForm {
+    fn is_idle(&self) -> bool {
+        self.editing.is_none() && !self.saving && self.error.is_none()
+    }
+}
+
+fn settle(
+    editing: &mut Option<McpEditing>,
+    error: &mut Option<Problem>,
+    request: &MutationRequest,
+    result: Result<(), Problem>,
+) {
+    match result {
+        Ok(()) if request.close_form => *editing = None,
+        Ok(()) => {}
+        Err(problem) => *error = Some(problem),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExtensionsForm {
-    pub host: Option<String>,
-    pub editing: Option<Option<McpServer>>,
+    pub(crate) host: Option<String>,
+    instance: Option<HostInstance>,
+    pub editing: Option<McpEditing>,
     pub fields: ServerFields,
     pub saving: bool,
-    pub error: Option<String>,
+    pub(crate) error: Option<Problem>,
     generation: u64,
+    parked: HashMap<String, ParkedForm>,
 }
 
 #[derive(Clone, Debug)]
 pub struct MutationRequest {
-    pub host: String,
-    pub generation: u64,
-    pub mutation: McpMutation,
-    pub close_form: bool,
+    pub(crate) host: String,
+    pub(crate) generation: u64,
+    pub(crate) mutation: McpMutation,
+    pub(crate) close_form: bool,
 }
 
 impl ExtensionsForm {
-    pub fn sync_host(&mut self, host: Option<String>) {
-        if self.host == host {
-            return;
+    pub fn sync_host(&mut self, host: Option<(String, HostInstance)>) -> bool {
+        let (name, instance) = host.unzip();
+        if self.host == name && self.instance == instance {
+            return false;
         }
-        self.host = host;
+        self.park();
+        self.host = name;
+        self.instance = instance;
         self.generation += 1;
-        self.saving = false;
-        self.editing = None;
-        self.error = None;
+        if let Some(parked) = self
+            .host
+            .as_ref()
+            .and_then(|host| self.parked.remove(host))
+            .filter(|parked| Some(parked.instance) == self.instance)
+        {
+            self.editing = parked.editing;
+            self.fields = parked.fields;
+            self.saving = parked.saving;
+            self.error = parked.error;
+            self.generation = parked.generation;
+        }
+        true
+    }
+
+    fn park(&mut self) {
+        let editing = self.editing.take();
+        let fields = std::mem::take(&mut self.fields);
+        let saving = std::mem::replace(&mut self.saving, false);
+        let error = self.error.take();
+        if let (Some(host), Some(instance)) = (self.host.take(), self.instance.take()) {
+            let parked = ParkedForm {
+                instance,
+                editing,
+                fields,
+                saving,
+                error,
+                generation: self.generation,
+            };
+            if !parked.is_idle() {
+                self.parked.insert(host, parked);
+            }
+        }
     }
 
     pub fn open(&mut self, previous: Option<McpServer>) {
         self.generation += 1;
         self.saving = false;
-        self.fields = ServerFields::from_server(previous.as_ref().unwrap_or(&McpServer::default()));
-        self.editing = Some(previous);
+        self.fields = ServerFields::from_server(&previous.clone().unwrap_or_default());
+        self.editing = Some(previous.map_or(McpEditing::New, McpEditing::Existing));
         self.error = None;
     }
 
-    pub fn cancel(&mut self) {
+    pub(crate) fn cancel(&mut self) {
+        if self.saving {
+            return;
+        }
         self.generation += 1;
         self.saving = false;
         self.editing = None;
@@ -126,18 +210,18 @@ impl ExtensionsForm {
         if self.saving {
             return None;
         }
-        let previous = self.editing.clone()?;
+        let previous = self.editing.as_ref()?.previous();
         self.host.as_ref()?;
         match self.fields.parse(previous.as_ref()) {
             Ok(server) => self.begin(McpMutation::Upsert { previous, server }, true),
             Err(error) => {
-                self.error = Some(error);
+                self.error = Some(Problem::new(error));
                 None
             }
         }
     }
 
-    pub fn remove(&mut self, previous: McpServer) -> Option<MutationRequest> {
+    pub(crate) fn remove(&mut self, previous: McpServer) -> Option<MutationRequest> {
         if self.saving {
             return None;
         }
@@ -157,15 +241,22 @@ impl ExtensionsForm {
         })
     }
 
-    pub fn complete(&mut self, request: &MutationRequest, result: Result<(), String>) {
-        if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
+    pub fn complete(&mut self, request: &MutationRequest, result: Result<(), Problem>) {
+        if self.host.as_ref() == Some(&request.host) {
+            if self.generation == request.generation {
+                self.saving = false;
+                settle(&mut self.editing, &mut self.error, request, result);
+            }
             return;
         }
-        self.saving = false;
-        match result {
-            Ok(()) if request.close_form => self.editing = None,
-            Ok(()) => {}
-            Err(error) => self.error = Some(format!("Couldn't save MCP servers: {error}")),
+        if let Some(parked) = self.parked.get_mut(&request.host)
+            && parked.generation == request.generation
+        {
+            parked.saving = false;
+            settle(&mut parked.editing, &mut parked.error, request, result);
+            if parked.is_idle() {
+                self.parked.remove(&request.host);
+            }
         }
     }
 }

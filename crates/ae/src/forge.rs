@@ -1,42 +1,147 @@
-//! `ae pair` and `ae devices`: connecting Editors to this machine's Forge.
-//! Both work on Forge's data directly, running or not.
-
-use crate::{service, ui};
-use anyhow::{Context, Result, bail};
+use crate::paths::{self, LocateError};
+use crate::service::{self, AddressError};
+use crate::ui::{self, AskError};
 use artisan_api::Timestamp;
 use artisan_paths::App;
 use forge_http::tls;
-use forge_store::admin::Admin;
+use forge_store::admin::{Admin, AdminError, DevicesError, PairCodeError, RevokeError};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-fn data() -> Result<std::path::PathBuf> {
-    let data = App::Forge.data()?;
-    anyhow::ensure!(
-        App::Forge.binary()?.is_file() || data.exists(),
-        "Forge isn't installed here; run `ae install`"
-    );
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ForgeDataError {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("Forge isn't installed here; run `ae install`")]
+    NotInstalled,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AdministerError {
+    #[error("open the Forge database in {}", data.display())]
+    Admin {
+        data: PathBuf,
+        #[source]
+        source: Box<AdminError>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PairError {
+    #[error(transparent)]
+    Data(#[from] ForgeDataError),
+    #[error(transparent)]
+    Administer(#[from] AdministerError),
+    #[error("make a pairing code for the Forge in {}", data.display())]
+    Invite {
+        data: PathBuf,
+        #[source]
+        source: forge_http::InviteError,
+    },
+    #[error("read the fingerprint of Forge's certificate")]
+    Fingerprint(#[source] artisan_api::tls::DecodeCertificateError),
+    #[error(transparent)]
+    Address(#[from] AddressError),
+    #[error("the pairing code expired")]
+    Expired,
+    #[error("check whether an Editor used the pairing code for the Forge in {}", data.display())]
+    Pending {
+        data: PathBuf,
+        #[source]
+        source: PairCodeError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ListDevicesError {
+    #[error(transparent)]
+    Data(#[from] ForgeDataError),
+    #[error("open the Forge database in {}", data.display())]
+    Open {
+        data: PathBuf,
+        #[source]
+        source: Box<AdminError>,
+    },
+    #[error("list the devices paired with the Forge in {}", data.display())]
+    List {
+        data: PathBuf,
+        #[source]
+        source: DevicesError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UnpairError {
+    #[error(transparent)]
+    List(#[from] ListDevicesError),
+    #[error(transparent)]
+    Administer(#[from] AdministerError),
+    #[error("no paired device has the id {id:?}; see `ae devices`")]
+    NoMatch { id: String },
+    #[error("{id:?} matches several devices; give more of the id")]
+    Ambiguous { id: String },
+    #[error("no paired devices")]
+    NoDevices,
+    #[error(transparent)]
+    Ask(#[from] AskError),
+    #[error("unpair {id}")]
+    Revoke {
+        id: String,
+        #[source]
+        source: Box<RevokeError>,
+    },
+    #[error("no paired device has the id {id:?}")]
+    Gone { id: String },
+}
+
+fn data() -> Result<PathBuf, ForgeDataError> {
+    let data = paths::data(App::Forge)?;
+    if !paths::binary(App::Forge)?.is_file() && !data.exists() {
+        return Err(ForgeDataError::NotInstalled);
+    }
     Ok(data)
 }
 
-/// The address Editors on this machine reach Forge at.
-fn reachable_address() -> SocketAddr {
-    let address = service::address();
-    if address.ip().is_unspecified() {
+fn administer(data: &Path) -> Result<Admin, AdministerError> {
+    Admin::open(data).map_err(|source| AdministerError::Admin {
+        data: data.to_owned(),
+        source: Box::new(source),
+    })
+}
+
+fn paired_devices(data: &Path) -> Result<Vec<forge_store::Device>, ListDevicesError> {
+    Admin::open_read_only(data)
+        .map_err(|source| ListDevicesError::Open {
+            data: data.to_owned(),
+            source: Box::new(source),
+        })?
+        .devices()
+        .map_err(|source| ListDevicesError::List {
+            data: data.to_owned(),
+            source,
+        })
+}
+
+fn reachable_address() -> Result<SocketAddr, AddressError> {
+    let address = service::address()?;
+    Ok(if address.ip().is_unspecified() {
         SocketAddr::from(([127, 0, 0, 1], address.port()))
     } else {
         address
-    }
+    })
 }
 
-/// Makes a one-time pairing code. In a terminal it waits until an Editor
-/// uses it; `--json` prints it for the Editor and returns.
-pub fn pair(json: bool) -> Result<()> {
+pub(crate) fn pair(json: bool) -> Result<(), PairError> {
     let data = data()?;
-    let invite = forge_http::invite_offline(&data)
-        .with_context(|| format!("make a pairing code for the Forge in {}", data.display()))?;
-    let fingerprint = tls::fingerprint_of(&invite.forge_certificate)?;
-    let address = reachable_address();
+    let invite =
+        forge_http::invite_offline(&administer(&data)?).map_err(|source| PairError::Invite {
+            data: data.clone(),
+            source,
+        })?;
+    let fingerprint =
+        tls::fingerprint_of(&invite.forge_certificate).map_err(PairError::Fingerprint)?;
+    let address = reachable_address()?;
     if json {
         let value = serde_json::json!({
             "code": invite.code,
@@ -45,15 +150,15 @@ pub fn pair(json: bool) -> Result<()> {
             "expires_at": invite.expires_at,
             "address": address.to_string(),
         });
-        println!("{value}");
+        ui::print(format_args!("{value}"));
         return Ok(());
     }
     let paste = format!("{address} {} {fingerprint}", invite.code);
     if !ui::interactive() {
-        println!("{paste}");
-        eprintln!(
+        ui::print(format_args!("{paste}"));
+        ui::status(format_args!(
             "Paste this into the Editor (Settings → Hosts → Add). Valid for 10 minutes, once."
-        );
+        ));
         return Ok(());
     }
     ui::intro("Pair an Editor");
@@ -64,38 +169,52 @@ pub fn pair(json: bool) -> Result<()> {
             invite.code
         ),
     );
-    if !service::listening(service::address()) {
+    if !service::listening(address) {
         ui::warning("Forge isn't running; the Editor can't pair until it is (`ae forge start`).");
     }
-    let before = Admin::open(&data)?.devices()?.len();
+    let code = forge_store::PairCodeHash::of(&invite.code);
     let progress = ui::Progress::spinner("Waiting for an Editor");
     loop {
         let left = (invite.expires_at - artisan_api::now()) / 1000;
         if left <= 0 {
             progress.fail("The code expired; run `ae pair` again");
-            bail!("the pairing code expired");
+            return Err(PairError::Expired);
         }
         progress.message(format!(
             "Waiting for an Editor (code valid for {}:{:02})",
             left / 60,
             left % 60
         ));
-        let devices = Admin::open(&data)?.devices()?;
-        if devices.len() > before {
-            let newest = devices
-                .iter()
-                .max_by_key(|device| device.created_at)
-                .map_or("an Editor", |device| device.name.as_str());
-            progress.done(format!("Paired {newest}"));
+        let admin = administer(&data)?;
+        let state = admin
+            .pair_code_state(&code)
+            .map_err(|source| PairError::Pending {
+                data: data.clone(),
+                source,
+            })?;
+        let paired = match state {
+            forge_store::PairCodeState::Waiting => None,
+            forge_store::PairCodeState::Paired(device) => Some(device.name),
+            forge_store::PairCodeState::PairedThenRemoved => {
+                Some("an Editor that has since been removed".to_owned())
+            }
+            forge_store::PairCodeState::Gone => {
+                progress.fail("The code is no longer valid; run `ae pair` again");
+                return Err(PairError::Expired);
+            }
+        };
+        if let Some(paired) = paired {
+            progress.done(format!("Paired {paired}"));
             ui::outro("Done.");
             return Ok(());
         }
+        drop(admin);
         std::thread::sleep(Duration::from_secs(1));
     }
 }
 
-pub fn devices(json: bool) -> Result<()> {
-    let devices = Admin::open(&data()?)?.devices()?;
+pub(crate) fn devices(json: bool) -> Result<(), ListDevicesError> {
+    let devices = paired_devices(&data()?)?;
     if json {
         let list: Vec<_> = devices
             .iter()
@@ -108,11 +227,11 @@ pub fn devices(json: bool) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::Value::Array(list));
+        ui::print(format_args!("{}", serde_json::Value::Array(list)));
         return Ok(());
     }
     if devices.is_empty() {
-        println!("No paired devices. Pair one with `ae pair`.");
+        ui::print(format_args!("No paired devices. Pair one with `ae pair`."));
         return Ok(());
     }
     let now = artisan_api::now();
@@ -129,17 +248,16 @@ pub fn devices(json: bool) -> Result<()> {
             ]
         })
         .collect();
-    println!(
+    ui::print(format_args!(
         "{}",
         ui::table(&["ID", "NAME", "PAIRED", "LAST SEEN"], &rows)
-    );
+    ));
     Ok(())
 }
 
-pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
-    let data = data()?;
-    let admin = Admin::open(&data)?;
-    let devices = admin.devices()?;
+pub(crate) fn revoke(id: Option<&str>, yes: bool) -> Result<(), UnpairError> {
+    let data = data().map_err(ListDevicesError::Data)?;
+    let devices = paired_devices(&data)?;
     let (id, name) = match id {
         Some(id) => {
             let matches: Vec<_> = devices
@@ -148,12 +266,14 @@ pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
                 .collect();
             match matches.as_slice() {
                 [device] => (device.id.as_str().to_owned(), device.name.clone()),
-                [] => bail!("no paired device has the id {id:?}; see `ae devices`"),
-                _ => bail!("{id:?} matches several devices; give more of the id"),
+                [] => return Err(UnpairError::NoMatch { id: id.to_owned() }),
+                _ => return Err(UnpairError::Ambiguous { id: id.to_owned() }),
             }
         }
         None if ui::interactive() => {
-            anyhow::ensure!(!devices.is_empty(), "no paired devices");
+            if devices.is_empty() {
+                return Err(UnpairError::NoDevices);
+            }
             let now = artisan_api::now();
             let mut select = cliclack::select("Unpair which device?");
             for device in &devices {
@@ -170,10 +290,9 @@ pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
             select.interact().map_err(ui::prompt_error)?
         }
         None => {
-            return Err(ui::needs_flag(
-                "which device to unpair",
-                "an id (see `ae devices`)",
-            ));
+            return Err(
+                ui::needs_flag("which device to unpair", "an id (see `ae devices`)").into(),
+            );
         }
     };
     if !yes && ui::interactive() {
@@ -185,8 +304,13 @@ pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
             return Ok(());
         }
     }
-    drop(admin);
-    match Admin::open(&data)?.revoke_device(&id)? {
+    let revoked = administer(&data)?
+        .revoke_device(&id)
+        .map_err(|source| UnpairError::Revoke {
+            id: id.clone(),
+            source: Box::new(source),
+        })?;
+    match revoked {
         Some(device) => {
             ui::success(format!(
                 "Unpaired {}. Its next request is refused.",
@@ -194,16 +318,20 @@ pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
             ));
             Ok(())
         }
-        None => bail!("no paired device has the id {id:?}"),
+        None => Err(UnpairError::Gone { id }),
     }
 }
 
-pub fn ago(now: Timestamp, at: Timestamp) -> String {
-    let seconds = (now - at).max(0) / 1000;
+pub(crate) fn ago(now: Timestamp, at: Timestamp) -> String {
+    let seconds = ((now - at).max(0) / 1000).unsigned_abs();
     match seconds {
         0..60 => "just now".to_owned(),
         60..3600 => format!("{} min ago", seconds / 60),
         3600..86_400 => format!("{} h ago", seconds / 3600),
-        _ => format!("{} days ago", seconds / 86_400),
+        _ => format!("{} ago", ui::count(seconds / 86_400, "day", "days")),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/forge/ago.rs"]
+mod ago_tests;

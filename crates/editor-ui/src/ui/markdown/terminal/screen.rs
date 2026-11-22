@@ -1,13 +1,13 @@
 use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::parser::{Params, Parser, Perform};
 use super::style::{TerminalLine, TerminalRun, TerminalStyle};
 
-pub const DEFAULT_MAX_LINES: usize = 5_000;
-pub const MAX_LINE_CHARS: usize = 4_096;
+const DEFAULT_MAX_LINES: usize = 5_000;
+const MAX_LINE_CHARS: usize = 4_096;
 const MAX_RETAINED_CELLS: usize = 128 * 1024;
 const MAX_COMBINING_PER_CELL: usize = 8;
 const MAX_CURSOR_ROW: usize = 500;
@@ -181,9 +181,15 @@ impl Grid {
         let before = self.current_line().cells.len();
         let cells = self.current_line().cells_mut();
         match mode {
-            0 => cells.truncate(col),
+            0 => {
+                if col > 0 && cells.get(col).is_some_and(|cell| cell.ch == '\0') {
+                    cells[col - 1] = BLANK;
+                }
+                cells.truncate(col);
+            }
             1 => {
-                let end = (col + 1).min(cells.len());
+                let wide = cells.get(col + 1).is_some_and(|cell| cell.ch == '\0');
+                let end = (col + 1 + usize::from(wide)).min(cells.len());
                 cells[..end].fill(BLANK);
             }
             2 => cells.clear(),
@@ -303,9 +309,77 @@ impl Grid {
     }
 }
 
+fn cluster_text(cell: &Cell) -> String {
+    std::iter::once(cell.ch)
+        .chain(cell.combining.iter().copied())
+        .collect()
+}
+
+fn cluster_before(cells: &[Cell], col: usize) -> Option<usize> {
+    let last = col.checked_sub(1)?;
+    match cells.get(last)?.ch {
+        '\0' => last.checked_sub(1).filter(|start| cells[*start].ch != '\0'),
+        _ => Some(last),
+    }
+}
+
+fn extends(cell: &Cell, ch: char) -> bool {
+    let candidate = cell.combining.last() == Some(&'\u{200D}')
+        || matches!(ch, '\u{1F1E6}'..='\u{1F1FF}' | '\u{1F3FB}'..='\u{1F3FF}');
+    if !candidate {
+        return false;
+    }
+    let cluster = cluster_text(cell);
+    let joined = format!("{cluster}{ch}");
+    joined.width() < cluster.width() + UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+impl Grid {
+    fn extend_cluster(&mut self, start: usize, ch: char) {
+        let cells = self.current_line().cells_mut();
+        if cells[start].combining.len() < MAX_COMBINING_PER_CELL {
+            cells[start].combining.push(ch);
+        }
+        self.widen_cluster(start);
+    }
+
+    fn widen_cluster(&mut self, start: usize) {
+        let cells = &self.lines[self.row].cells;
+        let narrow = cells.get(start + 1).is_none_or(|cell| cell.ch != '\0');
+        if !narrow
+            || self.col != start + 1
+            || start + 2 > MAX_LINE_CHARS
+            || cluster_text(&cells[start]).width() < 2
+        {
+            return;
+        }
+        let cells = self.current_line().cells_mut();
+        if cells.get(start + 2).is_some_and(|cell| cell.ch == '\0') {
+            cells[start + 2] = BLANK;
+        }
+        let added = (start + 2).saturating_sub(cells.len());
+        if added > 0 {
+            cells.resize(start + 2, BLANK);
+        }
+        cells[start + 1] = Cell {
+            ch: '\0',
+            combining: Vec::new(),
+            style: DEFAULT_STYLE,
+        };
+        self.retained_cells += added;
+        self.col = start + 2;
+    }
+}
+
 impl Perform for Grid {
     fn print(&mut self, ch: char) {
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let joined = cluster_before(&self.lines[self.row].cells, self.col)
+            .filter(|start| width > 0 && extends(&self.lines[self.row].cells[*start], ch));
+        if let Some(start) = joined {
+            self.extend_cluster(start, ch);
+            return;
+        }
         if width == 0 {
             let col = self.col;
             let cells = self.current_line().cells_mut();
@@ -314,6 +388,9 @@ impl Perform for Grid {
                 && cell.combining.len() < MAX_COMBINING_PER_CELL
             {
                 cell.combining.push(ch);
+            }
+            if let Some(start) = cluster_before(&self.lines[self.row].cells, col) {
+                self.widen_cluster(start);
             }
             return;
         }
@@ -453,7 +530,7 @@ impl TerminalScreen {
     }
 
     #[must_use]
-    pub fn with_max_lines(max_lines: usize) -> Self {
+    fn with_max_lines(max_lines: usize) -> Self {
         Self {
             parser: Parser::default(),
             grid: Grid::new(max_lines),
@@ -472,19 +549,8 @@ impl TerminalScreen {
         self.grid.content_len()
     }
 
-    pub fn take_dirty_line_indices(&mut self) -> Vec<usize> {
-        let count = self.grid.content_len();
-        self.grid
-            .lines
-            .iter_mut()
-            .take(count)
-            .enumerate()
-            .filter_map(|(index, line)| std::mem::take(&mut line.dirty).then_some(index))
-            .collect()
-    }
-
     #[must_use]
-    pub fn lines(&self) -> impl DoubleEndedIterator<Item = &TerminalLine> + ExactSizeIterator {
+    fn lines(&self) -> impl DoubleEndedIterator<Item = &TerminalLine> + ExactSizeIterator {
         let styles = &self.grid.styles;
         self.grid
             .lines
@@ -517,14 +583,6 @@ impl TerminalScreen {
     }
 
     #[must_use]
-    pub fn last_nonempty_line(&self) -> Option<&str> {
-        self.lines()
-            .rev()
-            .map(|line| line.text.trim_end())
-            .find(|text| !text.is_empty())
-    }
-
-    #[must_use]
     pub const fn cleared_earlier(&self) -> bool {
         self.grid.cleared_lines > 0
     }
@@ -539,3 +597,7 @@ impl TerminalScreen {
         self.grid.truncated_lines
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/markdown/terminal/screen.rs"]
+mod tests;

@@ -5,6 +5,9 @@
 
 pub(crate) const MAX_MARKDOWN_SOURCE_BYTES: usize = 256 * 1024;
 
+use crate::ui::text::slice::slice;
+use crate::ui::theme::{ArtisanTheme, Contrast, ThemeMode};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,6 +19,7 @@ use thiserror::Error;
 
 mod diagram;
 mod fence;
+mod language;
 mod list;
 pub mod literal;
 mod projected;
@@ -24,10 +28,12 @@ mod source_index;
 pub mod stored;
 mod table;
 mod table_view;
-pub use projected::{PROSE_MEASURE_PX, leaf_signatures, prose_measure};
+pub use crate::ui::rich::narrative::callout::GlyphFactory;
+pub use projected::ShapedSource;
+use source_index::normalize_record;
 pub use source_index::{
     BlockShape, IndexedLeaf, IndexedLeafContent, LeafContext, LeafSpacing, ListLevel,
-    MarkdownIndex, MarkdownIndexError, normalize_record,
+    MarkdownIndex, MarkdownIndexError,
 };
 
 use table::TableBuilder;
@@ -73,35 +79,62 @@ pub enum CodeTokenKind {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CodeToken {
-    pub kind: CodeTokenKind,
-    pub range: Range<usize>,
+    kind: CodeTokenKind,
+    range: Range<usize>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DiagramInks {
+    dark: Arc<str>,
+    light: Arc<str>,
+    dark_high: Arc<str>,
+    light_high: Arc<str>,
+}
+
+impl DiagramInks {
+    const fn for_theme(&self, theme: &ArtisanTheme) -> &Arc<str> {
+        match (theme.colors.mode, theme.colors.contrast) {
+            (ThemeMode::Dark, Contrast::Standard) => &self.dark,
+            (ThemeMode::Light, Contrast::Standard) => &self.light,
+            (ThemeMode::Dark, Contrast::High) => &self.dark_high,
+            (ThemeMode::Light, Contrast::High) => &self.light_high,
+        }
+    }
+
+    fn all(&self) -> [&Arc<str>; 4] {
+        [&self.dark, &self.light, &self.dark_high, &self.light_high]
+    }
+
+    fn bytes(&self) -> usize {
+        self.all().iter().map(|svg| svg.len()).sum()
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DiagramSvg {
-    pub source: Arc<str>,
-    pub light_source: Arc<str>,
-    pub width_bits: u32,
-    pub height_bits: u32,
+    inks: DiagramInks,
+    width_bits: u32,
+    height_bits: u32,
+    summary: Arc<str>,
 }
 
 impl DiagramSvg {
-    pub fn width(&self) -> f32 {
+    fn width(&self) -> f32 {
         f32::from_bits(self.width_bits)
     }
 
-    pub fn height(&self) -> f32 {
+    fn height(&self) -> f32 {
         f32::from_bits(self.height_bits)
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CodeFence {
-    pub language: Option<String>,
-    pub closed: bool,
-    pub source: String,
-    pub tokens: Option<Arc<[CodeToken]>>,
-    pub diagram: Option<Arc<DiagramSvg>>,
+    language: Option<String>,
+    closed: bool,
+    source: String,
+    tokens: Option<Arc<[CodeToken]>>,
+    diagram: Option<Arc<DiagramSvg>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -120,7 +153,7 @@ pub enum Span {
 
 impl Span {
     #[must_use]
-    pub fn text_content(&self) -> String {
+    fn text_content(&self) -> String {
         match self {
             Self::Text(text) | Self::Code(text) | Self::Html(text) | Self::Command(text) => {
                 text.clone()
@@ -134,7 +167,7 @@ impl Span {
 }
 
 #[must_use]
-pub fn spans_text(spans: &[Span]) -> String {
+fn spans_text(spans: &[Span]) -> String {
     spans.iter().map(Span::text_content).collect()
 }
 
@@ -162,51 +195,22 @@ pub enum Block {
     Table(Table),
 }
 
-impl Block {
-    #[must_use]
-    pub fn text_content(&self) -> String {
-        match self {
-            Self::Heading { spans, .. } | Self::Paragraph { spans, .. } => spans_text(spans),
-            Self::Code(fence) => fence.source.clone(),
-            Self::Html { source } => source.clone(),
-            Self::List { items, .. } => items
-                .iter()
-                .flat_map(|item| {
-                    item.blocks
-                        .iter()
-                        .map(Self::text_content)
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Self::Table(table) => table.text_content(),
-        }
-    }
-}
+impl Block {}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ListItem {
-    pub blocks: Vec<Block>,
-    pub task: Option<bool>,
+    blocks: Vec<Block>,
+    task: Option<bool>,
 }
 
-impl ListItem {
-    #[must_use]
-    pub fn text_content(&self) -> String {
-        self.blocks
-            .iter()
-            .map(Block::text_content)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
+impl ListItem {}
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct MarkdownDocument {
-    pub(crate) blocks: Vec<Block>,
+    blocks: Vec<Block>,
 }
 
-pub(crate) fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
+fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
     let Some(Span::Text(text)) = spans.first_mut() else {
         return;
     };
@@ -221,9 +225,9 @@ pub(crate) fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
 }
 
 impl MarkdownDocument {
-    pub(crate) fn resident_bytes(&self) -> usize {
+    fn resident_bytes(&self) -> usize {
         fn spans_bytes(spans: &Vec<Span>) -> usize {
-            spans.capacity() * std::mem::size_of::<Span>()
+            spans.capacity() * size_of::<Span>()
                 + spans
                     .iter()
                     .map(|span| match span {
@@ -239,7 +243,7 @@ impl MarkdownDocument {
                     .sum::<usize>()
         }
         fn blocks_bytes(blocks: &Vec<Block>) -> usize {
-            blocks.capacity() * std::mem::size_of::<Block>()
+            blocks.capacity() * size_of::<Block>()
                 + blocks
                     .iter()
                     .map(|block| match block {
@@ -247,33 +251,30 @@ impl MarkdownDocument {
                             spans_bytes(spans)
                         }
                         Block::Code(fence) => {
-                            fence
-                                .diagram
-                                .as_ref()
-                                .map_or(0, |svg| svg.source.len() + svg.light_source.len())
+                            fence.diagram.as_ref().map_or(0, |svg| svg.inks.bytes())
                                 + fence.source.capacity()
                                 + fence.language.as_ref().map_or(0, String::capacity)
                                 + fence
                                     .tokens
                                     .as_ref()
-                                    .map_or(0, |tokens| std::mem::size_of_val(tokens.as_ref()))
+                                    .map_or(0, |tokens| size_of_val(tokens.as_ref()))
                         }
                         Block::Html { source } => source.capacity(),
                         Block::List { items, .. } => {
-                            items.capacity() * std::mem::size_of::<ListItem>()
+                            items.capacity() * size_of::<ListItem>()
                                 + items
                                     .iter()
                                     .map(|item| blocks_bytes(&item.blocks))
                                     .sum::<usize>()
                         }
                         Block::Table(table) => {
-                            table.alignments.capacity() * std::mem::size_of::<TableAlignment>()
-                                + table.header.capacity() * std::mem::size_of::<TableCell>()
-                                + table.rows.capacity() * std::mem::size_of::<Vec<TableCell>>()
+                            table.alignments.capacity() * size_of::<TableAlignment>()
+                                + table.header.capacity() * size_of::<TableCell>()
+                                + table.rows.capacity() * size_of::<Vec<TableCell>>()
                                 + table
                                     .rows
                                     .iter()
-                                    .map(|row| row.capacity() * std::mem::size_of::<TableCell>())
+                                    .map(|row| row.capacity() * size_of::<TableCell>())
                                     .sum::<usize>()
                                 + table
                                     .header
@@ -285,11 +286,11 @@ impl MarkdownDocument {
                     })
                     .sum::<usize>()
         }
-        std::mem::size_of::<Self>() + blocks_bytes(&self.blocks)
+        size_of::<Self>() + blocks_bytes(&self.blocks)
     }
 
     #[must_use]
-    pub fn blocks(&self) -> &[Block] {
+    fn blocks(&self) -> &[Block] {
         &self.blocks
     }
 }
@@ -334,11 +335,7 @@ impl MarkdownEngine {
         })
     }
 
-    pub fn parse_document(&self, source: &str) -> Result<MarkdownDocument, MarkdownError> {
-        self.parse_document_with_fence_memo(source, &mut NoFenceTokenMemo)
-    }
-
-    pub(crate) fn parse_document_with_fence_memo(
+    fn parse_document_with_fence_memo(
         &self,
         source: &str,
         memo: &mut dyn FenceTokenMemo,
@@ -363,7 +360,7 @@ impl MarkdownEngine {
                         fence.diagram = self
                             .diagrams
                             .lock()
-                            .map_or_else(|poisoned| poisoned.into_inner(), |cache| cache)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .get(&fence.source);
                     }
                     if self.highlight_fence(fence, memo).is_err() {
@@ -504,7 +501,41 @@ pub(crate) trait FenceTokenMemo {
     fn remember(&mut self, language: &str, source: &str, tokens: Arc<[CodeToken]>);
 }
 
-struct NoFenceTokenMemo;
+pub(crate) struct NoFenceTokenMemo;
+
+#[derive(Default)]
+pub(crate) struct FenceTokenCache {
+    kept: HashMap<String, HashMap<String, Arc<[CodeToken]>>>,
+    used: HashMap<String, HashMap<String, Arc<[CodeToken]>>>,
+}
+
+impl FenceTokenCache {
+    fn finish(&mut self) {
+        self.kept = std::mem::take(&mut self.used);
+    }
+}
+
+impl FenceTokenMemo for FenceTokenCache {
+    fn cached(&mut self, language: &str, source: &str) -> Option<Arc<[CodeToken]>> {
+        if let Some(tokens) = self
+            .used
+            .get(language)
+            .and_then(|sources| sources.get(source))
+        {
+            return Some(Arc::clone(tokens));
+        }
+        let tokens = self.kept.get_mut(language)?.remove(source)?;
+        self.remember(language, source, Arc::clone(&tokens));
+        Some(tokens)
+    }
+
+    fn remember(&mut self, language: &str, source: &str, tokens: Arc<[CodeToken]>) {
+        self.used
+            .entry(language.to_owned())
+            .or_default()
+            .insert(source.to_owned(), tokens);
+    }
+}
 
 impl FenceTokenMemo for NoFenceTokenMemo {
     fn cached(&mut self, _language: &str, _source: &str) -> Option<Arc<[CodeToken]>> {
@@ -532,7 +563,7 @@ impl<'a> Iterator for LineOffsets<'a> {
         let remainder = self.source.get(self.cursor..)?;
         match remainder.find('\n') {
             Some(newline) => {
-                let item = (self.cursor, &remainder[..=newline]);
+                let item = (self.cursor, slice(remainder, ..=newline));
                 self.cursor += newline + 1;
                 Some(item)
             }
@@ -753,7 +784,7 @@ impl DocumentBuilder {
                 Event::Start(tag) => self.start_tag(tag, range.start),
                 Event::End(tag_end) => self.end_tag(tag_end, range, source),
                 Event::Text(_) if self.code.is_some() || self.html.is_some() => {
-                    let raw = &source[range];
+                    let raw = slice(source, range);
                     if let Some(fence) = self.code.as_mut() {
                         fence.source.push_str(raw);
                     } else if let Some(html) = self.html.as_mut() {
@@ -769,7 +800,7 @@ impl DocumentBuilder {
                     Some(open) => open.push_str(html.as_ref()),
                     None if self.code.is_none() => {
                         self.push_block(Block::Html {
-                            source: source[range].to_owned(),
+                            source: slice(source, range).to_owned(),
                         });
                     }
                     None => {}

@@ -1,22 +1,23 @@
 use artisan_api::{GlobalPrompt, SavePrompt};
+use editor_core::Problem;
 
 #[derive(Clone, Debug, Default)]
 pub struct PromptForm {
-    pub host: Option<String>,
+    pub(crate) host: Option<String>,
     pub loaded: bool,
     pub saved: String,
-    pub base_version: u64,
-    pub newer: bool,
-    pub pending: bool,
-    pub error: Option<String>,
+    base_version: u64,
+    pub(crate) newer: bool,
+    pub(crate) pending: bool,
+    pub error: Option<Problem>,
     generation: u64,
     edit_revision: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct PromptRequest {
-    pub host: String,
-    pub save: SavePrompt,
+    pub(crate) host: String,
+    pub(crate) save: SavePrompt,
     generation: u64,
     revision: u64,
 }
@@ -24,6 +25,11 @@ pub struct PromptRequest {
 impl PromptForm {
     pub fn changed(&mut self) {
         self.edit_revision = self.edit_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn park(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pending = false;
     }
 
     pub fn sync_host(&mut self, host: Option<String>) -> bool {
@@ -83,14 +89,14 @@ impl PromptForm {
         })
     }
 
-    pub fn accepts(&self, request: &PromptRequest) -> bool {
+    pub(crate) fn accepts(&self, request: &PromptRequest) -> bool {
         self.host.as_ref() == Some(&request.host) && self.generation == request.generation
     }
 
     pub fn complete(
         &mut self,
         request: &PromptRequest,
-        result: Result<(u64, Option<GlobalPrompt>), String>,
+        result: Result<(u64, Option<GlobalPrompt>), Problem>,
         text: &str,
     ) -> Option<String> {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
@@ -115,8 +121,8 @@ impl PromptForm {
                 self.loaded = true;
                 None
             }
-            Err(error) => {
-                self.error = Some(format!("Couldn't save the global prompt: {error}"));
+            Err(problem) => {
+                self.error = Some(problem);
                 None
             }
         }

@@ -2,26 +2,32 @@
 name = "editor-ui"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 
+[lib]
+doctest = false
+
 [features]
-test-support = ["editor-core/test-support"]
+test-support = []
 
 [dependencies]
 aqua = { workspace = true }
 aqua-core = { workspace = true }
 aqua-protocol = { workspace = true }
 aqua-text = { workspace = true }
+aqua-fonts-system = { workspace = true }
 aqua-ui = { workspace = true }
 aqua-reactive = { workspace = true }
+aqua-runtime = { workspace = true }
 aqua-media = { workspace = true }
-artisan-api = { path = "../artisan-api", features = ["tls"] }
-artisan-mentions = { path = "../artisan-mentions" }
-artisan-markdown-index = { path = "../artisan-markdown-index" }
-editor-assets = { path = "../editor-assets" }
-editor-audio = { path = "../editor-audio" }
-palette = "0.7"
-anyhow.workspace = true
+artisan-api = { workspace = true, features = ["tls"] }
+artisan-mentions.workspace = true
+artisan-markdown-index.workspace = true
+diagnostics.workspace = true
+editor-assets.workspace = true
+editor-audio.workspace = true
+palette.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -33,12 +39,20 @@ tempfile.workspace = true
 tokio-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 pulldown-cmark.workspace = true
+whatlang.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
-mermaid-rs-renderer = { path = "../../vendor/mermaid-rs-renderer" }
+mermaid-rs-renderer.workspace = true
+skrifa = "0.46.2"
 usvg = { version = "0.48.1", default-features = false, features = ["text"] }
 vte.workspace = true
+unicode-bidi.workspace = true
 unicode-width.workspace = true
+icu_normalizer.workspace = true
+icu_calendar.workspace = true
+icu_datetime.workspace = true
+icu_decimal.workspace = true
+icu_locale_core.workspace = true
 ufbx.workspace = true
 stl_io.workspace = true
 ply-rs-bw.workspace = true
@@ -46,42 +60,27 @@ gltf.workspace = true
 glam.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 data-url.workspace = true
-editor-core = { path = "../editor-core" }
+editor-core.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
 
 [dev-dependencies]
+reqwest.workspace = true
+artisan-paths.workspace = true
+divan.workspace = true
+tracing-subscriber.workspace = true
 editor-ui = { path = ".", features = ["test-support"] }
+test-support = { workspace = true, features = ["editor-core", "net"] }
 
-[lints.rust]
-unsafe_code = "forbid"
+[[bench]]
+name = "markdown"
+harness = false
 
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-panic = "deny"
-todo = "deny"
-unimplemented = "deny"
-dbg_macro = "deny"
-allow_attributes_without_reason = "deny"
-undocumented_unsafe_blocks = "deny"
-str_to_string = "deny"
-missing_assert_message = "deny"
-unwrap_in_result = "deny"
-collapsible_if = "allow"
-collapsible_match = "allow"
-too_many_arguments = "allow"
-type_complexity = "allow"
-useless_conversion = "allow"
-needless_borrow = "allow"
-needless_borrows_for_generic_args = "allow"
-large_enum_variant = "allow"
-should_implement_trait = "allow"
-manual_clamp = "allow"
-manual_flatten = "allow"
-unnecessary_fold = "allow"
-unnecessary_unwrap = "allow"
-unnecessary_to_owned = "allow"
-unnecessary_result_map_or_else = "allow"
-let_and_return = "allow"
-derivable_impls = "allow"
-clone_on_copy = "allow"
-arc_with_non_send_sync = "allow"
-rc_buffer = "allow"
+[[bench]]
+name = "charts"
+harness = false
+
+[lints]
+workspace = true

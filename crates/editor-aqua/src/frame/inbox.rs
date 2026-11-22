@@ -1,21 +1,27 @@
 use crate::core::Core;
 use crate::sidebar::{
-    controller::Sidebar,
+    controller::{SearchGap, Sidebar, TextSearchStatus},
+    geometry::ThreadPane,
     view::{self, ViewAction},
 };
-use crate::ui::kit::TextRole;
+use crate::ui::kit::{Button, ButtonSize, ButtonTone, Space, Spaced};
+use crate::ui::page;
 use crate::ui::theme::ArtisanTheme;
 use aqua::{Aqua, pct, px};
 use aqua_ui::element::Element;
 use std::rc::Rc;
 
-pub fn view(
+#[expect(
+    clippy::too_many_lines,
+    reason = "one inbox view: header, live rows, then the collapsed history"
+)]
+pub(crate) fn view(
     sidebar: &Sidebar,
     core: &Core,
     mut theme: ArtisanTheme,
     height: f32,
     reduced: bool,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     if !theme.colors.mode.is_dark() {
         theme.colors.text_muted = theme.colors.text_muted.animate_to(theme.colors.text, 0.08);
@@ -41,24 +47,28 @@ pub fn view(
         .skip(1)
         .cloned()
         .collect::<Vec<_>>();
-    let inbox_height: f32 = inbox_entries.iter().map(|entry| entry.height()).sum();
-    let history_content: f32 = history_entries.iter().map(|entry| entry.height()).sum();
+    let inbox_height: f32 = inbox_entries.iter().map(|entry| entry.height(&theme)).sum();
+    let history_content: f32 = history_entries
+        .iter()
+        .map(|entry| entry.height(&theme))
+        .sum();
     let history_height = history_height(
+        &theme,
         height,
         inbox_height,
         history_content,
         sidebar.history_fraction,
     );
-    let visuals = sidebar.thread_visual_factory(theme, reduced);
+    let visuals = sidebar.thread_visual_factory(&theme, reduced);
     let list = view::thread_entries_view(
         sidebar,
         core,
-        theme,
+        &theme,
         height,
         inbox_entries,
-        "sidebar-threads",
-        visuals.clone(),
-        Rc::clone(&emit),
+        ThreadPane::Inbox,
+        Rc::clone(&visuals),
+        Rc::clone(emit),
     );
     let inbox = Aqua::Box()
         .layout("column")
@@ -88,13 +98,9 @@ pub fn view(
     if !sidebar.lists.history.is_empty() {
         column = column.child(
             Aqua::Box()
-                .height(crate::sidebar::geometry::history_height())
+                .height(crate::sidebar::geometry::history_height(&theme))
                 .styles([Aqua::Style().flex_shrink(0.0)])
-                .child(view::history_toggle(
-                    theme,
-                    sidebar.history_fraction,
-                    Rc::clone(&emit),
-                ))
+                .child(view::history_toggle(&theme, sidebar.history_fraction, emit))
                 .build(),
         );
     }
@@ -102,12 +108,12 @@ pub fn view(
         let history = view::thread_entries_view(
             sidebar,
             core,
-            theme,
+            &theme,
             history_height,
             history_entries,
-            "sidebar-history-threads",
+            ThreadPane::History,
             visuals,
-            Rc::clone(&emit),
+            Rc::clone(emit),
         );
         column = column.child(
             Aqua::Box()
@@ -121,18 +127,7 @@ pub fn view(
                 .build(),
         );
     }
-    if let Some(error) = sidebar.error.as_ref().or_else(|| {
-        sidebar
-            .host_data(core)
-            .and_then(|host| host.thread_page(false).error.as_ref())
-    }) {
-        column = column.child(
-            TextRole::Caption
-                .text(&theme, error.clone())
-                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .build(),
-        );
-    }
+    column = column.children(states(sidebar, core, &theme, emit));
     Aqua::Box()
         .layout("column")
         .styles([Aqua::Style()
@@ -144,8 +139,173 @@ pub fn view(
         .with_key(view::ROOT_KEY)
 }
 
-pub fn history_height(viewport: f32, inbox: f32, history: f32, fraction: f32) -> f32 {
-    let available = (viewport - 43.0).max(0.0);
+fn button(
+    key: &str,
+    theme: &ArtisanTheme,
+    label: &str,
+    action: ViewAction,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let emit = Rc::clone(emit);
+    Button::text(key, *theme, ButtonTone::Neutral, label)
+        .size(ButtonSize::Sm)
+        .on_activate(move |_| emit(action.clone()))
+        .build()
+}
+
+fn guidance(theme: &ArtisanTheme, text: String, action: Option<Element>) -> Element {
+    aqua_ui::element::Box::new()
+        .layout("column")
+        .spaced(Space::S8)
+        .padded(Space::S12)
+        .child(page::note(theme, text).build())
+        .children(action)
+        .build()
+}
+
+fn actionable_notice(
+    theme: &ArtisanTheme,
+    problem: &crate::core::Problem,
+    id: &'static str,
+    label: &'static str,
+    action: ViewAction,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    crate::ui::kit::ProblemNotice::new(format!("{id}-problem"), *theme, problem)
+        .action(button(id, theme, label, action, emit))
+        .build()
+}
+
+pub fn states(
+    sidebar: &Sidebar,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Vec<Element> {
+    let mut states = notices_and_guidance(sidebar, core, theme, emit);
+    states.extend(sidebar.text_search_gap().map(|gap| {
+        guidance(
+            theme,
+            match gap {
+                SearchGap::Indexing => {
+                    "Forge is still indexing older messages, so some may be missing."
+                }
+                SearchGap::Incomplete => {
+                    "Forge couldn't finish indexing older messages, so some may be missing until it restarts."
+                }
+            }
+            .to_owned(),
+            None,
+        )
+    }));
+    states
+}
+
+fn notices_and_guidance(
+    sidebar: &Sidebar,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Vec<Element> {
+    let mut states = Vec::new();
+    if let TextSearchStatus::Failed(problem) = sidebar.text_search_status() {
+        states.push(actionable_notice(
+            theme,
+            problem,
+            "sidebar-search-retry",
+            "Try again",
+            ViewAction::Search,
+            emit,
+        ));
+    }
+    let host = sidebar.host_data(core).filter(|host| host.is_live());
+    if let Some(message) = host.and_then(|host| host.rollback_notice().message()) {
+        states.push(actionable_notice(
+            theme,
+            &message,
+            "sidebar-rollback-dismiss",
+            "Dismiss",
+            ViewAction::DismissRollbackNotice,
+            emit,
+        ));
+    }
+    if let Some(error) = host.and_then(|host| host.thread_page(false).error()) {
+        states.push(actionable_notice(
+            theme,
+            error,
+            "sidebar-threads-retry",
+            "Try again",
+            ViewAction::RetryThreads,
+            emit,
+        ));
+    }
+    if host.is_some_and(crate::core::HostData::project_icons_failed) {
+        states.push(actionable_notice(
+            theme,
+            &crate::core::Problem::new("Some project icons didn't load."),
+            "sidebar-metadata-retry",
+            "Try again",
+            ViewAction::RetryProjectIcons,
+            emit,
+        ));
+    }
+    if let Some(error) = &sidebar.error {
+        states.push(actionable_notice(
+            theme,
+            error,
+            "sidebar-error-dismiss",
+            "Dismiss",
+            ViewAction::DismissError,
+            emit,
+        ));
+    }
+    let lists = &sidebar.lists;
+    let empty = lists.inbox.is_empty() && lists.history.is_empty() && lists.hits.is_empty();
+    let Some(host) = host.filter(|_| empty && states.is_empty()) else {
+        return states;
+    };
+    let query = sidebar.search.borrow().text().trim().to_owned();
+    states.push(if !query.is_empty() {
+        match sidebar.text_search_status() {
+            TextSearchStatus::Searching => guidance(theme, "Searching messages…".to_owned(), None),
+            TextSearchStatus::Idle | TextSearchStatus::Failed(_) => guidance(
+                theme,
+                format!("No threads match “{query}”."),
+                Some(button(
+                    "sidebar-search-clear",
+                    theme,
+                    "Clear search",
+                    ViewAction::ClearSearch,
+                    emit,
+                )),
+            ),
+        }
+    } else if !host.thread_page(false).is_loaded() {
+        guidance(theme, "Loading threads…".to_owned(), None)
+    } else {
+        guidance(
+            theme,
+            "No threads yet.".to_owned(),
+            Some(button(
+                "sidebar-empty-new-thread",
+                theme,
+                "New thread",
+                ViewAction::NewThread(None),
+                emit,
+            )),
+        )
+    });
+    states
+}
+
+pub fn history_height(
+    theme: &ArtisanTheme,
+    viewport: f32,
+    inbox: f32,
+    history: f32,
+    fraction: f32,
+) -> f32 {
+    let available = (viewport - crate::sidebar::geometry::history_height(theme)).max(0.0);
     (available - inbox)
         .max(available * 0.5)
         .min(available)

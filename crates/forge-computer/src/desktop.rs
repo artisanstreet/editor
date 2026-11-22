@@ -1,29 +1,20 @@
-//! What computer use needs from a machine, whatever its windowing system:
-//! the agent's display, captures of it, input, its windows, launching, and
-//! the clipboard. Every call blocks; the server runs them off the async
-//! threads.
-
 use crate::frame::Frame;
 use crate::steps::Key;
-use anyhow::Result;
 use std::time::Duration;
 
-/// A window, as the backend names it.
 pub type WindowId = u64;
 
-/// A rectangle in desktop pixels: the space every display shares, where
-/// the primary display's top left is (0, 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl Rect {
     #[must_use]
-    pub fn contains(&self, point: Point) -> bool {
+    pub(crate) fn contains(&self, point: Point) -> bool {
         point.x >= self.x
             && point.y >= self.y
             && i64::from(point.x) < i64::from(self.x) + i64::from(self.width)
@@ -31,7 +22,7 @@ impl Rect {
     }
 
     #[must_use]
-    pub fn center(&self) -> Point {
+    pub(crate) fn center(&self) -> Point {
         Point {
             x: self
                 .x
@@ -43,11 +34,10 @@ impl Rect {
     }
 }
 
-/// A point in desktop pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Point {
-    pub x: i32,
-    pub y: i32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -57,37 +47,23 @@ pub enum Button {
     Middle,
 }
 
-/// One input event, sent as the machine's own input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
     MoveTo(Point),
-    Button {
-        button: Button,
-        down: bool,
-    },
-    /// Wheel notches: positive `dy` scrolls down, positive `dx` right.
-    Wheel {
-        dx: i32,
-        dy: i32,
-    },
-    Key {
-        key: Key,
-        down: bool,
-    },
-    /// One character typed as text, whatever the keyboard layout.
+    Button { button: Button, down: bool },
+    Wheel { dx: i32, dy: i32 },
+    Key { key: Key, down: bool },
     Text(char),
 }
 
-/// A visible top-level window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowInfo {
-    pub id: WindowId,
-    pub title: String,
-    /// The program's file name, such as `notepad.exe`.
-    pub process: String,
-    pub pid: u32,
-    pub rect: Rect,
-    pub minimized: bool,
+    pub(crate) id: WindowId,
+    pub(crate) title: String,
+    pub(crate) process: String,
+    pub(crate) pid: u32,
+    pub(crate) rect: Rect,
+    pub(crate) minimized: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,43 +71,135 @@ pub enum WindowChange {
     Focus,
     Close,
     Maximize,
-    /// Restores it if minimized or maximized, then moves it here.
     Place(Rect),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DisplayError {
+    #[cfg(windows)]
+    #[error("list the monitors")]
+    Monitors(#[source] windows::core::Error),
+    #[error("the agent display {display} is disconnected")]
+    Disconnected { display: String },
+    #[error("the agent display {display} must not be the primary monitor")]
+    Primary { display: String },
+    #[error("the agent display {display} has no pixels")]
+    Empty { display: String },
+    #[error("there is no primary monitor")]
+    NoPrimary,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CaptureError {
+    #[error("capture {area:?}: the size is outside what a capture takes")]
+    Size { area: Rect },
+    #[error("capture {area:?}: {step} failed")]
+    Failed { area: Rect, step: &'static str },
+    #[cfg(windows)]
+    #[error("capture {area:?}: {step}")]
+    System {
+        area: Rect,
+        step: &'static str,
+        #[source]
+        source: windows::core::Error,
+    },
+    #[error("capture {area:?}: keep the pixels")]
+    Frame {
+        area: Rect,
+        #[source]
+        source: crate::frame::FrameError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CursorError {
+    #[cfg(windows)]
+    #[error("read the cursor position")]
+    System(#[source] windows::core::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InputError {
+    #[error("the system rejected {input:?}; use handoff for elevated windows or UAC")]
+    Rejected { input: Input },
+    #[error("the virtual desktop is {width}x{height}, too small to move the cursor in")]
+    VirtualDesktop { width: i32, height: i32 },
+    #[error("{key:?} is not a key; use type for Unicode text")]
+    NotAKey { key: char },
+    #[error("{key:?} is unavailable in this keyboard layout")]
+    Unavailable { key: char },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WindowError {
+    #[cfg(windows)]
+    #[error("{step}")]
+    System {
+        step: &'static str,
+        #[source]
+        source: windows::core::Error,
+    },
+    #[error("window {window} no longer exists")]
+    Gone { window: WindowId },
+    #[error("the system refused to focus window {window}; use handoff")]
+    FocusRefused { window: WindowId },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchError {
+    #[error("launch {command}")]
+    Spawn {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProcessesError {
+    #[cfg(windows)]
+    #[error("list the processes")]
+    System(#[source] windows::core::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClipboardError {
+    #[cfg(windows)]
+    #[error("{step}")]
+    System {
+        step: &'static str,
+        #[source]
+        source: windows::core::Error,
+    },
+    #[error("the clipboard is busy")]
+    Busy,
+    #[error("the clipboard memory could not be locked")]
+    Lock,
+    #[error("clipboard text must be at most 1 MiB and contain no NUL, not {bytes} bytes")]
+    Text { bytes: usize },
+}
+
 pub trait Desktop: Send + Sync {
-    /// The display agents use. Refused, saying what to install, when this
-    /// machine has none.
-    fn agent_display(&self) -> Result<Rect>;
-    /// The user's main display, where a handoff shows a window.
-    fn user_display(&self) -> Result<Rect>;
-    /// The pixels of `area`.
-    fn capture(&self, area: Rect) -> Result<Frame>;
-    fn cursor(&self) -> Result<Point>;
-    fn send(&self, input: &Input) -> Result<()>;
-    /// How long since the user's own last input, leaving out what [`send`]
-    /// sent.
-    ///
-    /// [`send`]: Desktop::send
+    fn agent_display(&self) -> Result<Rect, DisplayError>;
+    fn user_display(&self) -> Result<Rect, DisplayError>;
+    fn capture(&self, area: Rect) -> Result<Frame, CaptureError>;
+    fn cursor(&self) -> Result<Point, CursorError>;
+    fn send(&self, input: &Input) -> Result<(), InputError>;
     fn user_idle(&self) -> Duration;
-    /// Changes on physical user input, never on our injected events.
     fn user_activity(&self) -> u64;
-    /// The window with the keyboard focus.
     fn foreground(&self) -> Option<WindowId>;
-    /// Every visible top-level window, frontmost first.
-    fn windows(&self) -> Result<Vec<WindowInfo>>;
-    fn window_rect(&self, id: WindowId) -> Result<Rect> {
+    fn windows(&self) -> Result<Vec<WindowInfo>, WindowError>;
+    fn window_rect(&self, id: WindowId) -> Result<Rect, WindowError> {
         self.windows()?
             .into_iter()
             .find(|window| window.id == id)
             .map(|window| window.rect)
-            .ok_or_else(|| anyhow::anyhow!("window no longer exists"))
+            .ok_or(WindowError::Gone { window: id })
     }
-    fn change_window(&self, window: WindowId, change: WindowChange) -> Result<()>;
-    /// Starts a program; its process id.
-    fn launch(&self, command: &str, args: &[String], cwd: Option<&str>) -> Result<u32>;
-    /// Every process as (id, parent id).
-    fn processes(&self) -> Result<Vec<(u32, u32)>>;
-    fn clipboard(&self) -> Result<Option<String>>;
-    fn set_clipboard(&self, text: &str) -> Result<()>;
+    fn change_window(&self, window: WindowId, change: WindowChange) -> Result<(), WindowError>;
+    fn launch(&self, command: &str, args: &[String], cwd: Option<&str>)
+    -> Result<u32, LaunchError>;
+    fn processes(&self) -> Result<Vec<(u32, u32)>, ProcessesError>;
+    fn clipboard(&self) -> Result<Option<String>, ClipboardError>;
+    fn set_clipboard(&self, text: &str) -> Result<(), ClipboardError>;
 }

@@ -1,6 +1,4 @@
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::SpansFixture;
 pub(crate) use view::{BarLabel, Services, SpansState, Tick, view};
 
 use super::super::kit;
@@ -46,43 +44,43 @@ pub(crate) fn prepare(value: &Value) -> Result<Layout, String> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Span {
-    pub(crate) label: String,
-    pub(crate) start: f64,
-    pub(crate) end: f64,
-    pub(crate) row: usize,
-    pub(crate) lane: Option<usize>,
-    pub(crate) color: usize,
-    pub(crate) group: Option<String>,
+    label: String,
+    start: f64,
+    end: f64,
+    row: usize,
+    lane: Option<usize>,
+    color: usize,
+    group: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Lane {
-    pub(crate) name: String,
-    pub(crate) first_row: usize,
-    pub(crate) rows: usize,
+    name: String,
+    first_row: usize,
+    rows: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Marker {
-    pub(crate) at: f64,
-    pub(crate) label: String,
+    at: f64,
+    label: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Layout {
-    pub(crate) spans: Vec<Span>,
-    pub(crate) row_spans: Vec<Vec<usize>>,
-    pub(crate) lanes: Vec<Lane>,
-    pub(crate) markers: Vec<Marker>,
-    pub(crate) rows: usize,
-    pub(crate) domain: Domain,
-    pub(crate) dates: bool,
-    pub(crate) unit: Option<String>,
+    spans: Vec<Span>,
+    row_spans: Vec<Vec<usize>>,
+    lanes: Vec<Lane>,
+    markers: Vec<Marker>,
+    rows: usize,
+    domain: Domain,
+    dates: bool,
+    unit: Option<String>,
 }
 impl Layout {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_vec(&self.spans)
             + self
                 .spans
@@ -145,7 +143,7 @@ fn resolve(spec: &SpansSpec) -> Result<(Vec<Timed<'_>>, Vec<Marker>, bool), Stri
         .map(|(index, marker)| {
             Ok(Marker {
                 at: time(&marker.at, &format!("markers[{index}].at"))?,
-                label: String::from(marker.label.trim().to_owned()),
+                label: marker.label.trim().to_owned(),
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -203,7 +201,7 @@ fn place(timed: &[Timed<'_>]) -> Rows {
         .iter()
         .zip(&stack_ends)
         .map(|(name, ends)| Lane {
-            name: String::from((*name).to_owned()),
+            name: (*name).to_owned(),
             first_row: 0,
             rows: ends.used.max(1),
         })
@@ -211,7 +209,7 @@ fn place(timed: &[Timed<'_>]) -> Rows {
     for (index, (span, _, _)) in timed.iter().enumerate() {
         if placed[index].1.is_none() {
             lanes.push(Lane {
-                name: String::from(span.label.trim().to_owned()),
+                name: span.label.trim().to_owned(),
                 first_row: 0,
                 rows: 1,
             });
@@ -259,13 +257,13 @@ impl Layout {
                     *groups.entry(group).or_insert(next)
                 });
                 Span {
-                    label: String::from(span.label.trim().to_owned()),
+                    label: span.label.trim().to_owned(),
                     start: *start,
                     end: *end,
                     row: lane.map_or(*row, |lane| lanes[lane].first_row + row),
                     lane: *lane,
                     color: group_color.or(*lane).unwrap_or(0),
-                    group: group.map(|group| String::from(group.to_owned())),
+                    group: group.map(ToOwned::to_owned),
                 }
             })
             .collect::<Vec<_>>();
@@ -299,18 +297,18 @@ impl Layout {
             row_spans[span.row].push(index);
         }
         Ok(Self {
-            row_spans,
             spans,
+            row_spans,
             lanes,
             markers,
             rows: count,
             domain,
             dates,
-            unit: spec.unit.clone().map(String::from),
+            unit: spec.unit.clone(),
         })
     }
 
-    pub(crate) fn time(&self, value: f64) -> String {
+    fn time(&self, value: f64) -> String {
         if self.dates {
             Time::Date(value).to_string()
         } else {
@@ -318,7 +316,7 @@ impl Layout {
         }
     }
 
-    pub(crate) fn duration(&self, span: &Span) -> String {
+    fn duration(&self, span: &Span) -> String {
         let length = span.end - span.start;
         if self.dates {
             let days = length.round();

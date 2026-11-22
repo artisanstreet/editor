@@ -35,7 +35,7 @@ pub fn viewport_moves_navigation(
     })
 }
 
-pub fn active_marker(
+pub(crate) fn active_marker(
     conversation: &Conversation,
     core: &Core,
     viewport: CollectionViewport,
@@ -64,14 +64,19 @@ pub(super) fn latest_visible(
     core: &Core,
     composer_present: bool,
 ) -> bool {
+    let on_open_thread = matches!(
+        core.workspace_screen(),
+        crate::core::Screen::Thread { host, thread }
+            if conversation.open.as_ref().is_some_and(|(open_host, open_thread)| {
+                open_host == host && open_thread == thread
+            })
+    );
     conversation.view.as_ref().is_some_and(|view| {
-        show_latest(
-            matches!(core.workspace_screen(), crate::core::Screen::Thread { host, thread } if conversation.open.as_ref().is_some_and(|(open_host, open_thread)| open_host == host && open_thread == thread)),
-            composer_present,
-            conversation.agent.is_some(),
-            view.viewport.state().is_following(),
-            conversation.host_is_current(core),
-        )
+        on_open_thread
+            && composer_present
+            && conversation.agent.is_none()
+            && !view.viewport.state().is_following()
+            && conversation.host_is_current(core)
     })
 }
 
@@ -84,7 +89,7 @@ const POP_OUT: Transition = Transition {
     easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
 };
 const POP_SCALE: f32 = 0.9;
-pub const LATEST_KEY: &str = "jump-latest-presence";
+const LATEST_KEY: &str = "jump-latest-presence";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LatestPresence {
@@ -100,27 +105,28 @@ impl Default for LatestPresence {
 }
 
 impl LatestPresence {
-    pub fn show(&mut self, visible: bool, now: Instant, reduced_motion: bool) {
-        let (target, transition) = match visible {
-            true => (1.0, POP_IN),
-            false => (0.0, POP_OUT),
+    pub(crate) fn show(&mut self, visible: bool, now: Instant, reduced_motion: bool) {
+        let (target, transition) = if visible {
+            (1.0, POP_IN)
+        } else {
+            (0.0, POP_OUT)
         };
-        if self.shown.target() != target {
+        if self.shown.target().total_cmp(&target).is_ne() {
             self.shown = self.shown.retarget(target, now, transition, reduced_motion);
         }
     }
 
     #[must_use]
-    pub fn value(&self, now: Instant) -> f32 {
+    pub(crate) fn value(&self, now: Instant) -> f32 {
         self.shown.value(now, POP_IN)
     }
 
     #[must_use]
-    pub const fn shown(&self) -> bool {
+    pub(crate) const fn shown(&self) -> bool {
         self.shown.target() > 0.5
     }
 
-    pub fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> (bool, bool) {
+    pub(crate) fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> (bool, bool) {
         let moving = self.shown.running();
         if moving
             && let Some(node) = keyed(ui, LATEST_KEY)
@@ -145,11 +151,11 @@ fn pop(presence: f32) -> aqua_core::Transform2D {
         .then(aqua_core::Transform2D::translate(centre, centre))
 }
 
-pub fn jump_to_latest(theme: ArtisanTheme, presence: f32, dispatch: Dispatch) -> Element {
+pub(crate) fn jump_to_latest(theme: &ArtisanTheme, presence: f32, dispatch: Dispatch) -> Element {
     let size = IconButtonSize::Md;
     let button = IconButton::new(
         "jump-latest",
-        theme,
+        *theme,
         editor_assets::AssetId::TABLER_CHEVRON_DOWN,
         "Jump to latest",
         size,
@@ -168,10 +174,6 @@ pub fn jump_to_latest(theme: ArtisanTheme, presence: f32, dispatch: Dispatch) ->
         .style(Style::new().justify(JustifyContent::CENTER))
         .child(presence)
         .build()
-}
-
-fn show_latest(thread: bool, composer: bool, agent: bool, following: bool, current: bool) -> bool {
-    thread && composer && !agent && !following && current
 }
 
 const EASE: CubicBezier = CubicBezier::new(0.22, 1.0, 0.36, 1.0);
@@ -211,7 +213,7 @@ pub enum Steer {
 }
 
 #[must_use]
-pub fn step(event: &KeyEvent) -> Option<Step> {
+fn step(event: &KeyEvent) -> Option<Step> {
     if !event.modifiers.is_empty() {
         return None;
     }
@@ -221,12 +223,12 @@ pub fn step(event: &KeyEvent) -> Option<Step> {
         Key::Named(NamedKey::Home) => Some(Step::First),
         Key::Named(NamedKey::End) => Some(Step::Last),
         Key::Named(NamedKey::Enter) => Some(Step::Jump),
-        _ => None,
+        Key::Char(_) | Key::Named(_) => None,
     }
 }
 
 #[must_use]
-pub fn outside(at: Point, drawer: Option<Rect>, chevron: Option<Rect>) -> bool {
+fn outside(at: Point, drawer: Option<Rect>, chevron: Option<Rect>) -> bool {
     [drawer, chevron]
         .into_iter()
         .flatten()
@@ -242,6 +244,7 @@ struct Interaction {
     available: bool,
     entries: Vec<Seq>,
     cursor: Option<usize>,
+    theme: ArtisanTheme,
 }
 
 impl Default for Interaction {
@@ -255,6 +258,7 @@ impl Default for Interaction {
             available: false,
             entries: Vec::new(),
             cursor: None,
+            theme: ArtisanTheme::resolved(),
         }
     }
 }
@@ -309,8 +313,8 @@ impl Interaction {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
-    pub changed: bool,
-    pub animating: bool,
+    pub(crate) changed: bool,
+    pub(crate) animating: bool,
 }
 
 #[derive(Clone)]
@@ -319,13 +323,19 @@ struct BuildContext {
     dispatch: Dispatch,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshNavigatorError {
+    #[error("refresh the turn navigator overlay in place")]
+    Subtree(#[source] aqua::UiAppError),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refresh {
     InPlace,
     Rebuild,
 }
 
-pub const OVERLAY_KEY: &str = "turn-navigation-overlay";
+const OVERLAY_KEY: &str = "turn-navigation-overlay";
 
 #[derive(Default)]
 pub struct ThreadNavigation {
@@ -333,8 +343,14 @@ pub struct ThreadNavigation {
     context: Option<BuildContext>,
 }
 
+impl std::fmt::Debug for ThreadNavigation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThreadNavigation").finish_non_exhaustive()
+    }
+}
+
 impl ThreadNavigation {
-    pub fn toggle(&mut self, now: Instant, reduced_motion: bool) {
+    pub(crate) fn toggle(&mut self, now: Instant, reduced_motion: bool) {
         let state = &mut self.interaction;
         if !state.available {
             return;
@@ -344,7 +360,7 @@ impl ThreadNavigation {
         state.recentre = open;
     }
 
-    pub fn close(&mut self, now: Instant, reduced_motion: bool) -> bool {
+    pub(crate) fn close(&mut self, now: Instant, reduced_motion: bool) -> bool {
         let state = &mut self.interaction;
         let open = state.open();
         if open {
@@ -354,7 +370,7 @@ impl ThreadNavigation {
         open
     }
 
-    pub fn key(&mut self, event: &KeyEvent) -> bool {
+    pub(crate) fn key(&mut self, event: &KeyEvent) -> bool {
         let Some(step) = step(event) else {
             return false;
         };
@@ -370,7 +386,7 @@ impl ThreadNavigation {
         }
     }
 
-    pub fn dismiss(
+    pub(crate) fn dismiss(
         &mut self,
         ui: &aqua::UiApp,
         at: Point,
@@ -389,36 +405,36 @@ impl ThreadNavigation {
         outside(at, drawer, chevron) && self.close(now, reduced_motion)
     }
 
-    pub fn chevron(&self, now: Instant) -> Option<f32> {
+    pub(crate) fn chevron(&self, now: Instant) -> Option<f32> {
         self.interaction
             .available
             .then(|| self.interaction.chevron.value(now, FLIP))
     }
 
-    pub fn build(
+    pub(crate) fn build(
         &mut self,
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         now: Instant,
         dispatch: Dispatch,
     ) -> Option<Element> {
         self.context = Some(BuildContext {
-            theme,
-            dispatch: dispatch.clone(),
+            theme: *theme,
+            dispatch: std::rc::Rc::clone(&dispatch),
         });
         self.build_with(conversation, core, viewport, now, theme, dispatch)
     }
 
-    pub fn refresh(
+    pub(crate) fn refresh(
         &mut self,
         ui: &mut aqua::UiApp,
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
         now: Instant,
-    ) -> Result<Refresh, String> {
+    ) -> Result<Refresh, RefreshNavigatorError> {
         let Some(context) = self.context.clone() else {
             return Ok(Refresh::Rebuild);
         };
@@ -428,7 +444,7 @@ impl ThreadNavigation {
             core,
             viewport,
             now,
-            context.theme,
+            &context.theme,
             context.dispatch,
         );
         match (element, mounted) {
@@ -442,7 +458,7 @@ impl ThreadNavigation {
                         Refresh::Rebuild
                     }
                 })
-                .map_err(|error| error.to_string()),
+                .map_err(RefreshNavigatorError::Subtree),
             _ => Ok(Refresh::Rebuild),
         }
     }
@@ -453,7 +469,7 @@ impl ThreadNavigation {
         core: &Core,
         viewport: CollectionViewport,
         now: Instant,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         dispatch: Dispatch,
     ) -> Option<Element> {
         let scope = conversation
@@ -481,6 +497,7 @@ impl ThreadNavigation {
             state.cursor = Some(active);
         }
         state.entries = markers.iter().map(|marker| marker.position).collect();
+        state.theme = *theme;
         let panel = navigator::panel(
             markers,
             Some(markers[active].position),
@@ -501,7 +518,7 @@ impl ThreadNavigation {
         Some(&summary.outline)
     }
 
-    pub fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> Frame {
+    pub(crate) fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> Frame {
         let mut frame = Frame::default();
         if let Some(reveal) = self.interaction.reveal
             && let Some(list) = keyed(ui, "turn-navigator-list")
@@ -511,11 +528,14 @@ impl ThreadNavigation {
         {
             let offset = match reveal {
                 Reveal::Center(active, count) => {
-                    navigator::panel_scroll_offset(active, count, bounds.h)
+                    navigator::panel_scroll_offset(&self.interaction.theme, active, count, bounds.h)
                 }
                 Reveal::Keep(index) => navigator::panel_keep_offset(
+                    &self.interaction.theme,
                     index,
-                    ui.tree().scroll_offset(scroll).map_or(0.0, |offset| offset.y),
+                    ui.tree()
+                        .scroll_offset(scroll)
+                        .map_or(0.0, |offset| offset.y),
                     bounds.h,
                 ),
             };
@@ -534,7 +554,7 @@ impl ThreadNavigation {
         frame
     }
 
-    pub fn dispose(&mut self) {
+    pub(crate) fn dispose(&mut self) {
         self.context = None;
         self.interaction.scope = None;
         self.interaction.available = false;

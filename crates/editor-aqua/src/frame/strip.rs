@@ -14,18 +14,20 @@ use artisan_api::{ItemId, ProjectId, ThreadId};
 use editor_assets::AssetId;
 use std::rc::Rc;
 
-pub const ROW: Row = Row::Heading;
-pub const HEIGHT: f32 = match ROW.height() {
-    Some(height) => height,
-    None => 0.0,
-};
-pub const BAR_HEIGHT: f32 = HEIGHT + Space::S4.px();
+const ROW: Row = Row::Heading;
+pub(crate) fn height(theme: &ArtisanTheme) -> f32 {
+    ROW.height(theme)
+}
+
+pub(crate) fn bar_height(theme: &ArtisanTheme) -> f32 {
+    height(theme) + Space::S4.px()
+}
 pub const RADIUS: Radius = Radius::Panel;
 const MIN_WIDTH: f32 = 96.0;
 const MAX_WIDTH: f32 = 720.0;
 const PULSE_MS: u32 = 1_600;
 pub const OUTLINE_CHEVRON: &str = "artisan-thread-outline-chevron";
-pub const OUTLINE_EDGE: IconSize = IconSize::Md;
+const OUTLINE_EDGE: IconSize = IconSize::Md;
 
 pub use crate::ui::project_mark::Mark;
 
@@ -42,6 +44,12 @@ pub struct Tab {
     pub outline: Option<f32>,
 }
 
+impl std::fmt::Debug for Tab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tab").finish_non_exhaustive()
+    }
+}
+
 #[must_use]
 pub fn strip(
     theme: &ArtisanTheme,
@@ -56,9 +64,10 @@ pub fn strip(
 }
 
 fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
-    let color = match tab.active {
-        true => theme.colors.text,
-        false => theme.colors.text_muted,
+    let color = if tab.active {
+        theme.colors.text
+    } else {
+        theme.colors.text_muted
     };
     let id = tab.id.clone();
     let label = tab
@@ -88,7 +97,10 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         .children(tab.location.as_ref().map(|_| separator(theme)))
         .child(thread(theme, tab, reduced, Rc::clone(&emit)))
         .children(agents(theme, tab, &emit))
-        .children(tab.outline.map(|flip| outline(theme, flip, Rc::clone(&emit))))
+        .children(
+            tab.outline
+                .map(|flip| outline(theme, flip, Rc::clone(&emit))),
+        )
         .build();
     let row = RowItem::new(
         format!("artisan-tab-row-{}", tab.id),
@@ -99,17 +111,22 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
     )
     .body(content)
     .build();
-    let area = HitArea::new(format!("artisan-tab-{}", tab.id), Role::Group, label)
+    let area = HitArea::new(format!("artisan-tab-{}", tab.id), theme, Role::Group, label)
         .child(row)
         .on_activate(move || emit(Event::Navigate(Command::Open(id.clone()))))
         .build();
-    let area = match tab.active {
-        true => area.debug_selector(crate::frame::seam::ACTIVE),
-        false => area,
+    let area = if tab.active {
+        area.debug_selector(crate::frame::seam::ACTIVE)
+    } else {
+        area
     };
     UiBox::new()
         .layout("column")
-        .height(if tab.active { BAR_HEIGHT } else { HEIGHT })
+        .height(if tab.active {
+            bar_height(theme)
+        } else {
+            height(theme)
+        })
         .style(
             Style::new()
                 .justify(JustifyContent::END)
@@ -120,7 +137,7 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         .child(
             UiBox::new()
                 .layout("column")
-                .height(HEIGHT)
+                .height(height(theme))
                 .style(Style::new().width(Length::Pct(100.0)))
                 .child(area)
                 .build(),
@@ -134,31 +151,28 @@ fn location(
     location_label: &str,
     emit: Rc<dyn Fn(Event)>,
 ) -> Element {
-    let name = match &tab.url {
-        Some(url) => {
-            let url = url.clone();
-            Link::new(
-                "artisan-thread-repository-link",
-                *theme,
-                LinkTone::Link,
-                location_label,
-            )
-            .on_activate(move || emit(Event::Navigate(Command::OpenUrl(url.clone()))))
-            .build()
-            .aria_label(format!("Open {location_label}"))
-        }
-        None => {
-            let project = tab.project.clone();
-            Link::new(
-                "artisan-thread-project-link",
-                *theme,
-                LinkTone::Crumb,
-                location_label,
-            )
-            .on_activate(move || emit(Event::Navigate(Command::Project(project.clone()))))
-            .build()
-            .aria_label(format!("New thread in {location_label}"))
-        }
+    let name = if let Some(url) = &tab.url {
+        let url = url.clone();
+        Link::new(
+            "artisan-thread-repository-link",
+            *theme,
+            LinkTone::Link,
+            location_label,
+        )
+        .on_activate(move || emit(Event::Navigate(Command::OpenUrl(url.clone()))))
+        .build()
+        .aria_label(format!("Open {location_label}"))
+    } else {
+        let project = tab.project.clone();
+        Link::new(
+            "artisan-thread-project-link",
+            *theme,
+            LinkTone::Crumb,
+            location_label,
+        )
+        .on_activate(move || emit(Event::Navigate(Command::Project(project.clone()))))
+        .build()
+        .aria_label(format!("New thread in {location_label}"))
     };
     UiBox::new()
         .layout("row")
@@ -195,23 +209,33 @@ fn frame(text: Text, fill: bool) -> Element {
 }
 
 fn separator(theme: &ArtisanTheme) -> Element {
-    words(TextRole::Label.text(theme, "/"), theme.colors.text_muted, false)
+    words(
+        TextRole::Label.text(theme, "/"),
+        theme.colors.text_muted,
+        false,
+    )
 }
 
 fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
     let pulsing = tab.state == RowState::Working && !reduced;
-    match tab.trail.is_empty() {
-        true => title(
+    if tab.trail.is_empty() {
+        title(
             frame(Text::new(tab.title.clone()), tab.outline.is_none()),
             pulsing,
-        ),
-        false => title(
-            Link::new("artisan-thread-crumb", *theme, LinkTone::Crumb, tab.title.clone())
-                .on_activate(move || emit(Event::Navigate(Command::Agent(None))))
-                .build()
-                .aria_label(format!("Open {}", tab.title)),
+        )
+    } else {
+        title(
+            Link::new(
+                "artisan-thread-crumb",
+                *theme,
+                LinkTone::Crumb,
+                tab.title.clone(),
+            )
+            .on_activate(move || emit(Event::Navigate(Command::Agent(None))))
+            .build()
+            .aria_label(format!("Open {}", tab.title)),
             pulsing,
-        ),
+        )
     }
 }
 
@@ -239,8 +263,8 @@ fn agents(theme: &ArtisanTheme, tab: &Tab, emit: &Rc<dyn Fn(Event)>) -> Vec<Elem
 }
 
 fn title(label: Element, pulsing: bool) -> Element {
-    match pulsing {
-        true => UiBox::new()
+    if pulsing {
+        UiBox::new()
             .layout("row")
             .style(
                 Style::new()
@@ -254,13 +278,14 @@ fn title(label: Element, pulsing: bool) -> Element {
                     }),
             )
             .child(label)
-            .build(),
-        false => label,
+            .build()
+    } else {
+        label
     }
 }
 
 #[must_use]
-pub fn flip(progress: f32) -> Transform2D {
+pub(crate) fn flip(progress: f32) -> Transform2D {
     let centre = OUTLINE_EDGE.px() / 2.0;
     Transform2D::translate(0.0, -centre)
         .then(Transform2D::scale(1.0, 2.0f32.mul_add(-progress, 1.0)))
@@ -279,10 +304,15 @@ fn outline(theme: &ArtisanTheme, progress: f32, emit: Rc<dyn Fn(Event)>) -> Elem
         ))
         .build()
         .with_key(OUTLINE_CHEVRON);
-    let hit = HitArea::new("artisan-thread-outline", Role::Button, "Messages in this thread")
-        .child(chevron)
-        .on_activate(move || emit(Event::Navigate(Command::Outline)))
-        .build();
+    let hit = HitArea::new(
+        "artisan-thread-outline",
+        theme,
+        Role::Button,
+        "Messages in this thread",
+    )
+    .child(chevron)
+    .on_activate(move || emit(Event::Navigate(Command::Outline)))
+    .build();
     UiBox::new()
         .width(edge)
         .height(edge)

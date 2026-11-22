@@ -6,13 +6,13 @@ use aqua_core::{DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradien
 use aqua_ui::element::Element;
 use std::sync::Arc;
 
-pub const RADIUS: f32 = Radius::Shell.px();
-pub const INSET_RADIUS: f32 = Radius::Panel.px();
+pub(crate) const RADIUS: f32 = Radius::Shell.px();
 
 const RIM_LIGHT: f32 = 0.04;
 const RIM_SHADE: f32 = 0.25;
 const HIGHLIGHT: f32 = 0.12;
 
+#[derive(Debug)]
 pub struct Edge {
     pub rim_top: Oklch,
     pub rim_bottom: Oklch,
@@ -33,8 +33,8 @@ impl Edge {
 }
 
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
-const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 
+#[derive(Debug)]
 pub struct Surfaces {
     pub bg: Oklch,
     pub inner: Oklch,
@@ -45,20 +45,16 @@ pub struct Surfaces {
 impl Surfaces {
     #[must_use]
     pub fn of(theme: &ArtisanTheme) -> Self {
-        let (bg, inner, ink, ink_dim) = match theme.colors.mode.is_dark() {
-            true => (
-                Oklch::new(0.1757, 0.0, 0.0),
-                Oklch::new(0.21, 0.0, 0.0).animate_to(WHITE, 0.06),
-                WHITE,
-                Oklch::new(0.709, 0.0, 0.0),
-            ),
-            false => (
-                WHITE,
-                theme.colors.raised,
-                BLACK,
-                Oklch::new(0.551, 0.027, 264.364),
-            ),
+        let colors = &theme.colors;
+        let (bg, inner) = if colors.mode.is_dark() {
+            (
+                colors.background,
+                colors.surface.animate_to(colors.white, 0.06),
+            )
+        } else {
+            (colors.white, colors.raised)
         };
+        let (ink, ink_dim) = (colors.text, colors.text_muted);
         Self {
             bg,
             inner,
@@ -69,35 +65,12 @@ impl Surfaces {
 }
 
 #[must_use]
-pub fn inset(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
-    let surfaces = Surfaces::of(theme);
-    outlined(
-        surfaces.ink,
-        surfaces.inner,
-        INSET_RADIUS,
-        rest_shadows(theme),
-        children,
-    )
-}
-
-#[must_use]
-pub fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
+pub(crate) fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
     crate::ui::kit::Divider::Rule.build(theme, bleed)
 }
 
 #[must_use]
-pub fn card(theme: &ArtisanTheme, surface: Oklch, children: Vec<Element>) -> Element {
-    outlined(
-        theme.colors.text,
-        surface,
-        RADIUS,
-        rest_shadows(theme),
-        children,
-    )
-}
-
-#[must_use]
-pub fn outlined(
+pub(crate) fn outlined(
     ink: Oklch,
     surface: Oklch,
     radius: f32,
@@ -141,7 +114,7 @@ fn layer(inset: f32, radius: f32, background: GpuiBackground) -> Element {
         .exclude_from_hit_testing()
 }
 
-pub(super) fn vertical(top: Oklch, bottom: Oklch) -> GpuiBackground {
+fn vertical(top: Oklch, bottom: Oklch) -> GpuiBackground {
     GpuiBackground::LinearGradient {
         angle: 180.0,
         color_space: GpuiGradientColorSpace::Srgb,
@@ -159,7 +132,7 @@ pub(super) fn vertical(top: Oklch, bottom: Oklch) -> GpuiBackground {
 }
 
 #[must_use]
-pub fn soft(theme: &ArtisanTheme, casts: [Cast; 2]) -> Vec<ShadowLayer> {
+pub(crate) fn soft(theme: &ArtisanTheme, casts: [Cast; 2]) -> Vec<ShadowLayer> {
     casts
         .into_iter()
         .map(|cast| ShadowLayer {
@@ -179,13 +152,18 @@ pub fn rest_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
 }
 
 #[must_use]
-pub fn key_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
+pub(crate) fn key_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
     soft(theme, Cast::KEY)
 }
 
 #[must_use]
 pub fn hex(color: Oklch) -> String {
     let srgb = color.to_srgb();
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the channel is clamped to 0..=255 first"
+    )]
     let channel = |value: f32| (value * 255.0).round().clamp(0.0, 255.0) as u8;
     format!(
         "#{:02x}{:02x}{:02x}",
@@ -210,14 +188,14 @@ pub fn polar_selection() -> GpuiBackground {
 }
 
 #[must_use]
-pub fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
+pub(crate) fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
     let (w, h) = (bounds.w.max(2.0), bounds.h.max(2.0));
     let (face_w, face_h) = (w - 2.0, h - 2.0);
     let stop = |color: Oklch| hex(color.animate_to(POLAR_INK, lift));
     let source = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}"><defs><radialGradient id="p" gradientUnits="userSpaceOnUse" cx="{cx}" cy="{cy}" r="{rx}" gradientTransform="translate({cx} {cy}) scale(1 {ratio}) translate(-{cx} -{cy})"><stop offset="0" stop-color="{haze}"/><stop offset="0.25" stop-color="{sky}"/><stop offset="0.58" stop-color="{blue}"/><stop offset="0.92" stop-color="{navy}"/></radialGradient><linearGradient id="t" gradientUnits="userSpaceOnUse" x1="0" y1="1" x2="0" y2="2.5"><stop offset="0" stop-color="{highlight}" stop-opacity="0.28"/><stop offset="1" stop-color="{highlight}" stop-opacity="0"/></linearGradient><linearGradient id="b" gradientUnits="userSpaceOnUse" x1="0" y1="{shade_top}" x2="0" y2="{shade_bottom}"><stop offset="0" stop-color="{shade}" stop-opacity="0"/><stop offset="1" stop-color="{shade}" stop-opacity="0.22"/></linearGradient></defs><rect width="{w}" height="{h}" rx="{radius}" fill="{edge}"/><rect x="1" y="1" width="{face_w}" height="{face_h}" rx="{inner}" fill="url(#p)"/><rect x="1" y="1" width="{face_w}" height="{face_h}" rx="{inner}" fill="url(#t)"/><rect x="1" y="1" width="{face_w}" height="{face_h}" rx="{inner}" fill="url(#b)"/></svg>"#,
         cx = w * 0.5,
-        cy = 1.0 + face_h * 1.25,
+        cy = face_h.mul_add(1.25, 1.0),
         rx = face_w * 1.3,
         ratio = (face_h * 1.4) / (face_w * 1.3),
         inner = (radius - 1.0).max(0.0),
@@ -240,7 +218,7 @@ pub fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
 }
 
 #[must_use]
-pub fn radial_glow(bounds: Rect, color: Oklch, alpha: f32) -> DisplayItem {
+fn radial_glow(bounds: Rect, color: Oklch, alpha: f32) -> DisplayItem {
     let (w, h) = (bounds.w.max(1.0), bounds.h.max(1.0));
     let tint = hex(color);
     let source = format!(

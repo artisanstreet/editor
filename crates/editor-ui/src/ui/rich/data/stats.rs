@@ -24,7 +24,7 @@ pub(crate) enum Figure {
 }
 
 impl Figure {
-    pub(crate) fn text(&self, signed: bool) -> String {
+    fn text(&self, signed: bool) -> String {
         match self {
             Self::Number(value) if signed && *value > 0.0 => {
                 format!("+{}", kit::format_number(*value))
@@ -92,8 +92,8 @@ impl Stats {
             Figure::Text(text) => text.capacity(),
             Figure::Number(_) => 0,
         };
-        std::mem::size_of::<Self>()
-            + std::mem::size_of_val(self.tiles.as_ref())
+        size_of::<Self>()
+            + size_of_val(self.tiles.as_ref())
             + self
                 .tiles
                 .iter()
@@ -101,19 +101,23 @@ impl Stats {
                     tile.label.capacity()
                         + figure(&tile.value)
                         + tile.delta.as_ref().map_or(0, &figure)
-                        + std::mem::size_of_val(tile.sparkline.0.as_ref())
-                        + crate::ui::rich::kit::retained_optional(tile.hint.as_ref())
+                        + size_of_val(tile.sparkline.0.as_ref())
+                        + kit::retained_optional(tile.hint.as_ref())
                 })
                 .sum::<usize>()
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one stats view laying out every tile"
+    )]
     pub(crate) fn view(
         &self,
         id: String,
         theme: &ArtisanTheme,
-        states: StatsState,
-        glyph: GlyphFactory,
-        hint: HintFactory,
-        invalidate: Rc<dyn Fn()>,
+        states: &StatsState,
+        glyph: &GlyphFactory,
+        hint: &HintFactory,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Element {
         let hovered = states
             .0
@@ -132,7 +136,9 @@ impl Stats {
             let color = match tone {
                 Tone::Success => theme.colors.banner_success.text,
                 Tone::Danger => theme.colors.banner_error.text,
-                _ => theme.colors.text_muted,
+                Tone::Neutral | Tone::Info | Tone::Warning | Tone::Accent => {
+                    theme.colors.text_muted
+                }
             };
             let edge = theme.colors.text.at(Opacity::Rule).to_reference_paint();
             let mut cell = ui::Canvas::new()
@@ -229,16 +235,12 @@ impl Stats {
                         color: spark_color.to_reference_paint(),
                         dash: false,
                     }];
+                    let spark_scene = scene::Scene::of_shapes(shapes, scene::Clip::Overflow);
                     let spark = ui::Canvas::new()
                         .width(64.0)
                         .height(20.0)
                         .style(Style::new().flex_shrink(0.0))
-                        .on_paint(move |bounds| {
-                            let mut items = scene::source_scene(bounds, &shapes);
-                            let _ = items.pop();
-                            items.remove(0);
-                            items
-                        })
+                        .on_paint(move |bounds| spark_scene.paint(bounds))
                         .build();
                     row = row.child(spark);
                 }
@@ -258,7 +260,7 @@ impl Stats {
             if tile.hint().is_some() {
                 let state = states.clone();
                 let key = id.clone();
-                let invalidate = invalidate.clone();
+                let invalidate = Rc::clone(invalidate);
                 cell = cell.on_hover_change(move |over| {
                     let mut state = state.0.borrow_mut();
                     if over {
@@ -298,7 +300,7 @@ impl Tile {
             .or_else(|| self.delta.as_ref().and_then(Figure::direction))
     }
 
-    pub(crate) fn tone(&self) -> Tone {
+    fn tone(&self) -> Tone {
         let good = match self.good {
             Some(Trend::Down) => Trend::Down,
             _ => Trend::Up,

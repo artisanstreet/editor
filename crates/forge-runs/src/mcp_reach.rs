@@ -1,93 +1,203 @@
-use crate::Hub;
-use artisan_api::McpServer;
-use std::collections::{BTreeMap, HashSet};
+use artisan_api::{Event, McpServer, ThreadId};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::time::Instant;
 
-const EVERY: Duration = Duration::from_secs(10);
 const PATIENCE: Duration = Duration::from_secs(3);
+const FRESH: Duration = Duration::from_secs(60);
 
-pub type Endpoint = (String, u16);
+pub(crate) type Endpoint = (String, u16);
 
-pub fn endpoint(server: &McpServer) -> Option<Endpoint> {
+fn endpoint(server: &McpServer) -> Option<Endpoint> {
     let url = url::Url::parse(server.url.as_deref()?).ok()?;
     Some((url.host_str()?.to_owned(), url.port_or_known_default()?))
 }
 
-async fn answers(endpoint: &Endpoint) -> bool {
-    let connect = tokio::net::TcpStream::connect((endpoint.0.as_str(), endpoint.1));
-    matches!(tokio::time::timeout(PATIENCE, connect).await, Ok(Ok(_)))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    Answers,
+    Silent,
 }
 
-impl Hub {
-    pub(crate) fn mcp_server_reachable(&self, server: &McpServer) -> bool {
-        endpoint(server).is_none_or(|endpoint| {
-            !self
-                .inner
-                .mcp_unreachable
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains(&endpoint)
-        })
+#[derive(Debug, Clone, Copy)]
+enum Entry {
+    Probing,
+    Probed { reach: Reach, at: Instant },
+}
+
+impl Entry {
+    fn fresh(self, now: Instant) -> Option<Reach> {
+        match self {
+            Self::Probed { reach, at } if now.duration_since(at) < FRESH => Some(reach),
+            Self::Probed { .. } | Self::Probing => None,
+        }
     }
 
-    pub async fn probe_mcp_servers(&self) -> anyhow::Result<()> {
-        let servers: Vec<McpServer> = self
-            .store()
-            .setting("mcp_servers")
-            .await?
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default();
-        let named: BTreeMap<Endpoint, String> = servers
+    fn due(self, now: Instant) -> bool {
+        match self {
+            Self::Probing => false,
+            Self::Probed { at, .. } => now.duration_since(at) >= FRESH,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Refresh {
+    Stale,
+    All,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Reachability {
+    entries: Mutex<HashMap<Endpoint, Entry>>,
+}
+
+async fn reach(endpoint: Endpoint) -> (Endpoint, Reach) {
+    let connect = tokio::net::TcpStream::connect((endpoint.0.as_str(), endpoint.1));
+    let reach = match tokio::time::timeout(PATIENCE, connect).await {
+        Ok(Ok(_)) => Reach::Answers,
+        Ok(Err(_)) | Err(_) => Reach::Silent,
+    };
+    (endpoint, reach)
+}
+
+impl Reachability {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<Endpoint, Entry>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn claim(&self, servers: &[McpServer], refresh: Refresh) -> BTreeSet<Endpoint> {
+        let now = Instant::now();
+        let mut entries = self.entries();
+        let claimed: BTreeSet<Endpoint> = servers
             .iter()
-            .filter_map(|server| Some((endpoint(server)?, server.name.clone())))
-            .collect();
-        let mut probes: tokio::task::JoinSet<(Endpoint, bool)> = named
-            .keys()
-            .cloned()
-            .map(|endpoint| async move {
-                let up = answers(&endpoint).await;
-                (endpoint, up)
+            .filter_map(endpoint)
+            .filter(|endpoint| match (refresh, entries.get(endpoint)) {
+                (_, None) | (Refresh::All, Some(Entry::Probed { .. })) => true,
+                (Refresh::Stale, Some(entry)) => entry.due(now),
+                (Refresh::All, Some(Entry::Probing)) => false,
             })
             .collect();
-        let mut unreachable = HashSet::new();
-        while let Some(verdict) = probes.join_next().await {
-            if let (endpoint, false) = verdict? {
-                unreachable.insert(endpoint);
-            }
+        for endpoint in &claimed {
+            entries.insert(endpoint.clone(), Entry::Probing);
         }
-        let mut known = self
-            .inner
-            .mcp_unreachable
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (endpoint, name) in &named {
-            match (known.contains(endpoint), unreachable.contains(endpoint)) {
-                (false, true) => tracing::info!(
-                    server = %name,
-                    address = %format_args!("{}:{}", endpoint.0, endpoint.1),
-                    "MCP server does not answer; new turns start without it"
-                ),
-                (true, false) => {
-                    tracing::info!(server = %name, "MCP server answers again; new turns include it");
-                }
-                (true, true) | (false, false) => {}
-            }
-        }
-        *known = unreachable;
-        drop(known);
-        Ok(())
+        claimed
     }
 
-    pub async fn watch_mcp_servers(&self, stop: CancellationToken) {
-        loop {
-            if let Err(error) = self.probe_mcp_servers().await {
-                tracing::warn!("check which MCP servers answer: {error:#}");
-            }
-            tokio::select! {
-                () = stop.cancelled() => return,
-                () = tokio::time::sleep(EVERY) => {}
+    async fn probe(&self, endpoints: BTreeSet<Endpoint>) -> HashMap<Endpoint, Reach> {
+        let mut probes: tokio::task::JoinSet<(Endpoint, Reach)> =
+            endpoints.into_iter().map(reach).collect();
+        let mut found = HashMap::new();
+        while let Some(probed) = probes.join_next().await {
+            let (endpoint, reach) = probed
+                .expect("invariant: a reachability probe is never cancelled and never panics");
+            self.entries().insert(
+                endpoint.clone(),
+                Entry::Probed {
+                    reach,
+                    at: Instant::now(),
+                },
+            );
+            found.insert(endpoint, reach);
+        }
+        found
+    }
+
+    pub(crate) fn warm(self: &Arc<Self>, servers: &[McpServer]) {
+        self.spawn_probe(servers, Refresh::Stale);
+    }
+
+    fn spawn_probe(self: &Arc<Self>, servers: &[McpServer], refresh: Refresh) {
+        let claimed = self.claim(servers, refresh);
+        if claimed.is_empty() {
+            return;
+        }
+        let reachability = Arc::clone(self);
+        drop(tokio::spawn(async move {
+            reachability.probe(claimed).await;
+        }));
+    }
+
+    pub(crate) fn watch_config(
+        self: Arc<Self>,
+        store: &forge_store::Store,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let mut changes = store.subscribe();
+        let store = store.clone();
+        async move {
+            loop {
+                match changes.recv().await {
+                    Ok(envelope) => {
+                        if let Event::Setting { key, value } = envelope.event
+                            && key == "mcp_servers"
+                        {
+                            match serde_json::from_value::<Vec<McpServer>>(value) {
+                                Ok(servers) => self.spawn_probe(&servers, Refresh::All),
+                                Err(error) => tracing::warn!(
+                                    %error,
+                                    "decode the changed MCP server list to probe it"
+                                ),
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => {
+                        match crate::mcp_auth::read_mcp_servers(&store).await {
+                            Ok(servers) => self.spawn_probe(&servers, Refresh::All),
+                            Err(error) => tracing::warn!(
+                                error = diagnostics::chain(&error),
+                                "read the MCP servers after missing their changes"
+                            ),
+                        }
+                    }
+                    Err(RecvError::Closed) => return,
+                }
             }
         }
     }
+
+    pub(crate) async fn answering(
+        &self,
+        servers: Vec<McpServer>,
+        thread: &ThreadId,
+    ) -> Vec<McpServer> {
+        let now = Instant::now();
+        let (mut known, cold): (HashMap<Endpoint, Reach>, BTreeSet<Endpoint>) = {
+            let entries = self.entries();
+            let mut known = HashMap::new();
+            let mut cold = BTreeSet::new();
+            for endpoint in servers.iter().filter_map(endpoint) {
+                match entries.get(&endpoint).and_then(|entry| entry.fresh(now)) {
+                    Some(reach) => {
+                        known.insert(endpoint, reach);
+                    }
+                    None => {
+                        cold.insert(endpoint);
+                    }
+                }
+            }
+            (known, cold)
+        };
+        known.extend(self.probe(cold).await);
+        servers
+            .into_iter()
+            .filter(|server| match endpoint(server) {
+                Some(address) if known.get(&address) == Some(&Reach::Silent) => {
+                    tracing::info!(
+                        %thread,
+                        server = %server.name,
+                        address = %format_args!("{}:{}", address.0, address.1),
+                        "MCP server does not answer; the turn starts without it"
+                    );
+                    false
+                }
+                Some(_) | None => true,
+            })
+            .collect()
+    }
 }
+
+#[cfg(test)]
+#[path = "../tests/mcp_reach/support.rs"]
+mod support;

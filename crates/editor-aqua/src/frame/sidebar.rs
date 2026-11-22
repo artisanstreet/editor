@@ -1,12 +1,10 @@
-use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
-use crate::ui::chrome::menu::{self, Effect, Menu};
-use crate::frame::projects::{Metrics, Section, pinned};
 use crate::frame::scramble::Rows;
-use crate::frame::tabs::Tabs;
 use crate::frame::view::{INK_X, WORDMARK_INK_LEFT, WORDMARK_WIDTH};
 use crate::frame::wordmark::Wordmark;
+use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
+use crate::ui::chrome::menu::{self, Effect, Menu};
 use artisan_api::{ProjectId, ThreadId};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::{cell::RefCell, rc::Rc, time::Duration, time::Instant};
 
 pub const OPEN_WIDTH: f32 = 336.0;
@@ -19,10 +17,6 @@ pub const RESIZE: Transition = Transition {
     easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
 };
 const REFRESH: Duration = Duration::from_secs(1);
-pub const ACCORDION: Transition = Transition {
-    duration: Duration::from_millis(250),
-    easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
-};
 const SEARCH_OPEN: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
@@ -38,7 +32,6 @@ pub enum Event {
     Toggle,
     Search(bool),
     Account(menu::Event),
-    Project(ProjectId),
     Navigate(Command),
 }
 
@@ -58,6 +51,7 @@ pub enum Command {
     New,
 }
 
+#[derive(Debug)]
 pub struct Sidebar {
     open: bool,
     forced: bool,
@@ -67,14 +61,7 @@ pub struct Sidebar {
     menu: Menu,
     effects: Vec<Effect>,
     commands: Vec<Command>,
-    expanded: HashMap<ProjectId, Glide>,
-    sections: Vec<Section>,
-    pinned: Option<(ProjectId, f32)>,
-    metrics: Metrics,
-    followed: Option<ThreadId>,
-    tabs: Tabs,
     refreshed: Option<Instant>,
-    fades: [Glide; 2],
     search: Glide,
     search_motion: Transition,
     focus_search: bool,
@@ -92,14 +79,7 @@ impl Default for Sidebar {
             menu: Menu::default(),
             effects: Vec::new(),
             commands: Vec::new(),
-            expanded: HashMap::new(),
-            sections: Vec::new(),
-            pinned: None,
-            metrics: Metrics::at(1.0),
-            followed: None,
-            tabs: Tabs::default(),
             refreshed: None,
-            fades: [Glide::Resting(0.0); 2],
             search: Glide::Resting(0.0),
             search_motion: SEARCH_OPEN,
             focus_search: false,
@@ -127,9 +107,10 @@ impl Sidebar {
 
     pub fn fit(&mut self, window_width: f32, now: Instant, reduced: bool) {
         let visible_width = self.width(now);
-        let threshold = match self.forced {
-            true => RESTORE_AT,
-            false => COLLAPSE_BELOW,
+        let threshold = if self.forced {
+            RESTORE_AT
+        } else {
+            COLLAPSE_BELOW
         };
         self.forced = window_width < threshold;
         if self.open() {
@@ -137,11 +118,12 @@ impl Sidebar {
         }
         self.width_limit = (window_width - THREAD_MIN_WIDTH - crate::frame::view::SHEET_PADDING)
             .clamp(COLLAPSED_WIDTH, OPEN_WIDTH);
-        let target = match self.open() {
-            true => OPEN_WIDTH,
-            false => COLLAPSED_WIDTH,
+        let target = if self.open() {
+            OPEN_WIDTH
+        } else {
+            COLLAPSED_WIDTH
         };
-        if self.width.target() != target || (reduced && self.width.running()) {
+        if self.width.target().total_cmp(&target).is_ne() || (reduced && self.width.running()) {
             if self.width.value(now, RESIZE) > visible_width {
                 self.width = Glide::Resting(visible_width);
             }
@@ -150,27 +132,28 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn search(&self, now: Instant) -> f32 {
+    pub(crate) fn search(&self, now: Instant) -> f32 {
         self.search.value(now, self.search_motion)
     }
 
     #[must_use]
-    pub fn searching(&self) -> bool {
+    pub(crate) fn searching(&self) -> bool {
         self.search.target() > 0.5 || self.search.running()
     }
 
-    pub fn take_search_focus(&mut self) -> bool {
+    pub(crate) fn take_search_focus(&mut self) -> bool {
         std::mem::take(&mut self.focus_search)
     }
 
     fn show_search(&mut self, shown: bool, now: Instant, reduced: bool) {
         let target = f32::from(u8::from(shown && !self.open()));
-        if self.search.target() == target {
+        if self.search.target().total_cmp(&target).is_eq() {
             return;
         }
-        self.search_motion = match target > 0.5 {
-            true => SEARCH_OPEN,
-            false => SEARCH_CLOSE,
+        self.search_motion = if target > 0.5 {
+            SEARCH_OPEN
+        } else {
+            SEARCH_CLOSE
         };
         self.focus_search = target > 0.5;
         self.search = self
@@ -179,20 +162,20 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn wordmark(&self, now: Instant) -> Rows {
+    pub(crate) fn wordmark(&self, now: Instant) -> Rows {
         self.wordmark.shown(now)
     }
 
     #[must_use]
-    pub const fn menu(&self) -> &Menu {
+    pub(crate) const fn menu(&self) -> &Menu {
         &self.menu
     }
 
-    pub fn take_effects(&mut self) -> Vec<Effect> {
+    pub(crate) fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
 
-    pub fn refresh_due(&mut self, now: Instant) -> bool {
+    pub(crate) fn refresh_due(&mut self, now: Instant) -> bool {
         let due = self
             .refreshed
             .is_none_or(|last| now.saturating_duration_since(last) >= REFRESH);
@@ -202,62 +185,8 @@ impl Sidebar {
         due
     }
 
-    #[must_use]
-    pub fn fades(&self, now: Instant) -> (f32, f32) {
-        let [above, below] = self.fades;
-        (above.value(now, menu::QUICK), below.value(now, menu::QUICK))
-    }
-
-    pub fn edges(&mut self, above: bool, below: bool, now: Instant, reduced: bool) -> bool {
-        let mut changed = false;
-        for (fade, shown) in self.fades.iter_mut().zip([above, below]) {
-            let target = f32::from(u8::from(shown));
-            if fade.target() != target {
-                *fade = fade.retarget(target, now, menu::QUICK, reduced);
-                changed = true;
-            }
-        }
-        changed
-    }
-
-    pub fn take_commands(&mut self) -> Vec<Command> {
+    pub(crate) fn take_commands(&mut self) -> Vec<Command> {
         std::mem::take(&mut self.commands)
-    }
-
-    #[must_use]
-    pub fn openness(&self, project: &ProjectId, now: Instant) -> f32 {
-        self.expanded
-            .get(project)
-            .map_or(0.0, |glide| glide.value(now, ACCORDION))
-    }
-
-    #[must_use]
-    pub fn pinned(&self) -> Option<&(ProjectId, f32)> {
-        self.pinned.as_ref()
-    }
-
-    pub fn lay_out(&mut self, sections: Vec<Section>, metrics: Metrics, offset: f32) {
-        self.metrics = metrics;
-        self.pinned = pinned(&sections, metrics, offset);
-        self.sections = sections;
-    }
-
-    pub fn scrolled(&mut self, offset: f32) -> bool {
-        let next = pinned(&self.sections, self.metrics, offset);
-        std::mem::replace(&mut self.pinned, next) != self.pinned
-    }
-
-    #[must_use]
-    pub const fn tabs(&self) -> &Tabs {
-        &self.tabs
-    }
-
-    pub fn follow(&mut self, working: &[ThreadId], open: Option<&ThreadId>) -> bool {
-        let moved = self.followed.as_ref() != open;
-        if moved {
-            self.followed = open.cloned();
-        }
-        self.tabs.sync(working, open) || moved
     }
 
     pub fn take_events(&mut self, now: Instant, reduced: bool) -> bool {
@@ -274,14 +203,6 @@ impl Sidebar {
         self.wordmark.advance(now, reduced);
         self.width = self.width.settle(now);
         self.search = self.search.settle(now);
-        for fade in &mut self.fades {
-            *fade = fade.settle(now);
-        }
-        for glide in self.expanded.values_mut() {
-            *glide = glide.settle(now);
-        }
-        self.expanded
-            .retain(|_, glide| glide.running() || glide.target() > 0.5);
         let turning = self.menu.tick(now);
         moving || turning || self.animating()
     }
@@ -292,16 +213,14 @@ impl Sidebar {
             || self.search.running()
             || self.wordmark.scrambling()
             || self.menu.animating()
-            || self.fades.iter().any(Glide::running)
-            || self.expanded.values().any(Glide::running)
     }
 
-    pub fn resizing(&self) -> bool {
+    pub(crate) fn resizing(&self) -> bool {
         self.width.running()
     }
 
     #[must_use]
-    pub const fn deadline(&self) -> Option<Instant> {
+    pub(crate) const fn deadline(&self) -> Option<Instant> {
         self.wordmark.deadline()
     }
 
@@ -323,11 +242,6 @@ impl Sidebar {
             Event::Search(shown) => self.show_search(shown, now, reduced),
             Event::Account(event) => {
                 self.effects.extend(self.menu.apply(event, now, reduced));
-            }
-            Event::Project(project) => {
-                let glide = self.expanded.entry(project).or_insert(Glide::Resting(0.0));
-                let target = if glide.target() > 0.5 { 0.0 } else { 1.0 };
-                *glide = glide.retarget(target, now, ACCORDION, reduced);
             }
             Event::Navigate(command) => {
                 self.show_search(false, now, reduced);

@@ -1,0 +1,1 @@
+CREATE TABLE threads (id TEXT PRIMARY KEY, rollout TEXT)

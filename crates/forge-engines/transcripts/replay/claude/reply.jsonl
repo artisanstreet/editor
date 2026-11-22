@@ -1,0 +1,10 @@
+{"kind":"transcript","source":"synthetic"}
+{"kind":"launch"}
+{"kind":"in","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Say hello\"}]},\"parent_tool_use_id\":null,\"session_id\":\"\"}"}
+{"kind":"in","text":"{\"type\":\"control_request\",\"request_id\":\"artisan-title\",\"request\":{\"subtype\":\"generate_session_title\",\"description\":\"Say hello\",\"persist\":true}}"}
+{"kind":"out","text":"{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/work\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"model\":\"claude-haiku-5-5\",\"permissionMode\":\"default\",\"tools\":[],\"mcp_servers\":[]}"}
+{"kind":"out","text":"{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Say hello\"}]},\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"artisan-title\",\"response\":{\"title\":\"Saying hello\"}}}"}
+{"kind":"out","text":"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_reply\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Hello from the replay.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Hello from the replay.\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"usage\":{}}"}
+{"kind":"closed"}

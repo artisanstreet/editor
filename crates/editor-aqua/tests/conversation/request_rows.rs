@@ -1,62 +1,49 @@
-use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
-use aqua_text::{SharedFonts, SharedRuns};
+use aqua_text::document::SelectionDocumentId;
 use artisan_api::{
-    Answer, Approval, ApprovalRequest, ContentId, ContentRef, Decision, Item, ItemId, ItemKind,
-    Status, TextContent, ThreadId, ToolKind,
+    Answer, Approval, ApprovalRequest, ContentId, ContentRef, Decision, Item, ItemKind, Status,
+    TextContent, ToolKind,
 };
 use editor_aqua::conversation::adapter::{Action, ActionScope, RowModel};
-use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::fold::{Row, RowKey};
-use editor_aqua::conversation::presentation::{MarkdownOwners, PresentationScope};
-use editor_aqua::conversation::thread::ItemUi;
-use editor_aqua::conversation::view::factory::{RealizedRow, RowFactory};
+use editor_aqua::conversation::presentation::MarkdownOwners;
+use editor_aqua::conversation::stored::StoredConversation;
+use editor_aqua::conversation::thread::AnswerState;
+use editor_aqua::conversation::view::factory::{RowServiceParts, RowServices};
 use editor_aqua::conversation::view::row_cache::RowCache;
-use editor_aqua::conversation::view::status::StatusShimmers;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
-use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
+use test_support::editor::core::{OpenThread, connect};
+use test_support::editor::rows::{
+    fixed_source, realized, row_factory, row_factory_with, row_model, service_parts,
+};
+use test_support::editor::ui::{click, mounted};
+use test_support::items;
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one approval scenario walked through each fence in turn"
+)]
 fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifetime() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
-    let config = HostConfig {
-        id: HostId("approval-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    core.add_test_host(&config, client.clone());
-    let mut conversation = Conversation::new(&core);
-    conversation.open_thread(&mut core, config.id.clone(), ThreadId("thread".into()));
-    let scope = PresentationScope::capture(&conversation, &core).unwrap();
+    let opened = OpenThread::new("approval-host", "thread");
+    let scope = opened.scope();
+    let OpenThread {
+        directory: _directory,
+        mut core,
+        host: config,
+        thread,
+        mut conversation,
+    } = opened;
     let action_scope = ActionScope::new(&conversation).unwrap();
     let provider = core.source_provider(&scope.host, scope.instance).unwrap();
-    let item = Arc::new(Item {
-        id: ItemId("approval".into()),
-        thread_id: ThreadId("thread".into()),
-        position: 1,
-        seq: 7,
-        run_id: None,
-        parent_id: None,
-        status: Status::AwaitingUser,
-        created_at: 0,
-        updated_at: 0,
-        kind: ItemKind::Tool {
+    let approval = items::item(
+        "approval",
+        thread.clone(),
+        7,
+        ItemKind::Tool {
             tool: ToolKind::Read {
                 path: "file".into(),
                 range: None,
@@ -77,72 +64,69 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
                 decision: None,
             }),
         },
+    );
+    let item = Arc::new(Item {
+        position: 1,
+        status: Status::AwaitingUser,
+        ..approval
     });
     let key = RowKey::Item(item.id.clone());
     let cache = Rc::new(RefCell::new(RowCache::default()));
     let markdown = Rc::new(RefCell::new(MarkdownOwners::new(SelectionDocumentId(510))));
     let actions = Rc::new(RefCell::new(Vec::new()));
-    let observed = actions.clone();
+    let observed = Rc::clone(&actions);
     let source_actions = Rc::new(RefCell::new(Vec::new()));
-    let observed_sources = source_actions.clone();
-    let row = |sending| RealizedRow {
-        model: RowModel {
-            row: Row::Prompt(item.id.clone()),
+    let observed_sources = Rc::clone(&source_actions);
+    let row = |sending| {
+        realized(RowModel {
             version: 7,
-            items: HashMap::from([(item.id.clone(), item.clone())]),
-            live: HashMap::new(),
-            ui: HashMap::from([(
+            answers: HashMap::from([(
                 item.id.clone(),
-                ItemUi {
-                    sending,
-                    error: Some("Previous failure".into()),
-                    ..Default::default()
+                if sending {
+                    AnswerState::Sending
+                } else {
+                    AnswerState::Failed("Previous failure".into())
                 },
             )]),
-            run: None,
-            author: None,
-            gap: 0.0,
-            end: 0.0,
-        },
-        disclosure: Default::default(),
-        held: false,
+            ..row_model(Row::Prompt(item.id.clone()), [Arc::clone(&item)])
+        })
     };
     let factory = |sending| {
-        RowFactory::new(
+        row_factory_with(
+            RowServices::new(
+                &scope,
+                RowServiceParts {
+                    provider: provider.clone(),
+                    document: SelectionDocumentId(510),
+                    on_source: {
+                        let observed_sources = Rc::clone(&observed_sources);
+                        Rc::new(move |action| observed_sources.borrow_mut().push(action))
+                    },
+                    ..service_parts(&core, &scope)
+                },
+            )
+            .unwrap(),
             vec![row(sending)],
             scope.clone(),
-            markdown.clone(),
-            Rc::new(RefCell::new(StatusShimmers::default())),
-            *ArtisanTheme::for_mode(ThemeMode::Dark),
+            Rc::clone(&markdown),
             true,
-            Rc::new(|| SelectionSourceId(511)),
-            Rc::new(|| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
+            fixed_source(511),
+            Instant::now(),
+            {
+                let observed = Rc::clone(&observed);
+                let action_scope = action_scope.clone();
+                Rc::new(move |action: Action| {
+                    observed
+                        .borrow_mut()
+                        .push((action.clone(), action_scope.bind(action)));
+                })
+            },
+            Rc::default(),
         )
-        .with_row_cache(cache.clone())
-        .with_sources(provider.clone(), SelectionDocumentId(510), {
-            let observed_sources = observed_sources.clone();
-            Rc::new(move |action| observed_sources.borrow_mut().push(action))
-        })
-        .unwrap()
-        .with_dispatch({
-            let observed = observed.clone();
-            let action_scope = action_scope.clone();
-            Rc::new(move |action: Action| {
-                observed
-                    .borrow_mut()
-                    .push((action.clone(), action_scope.bind(action)))
-            })
-        })
+        .with_row_cache(Rc::clone(&cache))
     };
     let ready = factory(false);
-    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.set_viewport(800.0, 900.0, 1.0);
-    app.mount(|_| ready.realize(0, &key).unwrap().element)
-        .unwrap();
-    app.layout().unwrap();
+    let mut app = mounted(800.0, 900.0, ready.realize(0, &key).unwrap().element);
     click(&mut app, "source-export");
     let stale_source = source_actions
         .borrow_mut()
@@ -157,85 +141,62 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
         matches!(action, Action::Answer { id, answer: Answer::Approval { decision: Decision::AllowOnce } } if id == item.id)
     );
     let sending = factory(true);
-    let mut sending_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    sending_app.set_viewport(800.0, 900.0, 1.0);
-    sending_app
-        .mount(|_| sending.realize(0, &key).unwrap().element)
-        .unwrap();
-    sending_app.layout().unwrap();
+    let mut sending_app = mounted(800.0, 900.0, sending.realize(0, &key).unwrap().element);
     click(&mut sending_app, "approve-approval-0");
     assert!(actions.borrow().is_empty());
     let notice = Arc::new(Item {
-        id: ItemId("notice".into()),
-        thread_id: ThreadId("thread".into()),
         position: 2,
-        seq: 8,
-        run_id: None,
-        parent_id: None,
-        status: Status::Done,
-        created_at: 0,
-        updated_at: 0,
-        kind: ItemKind::Notice {
-            kind: artisan_api::NoticeKind::Info,
-            text: TextContent::Stored(ContentRef {
-                id: ContentId("b".repeat(64)),
-                bytes: 10,
-                lines: 1,
-            }),
-        },
+        ..items::item(
+            "notice",
+            thread,
+            8,
+            ItemKind::Notice {
+                kind: artisan_api::NoticeKind::Info,
+                text: TextContent::Stored(ContentRef {
+                    id: ContentId("b".repeat(64)),
+                    bytes: 10,
+                    lines: 1,
+                }),
+            },
+        )
     });
     let notice_key = RowKey::Item(notice.id.clone());
-    let notice_row = RealizedRow {
-        model: RowModel {
-            row: Row::WorkEntry {
+    let notice_row = realized(RowModel {
+        version: 8,
+        ..row_model(
+            Row::WorkEntry {
                 id: notice.id.clone(),
                 run: None,
             },
-            version: 8,
-            items: HashMap::from([(notice.id.clone(), notice.clone())]),
-            live: HashMap::new(),
-            ui: HashMap::new(),
-            run: None,
-            author: None,
-            gap: 0.0,
-            end: 0.0,
-        },
-        disclosure: Default::default(),
-        held: false,
-    };
-    let notice_factory = RowFactory::new(
+            [Arc::clone(&notice)],
+        )
+    });
+    let notice_factory = row_factory(
+        RowServices::new(
+            &scope,
+            RowServiceParts {
+                provider: provider.clone(),
+                document: SelectionDocumentId(510),
+                on_source: {
+                    let observed_sources = Rc::clone(&observed_sources);
+                    Rc::new(move |action| observed_sources.borrow_mut().push(action))
+                },
+                ..service_parts(&core, &scope)
+            },
+        )
+        .unwrap(),
         vec![notice_row],
         scope.clone(),
-        markdown.clone(),
-        Rc::new(RefCell::new(StatusShimmers::default())),
-        *ArtisanTheme::for_mode(ThemeMode::Dark),
+        Rc::clone(&markdown),
         true,
-        Rc::new(|| SelectionSourceId(512)),
-        Rc::new(|| {}),
-        Rc::new(|_| {}),
-        Rc::new(|_| {}),
-        Rc::new(|_| {}),
+        fixed_source(512),
     )
-    .with_row_cache(cache.clone())
-    .with_sources(provider.clone(), SelectionDocumentId(510), {
-        let observed_sources = observed_sources.clone();
-        Rc::new(move |action| observed_sources.borrow_mut().push(action))
-    })
-    .unwrap()
-    .with_dispatch(Rc::new(|_| {}))
-    .with_work(
-        Rc::new(RefCell::new(Default::default())),
-        HashMap::new(),
-        Instant::now(),
-        0.0,
-        0,
+    .with_row_cache(Rc::clone(&cache));
+    let mut notice_app = mounted(
+        800.0,
+        900.0,
+        notice_factory.realize(0, &notice_key).unwrap().element,
     );
-    let mut notice_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    notice_app.set_viewport(800.0, 900.0, 1.0);
-    notice_app
-        .mount(|_| notice_factory.realize(0, &notice_key).unwrap().element)
-        .unwrap();
-    notice_app.layout().unwrap();
     click(&mut notice_app, "source-export");
     let action = source_actions
         .borrow_mut()
@@ -247,38 +208,13 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
         effect,
         Some(editor_aqua::conversation::view::row_sources::RowSourceEffect::SavePath(_))
     ));
-    core.add_test_host(&config, client);
-    assert!(!scoped.dispatch(&mut conversation, &core, true, Instant::now()));
-}
-
-fn click(app: &mut aqua::UiApp, key: &str) {
-    let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
-    let node = app
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|node| {
-            app.tree()
-                .get(*node)
-                .is_some_and(|record| record.key == Some(key))
-        })
-        .unwrap();
-    let bounds = app.tree().visual_rect(node).unwrap();
-    let down = aqua_core::PointerEvent {
-        contact: 1,
-        kind: aqua_core::PointerKind::Mouse,
-        position: aqua_core::Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
-        buttons: 1,
-    };
-    aqua_ui::events::dispatch_input(
-        app.tree_mut(),
-        &aqua_core::InputEvent::PointerDown(down, aqua_core::PointerButton::Primary),
-    );
-    aqua_ui::events::dispatch_input(
-        app.tree_mut(),
-        &aqua_core::InputEvent::PointerUp(
-            aqua_core::PointerEvent { buttons: 0, ..down },
-            aqua_core::PointerButton::Primary,
-        ),
-    );
+    core.remove_host(&config.id).unwrap();
+    connect(&mut core, &config);
+    assert!(!scoped.dispatch(
+        &mut conversation,
+        &mut StoredConversation::default(),
+        &core,
+        true,
+        Instant::now()
+    ));
 }

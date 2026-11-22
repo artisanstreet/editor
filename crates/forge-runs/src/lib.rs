@@ -1,22 +1,18 @@
-//! Live runs.
-//!
-//! [`Hub`] starts engine runs, delivers steers and answers to them, and turns
-//! what adapters report into stored items. Reasoning, shell output and
-//! streaming text stay in memory here and are published as live events.
-//!
-//! A user message is stored `running` and becomes `done` once an engine has
-//! it. Whatever is still `running` when a run ends starts the next run, so a
-//! message sent while a run winds down is never lost.
-
 mod agents;
 mod approvals;
+mod beneath;
 mod coordination;
 mod disk;
+pub mod error;
 mod extensions;
+pub mod failure;
 mod gateway;
 mod handoff;
+mod images;
+mod launch;
 mod mcp_auth;
 mod mcp_reach;
+mod operation;
 mod park;
 pub mod resources;
 mod retention;
@@ -24,36 +20,87 @@ mod run;
 pub mod runtime;
 mod scratch;
 mod side;
+mod turns;
 
-pub use agents::{AgentInfo, AgentState, MAX_AGENT_DEPTH, SpawnAgent};
-pub use extensions::{DISABLED_SKILLS_KEY, GLOBAL_PROMPT_KEY};
-pub use forge_store::Refused;
+pub use agents::{
+    AgentInfo, AgentLookupError, AgentQueryError, AgentState, AgentViewError, CancelAgentError,
+    MessageAgentError, SendAsAgentError, SpawnAgent, SpawnAgentError, StartThreadError,
+};
+pub use approvals::ApprovalError;
+pub use coordination::DeliverMessageError;
+pub use error::{ErrorClass, Refused};
+pub use extensions::{
+    AdoptSkillError, CustomisationError, DiscardSkillError, EnabledSkillsError, Extensions,
+    GlobalPromptError, HomesLockError, InstallSkillError, KeepSkillsError, MarketplaceInstallError,
+    MarketplaceSearchError, PlaceSkillsError, PlacedSkills, ReconcileSkillsError,
+    ResolveGlobalPromptError, SaveGlobalPromptError, SetSkillEnabledError, SkillCatalogError,
+    UndoSkillsError,
+};
 pub use gateway::COMPUTER_USE_KEY;
+pub use gateway::{Acting, CallEditorError, GatewayCaller, GatewayRefusal};
+pub use mcp_auth::{
+    Mcp, McpAuthError, McpSignInFinishError, McpSignInStartError, McpStoreError,
+    ReadMcpServersError,
+};
+pub(crate) use operation::InputError;
+pub use operation::{
+    AnswerError, AnswerRefusal, CancelError, ClearGoalError, ClearGoalRefusal, ContinueError,
+    ContinueRefusal, SendError, StopFailure, UpdateError,
+};
+pub use retention::{RemoveInactiveThreadsError, SettingKind};
+pub use run::PrepareError;
+pub use scratch::{EnsureScratchProjectError, ThreadFolderError};
 pub use side::{SUGGESTIONS_KEY, SUMMARY_TITLES_KEY, YOU_SHOULD_KNOW_KEY};
 
-use anyhow::{Context, Result, bail};
 use artisan_api::{
     Answer, EngineId, Event, Item, ItemId, ItemKind, LiveTarget, RunId, SendMessage, Status,
     ThreadId,
 };
-use forge_engines::{Engines, Harness, Input};
+use forge_engines::{Engines, Harness};
 use forge_store::Store;
-use std::collections::HashMap;
+use run::Inbound;
 use std::path::PathBuf;
-use std::sync::{
-    Arc, Mutex, PoisonError,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// Picks the adapter for an engine. Tests swap in a scripted one.
+const _: () = assert!(
+    forge_store::MAX_MESSAGE_IMAGE_BYTES <= forge_engines::codex::MAX_TURN_IMAGE_BYTES as u64,
+    "Codex must read the echo of the largest message Forge accepts"
+);
+
 pub type HarnessFor = Arc<dyn Fn(EngineId) -> Arc<dyn Harness> + Send + Sync>;
+
+pub async fn sweep_leftovers(
+    data_dir: &std::path::Path,
+    store: &Store,
+    exclusive: &forge_store::DataLock,
+) {
+    match images::sweep(data_dir, store, exclusive).await {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(removed, "removed the image copies of removed threads"),
+        Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
+    }
+    match forge_engines::opencode::sweep_leftover_servers(data_dir) {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(removed, "removed leftover OpenCode server folders"),
+        Err(error) => tracing::warn!("{}", diagnostics::chain(&error)),
+    }
+}
 
 #[derive(Clone)]
 pub struct Hub {
     inner: Arc<Inner>,
+}
+
+impl std::fmt::Debug for Hub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hub")
+            .field("data_dir", &self.inner.data_dir)
+            .field("store", &self.inner.store)
+            .finish_non_exhaustive()
+    }
 }
 
 struct Inner {
@@ -62,61 +109,125 @@ struct Inner {
     engines: Engines,
     data_dir: PathBuf,
     harness_for: HarnessFor,
-    live: Mutex<HashMap<ThreadId, LiveRun>>,
-    suggestions: Mutex<HashMap<ThreadId, Suggested>>,
-    /// How much each thread has done since its last "You should know" check.
-    attention: Mutex<HashMap<ThreadId, side::Attention>>,
-    /// Threads still waiting for a generated title.
-    untitled: Mutex<std::collections::HashSet<ThreadId>>,
-    /// Titles being generated independently of the working turn.
-    title_queries: Mutex<std::collections::HashSet<ThreadId>>,
-    /// Held while skills or the prompt are written into engine homes.
-    homes: Mutex<()>,
+    turns: Mutex<turns::Turns>,
+    side: side::SideQueries,
+    extensions: Extensions,
+    mcp: Mcp,
     shutdown: CancellationToken,
     tasks: TaskTracker,
     harness_slots: Arc<Semaphore>,
     dispatch: Notify,
     admission: tokio::sync::Mutex<()>,
-    /// Where engines reach the Artisan MCP, and each thread's credential.
-    gateway: Mutex<gateway::Gateway>,
-    /// Bumped whenever an agent's state may have changed; waiters watch it.
-    agents_changed: tokio::sync::watch::Sender<u64>,
-    /// How many `agent_wait` calls are waiting on each agent item now.
-    agent_waiters: Mutex<HashMap<ItemId, usize>>,
-    /// Approval cards Forge showed itself, by item.
-    approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
-    /// How runs read the free space where they work.
+    gateway: gateway::Gateway,
+    agents: agents::AgentWatch,
+    approvals: approvals::OwnApprovals,
     disk: disk::Probe,
-    /// Where the Marketplace searches skills.sh.
-    skills_sh: Mutex<String>,
-    /// MCP sign-ins waiting for their redirect.
-    mcp_flows: Mutex<mcp_auth::Flows>,
-    /// Serialises changes to the `mcp_auth` setting.
-    mcp_auth_writes: tokio::sync::Mutex<()>,
-    mcp_unreachable: Mutex<std::collections::HashSet<mcp_reach::Endpoint>>,
+    stop_deadline: std::time::Duration,
 }
 
-/// One live run's handles and memory-only text.
+struct Surroundings {
+    disk: disk::Probe,
+    stop_deadline: std::time::Duration,
+}
+
+impl Surroundings {
+    fn system() -> Self {
+        Self {
+            disk: disk::Probe::system(),
+            stop_deadline: STOP_DEADLINE,
+        }
+    }
+}
+
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+
+const RUN_CAPACITY: usize = 8;
+
+const FIRST_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+const LONGEST_RETRY: std::time::Duration = std::time::Duration::from_mins(1);
+
+fn retry_delay(failures: u32) -> std::time::Duration {
+    FIRST_RETRY
+        .saturating_mul(2_u32.saturating_pow(failures.saturating_sub(1).min(6)))
+        .min(LONGEST_RETRY)
+}
+
+enum Stopping {
+    Live(turns::StopWait),
+    Idle,
+}
+
+#[derive(Debug)]
 struct LiveRun {
-    inbox: mpsc::Sender<Input>,
+    id: RunId,
+    inbox: mpsc::Sender<Inbound>,
     cancel: CancellationToken,
     engine: Option<EngineId>,
-    cancel_through: Arc<AtomicU64>,
-    /// Streaming text, reasoning, shell output and progress, by target.
-    live: HashMap<LiveTarget, LivePreview>,
-    live_bytes: usize,
+    launched: Option<artisan_api::Permissions>,
+    live: std::collections::BTreeMap<LiveTarget, LivePreview>,
+    foreground_bytes: usize,
+    terminal_bytes: usize,
+    phase: turns::Phase,
+    stop: turns::StopSignal,
+    retries: u32,
 }
 
-/// The guess at a thread's next message, kept until the thread runs again.
-struct Suggested {
-    /// The run after which it is asked.
-    run: RunId,
-    /// Stops the side query asking for it once the thread moves on.
-    cancel: CancellationToken,
-    text: Option<String>,
+const LIVE_TARGET_BYTES: usize = 256 * 1024;
+const LIVE_FOREGROUND_BYTES: usize = 2 * 1024 * 1024;
+const LIVE_TERMINAL_BYTES: usize = 1024 * 1024;
+const LIVE_TARGETS: usize = 128;
+
+const fn terminal(target: &LiveTarget) -> bool {
+    matches!(
+        target,
+        LiveTarget::Shell { .. } | LiveTarget::Progress { .. }
+    )
 }
 
-#[derive(Default)]
+fn keep_newest(text: &mut String, bytes: usize) -> usize {
+    let mut cut = text.len().saturating_sub(bytes);
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    text.drain(..cut);
+    cut
+}
+
+impl LiveRun {
+    fn terminal_share(&self, admitting: bool) -> usize {
+        let terminals =
+            self.live.keys().filter(|target| terminal(target)).count() + usize::from(admitting);
+        LIVE_TARGET_BYTES.min(LIVE_TERMINAL_BYTES / terminals.max(1))
+    }
+
+    fn shrink_terminals(&mut self, share: usize) {
+        for (target, preview) in &mut self.live {
+            if terminal(target) && preview.text.len() > share {
+                let dropped = keep_newest(&mut preview.text, share);
+                preview.coverage.start = preview.coverage.start.saturating_add(dropped as u64);
+                self.terminal_bytes = self.terminal_bytes.saturating_sub(dropped);
+            }
+        }
+    }
+
+    fn release(&mut self, target: &LiveTarget, bytes: usize) {
+        if terminal(target) {
+            self.terminal_bytes = self.terminal_bytes.saturating_sub(bytes);
+        } else {
+            self.foreground_bytes = self.foreground_bytes.saturating_sub(bytes);
+        }
+    }
+
+    fn hold(&mut self, target: &LiveTarget, bytes: usize) {
+        if terminal(target) {
+            self.terminal_bytes += bytes;
+        } else {
+            self.foreground_bytes += bytes;
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 struct LivePreview {
     text: String,
     coverage: artisan_api::LiveCoverage,
@@ -140,7 +251,7 @@ impl Hub {
             engines,
             data_dir,
             harness_for,
-            disk::Probe::system(),
+            Surroundings::system(),
             None,
         )
     }
@@ -157,7 +268,7 @@ impl Hub {
             engines,
             data_dir,
             harness_for,
-            disk::Probe::system(),
+            Surroundings::system(),
             Some(generation),
         )
     }
@@ -171,9 +282,16 @@ impl Hub {
         engines: Engines,
         data_dir: PathBuf,
         harness_for: HarnessFor,
-        disk: disk::Probe,
+        surroundings: Surroundings,
         generation: Option<runtime::Generation>,
     ) -> Self {
+        let Surroundings {
+            disk,
+            stop_deadline,
+        } = surroundings;
+        let extensions = Extensions::new(store.clone(), engines.clone(), data_dir.clone());
+        let mcp = Mcp::new(store.clone());
+        let side = side::SideQueries::new(store.clone());
         let hub = Self {
             inner: Arc::new(Inner {
                 generation,
@@ -181,26 +299,20 @@ impl Hub {
                 engines,
                 data_dir,
                 harness_for,
-                live: Mutex::new(HashMap::new()),
-                suggestions: Mutex::new(HashMap::new()),
-                attention: Mutex::new(HashMap::new()),
-                untitled: Mutex::new(std::collections::HashSet::new()),
-                title_queries: Mutex::new(std::collections::HashSet::new()),
-                homes: Mutex::new(()),
+                turns: Mutex::new(turns::Turns::default()),
+                side,
+                extensions,
+                mcp,
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
-                harness_slots: Arc::new(Semaphore::new(8)),
+                harness_slots: Arc::new(Semaphore::new(RUN_CAPACITY)),
                 dispatch: Notify::new(),
                 admission: tokio::sync::Mutex::new(()),
-                gateway: Mutex::new(gateway::Gateway::default()),
-                agents_changed: tokio::sync::watch::channel(0).0,
-                agent_waiters: Mutex::new(HashMap::new()),
-                approvals: Mutex::new(HashMap::new()),
+                gateway: gateway::Gateway::default(),
+                agents: agents::AgentWatch::default(),
+                approvals: approvals::OwnApprovals::default(),
                 disk,
-                skills_sh: Mutex::new(forge_engines::SKILLS_SH_URL.to_owned()),
-                mcp_flows: Mutex::new(mcp_auth::Flows::default()),
-                mcp_auth_writes: tokio::sync::Mutex::new(()),
-                mcp_unreachable: Mutex::default(),
+                stop_deadline,
             }),
         };
         hub.forward_engine_status();
@@ -214,47 +326,33 @@ impl Hub {
         &self.inner.store
     }
 
-    /// Points the Marketplace's skills.sh search elsewhere: a test's stub.
-    pub fn set_skills_sh_url(&self, url: impl Into<String>) {
-        *self
-            .inner
-            .skills_sh
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = url.into();
-    }
-
-    pub(crate) fn skills_sh_url(&self) -> String {
-        self.inner
-            .skills_sh
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
     #[must_use]
     pub fn engines(&self) -> &Engines {
         &self.inner.engines
     }
 
     #[must_use]
-    pub fn data_dir(&self) -> &std::path::Path {
+    fn data_dir(&self) -> &std::path::Path {
         &self.inner.data_dir
     }
 
-    /// Starts runs for threads with undelivered messages, including ones a
-    /// previous Forge left.
     pub fn resume_pending(&self) {
         self.inner.dispatch.notify_one();
     }
 
-    /// Stores the message, then starts a run or steers the live one.
-    pub async fn send_message(&self, thread_id: &ThreadId, message: SendMessage) -> Result<Item> {
-        let store = &self.inner.store;
+    pub async fn send_message(
+        &self,
+        thread_id: &ThreadId,
+        message: SendMessage,
+    ) -> Result<Item, SendError> {
         if message.text.trim_start().starts_with('/') {
-            let thread = store
-                .thread(thread_id)
-                .await?
-                .ok_or_else(|| forge_store::SendRejected::ThreadNotFound(thread_id.clone()))?;
+            let thread =
+                self.store()
+                    .thread(thread_id)
+                    .await?
+                    .ok_or_else(|| SendError::ThreadNotFound {
+                        thread: thread_id.clone(),
+                    })?;
             let requested = message
                 .config
                 .as_ref()
@@ -264,25 +362,21 @@ impl Hub {
                 .get(thread_id)
                 .and_then(|run| run.engine)
                 .unwrap_or(requested);
-            // A command the engine can't read fails the send, not the run.
-            forge_engines::normalize_command(engine, &message.text)
-                .map_err(|error| forge_store::SendRejected::Payload(error.to_string()))?;
+            forge_engines::normalize_command(engine, &message.text).map_err(|source| {
+                SendError::Command {
+                    thread: thread_id.clone(),
+                    engine,
+                    source,
+                }
+            })?;
         }
-        // The first line names an untitled thread; the config a message
-        // runs with becomes the default for new threads.
         let acceptance = forge_store::Acceptance {
-            title: Some(
-                message
-                    .text
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .chars()
-                    .take(80)
-                    .collect::<String>(),
-            )
-            .filter(|title| !title.is_empty()),
+            title: message
+                .text
+                .lines()
+                .next()
+                .map(|line| line.trim().chars().take(80).collect::<String>())
+                .filter(|title| !title.is_empty()),
             remember_config: true,
             from_agent: None,
             sender: None,
@@ -290,63 +384,110 @@ impl Hub {
         self.accept_message(thread_id, message, acceptance).await
     }
 
-    /// Stores an already checked message, then starts a run or steers the
-    /// live one.
     async fn accept_message(
         &self,
         thread_id: &ThreadId,
         message: SendMessage,
         acceptance: forge_store::Acceptance,
-    ) -> Result<Item> {
-        if let Some(member) = self.remote_target(thread_id, true)? {
-            return Ok(serde_json::from_value(
-                runtime::request(
-                    &member,
-                    &runtime::Command::Accept {
-                        thread: thread_id.clone(),
-                        message,
-                        acceptance,
-                    },
-                )
-                .await?,
-            )?);
+    ) -> Result<Item, SendError> {
+        let route = self.route(thread_id).map_err(|source| SendError::Route {
+            thread: thread_id.clone(),
+            source,
+        })?;
+        if let Some(member) = route {
+            let item = message.id.clone();
+            return runtime::request_as(
+                &member,
+                &runtime::Command::Accept {
+                    thread: thread_id.clone(),
+                    message,
+                    acceptance,
+                },
+            )
+            .await
+            .map_err(|source| SendError::Peer {
+                thread: thread_id.clone(),
+                item,
+                source: Box::new(source),
+            });
         }
-        let steer = self.is_live(thread_id);
+        self.accept_here(thread_id, message, acceptance).await
+    }
+
+    async fn accept_here(
+        &self,
+        thread_id: &ThreadId,
+        message: SendMessage,
+        acceptance: forge_store::Acceptance,
+    ) -> Result<Item, SendError> {
+        let hub = self.clone();
+        let thread = thread_id.clone();
+        let item = message.id.clone();
+        let accepting = self
+            .inner
+            .tasks
+            .spawn(async move { hub.accept_and_dispatch(&thread, message, acceptance).await });
+        match accepting.await {
+            Ok(accepted) => accepted,
+            Err(failure) if failure.is_panic() => std::panic::resume_unwind(failure.into_panic()),
+            Err(source) => Err(SendError::Abandoned {
+                thread: thread_id.clone(),
+                item,
+                source,
+            }),
+        }
+    }
+
+    async fn accept_and_dispatch(
+        &self,
+        thread_id: &ThreadId,
+        message: SendMessage,
+        acceptance: forge_store::Acceptance,
+    ) -> Result<Item, SendError> {
         let (item, created, saved_engine) = self
             .inner
             .store
-            .send_message(thread_id.clone(), message, steer, acceptance)
+            .send_message(thread_id.clone(), message, acceptance)
             .await?;
-        if !created {
-            return Ok(item);
-        }
-        let live = self
-            .lock()
-            .get(thread_id)
-            .map(|run| (run.inbox.clone(), run.engine.unwrap_or(saved_engine)));
-        match live {
-            // A closed inbox means the run is ending; it starts the next run
-            // with this message.
-            Some((inbox, engine)) => {
-                let input = self.user_input(&item, engine).await?;
-                inbox.send(Input::Steer(input)).await.ok();
-            }
-            None => self.resume_pending(),
+        if created && let Err(error) = self.dispatch_accepted(thread_id, &item, saved_engine).await
+        {
+            tracing::warn!(thread = %thread_id, item = %item.id, "hand the saved message to the live run; it waits for the next turn: {}", diagnostics::chain(&error));
+            self.resume_pending();
         }
         Ok(item)
     }
 
-    /// Answers the approval or question on an item of a live run. What the
-    /// item's state turns down is [`Refused`]; anything else is Forge's fault.
-    pub async fn answer(&self, item_id: &ItemId, answer: Answer) -> Result<()> {
-        let refused = |message: String| anyhow::Error::new(Refused(message));
-        let item = self
-            .inner
-            .store
-            .item(item_id)
-            .await?
-            .ok_or_else(|| forge_store::ItemNotFound(item_id.clone()))?;
-        if let Some(member) = self.remote_target(&item.thread_id, false)? {
+    async fn dispatch_accepted(
+        &self,
+        thread_id: &ThreadId,
+        item: &Item,
+        saved_engine: EngineId,
+    ) -> Result<(), InputError> {
+        let live = self
+            .lock()
+            .get(thread_id)
+            .map(|run| (run.inbox.clone(), run.engine.unwrap_or(saved_engine)));
+        if let Some((inbox, engine)) = live {
+            let input = self.user_input(item, engine).await?;
+            if inbox.send(Inbound::Steer(input)).await.is_err() {
+                self.resume_pending();
+            }
+        } else {
+            self.lock().undefer(thread_id);
+            self.resume_pending();
+        }
+        Ok(())
+    }
+
+    pub async fn answer(&self, item_id: &ItemId, answer: Answer) -> Result<(), AnswerError> {
+        let item = self.answerable(item_id).await?;
+        let route = self
+            .route(&item.thread_id)
+            .map_err(|source| AnswerError::Route {
+                item: item_id.clone(),
+                source,
+            })?;
+        if let Some(member) = route {
             runtime::request(
                 &member,
                 &runtime::Command::Answer {
@@ -354,12 +495,34 @@ impl Hub {
                     answer,
                 },
             )
-            .await?;
+            .await
+            .map_err(|source| AnswerError::Peer {
+                item: item_id.clone(),
+                source: Box::new(source),
+            })?;
             return Ok(());
         }
+        self.answer_item(item, answer).await
+    }
+
+    async fn answer_here(&self, item_id: &ItemId, answer: Answer) -> Result<(), AnswerError> {
+        let item = self.answerable(item_id).await?;
+        self.answer_item(item, answer).await
+    }
+
+    async fn answerable(&self, item_id: &ItemId) -> Result<Item, AnswerError> {
+        self.store()
+            .item(item_id)
+            .await?
+            .ok_or_else(|| AnswerError::ItemNotFound {
+                item: item_id.clone(),
+            })
+    }
+
+    async fn answer_item(&self, item: Item, answer: Answer) -> Result<(), AnswerError> {
+        let item_id = &item.id;
         if let Answer::Question { answers } = &answer {
-            self.inner
-                .store
+            self.store()
                 .validate_question_answers(item_id, answers)
                 .await?;
         }
@@ -377,10 +540,11 @@ impl Hub {
                 | ItemKind::Notice { .. }
                 | ItemKind::Error { .. } => None,
             }
-            .ok_or_else(|| refused(format!("Item {item_id} is not an approval request.")))?;
+            .ok_or_else(|| AnswerError::refused(item_id, AnswerRefusal::NotAnApproval))?;
             if !approval.options.contains(decision) {
-                return Err(refused(
-                    "This request does not offer that decision.".to_owned(),
+                return Err(AnswerError::refused(
+                    item_id,
+                    AnswerRefusal::DecisionNotOffered,
                 ));
             }
             if self.answer_own_approval(item_id, *decision) {
@@ -390,6 +554,7 @@ impl Hub {
         let inbox = self
             .lock()
             .get(&item.thread_id)
+            .filter(|run| item.run_id.as_ref() == Some(&run.id))
             .map(|run| run.inbox.clone());
         if inbox.is_none()
             && matches!(
@@ -408,83 +573,123 @@ impl Hub {
             return Ok(());
         }
         if item.status != Status::AwaitingUser {
-            return Err(refused(format!(
-                "Item {item_id} is not waiting for an answer."
-            )));
+            return Err(AnswerError::refused(item_id, AnswerRefusal::NotWaiting));
         }
-        let key = self
-            .inner
-            .store
-            .native_id(item_id)
-            .await?
-            .with_context(|| format!("item {item_id} has no engine id"))?;
-        let ended = || refused(format!("The run of item {item_id} has ended."));
+        let key =
+            self.store()
+                .native_id(item_id)
+                .await?
+                .ok_or_else(|| AnswerError::NoEngineId {
+                    item: item_id.clone(),
+                })?;
+        let ended = || AnswerError::refused(item_id, AnswerRefusal::RunEnded);
         let inbox = inbox.ok_or_else(ended)?;
-        inbox
-            .send(Input::Answer { key, answer })
-            .await
-            .map_err(|_unsent| ended())?;
+        if inbox.send(Inbound::Answer { key, answer }).await.is_err() {
+            return Err(ended());
+        }
         self.agent_attention(&item.thread_id).await;
         Ok(())
     }
 
-    /// Carries on the thread's turn that stopped before it finished (the
-    /// user stopped it, or Forge restarted), with no new message. Messages
-    /// the stop caught before the engine read them are sent instead.
-    pub async fn continue_turn(&self, thread_id: &ThreadId) -> Result<()> {
-        let refused = |message: &str| anyhow::Error::new(Refused(message.to_owned()));
-        let _admission = self.inner.admission.lock().await;
-        if self.is_live(thread_id) {
-            return Err(refused("The thread is already working."));
+    pub async fn continue_turn(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
+        let route = self
+            .route(thread_id)
+            .map_err(|source| ContinueError::Route {
+                thread: thread_id.clone(),
+                source,
+            })?;
+        if let Some(member) = route {
+            runtime::request(
+                &member,
+                &runtime::Command::Continue {
+                    thread: thread_id.clone(),
+                },
+            )
+            .await
+            .map_err(|source| ContinueError::Peer {
+                thread: thread_id.clone(),
+                source: Box::new(source),
+            })?;
+            return Ok(());
         }
-        let stopped = self
-            .store()
-            .latest_run(thread_id)
-            .await?
-            .is_some_and(|run| run.status.is_stopped());
-        if !stopped {
-            return Err(refused("The thread has no stopped turn to continue."));
-        }
-        if self
-            .store()
-            .restore_undelivered_inputs(thread_id.clone())
-            .await?
-            == 0
-        {
-            self.store().request_continue(thread_id.clone()).await?;
-        }
-        self.resume_pending();
-        Ok(())
+        self.continue_here(thread_id).await
     }
 
-    /// Saves a thread's title, archive state, settings or read mark. A
-    /// change of access reaches its live run at once: Full approves what
-    /// waits and the engine stops asking.
+    async fn continue_here(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
+        let _admission = self.inner.admission.lock().await;
+        self.continue_admitted(thread_id).await
+    }
+
+    async fn continue_admitted(&self, thread_id: &ThreadId) -> Result<(), ContinueError> {
+        let refused = |reason| ContinueError::Refused {
+            thread: thread_id.clone(),
+            reason,
+        };
+        let continued = self.lock().carry_on(thread_id);
+        match continued {
+            turns::Continued::Recorded => Ok(()),
+            turns::Continued::Record => {
+                self.store().request_continue(thread_id.clone()).await?;
+                self.lock().continued(thread_id);
+                Ok(())
+            }
+            turns::Continued::Busy => Err(refused(ContinueRefusal::Working)),
+            turns::Continued::NothingStopped => Err(refused(ContinueRefusal::NothingStopped)),
+            turns::Continued::Idle => {
+                let stopped = self
+                    .store()
+                    .latest_run(thread_id)
+                    .await?
+                    .is_some_and(|run| run.status().is_stopped());
+                if !stopped {
+                    return Err(refused(ContinueRefusal::NothingStopped));
+                }
+                self.store().request_continue(thread_id.clone()).await?;
+                self.lock().undefer(thread_id);
+                self.resume_pending();
+                Ok(())
+            }
+        }
+    }
+
     pub async fn update_thread(
         &self,
         thread_id: &ThreadId,
         update: artisan_api::UpdateThread,
-    ) -> Result<Option<artisan_api::Thread>> {
-        if let Some(member) = self.remote_target(thread_id, false)? {
-            return Ok(serde_json::from_value(
-                runtime::request(
-                    &member,
-                    &runtime::Command::Update {
-                        thread: thread_id.clone(),
-                        update,
-                    },
-                )
-                .await?,
-            )?);
+    ) -> Result<Option<artisan_api::Thread>, UpdateError> {
+        let route = self.route(thread_id).map_err(|source| UpdateError::Route {
+            thread: thread_id.clone(),
+            source,
+        })?;
+        if let Some(member) = route {
+            return runtime::request_as(
+                &member,
+                &runtime::Command::Update {
+                    thread: thread_id.clone(),
+                    update,
+                },
+            )
+            .await
+            .map_err(|source| UpdateError::Peer {
+                thread: thread_id.clone(),
+                source: Box::new(source),
+            });
         }
+        self.update_here(thread_id, update).await
+    }
+
+    async fn update_here(
+        &self,
+        thread_id: &ThreadId,
+        update: artisan_api::UpdateThread,
+    ) -> Result<Option<artisan_api::Thread>, UpdateError> {
         let before = self
             .store()
             .thread(thread_id)
             .await?
             .map(|thread| thread.config.permissions);
-        // A title the user gave wins over one a side query would generate.
         if update.title.is_some() {
-            self.untitled_lock().remove(thread_id);
+            self.inner.side.titled(thread_id);
         }
         let thread = self.store().update_thread(thread_id, update).await?;
         if let Some(thread) = &thread
@@ -496,7 +701,7 @@ impl Hub {
             let inbox = self.lock().get(thread_id).map(|run| run.inbox.clone());
             if let Some(inbox) = inbox
                 && inbox
-                    .send(Input::SetPermissions(thread.config.permissions))
+                    .send(Inbound::SetPermissions(thread.config.permissions))
                     .await
                     .is_err()
             {
@@ -506,28 +711,44 @@ impl Hub {
         Ok(thread)
     }
 
-    pub async fn clear_goal(&self, thread_id: &ThreadId) -> Result<()> {
-        if let Some(member) = self.remote_target(thread_id, false)? {
+    pub async fn clear_goal(&self, thread_id: &ThreadId) -> Result<(), ClearGoalError> {
+        let route = self
+            .route(thread_id)
+            .map_err(|source| ClearGoalError::Route {
+                thread: thread_id.clone(),
+                source,
+            })?;
+        if let Some(member) = route {
             runtime::request(
                 &member,
                 &runtime::Command::ClearGoal {
                     thread: thread_id.clone(),
                 },
             )
-            .await?;
+            .await
+            .map_err(|source| ClearGoalError::Peer {
+                thread: thread_id.clone(),
+                source: Box::new(source),
+            })?;
             return Ok(());
         }
-        let refused = |message: &str| anyhow::Error::new(Refused(message.to_owned()));
+        self.clear_goal_here(thread_id).await
+    }
+
+    async fn clear_goal_here(&self, thread_id: &ThreadId) -> Result<(), ClearGoalError> {
         let store = self.store();
-        let thread = store
-            .thread(thread_id)
-            .await?
-            .ok_or_else(|| forge_store::SendRejected::ThreadNotFound(thread_id.clone()))?;
+        let thread =
+            store
+                .thread(thread_id)
+                .await?
+                .ok_or_else(|| ClearGoalError::ThreadNotFound {
+                    thread: thread_id.clone(),
+                })?;
         let goal = store
             .inspector(thread_id)
             .await?
             .goal
-            .ok_or_else(|| refused("The thread has no goal."))?;
+            .ok_or_else(|| ClearGoalError::refused(thread_id, ClearGoalRefusal::NoGoal))?;
         let live = self.lock().get(thread_id).map(|run| {
             (
                 run.inbox.clone(),
@@ -546,37 +767,22 @@ impl Hub {
                     config: None,
                     draft: None,
                 };
-                self.send_message(thread_id, message).await?;
+                self.send_message(thread_id, message)
+                    .await
+                    .map_err(|source| ClearGoalError::Send {
+                        thread: thread_id.clone(),
+                        source: Box::new(source),
+                    })?;
                 return Ok(());
             }
             EngineId::Codex | EngineId::OpenCode => {}
         }
         if let Some((inbox, _)) = live {
-            inbox
-                .send(Input::ClearGoal)
-                .await
-                .map_err(|_unsent| refused("The run is ending; try again in a moment."))?;
+            if inbox.send(Inbound::ClearGoal).await.is_err() {
+                return Err(ClearGoalError::refused(thread_id, ClearGoalRefusal::Ending));
+            }
         } else {
-            let session = store
-                .latest_run(thread_id)
-                .await?
-                .filter(|run| run.engine == engine)
-                .and_then(|run| run.session_id)
-                .ok_or_else(|| refused("This engine never started this thread's session."))?;
-            let lease = self.engines().lease(engine);
-            let turn = run::prepare(
-                self,
-                &thread,
-                Some(session),
-                forge_engines::UserInput::default(),
-                lease.as_ref().map(|lease| lease.path().to_path_buf()),
-            )
-            .await?;
-            (self.inner.harness_for)(engine)
-                .clear_goal(turn)
-                .await
-                .with_context(|| format!("clearing the goal of thread {thread_id}"))?;
-            drop(lease);
+            self.clear_goal_offline(&thread, engine).await?;
         }
         store
             .upsert_item(forge_store::NewItem {
@@ -597,64 +803,165 @@ impl Hub {
         Ok(())
     }
 
-    /// Cancels the thread's live run, if any, and the agents it started.
-    pub async fn cancel(&self, thread_id: &ThreadId) -> Result<()> {
-        // Stop the whole tree before dispatching inputs or delivering agent
-        // results. Otherwise a child's cancellation can restart its parent.
-        let _admission = self.inner.admission.lock().await;
-        self.cancel_one(thread_id).await?;
-        self.cancel_agents_of(thread_id).await
-    }
-
-    /// The caller holds admission across the entire cancellation tree.
-    async fn cancel_one(&self, thread_id: &ThreadId) -> Result<()> {
-        if let Some(member) = self.remote_target(thread_id, false)? {
-            runtime::request(
-                &member,
-                &runtime::Command::Cancel {
-                    thread: thread_id.clone(),
-                },
-            )
-            .await?;
-            return Ok(());
+    async fn clear_goal_offline(
+        &self,
+        thread: &artisan_api::Thread,
+        engine: EngineId,
+    ) -> Result<(), ClearGoalError> {
+        let thread_id = &thread.id;
+        let prepare_failed = |source: PrepareError| ClearGoalError::Prepare {
+            thread: thread_id.clone(),
+            engine,
+            source: Box::new(source),
+        };
+        let latest = self.store().latest_run(thread_id).await?;
+        let launch = launch::LaunchSession::current(self, engine, latest.as_ref())
+            .await
+            .map_err(|source| prepare_failed(source.into()))?;
+        if launch.resume().is_none() {
+            return Err(ClearGoalError::refused(
+                thread_id,
+                ClearGoalRefusal::NoSession { engine },
+            ));
         }
-        self.cancel_owned(thread_id).await
-    }
-
-    pub async fn cancel_local(&self, thread_id: &ThreadId) -> Result<()> {
-        let _admission = self.inner.admission.lock().await;
-        self.cancel_owned(thread_id).await
-    }
-
-    async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<()> {
-        let cutoff = self.store().head();
-        if let Some(run) = self.lock().get(thread_id) {
-            run.cancel_through.store(cutoff, Ordering::Release);
-            run.cancel.cancel();
-        }
-        self.store()
-            .cancel_pending_inputs(thread_id.clone(), cutoff)
-            .await?;
-        // A parked turn is stopped too: it isn't picked up again.
-        self.store().unpark(thread_id.clone()).await?;
-        self.resume_pending();
+        let lease = self.engines().lease(engine);
+        let run::Prepared {
+            turn,
+            gateway: _gateway,
+        } = run::prepare(
+            self,
+            thread,
+            &launch,
+            forge_engines::UserInput::default(),
+            lease.as_ref().map(|lease| lease.path().to_path_buf()),
+        )
+        .await
+        .map_err(prepare_failed)?;
+        (self.inner.harness_for)(engine)
+            .clear_goal(turn)
+            .await
+            .map_err(|source| ClearGoalError::Engine {
+                thread: thread_id.clone(),
+                engine,
+                source,
+            })?;
+        drop(lease);
         Ok(())
     }
 
-    /// Cancels startup-owned work if setup fails or its future is dropped.
-    /// Disarm only after ownership transfers to the serving controller.
+    pub async fn cancel(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
+        let mut failures = Vec::new();
+        let mut elsewhere = Vec::new();
+        let mut idle = Vec::new();
+        let mut stopping = Vec::new();
+        let total = {
+            let _admission = self.inner.admission.lock().await;
+            let tree = self.agent_tree(thread_id).await?;
+            for thread in &tree {
+                match self.route(thread) {
+                    Ok(Some(member)) => elsewhere.push((thread.clone(), member)),
+                    Ok(None) => match self.cancel_owned(thread, &mut failures).await {
+                        Stopping::Live(saved) => stopping.push((thread.clone(), saved)),
+                        Stopping::Idle => idle.push(thread.clone()),
+                    },
+                    Err(source) => failures.push(StopFailure::Route {
+                        thread: thread.clone(),
+                        source,
+                    }),
+                }
+            }
+            tree.len()
+        };
+        for (thread, saved) in stopping {
+            if let Err(source) = saved.saved().await {
+                failures.push(StopFailure::Unsaved { thread, source });
+            }
+        }
+        for thread in idle {
+            self.agent_attention(&thread).await;
+        }
+        for (thread, member) in elsewhere {
+            if let Err(source) = runtime::request(
+                &member,
+                &runtime::Command::Cancel {
+                    thread: thread.clone(),
+                },
+            )
+            .await
+            {
+                failures.push(StopFailure::Peer {
+                    thread,
+                    source: Box::new(source),
+                });
+            }
+        }
+        CancelError::check(thread_id, total, failures)
+    }
+
+    async fn cancel_local(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
+        let mut failures = Vec::new();
+        let stopped = {
+            let _admission = self.inner.admission.lock().await;
+            self.cancel_owned(thread_id, &mut failures).await
+        };
+        match stopped {
+            Stopping::Live(saved) => {
+                if let Err(source) = saved.saved().await {
+                    failures.push(StopFailure::Unsaved {
+                        thread: thread_id.clone(),
+                        source,
+                    });
+                }
+            }
+            Stopping::Idle => self.agent_attention(thread_id).await,
+        }
+        CancelError::check(thread_id, 1, failures)
+    }
+
+    async fn cancel_owned(
+        &self,
+        thread_id: &ThreadId,
+        failures: &mut Vec<StopFailure>,
+    ) -> Stopping {
+        let cutoff = self.store().head();
+        let stopped = self.lock().stop(thread_id, cutoff);
+        if let Err(error) = self
+            .store()
+            .cancel_pending_inputs(thread_id.clone(), cutoff)
+            .await
+        {
+            failures.push(error.into());
+        }
+        if let Err(error) = self.store().unpark(thread_id.clone()).await {
+            failures.push(error.into());
+        }
+        let stopping = match stopped {
+            turns::Stopped::Live(saved) => Stopping::Live(saved),
+            turns::Stopped::Idle => Stopping::Idle,
+            turns::Stopped::Unsettled(settlement) => {
+                match self.store().settle_run(*settlement).await {
+                    Ok(_) => self.lock().settled(thread_id),
+                    Err(error) => failures.push(StopFailure::Unsaved {
+                        thread: thread_id.clone(),
+                        source: Arc::new(error),
+                    }),
+                }
+                Stopping::Idle
+            }
+        };
+        self.resume_pending();
+        stopping
+    }
+
     pub fn shutdown_on_drop(&self) -> tokio_util::sync::DropGuard {
         self.inner.shutdown.clone().drop_guard()
     }
 
-    /// Stops all work owned by this controller without touching another Forge.
     pub fn shutdown(&self) {
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
     }
 
-    /// Stops every run and waits up to `grace` for them to settle, so they
-    /// end interrupted and carry on after the restart.
     pub async fn stop(&self, grace: std::time::Duration) {
         self.shutdown();
         if tokio::time::timeout(grace, self.inner.tasks.wait())
@@ -671,62 +978,64 @@ impl Hub {
     #[must_use]
     pub fn is_live(&self, thread_id: &ThreadId) -> bool {
         self.lock().contains_key(thread_id)
-            || self.inner.generation.as_ref().is_some_and(|generation| {
-                generation
-                    .registry
-                    .owner(thread_id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
+            || self
+                .inner
+                .generation
+                .as_ref()
+                .is_some_and(|generation| generation.owner(thread_id).is_some())
+    }
+
+    #[must_use]
+    pub fn live_run(&self, thread_id: &ThreadId) -> Option<RunId> {
+        self.lock().get(thread_id).map(|run| run.id.clone())
+    }
+
+    fn owned_thread_ids(&self) -> Vec<ThreadId> {
+        let ids: std::collections::BTreeSet<_> = self.lock().held().cloned().collect();
+        ids.into_iter().collect()
     }
 
     pub fn active_thread_ids(&self) -> Vec<ThreadId> {
-        let mut ids: std::collections::BTreeSet<_> = self.lock().keys().cloned().collect();
-        if let Some(generation) = &self.inner.generation
-            && let Ok(owners) = generation.registry.owners()
-        {
-            ids.extend(owners.into_iter().map(|(id, _)| id));
+        let mut ids: std::collections::BTreeSet<_> = self.owned_thread_ids().into_iter().collect();
+        if let Some(generation) = &self.inner.generation {
+            ids.extend(generation.foreign_threads());
         }
         ids.into_iter().collect()
     }
 
-    fn remote_target(&self, thread: &ThreadId, new_work: bool) -> Result<Option<runtime::Member>> {
+    fn route(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<Option<runtime::Member>, runtime::RegistryFileError> {
         let Some(generation) = &self.inner.generation else {
             return Ok(None);
         };
-        let owner = generation.registry.owner(thread)?;
-        let target = match owner {
-            Some(owner) => Some(owner),
-            None if new_work => generation.registry.active()?,
-            None => None,
-        };
-        Ok(target.filter(|target| target.id != generation.member.id))
+        if self.lock().holds(thread) {
+            return Ok(None);
+        }
+        if let Some(owner) = generation.owner(thread) {
+            return Ok(Some(owner));
+        }
+        if !generation.draining() {
+            return Ok(None);
+        }
+        Ok(generation
+            .registry()
+            .active()?
+            .filter(|active| active.id != generation.member().id))
     }
 
     pub fn local_active_count(&self) -> usize {
-        let live = self.lock().len();
-        self.inner.generation.as_ref().map_or(live, |generation| {
-            generation.registry.owners().map_or(live, |owners| {
-                owners
-                    .into_iter()
-                    .filter(|(_, member)| member.id == generation.member.id)
-                    .count()
-                    .max(live)
-            })
-        })
+        self.owned_thread_ids().len()
     }
 
-    /// The current memory-only text of every live run, and every thread's
-    /// suggested next message, for a client that just connected.
     #[must_use]
     #[expect(
         clippy::significant_drop_tightening,
-        reason = "both locks are held so the snapshot matches its revision"
+        reason = "the turns stay locked so the snapshot matches its revision"
     )]
-    pub fn live_snapshot(&self) -> (u64, Vec<Event>) {
+    fn live_snapshot(&self) -> (u64, Vec<Event>) {
         let live = self.lock();
-        let suggestions = self.suggestions_lock();
         let mut snapshot: Vec<_> = live
             .iter()
             .flat_map(|(thread_id, run)| {
@@ -739,238 +1048,223 @@ impl Hub {
                 })
             })
             .collect();
-        snapshot.extend(suggestions.iter().filter_map(|(thread_id, suggested)| {
-            suggested.text.clone().map(|text| Event::Suggestion {
-                thread_id: thread_id.clone(),
-                text: Some(text),
-            })
-        }));
-        (self.inner.store.live_revision(), snapshot)
+        self.inner.side.with_suggestions(|suggestions| {
+            snapshot.extend(suggestions);
+            snapshot.extend(self.pending_editor_calls());
+            sort_snapshot(&mut snapshot);
+            (self.inner.store.live_revision(), snapshot)
+        })
     }
 
-    /// Opens the slot for the guess at the thread's next message after
-    /// `run`. The thread's previous guess is withdrawn, and a side query
-    /// still working on one stops.
-    fn open_suggestion(&self, thread_id: &ThreadId, run: &RunId) {
-        let cancel = self.inner.shutdown.child_token();
-        let previous = self.suggestions_lock().insert(
-            thread_id.clone(),
-            Suggested {
-                run: run.clone(),
-                cancel,
-                text: None,
-            },
-        );
-        if let Some(previous) = previous {
-            previous.cancel.cancel();
-            if previous.text.is_some() {
-                self.inner.store.publish_live(Event::Suggestion {
-                    thread_id: thread_id.clone(),
-                    text: None,
-                });
+    fn lock(&self) -> std::sync::MutexGuard<'_, turns::Turns> {
+        self.inner
+            .turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    async fn settle_unsettled(&self) -> bool {
+        if self.lock().unsettled().is_empty() {
+            return true;
+        }
+        let mut settled = true;
+        let mut ended = Vec::new();
+        {
+            let _admission = self.inner.admission.lock().await;
+            let waiting = self.lock().unsettled();
+            for settlement in waiting {
+                let thread = settlement.run.thread_id.clone();
+                let run = settlement.run.id.clone();
+                if let Err(error) = self.store().settle_run(settlement).await {
+                    settled = false;
+                    tracing::warn!(%thread, %run, "saving the run's end failed again: {}", diagnostics::chain(&error));
+                    continue;
+                }
+                tracing::info!(%thread, %run, "saved the run's end after an earlier failure");
+                self.lock().settled(&thread);
+                ended.push(thread);
             }
         }
+        for thread in ended {
+            self.agent_attention(&thread).await;
+        }
+        self.resume_pending();
+        settled
     }
 
-    /// What stops the side queries after `run` once the thread moves on;
-    /// `None` if it already has.
-    fn suggestion_slot(&self, thread_id: &ThreadId, run: &RunId) -> Option<CancellationToken> {
-        self.suggestions_lock()
-            .get(thread_id)
-            .filter(|suggested| &suggested.run == run && !suggested.cancel.is_cancelled())
-            .map(|suggested| suggested.cancel.clone())
-    }
-
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "published under the lock, so a newer run's withdrawal follows it"
-    )]
-    fn offer_suggestion(&self, thread_id: &ThreadId, run: &RunId, text: String) {
-        let mut suggestions = self.suggestions_lock();
-        let Some(suggested) = suggestions
-            .get_mut(thread_id)
-            .filter(|suggested| &suggested.run == run && !suggested.cancel.is_cancelled())
-        else {
-            return;
-        };
-        suggested.text = Some(text.clone());
-        // Published under the lock, so a newer run's withdrawal follows it.
-        self.inner.store.publish_live(Event::Suggestion {
-            thread_id: thread_id.clone(),
-            text: Some(text),
+    fn start_dispatcher(&self) {
+        let hub = self.clone();
+        self.inner.tasks.spawn(async move {
+            let mut unclaimed_at = None;
+            let mut failures = 0_u32;
+            let mut passed_at = tokio::time::Instant::now();
+            loop {
+                let (parked, readable) = park::until_next(&hub, unclaimed_at).await;
+                let retry = async {
+                    if failures == 0 && readable {
+                        std::future::pending::<()>().await;
+                    } else {
+                        tokio::time::sleep(retry_delay(failures)).await;
+                    }
+                };
+                let next_due = hub.lock().next_due(passed_at);
+                let undeferred = async {
+                    match next_due {
+                        Some(until) => tokio::time::sleep_until(until).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    () = hub.inner.shutdown.cancelled() => break,
+                    () = hub.inner.dispatch.notified() => {},
+                    () = parked => {},
+                    () = retry => {},
+                    () = undeferred => {},
+                }
+                let mut failed = !readable;
+                failed |= !hub.settle_unsettled().await;
+                unclaimed_at = Some(hub.store().now());
+                passed_at = tokio::time::Instant::now();
+                loop {
+                    let _admission = hub.inner.admission.lock().await;
+                    if hub.inner.shutdown.is_cancelled() {
+                        return;
+                    }
+                    if hub
+                        .inner
+                        .generation
+                        .as_ref()
+                        .is_some_and(|generation| !generation.accepting())
+                    {
+                        break;
+                    }
+                    let mut excluded = hub.active_thread_ids();
+                    let foreign = excluded.len().saturating_sub(hub.local_active_count());
+                    if hub.inner.harness_slots.available_permits() <= foreign {
+                        break;
+                    }
+                    excluded.extend(hub.lock().waiting(passed_at).cloned());
+                    let Ok(permit) = Arc::clone(&hub.inner.harness_slots).try_acquire_owned()
+                    else {
+                        break;
+                    };
+                    let next = match hub.store().pending_threads(1, excluded).await {
+                        Ok(threads) => threads.into_iter().next(),
+                        Err(error) => {
+                            tracing::error!(
+                                "read pending run candidates: {}",
+                                diagnostics::chain(&error)
+                            );
+                            failed = true;
+                            break;
+                        }
+                    };
+                    let Some(thread) = next else {
+                        break;
+                    };
+                    unclaimed_at = None;
+                    hub.claim(thread, permit);
+                }
+                failures = if failed {
+                    failures.saturating_add(1)
+                } else {
+                    0
+                };
+            }
         });
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ThreadId, LiveRun>> {
-        self.inner
-            .live
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn suggestions_lock(&self) -> std::sync::MutexGuard<'_, HashMap<ThreadId, Suggested>> {
-        self.inner
-            .suggestions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn attention_lock(&self) -> std::sync::MutexGuard<'_, HashMap<ThreadId, side::Attention>> {
-        self.inner
-            .attention
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn untitled_lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<ThreadId>> {
-        self.inner
-            .untitled
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// One dispatcher claims only threads that can start immediately, and
-    /// wakes by itself when the earliest parked turn is due.
-    fn start_dispatcher(&self) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let hub = self.clone();
-        self.inner.tasks.spawn_on(
-            async move {
-                loop {
-                    let parked = park::until_next(&hub).await;
-                    tokio::select! {
-                        biased;
-                        () = hub.inner.shutdown.cancelled() => break,
-                        () = hub.inner.dispatch.notified() => {},
-                        () = parked => {},
-                        () = async { match &hub.inner.generation { Some(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await, None => std::future::pending().await } } => {},
-                    }
-                    if let Some(generation) = &hub.inner.generation
-                        && generation.accepting()
-                        && let Ok(threads) = hub.store().running_threads().await {
-                        for thread in threads {
-                            if hub.lock().contains_key(&thread) { continue; }
-                            if let Ok(Some(_lease)) = generation.claim(&thread)
-                                && let Err(error) = hub.store().recover_thread(thread.clone()).await {
-                                tracing::error!(%thread,"recover orphaned generation: {error:#}");
-                            }
-                        }
-                    }
-                    loop {
-                        let _admission = hub.inner.admission.lock().await;
-                        if hub.inner.shutdown.is_cancelled() {
-                            return;
-                        }
-                        if hub.inner.generation.as_ref().is_some_and(|generation| !generation.accepting()) { break; }
-                        let Ok(permit) = Arc::clone(&hub.inner.harness_slots).try_acquire_owned()
-                        else {
-                            break;
-                        };
-                        let excluded = hub.active_thread_ids();
-                        let next = match hub.store().pending_threads(1, excluded).await {
-                            Ok(threads) => threads.into_iter().next(),
-                            Err(error) => {
-                                tracing::error!("read pending run candidates: {error:#}");
-                                break;
-                            }
-                        };
-                        let Some(thread) = next else {
-                            break;
-                        };
-                        let leases = if let Some(generation) = &hub.inner.generation {
-                            let Ok(Some(slot)) = generation.slot() else { break; };
-                            let Ok(Some(owner)) = generation.claim(&thread) else { continue; };
-                            Some((slot, owner))
-                        } else { None };
-                        if leases.is_some()
-                            && let Err(error) = hub.store().recover_thread(thread.clone()).await {
-                            tracing::error!(%thread, "recover abandoned run: {error:#}");
-                            break;
-                        }
-                        hub.claim(thread, permit, leases);
-                    }
-                }
-            },
-            &runtime,
-        );
-    }
-
-    fn claim(
-        &self,
-        thread_id: ThreadId,
-        permit: OwnedSemaphorePermit,
-        leases: Option<(runtime::Lease, runtime::Lease)>,
-    ) {
+    fn claim(&self, thread_id: ThreadId, permit: OwnedSemaphorePermit) {
         let (inbox, receiver) = mpsc::channel(64);
         let cancel = CancellationToken::new();
-        let cancel_through = Arc::new(AtomicU64::new(0));
+        let stop = turns::StopSignal::default();
         let run_id = RunId::new();
-        self.lock().insert(
-            thread_id.clone(),
-            LiveRun {
-                inbox,
-                cancel: cancel.clone(),
-                engine: None,
-                cancel_through: Arc::clone(&cancel_through),
-                live: HashMap::new(),
-                live_bytes: 0,
-            },
-        );
+        self.lock().claim(thread_id.clone(), |retries| LiveRun {
+            id: run_id.clone(),
+            inbox,
+            cancel: cancel.clone(),
+            engine: None,
+            launched: None,
+            live: std::collections::BTreeMap::new(),
+            foreground_bytes: 0,
+            terminal_bytes: 0,
+            phase: turns::Phase::Working,
+            stop: stop.clone(),
+            retries,
+        });
         let hub = self.clone();
-        self.inner.tasks.spawn(async move {
-            let _leases = leases;
-            let outcome = Box::pin(run::drive(
+        let span = tracing::info_span!("run", thread = %thread_id, run = %run_id);
+        let run = async move {
+            let drove = Box::pin(run::drive(
                 &hub,
                 &thread_id,
                 run_id.clone(),
                 receiver,
                 cancel.clone(),
+                stop,
             ))
             .await;
-            if let Err(error) = &outcome {
-                tracing::error!(thread = %thread_id, run = %run_id, "run failed: {error:#}");
-            }
-            hub.lock().remove(&thread_id);
+            cancel.cancel();
+            let status = match drove {
+                Ok(run::Drove::Concluded(status)) => Some(status),
+                Ok(run::Drove::Nothing) => {
+                    hub.end_live(&thread_id, &run_id, turns::Ended::Settled)
+                        .await;
+                    None
+                }
+                Err(error) => {
+                    let spans = diagnostics::Spans::capture();
+                    tracing::error!(thread = %thread_id, run = %run_id, %spans, "run failed: {}", diagnostics::chain(&error));
+                    let ended = if error.retry_later() {
+                        turns::Ended::Deferred
+                    } else {
+                        turns::Ended::Settled
+                    };
+                    hub.end_live(&thread_id, &run_id, ended).await;
+                    None
+                }
+            };
             drop(permit);
-            if outcome.is_ok() && !hub.inner.shutdown.is_cancelled() {
+            if !hub.inner.shutdown.is_cancelled() {
                 hub.resume_pending();
             }
             if !hub.inner.shutdown.is_cancelled() {
-                hub.agent_run_ended(&thread_id).await;
+                hub.agent_attention(&thread_id).await;
             }
-            if matches!(outcome, Ok(artisan_api::RunStatus::Done))
+            if status == Some(artisan_api::RunStatus::Done)
                 && !hub.inner.shutdown.is_cancelled()
                 && !hub.is_agent_thread(&thread_id).await
             {
                 hub.after_turn(thread_id, run_id).await;
             }
-        });
+        };
+        self.inner
+            .tasks
+            .spawn(tracing::Instrument::instrument(run, span));
     }
 
-    fn homes_lock(&self) -> Result<(std::sync::MutexGuard<'_, ()>, std::fs::File)> {
-        let local = self
-            .inner
-            .homes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.inner.data_dir.join("homes.lock"))?;
-        fs2::FileExt::lock_exclusive(&file)?;
-        Ok((local, file))
+    async fn end_live(&self, thread_id: &ThreadId, run_id: &RunId, ended: turns::Ended) {
+        let _admission = self.inner.admission.lock().await;
+        self.lock()
+            .end(thread_id, run_id, ended, tokio::time::Instant::now());
     }
 
-    /// `<data>/extensions/skills`, where Forge keeps the skills it installs.
-    fn skills_dir(&self) -> PathBuf {
-        self.inner.data_dir.join("extensions").join("skills")
+    #[must_use]
+    pub fn extensions(&self) -> &Extensions {
+        &self.inner.extensions
     }
 
-    async fn user_input(&self, item: &Item, engine: EngineId) -> Result<forge_engines::UserInput> {
+    #[must_use]
+    pub fn mcp(&self) -> &Mcp {
+        &self.inner.mcp
+    }
+
+    async fn user_input(
+        &self,
+        item: &Item,
+        engine: EngineId,
+    ) -> Result<images::Message, InputError> {
         let ItemKind::UserMessage {
             text,
             images,
@@ -978,7 +1272,10 @@ impl Hub {
             ..
         } = &item.kind
         else {
-            bail!("input {} is not a user message", item.id);
+            unreachable!(
+                "invariant: input {} of thread {} is a user message",
+                item.id, item.thread_id
+            );
         };
         let text = self.store().resolve_text(text).await?;
         let parent = match sender {
@@ -990,24 +1287,25 @@ impl Hub {
             None => None,
         };
         let text = match sender {
-            // An agent's own parent briefs it: its words go as they are.
             Some(sender) if parent.as_ref() == Some(&sender.thread) => text,
-            // Another thread's agent wrote it: the engine is told so, and a
-            // leading slash is text, never one of the user's commands.
             Some(sender) => format!("{}\n\n{text}", sender_line(sender)),
-            // Normalize each native prompt before pending inputs/context are joined.
-            None => forge_engines::normalize_command(engine, &text)?.unwrap_or(text),
+            None => forge_engines::normalize_command(engine, &text)
+                .map_err(|source| InputError::Command {
+                    thread: item.thread_id.clone(),
+                    item: item.id.clone(),
+                    engine,
+                    source,
+                })?
+                .unwrap_or(text),
         };
         let text = if text.contains('$') {
-            let skills = match self.enabled_skills().await {
+            let skills = match self.extensions().enabled_skills().await {
                 Ok(skills) => skills,
                 Err(error) => {
-                    // The message still goes; only the closing line naming
-                    // the mentioned skills is left off.
                     tracing::warn!(
                         thread = %item.thread_id,
                         item = %item.id,
-                        "listing the skills for the message's mentions: {error:#}"
+                        "listing the skills for the message's mentions: {}", diagnostics::chain(&error)
                     );
                     Vec::new()
                 }
@@ -1020,12 +1318,10 @@ impl Hub {
             match self.store().thread_titles().await {
                 Ok(threads) => forge_engines::with_thread_mentions(&text, &threads),
                 Err(error) => {
-                    // The message still goes; only the closing line naming
-                    // the mentioned threads is left off.
                     tracing::warn!(
                         thread = %item.thread_id,
                         item = %item.id,
-                        "listing the threads for the message's mentions: {error:#}"
+                        "listing the threads for the message's mentions: {}", diagnostics::chain(&error)
                     );
                     text
                 }
@@ -1033,15 +1329,10 @@ impl Hub {
         } else {
             text
         };
-        let images = self.store().input_image_paths(images.clone()).await?;
-        Ok(forge_engines::UserInput {
-            id: item.id.clone(),
-            text: with_image_paths(text, &images),
-            images,
-        })
+        let stored = self.store().input_image_paths(images.clone()).await?;
+        Ok(images::Message::new(item.id.clone(), text, stored))
     }
 
-    /// Records live text and publishes it.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "published under the lock, so updates reach clients in the order they were recorded"
@@ -1053,16 +1344,28 @@ impl Hub {
         mut text: String,
         mut append: bool,
     ) {
-        const TARGET_BYTES: usize = 256 * 1024;
-        const RUN_BYTES: usize = 2 * 1024 * 1024;
-        const TARGETS: usize = 128;
         let mut live = self.lock();
         let Some(run) = live.get_mut(thread_id) else {
             return;
         };
-        if !run.live.contains_key(&target) && run.live.len() >= TARGETS {
+        let admitting = !run.live.contains_key(&target);
+        if admitting && run.live.len() >= LIVE_TARGETS {
             return;
         }
+        let is_terminal = terminal(&target);
+        let limit = if is_terminal {
+            let share = run.terminal_share(admitting);
+            run.shrink_terminals(share);
+            share
+        } else {
+            let before = run
+                .live
+                .get(&target)
+                .map_or(0, |preview| preview.text.len());
+            LIVE_TARGET_BYTES.min(
+                LIVE_FOREGROUND_BYTES.saturating_sub(run.foreground_bytes.saturating_sub(before)),
+            )
+        };
         let preview = run.live.entry(target.clone()).or_default();
         let incoming_bytes = text.len() as u64;
         preview.coverage.total = if append {
@@ -1075,35 +1378,19 @@ impl Hub {
         }
         let buffer = &mut preview.text;
         let before = buffer.len();
-        let limit =
-            TARGET_BYTES.min(RUN_BYTES.saturating_sub(run.live_bytes.saturating_sub(before)));
         if append && before + text.len() <= limit {
             buffer.push_str(&text);
-        } else if append
-            && matches!(
-                target,
-                LiveTarget::Shell { .. } | LiveTarget::Progress { .. }
-            )
-        {
-            // Terminal previews retain their latest bytes. Publish one replacement,
-            // so the client drops the same prefix instead of accumulating it forever.
-            if text.len() >= limit {
-                let mut start = text.len().saturating_sub(limit);
-                while !text.is_char_boundary(start) {
-                    start += 1;
-                }
-                buffer.clear();
-                buffer.push_str(&text[start..]);
+        } else if append && is_terminal {
+            let window = limit / 2;
+            if text.len() >= window {
+                keep_newest(&mut text, window);
+                buffer.clone_from(&text);
             } else {
-                let mut discard = (before + text.len()).saturating_sub(limit);
-                while !buffer.is_char_boundary(discard) {
-                    discard += 1;
-                }
-                buffer.drain(..discard);
+                keep_newest(buffer, window - text.len());
                 buffer.push_str(&text);
+                text.clone_from(buffer);
             }
             preview.coverage.start = preview.coverage.total.saturating_sub(buffer.len() as u64);
-            text.clone_from(buffer);
             append = false;
         } else {
             let available = if append {
@@ -1122,8 +1409,11 @@ impl Hub {
                 buffer.clone_from(&text);
             }
         }
-        run.live_bytes = run.live_bytes.saturating_sub(before) + buffer.len();
-        if text.capacity() > TARGET_BYTES * 2 {
+        let after = buffer.len();
+        let coverage = preview.coverage;
+        run.release(&target, before);
+        run.hold(&target, after);
+        if text.capacity() > LIVE_TARGET_BYTES * 2 {
             text.shrink_to_fit();
         }
         self.inner.store.publish_live(Event::Live {
@@ -1131,11 +1421,16 @@ impl Hub {
             target,
             text,
             append,
-            coverage: preview.coverage,
+            coverage,
         });
     }
 
-    /// Empties memory-only text that clients still show.
+    fn live_has_room(&self, thread_id: &ThreadId) -> bool {
+        self.lock()
+            .get(thread_id)
+            .is_some_and(|run| run.live.len() < LIVE_TARGETS)
+    }
+
     fn clear_live(&self, thread_id: &ThreadId, target: LiveTarget) {
         let shown = self
             .lock()
@@ -1147,63 +1442,54 @@ impl Hub {
         }
     }
 
-    /// Drops memory-only text for a target that ended.
     fn forget_live(&self, thread_id: &ThreadId, target: &LiveTarget) {
         if let Some(run) = self.lock().get_mut(thread_id)
-            && let Some(text) = run.live.remove(target)
+            && let Some(preview) = run.live.remove(target)
         {
-            run.live_bytes = run.live_bytes.saturating_sub(text.text.len());
+            run.release(target, preview.text.len());
         }
     }
 
     fn forward_engine_status(&self) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         let mut statuses = self.inner.engines.subscribe();
+        let engines = self.inner.engines.clone();
         let store = self.inner.store.clone();
         let stop = self.inner.shutdown.clone();
-        self.inner.tasks.spawn_on(
-            async move {
-                loop {
-                    let received = tokio::select! {
-                        () = stop.cancelled() => break,
-                        received = statuses.recv() => received,
-                    };
-                    match received {
-                        Ok(forge_engines::EngineChange::Full(status)) => {
-                            store.publish_live(Event::Engine { status });
-                        }
-                        Ok(forge_engines::EngineChange::Install { engine, install }) => {
-                            store.publish_live(Event::EngineInstall { engine, install });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        self.inner.tasks.spawn(async move {
+            loop {
+                let received = tokio::select! {
+                    () = stop.cancelled() => break,
+                    received = statuses.recv() => received,
+                };
+                match received {
+                    Ok(forge_engines::EngineChange::Full(status)) => {
+                        store.publish_live(Event::Engine { status });
                     }
+                    Ok(forge_engines::EngineChange::Install { engine, install }) => {
+                        store.publish_live(Event::EngineInstall { engine, install });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::debug!(
+                            missed,
+                            "engine statuses lagged; publishing every engine's current one"
+                        );
+                        for engine in EngineId::ALL {
+                            store.publish_live(Event::Engine {
+                                status: engines.status(engine),
+                            });
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
-            },
-            &runtime,
-        );
+            }
+        });
     }
 }
 
 #[cfg(test)]
+#[path = "../tests/lib/unit.rs"]
 mod tests;
 
-fn with_image_paths(text: String, images: &[PathBuf]) -> String {
-    let lines: Vec<String> = images
-        .iter()
-        .enumerate()
-        .map(|(index, path)| format!("[Image {} is saved at {}]", index + 1, path.display()))
-        .collect();
-    match (text.is_empty(), lines.is_empty()) {
-        (_, true) => text,
-        (true, false) => lines.join("\n"),
-        (false, false) => format!("{text}\n\n{}", lines.join("\n")),
-    }
-}
-
-/// The line an engine reads above a message another thread's agent wrote.
 fn sender_line(sender: &artisan_api::Sender) -> String {
     let title = sender
         .title
@@ -1215,4 +1501,29 @@ fn sender_line(sender: &artisan_api::Sender) -> String {
         sender.engine.display_name(),
         sender.thread
     )
+}
+
+fn sort_snapshot(snapshot: &mut [Event]) {
+    snapshot.sort_by(|left, right| snapshot_key(left).cmp(&snapshot_key(right)));
+}
+
+fn snapshot_key(event: &Event) -> (Option<&ThreadId>, Option<&LiveTarget>, Option<&str>) {
+    match event {
+        Event::Live {
+            thread_id, target, ..
+        } => (Some(thread_id), Some(target), None),
+        Event::EditorCall { id, .. } => (None, None, Some(id)),
+        Event::Hello { .. }
+        | Event::Project { .. }
+        | Event::Thread { .. }
+        | Event::ThreadRemoved { .. }
+        | Event::Item { .. }
+        | Event::Run { .. }
+        | Event::ItemState { .. }
+        | Event::Setting { .. }
+        | Event::Suggestion { .. }
+        | Event::Engine { .. }
+        | Event::EngineInstall { .. }
+        | Event::Reset => (event.thread_id(), None, None),
+    }
 }

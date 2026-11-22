@@ -21,13 +21,30 @@ fn copy_preserves_the_original_excerpt_and_falls_back_to_reference() {
 }
 
 #[test]
+fn references_without_a_path_or_with_line_zero_are_rejected_and_reversed_ranges_read_forward() {
+    for invalid in [
+        r#"{"ref":":7"}"#,
+        r#"{"ref":"  "}"#,
+        r#"{"ref":"src/a.rs:0"}"#,
+        r#"{"ref":"src/a.rs:0-4"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<CodeRefBlock>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+    assert_eq!(block(r#"{"ref":"src/a.rs:9-3"}"#).copy(), "src/a.rs:3-9");
+    assert_eq!(
+        block(r#"{"ref":"C:\\src\\a.rs:4-4"}"#).copy(),
+        "C:\\src\\a.rs:4"
+    );
+}
+
+#[test]
 fn clicking_path_dispatches_original_reference_with_captured_scope() {
     let value = block(r#"{"ref":"src/x.rs:7-9","excerpt":"one\ntwo"}"#);
     let directory = tempfile::tempdir().unwrap();
-    let mut core = editor_core::Core::for_tests(editor_core::EditorFiles {
-        dir: directory.path().join("editor"),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
     let identity = artisan_api::tls::Identity::generate("code-ref-test").unwrap();
     let fingerprint = artisan_api::tls::fingerprint(identity.certificate_der().unwrap().as_ref());
     let client = editor_core::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
@@ -39,14 +56,14 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
         fingerprint,
         kind: editor_core::HostKind::Local,
     };
-    core.add_test_host(&config, client.clone());
+    test_support::editor::core::connect_client(&mut core, &config, client.clone());
     let instance = core.host(&id).unwrap().instance();
     let scope = ResourceScope {
         host: "host-a".into(),
         thread: ThreadId("thread-a".into()),
     };
     let received = Rc::new(RefCell::new(Vec::new()));
-    let sink = received.clone();
+    let sink = Rc::clone(&received);
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         value.render(
@@ -59,14 +76,14 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
     })
     .unwrap();
     core.remove_host(&id).unwrap();
-    core.add_test_host(&config, client);
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert!(core.host_if_instance(&id, instance).is_none());
     app.set_viewport(500.0, 300.0, 1.0);
     app.build_frame().unwrap();
-    let code = app.tree().traverse().into_iter().find(|id| {
+    let code_node = app.tree().traverse().into_iter().find(|id| {
         matches!(&app.tree().get(*id).unwrap().kind, aqua_ui::tree::NodeKind::Text(text) if text.text() == "one")
     }).unwrap();
-    let code_bounds = app.tree().rect(code).unwrap();
+    let code_bounds = app.tree().rect(code_node).unwrap();
     let code_pointer = PointerEvent {
         contact: 0,
         kind: PointerKind::Mouse,
@@ -79,7 +96,7 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
     ));
     app.handle_input(&InputEvent::PointerUp(code_pointer, PointerButton::Primary));
     assert!(
-        matches!(&app.tree().get(code).unwrap().kind, aqua_ui::tree::NodeKind::Text(text) if text.selection.is_none())
+        matches!(&app.tree().get(code_node).unwrap().kind, aqua_ui::tree::NodeKind::Text(text) if text.selection.is_none())
     );
     assert!(received.borrow().is_empty());
     let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("block-path"));
@@ -112,5 +129,36 @@ fn clicking_path_dispatches_original_reference_with_captured_scope() {
             },
             Some(instance)
         )]
+    );
+}
+
+#[test]
+fn at_the_largest_text_size_excerpt_lines_get_a_full_line_each() {
+    use aqua_ui::tree::NodeKind;
+    let value = block(r#"{"ref":"src/x.rs:7-9","excerpt":"one\ntwo"}"#);
+    let mut theme = ArtisanTheme::resolved();
+    theme.typography = theme.typography.scaled(2.25);
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| value.render(&theme, "block", None, None, Rc::new(|_, _| {})))
+        .unwrap();
+    app.set_viewport(600.0, 800.0, 1.0);
+    app.build_frame().unwrap();
+    let tree = app.tree();
+    let line = |text: &str| {
+        tree.traverse()
+            .into_iter()
+            .find(|node| {
+                tree.get(*node).is_some_and(
+                    |shown| matches!(&shown.kind, NodeKind::Text(shown) if shown.text() == text),
+                )
+            })
+            .and_then(|node| tree.rect(node))
+            .unwrap_or_else(|| panic!("{text:?} is shown"))
+    };
+    let pitch = line("two").y - line("one").y;
+    let drawn = TextRole::Code.style(&theme).line_height_px;
+    assert!(
+        pitch >= drawn - 0.5,
+        "{drawn}px code lines are stacked only {pitch}px apart"
     );
 }

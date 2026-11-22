@@ -6,24 +6,7 @@ use artisan_api::{
 };
 use forge_store::{NewItem, Store};
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("forge-retention-test-{}", ItemId::new()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).ok();
-    }
-}
 
 async fn add_thread(store: &Store, project: &ProjectId, parent: Option<&ThreadId>) -> ThreadId {
     store
@@ -66,20 +49,25 @@ fn run(thread: &ThreadId, status: RunStatus) -> Run {
         engine: EngineId::Claude,
         model: None,
         input_cutoff: 0,
-        status,
+        state: artisan_api::RunOutcome::of(status).map_or(
+            artisan_api::RunState::Running,
+            |outcome| artisan_api::RunState::Finished {
+                outcome,
+                error: None,
+                ended_at: now(),
+            },
+        ),
         usage: Usage::default(),
         session_id: None,
-        error: None,
         seq: 0,
         started_at: now(),
-        ended_at: None,
         continuation: None,
     }
 }
 
-async fn open() -> (TempDir, Store, ProjectId) {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+async fn open() -> (tempfile::TempDir, Store, ProjectId) {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let project = store
         .create_project(CreateProject {
             id: ProjectId::new(),
@@ -177,8 +165,8 @@ async fn idle_threads_go_with_their_images_and_busy_families_stay() {
 
 #[tokio::test]
 async fn recent_threads_stay_and_a_removal_survives_a_restart() {
-    let dir = TempDir::new();
-    let store = Store::open(&dir.0).unwrap();
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
     let project = store
         .create_project(CreateProject {
             id: ProjectId::new(),
@@ -203,7 +191,7 @@ async fn recent_threads_stay_and_a_removal_survives_a_restart() {
     let before = store.changes_since(0, 10_000).await.unwrap().unwrap();
     drop(store);
 
-    let store = Store::open(&dir.0).unwrap();
+    let store = Store::open(dir.path()).unwrap();
     let after = store.changes_since(0, 10_000).await.unwrap().unwrap();
     assert_eq!(before, after);
     let next = add_thread(&store, &project, None).await;
@@ -215,4 +203,200 @@ async fn recent_threads_stay_and_a_removal_survives_a_restart() {
         "a restarted Forge never reuses the removal's seq"
     );
     assert!(store.thread(&thread).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_old_thread_with_a_saved_draft_survives_collection() {
+    let (_dir, store, project) = open().await;
+    let drafted = add_thread(&store, &project, None).await;
+    let cleared = add_thread(&store, &project, None).await;
+    let scope = |thread: &ThreadId| format!("thread:{thread}");
+    store
+        .set_draft(
+            scope(&drafted),
+            artisan_api::WriteDraft {
+                expected_revision: 0,
+                body: serde_json::json!({"text": "half a thought"}),
+            },
+        )
+        .await
+        .unwrap();
+    let written = store
+        .set_draft(
+            scope(&cleared),
+            artisan_api::WriteDraft {
+                expected_revision: 0,
+                body: serde_json::json!({"text": "sent later"}),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .set_draft(
+            scope(&cleared),
+            artisan_api::WriteDraft {
+                expected_revision: written.current.revision,
+                body: serde_json::Value::Null,
+            },
+        )
+        .await
+        .unwrap();
+
+    let removed: Vec<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 8)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, vec![cleared]);
+    assert!(store.thread(&drafted).await.unwrap().is_some());
+    assert_eq!(
+        store.draft(&scope(&drafted)).await.unwrap().body,
+        serde_json::json!({"text": "half a thought"})
+    );
+}
+
+#[tokio::test]
+async fn retention_takes_a_removed_threads_coordination_with_it() {
+    use forge_store::coordination::{Content, Intent, MessageState, WorkState};
+    let (_dir, store, project) = open().await;
+    let idle = add_thread(&store, &project, None).await;
+    let busy = add_thread(&store, &project, None).await;
+    store
+        .upsert_item(message(&busy, Status::AwaitingUser, Vec::new()))
+        .await
+        .unwrap();
+    let work = |dependencies| Content::Work {
+        objective: "fix parser".into(),
+        worktree: "/repo".into(),
+        state: WorkState::Running,
+        resources: vec![],
+        dependencies,
+        summary: String::new(),
+        evidence: vec![],
+    };
+    let declared = store
+        .coordination_put(idle.clone(), None, work(vec![]), None)
+        .await
+        .unwrap();
+    let kept = store
+        .coordination_put(busy.clone(), None, work(vec![]), None)
+        .await
+        .unwrap();
+    let addressed = store
+        .coordination_put(
+            busy.clone(),
+            None,
+            Content::Message {
+                recipient: idle.clone(),
+                intent: Intent::Information,
+                text: "the parser is yours".into(),
+                state: MessageState::Prepared,
+                reply: None,
+                delivery_item: None,
+                receipt_revision: 0,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let removed: Vec<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 8)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, vec![idle.clone()]);
+    assert_eq!(store.coordination_get(declared.id).await.unwrap(), None);
+    assert_eq!(store.coordination_get(addressed.id).await.unwrap(), None);
+    assert_eq!(
+        store.coordination_get(kept.id.clone()).await.unwrap(),
+        Some(kept)
+    );
+    let changes = store.coordination_changes(0, None, 100).await.unwrap();
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.owner == busy && change.record_id.starts_with("work:")),
+        "{changes:?}"
+    );
+}
+
+#[tokio::test]
+async fn one_pass_removes_every_idle_family_and_keeps_a_busy_chain_whole() {
+    let (_dir, store, project) = open().await;
+    let mut idle = HashSet::new();
+    for _ in 0..12 {
+        idle.insert(add_thread(&store, &project, None).await);
+    }
+    let mut parent = add_thread(&store, &project, None).await;
+    idle.insert(parent.clone());
+    for _ in 0..4 {
+        parent = add_thread(&store, &project, Some(&parent)).await;
+        idle.insert(parent.clone());
+    }
+    let busy_head = add_thread(&store, &project, None).await;
+    let busy_tail = add_thread(&store, &project, Some(&busy_head)).await;
+    store
+        .upsert_item(message(&busy_tail, Status::AwaitingUser, Vec::new()))
+        .await
+        .unwrap();
+
+    let removed: HashSet<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 8)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, idle);
+    assert!(store.thread(&busy_head).await.unwrap().is_some());
+    assert!(store.thread(&busy_tail).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn a_family_that_fails_to_go_is_kept_whole_and_the_other_idle_families_still_go() {
+    let (dir, store, project) = open().await;
+    let mut idle = HashSet::new();
+    for _ in 0..3 {
+        idle.insert(add_thread(&store, &project, None).await);
+    }
+    let held_parent = add_thread(&store, &project, None).await;
+    let held_child = add_thread(&store, &project, Some(&held_parent)).await;
+    let kept = store
+        .upsert_item(message(&held_parent, Status::Done, Vec::new()))
+        .await
+        .unwrap()
+        .id;
+    drop(store);
+    let raw = rusqlite::Connection::open(dir.path().join("forge.sqlite3"))
+        .expect("open the database beside the store");
+    raw.execute_batch(include_str!("retention/hold_thread.sql"))
+        .expect("make one thread's removal fail");
+    raw.execute(include_str!("retention/held.sql"), [held_child.as_str()])
+        .expect("hold the child thread");
+    drop(raw);
+    let store = Store::open(dir.path()).expect("reopen the store");
+
+    let removed: HashSet<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 2)
+        .await
+        .expect("one family's failure doesn't stop retention")
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, idle);
+    assert!(store.thread(&held_parent).await.unwrap().is_some());
+    assert!(store.thread(&held_child).await.unwrap().is_some());
+    assert!(
+        store.item(&kept).await.unwrap().is_some(),
+        "the family's items are kept with it"
+    );
 }

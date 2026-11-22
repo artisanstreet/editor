@@ -1,12 +1,4 @@
-//! Pure decoding of OpenCode's v2 event stream (`GET /api/event`).
-//!
-//! The global stream carries every session on the server, so the decoder
-//! follows the run's root session plus any child session whose parent it
-//! already follows; everything else is ignored. Shapes were captured from
-//! OpenCode 2.1.0 (see `transcripts/opencode`).
-
 use crate::{EngineEvent, LiveKind};
-use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Collection, Decision, ErrorKind, FileChange, FileOp, ItemId,
     ItemKind, NoticeKind, Output, Phase, Question, QuestionOption, SearchMode, Status, ToolKind,
@@ -37,8 +29,6 @@ struct NativeOption {
     description: Option<String>,
 }
 
-/// Tool names OpenCode ships; any other name with an underscore is an MCP
-/// tool (`<server>_<tool>`).
 const BUILTIN_TOOLS: &[&str] = &[
     "edit",
     "execute",
@@ -54,43 +44,89 @@ const BUILTIN_TOOLS: &[&str] = &[
     "write",
 ];
 
-/// An HTTP request the driver must send to answer OpenCode.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Reply {
+pub(super) struct Reply {
     pub method: Method,
     pub path: String,
     pub body: Option<Value>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("decode OpenCode protocol JSON")]
+    Json(#[source] serde_json::Error),
+    #[error("an OpenCode event must be an object")]
+    NotObject,
+    #[error("an OpenCode event is missing its type")]
+    NoType,
+    #[error("decode an OpenCode event's identity")]
+    Identity(#[source] serde_json::Error),
+    #[error("an OpenCode event's id is empty")]
+    EmptyId,
+}
+
+pub(super) enum Answered {
+    Reply {
+        reply: Reply,
+        events: Vec<EngineEvent>,
+    },
+    Invalid(Vec<EngineEvent>),
+    Unexpected,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Method {
+pub(super) enum Method {
     Post,
     Delete,
 }
 
+pub(super) enum TurnFailure {
+    ContextLimit(String),
+    Failed(String),
+}
+
+impl TurnFailure {
+    fn of(error: &Value) -> Self {
+        let message = error_message(error);
+        if exceeds_context(error) {
+            Self::ContextLimit(message)
+        } else {
+            Self::Failed(message)
+        }
+    }
+
+    #[must_use]
+    pub(super) fn into_message(self) -> String {
+        match self {
+            Self::ContextLimit(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
+pub(super) fn exceeds_context(error: &Value) -> bool {
+    error["type"] == "provider.invalid-request"
+        && (error["status"] == 413
+            || error["response"]["body"].as_str().is_some_and(|body| {
+                serde_json::from_str::<Value>(body)
+                    .is_ok_and(|body| crate::provider::exceeds_context(&body["error"]))
+            }))
+}
+
 #[derive(Default)]
-pub struct Decoder {
+pub(super) struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
     root: Option<String>,
-    /// Followed sessions → the `Agent` item their items belong to.
     sessions: HashMap<String, Option<String>>,
-    /// Child sessions no `subagent` call has claimed yet → their
-    /// `session.created` data, for the Agent item they get if none does.
     unbound: HashMap<String, Value>,
-    /// Tool names by call id: `session.tool.called` doesn't repeat it.
+    orphans: HashMap<String, String>,
     tool_names: HashMap<String, String>,
-    /// By OpenCode call id.
     tools: HashMap<String, Tool>,
-    /// Background shells awaiting their completion notification → starting call.
-    /// `shell.exited` precedes notification admission and must not release this
-    /// guard: the server still needs to wake the assistant with the result.
+    retired: crate::retained::Retired,
+    awaiting_settle: HashSet<String>,
     shells: HashMap<String, String>,
-    /// Texts ended in the current step, per session, for the phase decision.
     step_texts: HashMap<String, Vec<(String, String)>>,
-    open_texts: HashSet<String>,
-    /// Compactions started per session, which keys the running one.
+    open_texts: std::collections::BTreeSet<String>,
     compactions: HashMap<String, usize>,
-    /// OpenCode inbox id → our user message, for steers.
     steers: HashMap<String, ItemId>,
     admitted: HashSet<String>,
     delivered: HashSet<String>,
@@ -100,11 +136,8 @@ pub struct Decoder {
     usage: Usage,
     model: Option<String>,
     title: Option<String>,
-    /// The error the last step failed with, which the execution failure
-    /// that follows repeats.
     step_error: Option<String>,
-    /// The last error that ended a turn.
-    pub error: Option<String>,
+    pub(crate) error: Option<TurnFailure>,
     cancelled: bool,
     goals: HashMap<String, Goal>,
     awaiting_goal: Option<GoalChange>,
@@ -142,12 +175,14 @@ impl GoalStatus {
     }
 }
 
+#[derive(Debug)]
 struct Tool {
     session: String,
     status: Status,
     kind: ItemKind,
 }
 
+#[derive(Debug)]
 enum Pending {
     Permission {
         session: String,
@@ -160,25 +195,25 @@ enum Pending {
     },
 }
 
-/// A form field asked as one question.
+#[derive(Debug)]
 struct FormField {
     key: String,
     kind: FieldKind,
-    /// Option label → the value OpenCode wants back.
     values: HashMap<String, String>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum FieldKind {
     Text,
     Choice,
     Choices,
     Boolean,
+    Integer,
     Number,
 }
 
 impl Decoder {
-    pub fn new(root: Option<String>) -> Self {
+    pub(super) fn new(root: Option<String>) -> Self {
         let mut decoder = Self::default();
         if let Some(root) = root {
             decoder.follow_root(root);
@@ -187,18 +222,16 @@ impl Decoder {
     }
 
     #[cfg(test)]
-    pub const fn has_root(&self) -> bool {
+    pub(super) const fn has_root(&self) -> bool {
         self.root.is_some()
     }
 
-    pub fn follow_root(&mut self, session: String) {
+    pub(super) fn follow_root(&mut self, session: String) {
         self.sessions.insert(session.clone(), None);
         self.root = Some(session);
     }
 
-    /// The driver sent a prompt OpenCode admitted as inbox item `message`;
-    /// `steer` names our user message when it was a steer.
-    pub fn prompt_sent(&mut self, message: &str, steer: Option<ItemId>) -> Vec<EngineEvent> {
+    pub(super) fn prompt_sent(&mut self, message: &str, steer: Option<ItemId>) -> Vec<EngineEvent> {
         self.admitted.insert(message.to_owned());
         match steer {
             Some(id) if self.delivered.contains(message) => vec![EngineEvent::InputAccepted { id }],
@@ -210,7 +243,7 @@ impl Decoder {
         }
     }
 
-    pub fn idle(&self) -> bool {
+    pub(super) fn idle(&self) -> bool {
         !self.turn_open
             && self.awaiting_goal.is_none()
             && (self.error.is_some()
@@ -263,8 +296,7 @@ impl Decoder {
         }]
     }
 
-    /// Settles what is still open after the user cancelled.
-    pub fn cancel(&mut self) -> Vec<EngineEvent> {
+    pub(super) fn cancel(&mut self) -> Vec<EngineEvent> {
         self.cancelled = true;
         let mut out = Vec::new();
         for key in std::mem::take(&mut self.open_texts) {
@@ -286,27 +318,27 @@ impl Decoder {
         out
     }
 
-    /// One SSE `data:` payload.
-    pub fn feed(&mut self, data: &str) -> anyhow::Result<Vec<EngineEvent>> {
+    pub(super) fn feed(&mut self, data: &str) -> Result<Vec<EngineEvent>, DecodeError> {
         #[derive(serde::Deserialize)]
         struct Identity<'a> {
             id: &'a str,
         }
-        let event: Value = serde_json::from_str(data).context("decoding OpenCode protocol JSON")?;
-        anyhow::ensure!(
-            event.is_object(),
-            "OpenCode protocol frame must be an object"
-        );
-        anyhow::ensure!(
-            event["type"].is_string(),
-            "OpenCode event is missing its type"
-        );
-        let identity = <Identity as serde::Deserialize>::deserialize(&event)
-            .context("decoding OpenCode event identity")?;
-        anyhow::ensure!(!identity.id.trim().is_empty(), "OpenCode event ID is empty");
+        let event: Value = serde_json::from_str(data).map_err(DecodeError::Json)?;
+        if !event.is_object() {
+            return Err(DecodeError::NotObject);
+        }
+        if !event["type"].is_string() {
+            return Err(DecodeError::NoType);
+        }
+        let identity = <Identity<'_> as serde::Deserialize>::deserialize(&event)
+            .map_err(DecodeError::Identity)?;
+        if identity.id.trim().is_empty() {
+            return Err(DecodeError::EmptyId);
+        }
         let events = self.feed_raw(&event);
         let events = self.reasoning_summary.normalize(events, false);
         let mut events = crate::retained::settle(self, events);
+        self.retire_settled();
         let waiting =
             !self.turn_open && !self.shells.is_empty() && self.error.is_none() && !self.cancelled;
         if std::mem::replace(&mut self.waiting_on_background, waiting) != waiting {
@@ -324,12 +356,10 @@ impl Decoder {
         let kind = event["type"].as_str().unwrap_or_default();
         let data = &event["data"];
         match kind {
-            // Child sessions announce themselves before any of their events.
             "session.created" => {
                 self.session_created(data);
                 return out;
             }
-            // Shells live outside sessions: a background one reports its exit here.
             "shell.exited" => {
                 self.shell_exited(data, &mut out);
                 return out;
@@ -354,6 +384,11 @@ impl Decoder {
             return out;
         };
         let root = self.root.as_deref() == Some(session);
+        if let Some(status) = execution_end(kind)
+            && let Some(key) = self.orphans.remove(session)
+        {
+            out.push(EngineEvent::Status { key, status });
+        }
         match kind {
             "rpc.opencode.goal.changed" => {
                 if let Ok(goal) = serde_json::from_value::<Option<Goal>>(data["goal"].clone()) {
@@ -412,7 +447,7 @@ impl Decoder {
                 }
                 if root {
                     self.turn_open = false;
-                    self.error = Some(message);
+                    self.error = Some(TurnFailure::of(&data["error"]));
                 }
             }
             "session.step.started" => {
@@ -456,7 +491,7 @@ impl Decoder {
                     let message = "OpenCode completed a text without its required final body";
                     out.push(error_item(event, parent, ErrorKind::Api, message, false));
                     if root {
-                        self.error = Some(message.to_owned());
+                        self.error = Some(TurnFailure::Failed(message.to_owned()));
                     }
                     return out;
                 };
@@ -504,8 +539,8 @@ impl Decoder {
                 self.step_ended(session, parent.as_deref(), data, &mut out);
             }
             "session.step.failed" => {
-                self.step_texts.remove(session);
-                // An interrupt fails the step; the user already knows.
+                let texts = self.step_texts.remove(session).unwrap_or_default();
+                settle_texts(texts, parent.as_deref(), false, &mut out);
                 if data["error"]["type"] != "aborted" {
                     let message = error_message(&data["error"]);
                     out.push(error_item(event, parent, ErrorKind::Api, &message, false));
@@ -554,30 +589,92 @@ impl Decoder {
         out
     }
 
-    /// Answers the approval or question on item `key`: the events to emit
-    /// now and the request that tells OpenCode.
-    pub fn answer(&mut self, key: &str, answer: &Answer) -> Option<(Reply, Vec<EngineEvent>)> {
-        let (reply, events) = self.answer_raw(key, answer)?;
-        Some((reply, crate::retained::settle(self, events)))
+    pub(super) fn answer(&mut self, key: &str, answer: &Answer) -> Answered {
+        match self.answer_raw(key, answer) {
+            Answered::Reply { reply, events } => {
+                let events = crate::retained::settle(self, events);
+                self.retire_settled();
+                Answered::Reply { reply, events }
+            }
+            refused @ (Answered::Invalid(_) | Answered::Unexpected) => refused,
+        }
     }
 
-    fn answer_raw(&mut self, key: &str, answer: &Answer) -> Option<(Reply, Vec<EngineEvent>)> {
-        let native = if let Answer::Question { answers } = answer {
-            let tool = self.tools.get(key)?;
-            let ItemKind::Question { questions, .. } = &tool.kind else {
-                return None;
+    fn retire_settled(&mut self) {
+        let settled: Vec<String> = self
+            .tools
+            .iter()
+            .filter(|(call, tool)| {
+                tool.status.is_terminal()
+                    && !matches!(tool.kind, ItemKind::Agent { .. })
+                    && !self.pending.contains_key(*call)
+                    && !self.awaiting_settle.contains(*call)
+                    && !self.shells.values().any(|shell| shell == *call)
+            })
+            .map(|(call, _)| call.clone())
+            .collect();
+        for call in settled {
+            self.tools.remove(&call);
+            self.retired.insert(call);
+        }
+    }
+
+    fn form_answer(
+        &self,
+        key: &str,
+        answers: &[Option<artisan_api::QuestionAnswer>],
+    ) -> Result<Option<Map<String, Value>>, String> {
+        let Some(tool) = self.tools.get(key) else {
+            return Ok(None);
+        };
+        let ItemKind::Question { questions, .. } = &tool.kind else {
+            return Ok(None);
+        };
+        let questions = questions
+            .inline()
+            .ok_or("native questions must be inline")?;
+        let Some(Pending::Form { fields, .. }) = self.pending.get(key) else {
+            return Ok(None);
+        };
+        if answers.len() != questions.len() || fields.len() != questions.len() {
+            return Err("question answer count differs from the request".into());
+        }
+        let mut form = Map::new();
+        for ((question, field), answer) in questions.iter().zip(fields).zip(answers) {
+            question
+                .validate_answer_structure(answer.as_ref())
+                .map_err(str::to_owned)?;
+            let given = match answer {
+                None => continue,
+                Some(artisan_api::QuestionAnswer::Text { text }) => Given::Text(text),
+                Some(artisan_api::QuestionAnswer::Choices { ids }) => Given::Choices(
+                    ids.inline()
+                        .ok_or("submitted choices must be inline")?
+                        .iter()
+                        .map(String::as_str)
+                        .collect(),
+                ),
             };
-            match crate::question::native_collection_answers(questions, answers) {
-                Ok(native) => native,
+            form.insert(field.key.clone(), field.value(given)?);
+        }
+        Ok(Some(form))
+    }
+
+    fn answer_raw(&mut self, key: &str, answer: &Answer) -> Answered {
+        let form_answer = match answer {
+            Answer::Question { answers } => match self.form_answer(key, answers) {
+                Ok(Some(form_answer)) => Some(form_answer),
+                Ok(None) => return Answered::Unexpected,
                 Err(message) => {
                     tracing::warn!(key, message, "invalid answer; request remains pending");
-                    return None;
+                    return Answered::Invalid(vec![crate::question::invalid_answer(key, message)]);
                 }
-            }
-        } else {
-            Vec::new()
+            },
+            Answer::Approval { .. } => None,
         };
-        let pending = self.pending.remove(key)?;
+        let Some(pending) = self.pending.remove(key) else {
+            return Answered::Unexpected;
+        };
         let mut out = Vec::new();
         let reply = match (pending, answer) {
             (Pending::Permission { session, request }, Answer::Approval { decision }) => {
@@ -597,6 +694,7 @@ impl Decoder {
                     tool.status = if decision.allows() {
                         Status::Running
                     } else {
+                        self.awaiting_settle.insert(key.to_owned());
                         Status::Declined
                     };
                     out.push(self.tool_event(key));
@@ -607,15 +705,11 @@ impl Decoder {
                     body: Some(json!({ "decision": reply })),
                 }
             }
-            (
-                Pending::Form {
-                    session,
-                    form,
-                    fields,
-                },
-                Answer::Question { answers },
-            ) => {
+            (Pending::Form { session, form, .. }, Answer::Question { answers }) => {
                 let skipped = answers.iter().all(Option::is_none);
+                if form != key {
+                    self.awaiting_settle.insert(key.to_owned());
+                }
                 if let Some(tool) = self.tools.get_mut(key) {
                     if let ItemKind::Question {
                         answers: stored, ..
@@ -637,13 +731,9 @@ impl Decoder {
                         body: None,
                     }
                 } else {
-                    let answer: Map<String, Value> = fields
-                        .iter()
-                        .zip(&native)
-                        .filter_map(|(field, answer)| {
-                            Some((field.key.clone(), field.value(answer.as_ref()?)))
-                        })
-                        .collect();
+                    let answer = form_answer.unwrap_or_else(|| {
+                        unreachable!("invariant: form {form} for item {key} was validated before it was answered")
+                    });
                     Reply {
                         method: Method::Post,
                         path: format!("/api/session/{session}/form/{form}/reply"),
@@ -654,14 +744,12 @@ impl Decoder {
             (pending, _) => {
                 tracing::warn!(key, "answer does not match what OpenCode asked");
                 self.pending.insert(key.to_owned(), pending);
-                return None;
+                return Answered::Unexpected;
             }
         };
-        Some((reply, out))
+        Answered::Reply { reply, events: out }
     }
 
-    /// A child session of a followed one: followed from now on, under the
-    /// `subagent` call that claims it with its progress.
     fn session_created(&mut self, data: &Value) {
         let (Some(session), Some(parent)) = (data["sessionID"].as_str(), data["parentID"].as_str())
         else {
@@ -674,8 +762,6 @@ impl Decoder {
         self.unbound.insert(session.to_owned(), data.clone());
     }
 
-    /// A child no call claimed before its first step still gets an Agent
-    /// item. Arrival order never ties a child to a call.
     fn bind_orphan(&mut self, session: &str, out: &mut Vec<EngineEvent>) {
         let Some(info) = self.unbound.remove(session) else {
             return;
@@ -702,6 +788,7 @@ impl Decoder {
                 label: None,
             },
         });
+        self.orphans.insert(session.to_owned(), key.clone());
         self.sessions.insert(session.to_owned(), Some(key));
     }
 
@@ -709,12 +796,14 @@ impl Decoder {
         let Some(call) = data["id"].as_str() else {
             return;
         };
+        if self.retired.contains(call) {
+            return;
+        }
         let Some(name) = self.tool_names.get(call).cloned() else {
             tracing::warn!(call, "OpenCode called a tool it never named");
             return;
         };
         let input = &data["input"];
-        // The question arrives as `form.created`.
         if name == "question" {
             return;
         }
@@ -775,7 +864,6 @@ impl Decoder {
         out.push(self.tool_event(call));
     }
 
-    /// A `subagent` call names the child session it runs in its progress.
     fn tool_progress(&mut self, data: &Value) {
         let (Some(call), Some(child)) =
             (data["id"].as_str(), data["metadata"]["sessionID"].as_str())
@@ -797,6 +885,8 @@ impl Decoder {
         let Some(call) = data["id"].as_str() else {
             return;
         };
+        self.tool_names.remove(call);
+        self.awaiting_settle.remove(call);
         let cancelled = self.cancelled || data["error"]["type"] == "aborted";
         let Some(tool) = self.tools.get_mut(call) else {
             return;
@@ -851,8 +941,6 @@ impl Decoder {
                     (false, false, true) => Status::Cancelled,
                     (false, false, false) => Status::Failed,
                 };
-                // A background shell's call returns while it runs on; it
-                // ends with its `shell.exited`.
                 if success
                     && str_at(metadata, "status").as_deref() == Some("running")
                     && let ToolKind::Shell { background, .. } = kind
@@ -865,7 +953,6 @@ impl Decoder {
                 out.push(self.tool_event(call));
                 return;
             }
-            // Settled when answered.
             ItemKind::Question { .. } => return,
             ItemKind::UserMessage { .. }
             | ItemKind::AssistantMessage { .. }
@@ -897,7 +984,8 @@ impl Decoder {
             .as_i64()
             .and_then(|code| i32::try_from(code).ok());
         tool.status = match (data["status"].as_str(), exit) {
-            (Some("exited"), Some(0) | None) => Status::Done,
+            (Some("exited"), None) => return,
+            (Some("exited"), Some(0)) => Status::Done,
             (Some("killed"), _) => Status::Cancelled,
             _ => Status::Failed,
         };
@@ -979,22 +1067,7 @@ impl Decoder {
         out.push(EngineEvent::Usage(self.usage.clone()));
         let texts = self.step_texts.remove(session).unwrap_or_default();
         let final_step = data["finish"].as_str() != Some("tool-calls");
-        let last = texts.len().saturating_sub(1);
-        for (index, (key, text)) in texts.into_iter().enumerate() {
-            out.push(EngineEvent::Item {
-                key,
-                parent: parent.map(str::to_owned),
-                status: Status::Done,
-                kind: ItemKind::AssistantMessage {
-                    text: text.into(),
-                    phase: if final_step && index == last {
-                        Phase::Final
-                    } else {
-                        Phase::Commentary
-                    },
-                },
-            });
-        }
+        settle_texts(texts, parent, final_step, out);
     }
 
     fn permission_asked(&mut self, session: &str, data: &Value, out: &mut Vec<EngineEvent>) {
@@ -1031,9 +1104,15 @@ impl Decoder {
             ],
             decision: None,
         };
-        // Approvals live on the tool they gate; one asked before its call
-        // is announced creates the item from what the permission says.
         let key = data["source"]["id"].as_str().unwrap_or(request).to_owned();
+        if self.retired.contains(&key) {
+            tracing::warn!(
+                call = key,
+                request,
+                "OpenCode asked to approve a settled call"
+            );
+            return;
+        }
         let tool = self.tools.entry(key.clone()).or_insert_with(|| Tool {
             session: session.to_owned(),
             status: Status::Running,
@@ -1066,7 +1145,6 @@ impl Decoder {
         out.push(self.tool_event(&key));
     }
 
-    /// A reply we didn't send (another client answered).
     fn permission_replied(&mut self, data: &Value, out: &mut Vec<EngineEvent>) {
         let Some(request) = data["requestID"].as_str() else {
             return;
@@ -1086,13 +1164,11 @@ impl Decoder {
             Some("always") => Decision::AllowAlways,
             _ => Decision::DenyOnce,
         };
-        if let Some((_, events)) = self.answer(&key, &Answer::Approval { decision }) {
+        if let Answered::Reply { events, .. } = self.answer(&key, &Answer::Approval { decision }) {
             out.extend(events);
         }
     }
 
-    /// A form (the question tool asks through one) becomes a question per
-    /// field.
     fn form_created(&mut self, event: &Value, form: &Value, out: &mut Vec<EngineEvent>) {
         let (Some(session), Some(id)) = (form["sessionID"].as_str(), form["id"].as_str()) else {
             return;
@@ -1104,6 +1180,9 @@ impl Decoder {
             .as_str()
             .unwrap_or(id)
             .to_owned();
+        if self.retired.contains(&key) {
+            return;
+        }
         let native = <Vec<NativeField> as serde::Deserialize>::deserialize(&form["fields"]);
         let asked = native.ok().and_then(|fields| {
             let asked: Option<Vec<_>> = fields
@@ -1124,7 +1203,7 @@ impl Decoder {
                 false,
             ));
             if self.root.as_deref() == Some(session) {
-                self.error = Some(message.to_owned());
+                self.error = Some(TurnFailure::Failed(message.to_owned()));
                 self.turn_open = false;
             }
             return;
@@ -1154,7 +1233,6 @@ impl Decoder {
         out.push(self.tool_event(&key));
     }
 
-    /// Settles a form another client answered or dismissed.
     fn form_settled(&mut self, replied: bool, data: &Value, out: &mut Vec<EngineEvent>) {
         let Some(form) = data["id"].as_str() else {
             return;
@@ -1200,7 +1278,7 @@ impl Decoder {
                 Some(artisan_api::QuestionAnswer::Text { text })
             })
             .collect();
-        if let Some((_, events)) = self.answer(&key, &Answer::Question { answers }) {
+        if let Answered::Reply { events, .. } = self.answer(&key, &Answer::Question { answers }) {
             out.extend(events);
         }
     }
@@ -1222,7 +1300,6 @@ impl crate::retained::Retains for Decoder {
     }
 }
 
-/// One form field as a question; `None` for a field Artisan can't ask.
 fn form_question(field: NativeField) -> Option<(Question, FormField)> {
     let text = field
         .description
@@ -1244,7 +1321,8 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
                 })
                 .into(),
         ),
-        "number" | "integer" => (FieldKind::Number, Vec::new()),
+        "integer" => (FieldKind::Integer, Vec::new()),
+        "number" => (FieldKind::Number, Vec::new()),
         _ => return None,
     };
     if text.trim().is_empty() || options.iter().any(|option| option.label.trim().is_empty()) {
@@ -1268,7 +1346,8 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
     };
     let values = options
         .into_iter()
-        .map(|option| (option.label, option.value))
+        .enumerate()
+        .map(|(index, option)| (format!("option-{index}"), option.value))
         .collect();
     Some((
         question,
@@ -1280,23 +1359,91 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
     ))
 }
 
+enum Given<'a> {
+    Text(&'a str),
+    Choices(Vec<&'a str>),
+}
+
 impl FormField {
-    /// The value OpenCode wants for the chosen labels or typed text.
-    fn value(&self, answer: &[String]) -> Value {
-        let value = |label: &String| self.values.get(label).unwrap_or(label).clone();
-        match self.kind {
-            FieldKind::Choices => Value::from(answer.iter().map(value).collect::<Vec<_>>()),
-            FieldKind::Boolean => Value::from(answer.first().is_some_and(|label| label == "Yes")),
-            FieldKind::Number => {
-                let text = answer.first().map(String::as_str).unwrap_or_default();
-                text.trim()
-                    .parse::<f64>()
-                    .map_or_else(|_| Value::from(text), Value::from)
+    fn chosen(&self, id: &str) -> Result<String, String> {
+        self.values
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("unknown choice {id} for {}", self.key))
+    }
+
+    fn value(&self, given: Given<'_>) -> Result<Value, String> {
+        match (self.kind, given) {
+            (FieldKind::Choices, Given::Choices(ids)) => ids
+                .into_iter()
+                .map(|id| self.chosen(id))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::from),
+            (FieldKind::Choice, Given::Choices(ids)) => match ids.as_slice() {
+                [id] => self.chosen(id).map(Value::from),
+                _ => Err(format!("{} takes one choice", self.key)),
+            },
+            (FieldKind::Boolean, Given::Choices(ids)) => match ids.as_slice() {
+                [id] => self.chosen(id).map(|value| Value::from(value == "Yes")),
+                _ => Err(format!("{} takes yes or no", self.key)),
+            },
+            (FieldKind::Integer | FieldKind::Number | FieldKind::Text, Given::Choices(_)) => {
+                Err(format!("{} takes text, not choices", self.key))
             }
-            FieldKind::Text | FieldKind::Choice => {
-                Value::from(answer.first().map(value).unwrap_or_default())
+            (FieldKind::Choices, Given::Text(text)) => Ok(Value::from(vec![text.to_owned()])),
+            (FieldKind::Boolean, Given::Text(text)) => Ok(Value::from(text == "Yes")),
+            (FieldKind::Integer, Given::Text(text)) => {
+                let text = text.trim();
+                text.parse::<i64>().map(Value::from).map_err(|error| {
+                    format!("{} needs a whole number, not {text:?}: {error}", self.key)
+                })
             }
+            (FieldKind::Number, Given::Text(text)) => {
+                let text = text.trim();
+                match text.parse::<f64>().map(serde_json::Number::from_f64) {
+                    Ok(Some(number)) => Ok(Value::Number(number)),
+                    Ok(None) => Err(format!("{} needs a finite number, not {text:?}", self.key)),
+                    Err(error) => Err(format!(
+                        "{} needs a number, not {text:?}: {error}",
+                        self.key
+                    )),
+                }
+            }
+            (FieldKind::Text | FieldKind::Choice, Given::Text(text)) => Ok(Value::from(text)),
         }
+    }
+}
+
+fn execution_end(kind: &str) -> Option<Status> {
+    match kind {
+        "session.execution.succeeded" => Some(Status::Done),
+        "session.execution.interrupted" => Some(Status::Cancelled),
+        "session.execution.failed" => Some(Status::Failed),
+        _ => None,
+    }
+}
+
+fn settle_texts(
+    texts: Vec<(String, String)>,
+    parent: Option<&str>,
+    final_step: bool,
+    out: &mut Vec<EngineEvent>,
+) {
+    let last = texts.len().saturating_sub(1);
+    for (index, (key, text)) in texts.into_iter().enumerate() {
+        out.push(EngineEvent::Item {
+            key,
+            parent: parent.map(str::to_owned),
+            status: Status::Done,
+            kind: ItemKind::AssistantMessage {
+                text: text.into(),
+                phase: if final_step && index == last {
+                    Phase::Final
+                } else {
+                    Phase::Commentary
+                },
+            },
+        });
     }
 }
 
@@ -1352,7 +1499,7 @@ fn error_item(
             "error:{}",
             event["id"]
                 .as_str()
-                .expect("validated native event identity")
+                .expect("invariant: OpenCode event ids are validated on arrival")
         ),
         parent,
         status: Status::Done,
@@ -1388,10 +1535,12 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
         ));
     }
     let text = |key: &str| str_at(input, key).filter(|value| !value.trim().is_empty());
-    let path = || text("path").expect("validated path");
+    let path = || text("path").expect("invariant: tool_kind checked the path above");
     Ok(match name {
         "shell" => ToolKind::Shell {
-            command: (text("command").expect("validated command")).into(),
+            command: (text("command")
+                .expect("invariant: tool_kind checked the shell command above"))
+            .into(),
             cwd: text("workdir"),
             background: input["background"].as_bool() == Some(true),
             watch: false,
@@ -1428,20 +1577,22 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             .into(),
         },
         "grep" => ToolKind::Search {
-            pattern: text("pattern").expect("validated pattern"),
+            pattern: text("pattern")
+                .expect("invariant: tool_kind checked the search pattern above"),
             path: text("path"),
             mode: SearchMode::Grep,
         },
         "glob" => ToolKind::Search {
-            pattern: text("pattern").expect("validated pattern"),
+            pattern: text("pattern")
+                .expect("invariant: tool_kind checked the search pattern above"),
             path: text("path"),
             mode: SearchMode::Glob,
         },
         "webfetch" => ToolKind::WebFetch {
-            url: text("url").expect("validated URL"),
+            url: text("url").expect("invariant: tool_kind checked the webfetch URL above"),
         },
         "websearch" => ToolKind::WebSearch {
-            query: text("query").expect("validated query"),
+            query: text("query").expect("invariant: tool_kind checked the websearch query above"),
         },
         _ => {
             let input = (!input.is_null()).then(|| input.to_string());
@@ -1460,8 +1611,6 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     })
 }
 
-/// Edit results list the files with their diffs; `write` says whether the
-/// file existed.
 fn settle_changes(changes: &mut Collection<FileChange>, metadata: &Value) -> Result<(), String> {
     if let Some(files) = metadata["files"].as_array() {
         *changes = files
@@ -1489,3 +1638,7 @@ fn settle_changes(changes: &mut Collection<FileChange>, metadata: &Value) -> Res
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../tests/opencode/decoder.rs"]
+mod decoder_tests;

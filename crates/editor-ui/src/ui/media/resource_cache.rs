@@ -15,67 +15,171 @@ const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PENDING: usize = 8;
 static NEXT_CACHE: AtomicU64 = AtomicU64::new(1);
 
-type Release = Box<dyn FnOnce() + Send>;
+type Output = Box<dyn Any + Send>;
+type Release = Box<dyn FnOnce(Output) + Send>;
+type Rejected = Box<dyn FnOnce() + Send>;
 
 struct Waiter {
     id: u64,
     wake: aqua::mailbox::Wake,
 }
 
+fn enlist(waiters: &mut Vec<Waiter>, id: u64, wake: aqua::mailbox::Wake) {
+    if !waiters.iter().any(|known| known.id == id) {
+        waiters.push(Waiter { id, wake });
+    }
+}
+
+enum Slot {
+    Pending {
+        waiters: Vec<Waiter>,
+        cancel: Option<AbortHandle>,
+    },
+    Ready {
+        output: Output,
+        release: Option<Release>,
+    },
+    TooLarge,
+}
+
 struct Entry {
     loader: TypeId,
     owners: Vec<Arc<[u64]>>,
-    waiters: Vec<Waiter>,
     source: Box<dyn Any + Send>,
-    output: Option<Box<dyn Any + Send>>,
     bytes: usize,
     generation: u64,
-    cancel: Option<AbortHandle>,
-    release: Option<Release>,
+    slot: Slot,
 }
 
 impl Entry {
     fn resident_bytes(&self) -> usize {
+        let waiters = match &self.slot {
+            Slot::Pending { waiters, .. } => waiters.capacity(),
+            Slot::Ready { .. } | Slot::TooLarge => 0,
+        };
         self.bytes
             .saturating_add(
                 self.owners
                     .capacity()
                     .saturating_mul(size_of::<Arc<[u64]>>()),
             )
-            .saturating_add(self.waiters.capacity().saturating_mul(size_of::<Waiter>()))
-            .saturating_add(
-                self.owners
-                    .iter()
-                    .map(|owner| {
-                        owner
-                            .len()
-                            .saturating_mul(size_of::<u64>())
-                            .saturating_add(2 * size_of::<usize>())
-                    })
-                    .sum::<usize>(),
-            )
+            .saturating_add(waiters.saturating_mul(size_of::<Waiter>()))
+            .saturating_add(self.owners.iter().map(|owner| membership(owner)).sum())
     }
 
-    fn dispose(self) {
-        drop(self);
+    fn pending(&self) -> bool {
+        matches!(self.slot, Slot::Pending { .. })
+    }
+
+    fn matches<L: ResourceLoader>(&self, source: &L::Source) -> bool {
+        self.loader == TypeId::of::<L>() && self.source.downcast_ref::<L::Source>() == Some(source)
+    }
+
+    fn is_pending_ticket<L: ResourceLoader>(&self, ticket: &LoadTicket<L>) -> bool {
+        self.generation == ticket.generation && self.pending() && self.matches::<L>(&ticket.source)
     }
 }
 
 impl Drop for Entry {
     fn drop(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            cancel.abort();
-        }
-        if let Some(release) = self.release.take() {
-            release();
+        match &mut self.slot {
+            Slot::Pending { waiters, cancel } => {
+                if let Some(cancel) = cancel.take() {
+                    cancel.abort();
+                }
+                for waiter in waiters.drain(..) {
+                    (waiter.wake)();
+                }
+            }
+            Slot::Ready { output, release } => {
+                if let Some(release) = release.take() {
+                    release(std::mem::replace(output, Box::new(())));
+                }
+            }
+            Slot::TooLarge => {}
         }
     }
+}
+
+fn membership(owner: &[u64]) -> usize {
+    owner
+        .len()
+        .saturating_mul(size_of::<u64>())
+        .saturating_add(2 * size_of::<usize>())
 }
 
 struct State {
     closed: bool,
     generation: u64,
     entries: VecDeque<Entry>,
+    admission: Vec<Waiter>,
+}
+
+impl State {
+    fn resident_bytes(&self) -> usize {
+        self.entries.iter().map(Entry::resident_bytes).sum()
+    }
+
+    fn pending(&self) -> usize {
+        self.entries.iter().filter(|entry| entry.pending()).count()
+    }
+
+    fn pending_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| entry.pending())
+            .map(Entry::resident_bytes)
+            .sum()
+    }
+
+    fn evict_until(
+        &mut self,
+        kept: Option<u64>,
+        fits: impl Fn(&Self) -> bool,
+    ) -> (Vec<Entry>, bool) {
+        let mut removed = Vec::new();
+        while !fits(self) {
+            let Some(position) = self
+                .entries
+                .iter()
+                .position(|entry| !entry.pending() && Some(entry.generation) != kept)
+            else {
+                return (removed, false);
+            };
+            removed.push(
+                self.entries
+                    .remove(position)
+                    .expect("invariant: an evictable position is inside the entries"),
+            );
+        }
+        (removed, true)
+    }
+
+    fn admitted(&mut self, freed: bool) -> Vec<Waiter> {
+        if freed {
+            std::mem::take(&mut self.admission)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+struct Settled {
+    removed: Vec<Entry>,
+    wake: Vec<Waiter>,
+    release: Option<Rejected>,
+}
+
+impl Settled {
+    fn run(self) {
+        drop(self.removed);
+        if let Some(release) = self.release {
+            release();
+        }
+        for waiter in self.wake {
+            (waiter.wake)();
+        }
+    }
 }
 
 pub struct ResourceCache {
@@ -83,17 +187,25 @@ pub struct ResourceCache {
     state: Mutex<State>,
 }
 
+impl std::fmt::Debug for ResourceCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceCache").finish_non_exhaustive()
+    }
+}
+
 pub trait ResourceLoader: 'static {
     type Source: Clone + PartialEq + Send + 'static;
     type Output: Clone + Send + 'static;
 }
 
-pub enum Load<L: ResourceLoader> {
+pub(crate) enum Load<L: ResourceLoader> {
     Ready(L::Output),
     Pending,
     Start(LoadTicket<L>),
+    TooLarge,
 }
 
+#[derive(Debug)]
 pub struct LoadTicket<L: ResourceLoader> {
     cache: Weak<ResourceCache>,
     source: L::Source,
@@ -110,25 +222,28 @@ impl Default for ResourceCache {
                 closed: false,
                 generation: 0,
                 entries: VecDeque::new(),
+                admission: Vec::new(),
             }),
         }
     }
 }
 
 impl ResourceCache {
-    pub fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    pub fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|error| error.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub fn load<L: ResourceLoader>(
+    pub(crate) fn load<L: ResourceLoader>(
         self: &Arc<Self>,
         owner: &Arc<[u64]>,
         source: &L::Source,
@@ -136,113 +251,87 @@ impl ResourceCache {
         waiter: u64,
         wake: aqua::mailbox::Wake,
     ) -> Load<L> {
-        let loader = TypeId::of::<L>();
         let mut state = self.state();
         if state.closed {
             return Load::Pending;
         }
-        let position = state.entries.iter().position(|entry| {
-            entry.loader == loader && entry.source.downcast_ref::<L::Source>() == Some(source)
-        });
-        if let Some(position) = position {
-            let mut entry = state.entries.remove(position).unwrap();
+        if let Some(position) = state
+            .entries
+            .iter()
+            .position(|entry| entry.matches::<L>(source))
+        {
+            let mut entry = state
+                .entries
+                .remove(position)
+                .expect("invariant: a found position is inside the entries");
             if !entry.owners.iter().any(|known| known == owner) {
                 entry.owners.push(Arc::clone(owner));
             }
-            if entry.output.is_none() && !entry.waiters.iter().any(|known| known.id == waiter) {
-                entry.waiters.push(Waiter { id: waiter, wake });
-            }
-            let output = entry
-                .output
-                .as_ref()
-                .and_then(|value| value.downcast_ref::<L::Output>())
-                .cloned();
+            let load = match &mut entry.slot {
+                Slot::Pending { waiters, .. } => {
+                    enlist(waiters, waiter, wake);
+                    Load::Pending
+                }
+                Slot::Ready { output, .. } => Load::Ready(
+                    output
+                        .downcast_ref::<L::Output>()
+                        .expect("invariant: an entry's output has its loader's type")
+                        .clone(),
+                ),
+                Slot::TooLarge => Load::TooLarge,
+            };
             let generation = entry.generation;
             state.entries.push_back(entry);
-            let mut removed = Vec::new();
-            while state
-                .entries
-                .iter()
-                .map(Entry::resident_bytes)
-                .sum::<usize>()
-                > MAX_BYTES
-            {
-                let Some(entry) = state.entries.pop_front() else {
-                    break;
-                };
-                removed.push(entry);
-            }
-            let retained = state
-                .entries
-                .iter()
-                .any(|entry| entry.generation == generation);
+            let (removed, _) = state.evict_until(Some(generation), |state| {
+                state.resident_bytes() <= MAX_BYTES
+            });
+            let wake = state.admitted(!removed.is_empty());
             drop(state);
-            for entry in removed {
-                entry.dispose();
+            Settled {
+                removed,
+                wake,
+                release: None,
             }
-            return if retained {
-                output.map_or(Load::Pending, Load::Ready)
-            } else {
-                Load::Pending
-            };
+            .run();
+            return load;
         }
-        if state
-            .entries
-            .iter()
-            .filter(|entry| entry.output.is_none())
-            .count()
-            >= MAX_PENDING
-        {
-            return Load::Pending;
-        }
-        let membership = size_of::<Arc<[u64]>>()
-            .saturating_add(owner.len().saturating_mul(size_of::<u64>()))
-            .saturating_add(2 * size_of::<usize>())
+        let admission = membership(owner)
+            .saturating_add(size_of::<Arc<[u64]>>())
             .saturating_add(size_of::<Waiter>());
-        if source_bytes.saturating_add(membership) > MAX_BYTES {
+        let needed = source_bytes.saturating_add(admission);
+        if needed > MAX_BYTES {
+            return Load::TooLarge;
+        }
+        if state.pending() >= MAX_PENDING
+            || state.pending_bytes().saturating_add(needed) > MAX_BYTES
+        {
+            enlist(&mut state.admission, waiter, wake);
             return Load::Pending;
         }
-        let mut removed: Vec<Entry> = Vec::new();
-        while state.entries.len() >= MAX_ENTRIES
-            || state
-                .entries
-                .iter()
-                .map(Entry::resident_bytes)
-                .sum::<usize>()
-                .saturating_add(source_bytes)
-                .saturating_add(membership)
-                > MAX_BYTES
-        {
-            let Some(position) = state
-                .entries
-                .iter()
-                .position(|entry| entry.output.is_some())
-            else {
-                drop(state);
-                for entry in removed {
-                    entry.dispose();
-                }
-                return Load::Pending;
-            };
-            removed.push(state.entries.remove(position).unwrap());
-        }
+        let (removed, fits) = state.evict_until(None, |state| {
+            state.entries.len() < MAX_ENTRIES
+                && state.resident_bytes().saturating_add(needed) <= MAX_BYTES
+        });
+        assert!(
+            fits,
+            "invariant: pending entries leave room for {needed} bytes in cache {}",
+            self.id
+        );
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
         state.entries.push_back(Entry {
-            loader,
+            loader: TypeId::of::<L>(),
             owners: vec![Arc::clone(owner)],
-            waiters: vec![Waiter { id: waiter, wake }],
             source: Box::new(source.clone()),
-            output: None,
             bytes: source_bytes,
             generation,
-            cancel: None,
-            release: None,
+            slot: Slot::Pending {
+                waiters: vec![Waiter { id: waiter, wake }],
+                cancel: None,
+            },
         });
         drop(state);
-        for entry in removed {
-            entry.dispose();
-        }
+        drop(removed);
         Load::Start(LoadTicket {
             cache: Arc::downgrade(self),
             source: source.clone(),
@@ -252,111 +341,107 @@ impl ResourceCache {
         })
     }
 
-    pub fn forget<L: ResourceLoader>(&self, source: &L::Source) {
+    fn remove(&self, mut removed: impl FnMut(&mut Entry) -> bool) -> bool {
         let mut state = self.state();
-        let position = state.entries.iter().position(|entry| {
-            entry.loader == TypeId::of::<L>()
-                && entry.source.downcast_ref::<L::Source>() == Some(source)
-        });
-        let removed = position.and_then(|index| state.entries.remove(index));
-        drop(state);
-        if let Some(entry) = removed {
-            entry.dispose();
-        }
-    }
-
-    pub fn retain_owners(&self, owners: &[Vec<u64>]) {
-        let mut state = self.state();
-        let mut kept = VecDeque::new();
-        let mut removed = Vec::new();
+        let mut kept = VecDeque::with_capacity(state.entries.len());
+        let mut gone = Vec::new();
         for mut entry in state.entries.drain(..) {
-            entry
-                .owners
-                .retain(|owner| owners.iter().any(|prefix| owner.starts_with(prefix)));
-            if entry.owners.is_empty() {
-                removed.push(entry);
+            if removed(&mut entry) {
+                gone.push(entry);
             } else {
                 kept.push_back(entry);
             }
         }
         state.entries = kept;
+        let any = !gone.is_empty();
+        let wake = state.admitted(any);
         drop(state);
-        for entry in removed {
-            entry.dispose();
+        Settled {
+            removed: gone,
+            wake,
+            release: None,
         }
+        .run();
+        any
     }
 
-    pub fn clear(&self) {
+    pub(crate) fn forget<L: ResourceLoader>(&self, source: &L::Source) {
+        self.remove(|entry| entry.matches::<L>(source));
+    }
+
+    pub(crate) fn retain_owners(&self, owners: &[Vec<u64>]) {
+        self.remove(|entry| {
+            entry
+                .owners
+                .retain(|owner| owners.iter().any(|prefix| owner.starts_with(prefix)));
+            entry.owners.is_empty()
+        });
+    }
+
+    pub(crate) fn close(&self) {
         let mut state = self.state();
         state.closed = true;
         let entries = std::mem::take(&mut state.entries);
+        let wake = std::mem::take(&mut state.admission);
         drop(state);
-        for entry in entries {
-            entry.dispose();
+        Settled {
+            removed: entries.into(),
+            wake,
+            release: None,
         }
+        .run();
     }
 }
 
 impl<L: ResourceLoader> LoadTicket<L> {
-    pub fn current(&self) -> bool {
+    pub(crate) fn current(&self) -> bool {
         let Some(cache) = self.cache.upgrade() else {
             return false;
         };
         let state = cache.state();
-        state.entries.iter().any(|entry| {
-            entry.generation == self.generation
-                && entry.loader == TypeId::of::<L>()
-                && entry.source.downcast_ref::<L::Source>() == Some(&self.source)
-                && entry.output.is_none()
+        state
+            .entries
+            .iter()
+            .any(|entry| entry.is_pending_ticket(self))
+    }
+
+    pub(crate) fn cancel(&self) -> bool {
+        let Some(cache) = self.cache.upgrade() else {
+            return false;
+        };
+        let mut found = false;
+        cache.remove(|entry| {
+            let matched = !found && entry.is_pending_ticket(self);
+            found |= matched;
+            matched
         })
     }
 
-    pub fn cancel(&self) -> bool {
-        let Some(cache) = self.cache.upgrade() else {
-            return false;
-        };
-        let mut state = cache.state();
-        let position = state.entries.iter().position(|entry| {
-            entry.generation == self.generation
-                && entry.loader == TypeId::of::<L>()
-                && entry.source.downcast_ref::<L::Source>() == Some(&self.source)
-                && entry.output.is_none()
-        });
-        let removed = position.and_then(|index| state.entries.remove(index));
-        drop(state);
-        if let Some(entry) = removed {
-            entry.dispose();
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn attach(&self, abort: AbortHandle) -> bool {
+    pub(crate) fn attach(&self, abort: AbortHandle) -> bool {
         let Some(cache) = self.cache.upgrade() else {
             abort.abort();
             return false;
         };
         let mut state = cache.state();
-        let Some(entry) = state
+        let slot = state
             .entries
             .iter_mut()
-            .find(|entry| entry.generation == self.generation && entry.output.is_none())
-        else {
-            drop(state);
-            abort.abort();
-            return false;
-        };
-        if entry.cancel.is_some() {
-            drop(state);
-            abort.abort();
-            return false;
+            .find(|entry| entry.is_pending_ticket(self))
+            .map(|entry| &mut entry.slot);
+        match slot {
+            Some(Slot::Pending { cancel, .. }) if cancel.is_none() => {
+                *cancel = Some(abort);
+                true
+            }
+            Some(_) | None => {
+                drop(state);
+                abort.abort();
+                false
+            }
         }
-        entry.cancel = Some(abort);
-        true
     }
 
-    pub fn publish(
+    pub(crate) fn publish(
         self,
         output: L::Output,
         output_bytes: usize,
@@ -367,43 +452,63 @@ impl<L: ResourceLoader> LoadTicket<L> {
             return false;
         };
         let mut state = cache.state();
-        let Some(entry) = state.entries.iter_mut().find(|entry| {
-            entry.generation == self.generation
-                && entry.loader == TypeId::of::<L>()
-                && entry.source.downcast_ref::<L::Source>() == Some(&self.source)
-                && entry.output.is_none()
-        }) else {
+        let Some(position) = state
+            .entries
+            .iter()
+            .position(|entry| entry.is_pending_ticket(&self))
+        else {
             drop(state);
             release(output);
             return false;
         };
-        let owned = output.clone();
-        entry.output = Some(Box::new(output));
-        entry.cancel = None;
+        let mut entry = state
+            .entries
+            .remove(position)
+            .expect("invariant: a found position is inside the entries");
+        let Slot::Pending { waiters, .. } = std::mem::replace(&mut entry.slot, Slot::TooLarge)
+        else {
+            unreachable!(
+                "invariant: generation {} matched a pending entry",
+                self.generation
+            );
+        };
         entry.bytes = self.source_bytes.saturating_add(output_bytes);
-        entry.release = Some(Box::new(move || release(owned)));
-        let waiters = std::mem::take(&mut entry.waiters);
-        let mut removed = Vec::new();
-        while state.entries.len() > MAX_ENTRIES
-            || state
-                .entries
-                .iter()
-                .map(Entry::resident_bytes)
-                .sum::<usize>()
-                > MAX_BYTES
-        {
-            let Some(entry) = state.entries.pop_front() else {
-                break;
+        let retained = entry.resident_bytes() <= MAX_BYTES;
+        let rejected = if retained {
+            let generation = self.generation;
+            entry.slot = Slot::Ready {
+                output: Box::new(output),
+                release: Some(Box::new(move |output: Output| {
+                    release(*output.downcast::<L::Output>().unwrap_or_else(|_| {
+                        unreachable!(
+                            "invariant: entry {generation} stores its loader's output type"
+                        )
+                    }));
+                })),
             };
-            removed.push(entry);
-        }
+            None
+        } else {
+            entry.bytes = self.source_bytes;
+            let rejected: Rejected = Box::new(move || release(output));
+            Some(rejected)
+        };
+        state.entries.push_back(entry);
+        let (removed, _) = state.evict_until(Some(self.generation), |state| {
+            state.entries.len() <= MAX_ENTRIES && state.resident_bytes() <= MAX_BYTES
+        });
+        let mut wake = waiters;
+        wake.extend(state.admitted(true));
         drop(state);
-        for entry in removed {
-            entry.dispose();
+        Settled {
+            removed,
+            wake,
+            release: rejected,
         }
-        for waiter in waiters {
-            (waiter.wake)();
-        }
+        .run();
         true
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/ui/media/resource_cache.rs"]
+mod tests;

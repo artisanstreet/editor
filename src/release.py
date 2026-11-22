@@ -11,11 +11,16 @@ import tempfile
 from zoneinfo import ZoneInfo
 
 ANCHOR = "400a4b35cffdfa088227b9824176affb37b807fb26eb3c59b48ae56fbf5e4d8b"
+SPKI = "302a300506032b6570032100"
+NAMESPACE = "artisan-release"
 EXPECTED = {("ae", "linux", "x86_64"), ("ae", "linux", "aarch64"), ("ae", "macos", "aarch64"), ("editor", "windows", "x86_64")}
 OPTIONAL = {("editor", "windows", "aarch64")}
 SYSTEMS = {"linux": "Linux", "macos": "macOS", "windows": "Windows"}
 CHIPS = {("macos", "aarch64"): "Apple Silicon", ("linux", "aarch64"): "ARM64", ("windows", "aarch64"): "ARM64"}
-SUPPORT = {"release.json": "Signed release manifest", "release.json.sig": "Release manifest signature", "install.sh": "Install script for Linux and macOS"}
+SBOMS = {"ae": "ae CLI", "forge": "Forge", "editor-aqua": "Artisan Editor"}
+SUPPORT = {"install.sh": "Install script for Linux and macOS", "release.json.sig": "Release manifest signature", "release.json.sshsig": "Release manifest signature for ssh-keygen", "release.json": "Signed release manifest"}
+STABLE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+NIGHTLY_VERSION = re.compile(r"0\.0\.0-nightly\.([0-9]{14})\+[0-9a-f]{12}")
 LATEST = "releases/latest/download/release.json"
 NIGHTLY = "releases/download/nightly/release.json"
 
@@ -33,9 +38,55 @@ def run(*args, **kwargs):
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
 
+def ssh_string(data):
+    return len(data).to_bytes(4, "big") + data
+
+
+def ssh_public(anchor):
+    return ssh_string(b"ssh-ed25519") + ssh_string(bytes.fromhex(anchor))
+
+
+def allowed_signer(anchor):
+    return f"{NAMESPACE} ssh-ed25519 {base64.b64encode(ssh_public(anchor)).decode()}"
+
+
+def pem_public(anchor):
+    return base64.b64encode(bytes.fromhex(SPKI + anchor)).decode()
+
+
+def sshsig_message(manifest):
+    return b"SSHSIG" + ssh_string(NAMESPACE.encode()) + ssh_string(b"") + ssh_string(b"sha512") + ssh_string(hashlib.sha512(manifest).digest())
+
+
+def sshsig_armor(anchor, signature):
+    blob = b"SSHSIG" + (1).to_bytes(4, "big") + ssh_string(ssh_public(anchor)) + ssh_string(NAMESPACE.encode()) + ssh_string(b"") + ssh_string(b"sha512") + ssh_string(ssh_string(b"ssh-ed25519") + ssh_string(signature))
+    text = base64.b64encode(blob).decode()
+    lines = [text[index:index + 70] for index in range(0, len(text), 70)]
+    return "-----BEGIN SSH SIGNATURE-----\n" + "\n".join(lines) + "\n-----END SSH SIGNATURE-----\n"
+
+
+def tag_for(version):
+    if STABLE.fullmatch(version) or NIGHTLY_VERSION.fullmatch(version):
+        return "v" + version.split("+", 1)[0]
+    raise ValueError(f"no release tag for version {version!r}")
+
+
+def precedence(version):
+    if STABLE.fullmatch(version):
+        return tuple(int(part) for part in version.split(".")), 1, ""
+    nightly = NIGHTLY_VERSION.fullmatch(version)
+    if nightly:
+        return (0, 0, 0), 0, nightly[1]
+    raise ValueError(f"unordered release version {version!r}")
+
+
+def advances(candidate, current):
+    return current is None or precedence(candidate) > precedence(current)
+
+
 def public_key(value):
     value = value.strip().lower()
-    if value.startswith("302a300506032b6570032100"):
+    if value.startswith(SPKI):
         value = value[24:]
     if value != ANCHOR:
         raise ValueError("release public key does not match the compiled trust anchor")
@@ -106,7 +157,21 @@ def package(binaries, output, app, system, arch):
     return entry
 
 
-def assemble(root, source, output, version, sha):
+def bill(root, output, crate, version):
+    path = root / "crates" / crate / f"{crate}.cdx.json"
+    if not path.is_file():
+        raise ValueError(f"no SBOM for {crate}; run cargo cyclonedx first")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    component = document.get("metadata", {}).get("component", {})
+    if document.get("bomFormat") != "CycloneDX" or component.get("name") != crate or component.get("version") != version:
+        raise ValueError(f"the {crate} SBOM does not describe {crate} {version}")
+    name = f"{crate}.cdx.json"
+    shutil.copyfile(path, output / name)
+    return {"sbom": crate, "file": name, "sha256": digest(output / name)}
+
+
+def assemble(root, source, output, version, sha, anchor):
+    tag_for(version)
     entries = []
     seen = set()
     output.mkdir(parents=True, exist_ok=False)
@@ -125,11 +190,15 @@ def assemble(root, source, output, version, sha):
         entries.append(entry)
     if not EXPECTED <= seen:
         raise ValueError("release is missing platform artifacts")
+    bills = [bill(root, output, crate, version) for crate in SBOMS]
     lines = ",\n".join(json.dumps(entry, separators=(",", ":")) for entry in entries)
-    (output / "release.json").write_text(f'{{"version":"{version}","commit":"{sha}","artifacts":[\n{lines}\n]}}\n', encoding="utf-8")
+    sboms = ",\n".join(json.dumps(entry, separators=(",", ":")) for entry in bills)
+    (output / "release.json").write_text(f'{{"version":"{version}","commit":"{sha}","artifacts":[\n{lines}\n],"sboms":[\n{sboms}\n]}}\n', encoding="utf-8")
     installer = (root / "scripts/install.sh").read_text(encoding="utf-8")
     if LATEST not in installer:
         raise ValueError("install.sh does not name the release feed")
+    if f"signer='{allowed_signer(anchor)}'" not in installer or f"public_key='{pem_public(anchor)}'" not in installer:
+        raise ValueError("install.sh does not pin the release trust anchor")
     if "-nightly." in version:
         installer = installer.replace(LATEST, NIGHTLY)
     (output / "install.sh").write_text(installer, encoding="utf-8")
@@ -138,6 +207,7 @@ def assemble(root, source, output, version, sha):
 def assets(output):
     manifest_data = json.loads((output / "release.json").read_text(encoding="utf-8"))
     labelled = [(entry["file"], label(entry["app"], entry["os"], entry["arch"])) for entry in manifest_data["artifacts"]]
+    labelled += [(entry["file"], f"Software bill of materials for {SBOMS[entry['sbom']]} (CycloneDX)") for entry in manifest_data["sboms"]]
     return [f"{output / name}#{text}" for name, text in labelled + list(SUPPORT.items())]
 
 
@@ -153,18 +223,29 @@ def validate(output, sha=None):
         seen.add(identity)
     if not EXPECTED <= seen:
         raise ValueError("signed release is incomplete")
+    bills = manifest_data.get("sboms", [])
+    if sorted(entry["sbom"] for entry in bills) != sorted(SBOMS) or any(entry["file"] != f"{entry['sbom']}.cdx.json" for entry in bills):
+        raise ValueError("signed release does not carry one SBOM per shipped binary")
+    if any(digest(output / entry["file"]) != entry["sha256"] for entry in bills):
+        raise ValueError("SBOM changed before signing")
     if sha is not None and manifest_data.get("commit") != sha:
         raise ValueError("manifest commit differs from the release SHA")
     return manifest_data
 
 
 def verify(output, expected, sha):
-    validate(output, sha)
-    with tempfile.TemporaryDirectory() as temporary:
+    manifest = output / "release.json"
+    with tempfile.TemporaryDirectory() as temporary, manifest.open("rb") as signed:
         directory = Path(temporary)
-        (directory / "public.der").write_bytes(bytes.fromhex("302a300506032b6570032100" + expected))
-        (directory / "signature").write_bytes(base64.b64decode((output / "release.json.sig").read_bytes(), validate=True))
-        run("openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-keyform", "DER", "-inkey", str(directory / "public.der"), "-in", str(output / "release.json"), "-sigfile", str(directory / "signature"))
+        (directory / "public.der").write_bytes(bytes.fromhex(SPKI + expected))
+        (directory / "signers").write_text(allowed_signer(expected) + "\n", encoding="utf-8")
+        try:
+            (directory / "signature").write_bytes(base64.b64decode((output / "release.json.sig").read_bytes(), validate=True))
+            run("openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-keyform", "DER", "-inkey", str(directory / "public.der"), "-in", str(manifest), "-sigfile", str(directory / "signature"), stderr=subprocess.DEVNULL)
+            run("ssh-keygen", "-Y", "verify", "-f", str(directory / "signers"), "-I", NAMESPACE, "-n", NAMESPACE, "-s", str(output / "release.json.sshsig"), stdin=signed, stderr=subprocess.DEVNULL)
+        except (subprocess.CalledProcessError, ValueError) as error:
+            raise ValueError("release.json is not signed by the release key") from error
+    return validate(output, sha)
 
 
 def sign(output, pem, expected):
@@ -175,14 +256,18 @@ def sign(output, pem, expected):
         key.write_text(pem, encoding="utf-8")
         key.chmod(0o600)
         public = subprocess.check_output(["openssl", "pkey", "-in", str(key), "-pubout", "-outform", "DER"])
-        if public != bytes.fromhex("302a300506032b6570032100" + expected):
+        if public != bytes.fromhex(SPKI + expected):
             raise ValueError("signing key does not match the release trust anchor")
-        (directory / "public.der").write_bytes(public)
         manifest = output / "release.json"
+        message = directory / "sshsig-message"
+        message.write_bytes(sshsig_message(manifest.read_bytes()))
         signature = directory / "signature"
+        sshsig = directory / "sshsig"
         run("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(manifest), "-out", str(signature))
-        run("openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-keyform", "DER", "-inkey", str(directory / "public.der"), "-in", str(manifest), "-sigfile", str(signature))
+        run("openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(key), "-in", str(message), "-out", str(sshsig))
         (output / "release.json.sig").write_bytes(base64.b64encode(signature.read_bytes()))
+        (output / "release.json.sshsig").write_text(sshsig_armor(expected, sshsig.read_bytes()), encoding="utf-8")
+    verify(output, expected, None)
 
 
 def main():
@@ -208,6 +293,11 @@ def main():
     signing.add_argument("--output", required=True)
     listing = commands.add_parser("assets")
     listing.add_argument("--output", required=True)
+    tagging = commands.add_parser("tag")
+    tagging.add_argument("--version", required=True)
+    promotion = commands.add_parser("advances")
+    promotion.add_argument("--candidate", required=True)
+    promotion.add_argument("--current")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     if args.command == "key":
@@ -217,13 +307,17 @@ def main():
     elif args.command == "package":
         package(Path(args.binaries), Path(args.output), args.app, args.os, args.arch)
     elif args.command == "assemble":
-        assemble(root, Path(args.source), Path(args.output), args.version, args.sha)
+        assemble(root, Path(args.source), Path(args.output), args.version, args.sha, ANCHOR)
     elif args.command == "stamp":
         stamp(root, args.version)
     elif args.command == "verify":
         verify(Path(args.output), public_key(os.environ["ARTISAN_RELEASE_PUBLIC_KEY_HEX"]), args.sha)
     elif args.command == "assets":
         print("\n".join(assets(Path(args.output))))
+    elif args.command == "tag":
+        print(tag_for(args.version))
+    elif args.command == "advances":
+        print(str(advances(args.candidate, args.current or None)).lower())
     elif args.command == "sign":
         sign(Path(args.output), os.environ["ARTISAN_RELEASE_SIGNING_KEY_PEM"], public_key(os.environ["ARTISAN_RELEASE_PUBLIC_KEY_HEX"]))
 

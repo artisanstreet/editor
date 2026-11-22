@@ -1,0 +1,237 @@
+preserve-uniform-field-visibility = true
+
+[[production]]
+package = "editor-aqua"
+bin = "editor-aqua"
+reason = "shipped Editor"
+
+[[production]]
+package = "forge"
+bin = "forge"
+reason = "shipped Forge"
+
+[[production]]
+package = "ae"
+bin = "ae"
+reason = "shipped CLI and installer"
+
+[[feature-profile]]
+name = "shipped"
+
+[[feature-profile]]
+name = "all"
+all-features = true
+
+[[exclude]]
+crate = "editor_aqua"
+module = "capture"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "capture tooling runs only on Windows; elsewhere its window and readback paths are compiled out, so its items look dead"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_http"
+item = "upgrade::Upgrade::binary"
+kind = "field"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_isolation"
+item = "linux::protect_forge"
+kind = "function"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "Linux-only cgroup module, so the Windows run cannot confirm the finding"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "editor_audio"
+item = "state::Inner::fill_mapped"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(not(windows))"
+reason = "the Windows build uses this item or compiles a different implementation of it"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "forge_http"
+item = "start_generation"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::upgrade_lock"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "test_support"
+item = "replay::ReplayingEngine::install_transcript"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_store"
+item = "progress::Progress::with_heartbeat"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "the Unix gateway (forge_http::upgrade, cfg(unix)) sends systemd's start heartbeats through it; Windows has no systemd, so only the store's own tests reach it there"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_http"
+item = "Server::hub"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::read"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::write"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::UpgradeLock"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::root"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::peers"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::active"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_runs"
+item = "runtime::registry::Registry::retire_unused"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "diagnostics"
+item = "Destination"
+kind = "reexport"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "editor_audio"
+item = "state::Inner::fill"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "used by Linux-only code or tests (target_os = linux), so the Windows run cannot see the use"
+
+[[override]]
+lint = "hawk::dead_public"
+crate = "test_support"
+item = "skipped"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix cgroup and gateway tests can be skipped for a missing tool"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "test_support"
+item = "editor::core::StubbedHost::start_in"
+kind = "inherent_method"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix agent-call tests start a stubbed host in their own folder"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "forge_http"
+item = "start_in"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Linux-only Forge simulation test starts Forge in a simulated environment"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "test_support"
+item = "executable"
+kind = "module"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix ae and engine-manager tests install executables from other crates"
+
+[[override]]
+lint = "hawk::unnecessary_public"
+crate = "test_support"
+item = "executable::install"
+kind = "function"
+level = "expect"
+target = "cfg(windows)"
+reason = "only the Unix ae and engine-manager tests install executables from other crates"
+
+[[override]]
+lint = "hawk::unnecessary_restricted_visibility"
+crate = "forge_engines"
+item = "claudeai::session::FILE_LOCK"
+kind = "static"
+level = "expect"
+target = "cfg(windows)"
+reason = "a Unix-only transport test holds the session file lock to stand in for a slow disk"

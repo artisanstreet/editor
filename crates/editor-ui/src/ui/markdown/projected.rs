@@ -1,13 +1,12 @@
-use super::presenter::{PresenterError, ProjectedGeometry, ProjectedTextLeaf};
+use super::presenter::{PresenterError, ProjectedGeometry, ProjectedTextLeaf, SelectionPlace};
+use super::reveal::PreparedReveal;
 use super::visual::{
-    BodyTone, LinkAction, interactive_leaf_with_opacity, interactive_table_leaf_with_opacity,
-    prepare_inline, raw_leaf,
+    BodyContext, BodyTone, LeafKind, LeafSource, interactive_leaf, prepare_inline, raw_leaf,
 };
 use super::{
     Block, BlockShape, CodeFence, IndexedLeafContent, LeafContext, LeafSpacing, MarkdownEngine,
     MarkdownIndex, MarkdownIndexError, TableAlignment, TableCell,
 };
-use crate::ui::rich::actions::{ResourceScope, ShowCopyMenu};
 use crate::ui::theme::{ArtisanTheme, ProseTypography};
 use aqua_core::Insets;
 use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
@@ -16,10 +15,50 @@ use aqua_ui::collection_runtime::{SelectionBatchOwner, SelectionSourceBatch};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+
+type RichFenceView<'a> = dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError> + 'a;
+type OrdinaryFence<'a> = dyn Fn(
+        usize,
+        &super::fence::Fence,
+        &[SelectionSource],
+        Option<&editor_core::Problem>,
+    ) -> Result<Element, PresenterError>
+    + 'a;
+
+#[derive(Clone, Copy)]
+pub(super) struct LeafRender<'a> {
+    pub(super) body: BodyContext<'a>,
+    pub(super) place: SelectionPlace<'a>,
+    pub(super) reveal: Option<&'a PreparedReveal>,
+    pub(super) batch_owner: SelectionBatchOwner,
+    pub(super) rich: Option<&'a RichFenceView<'a>>,
+    pub(super) ordinary: Option<&'a OrdinaryFence<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct LeafSlots<'a> {
+    pub(super) sources: &'a [SelectionSource],
+    pub(super) start: usize,
+    pub(super) last: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CellLeaves<'a> {
+    document: SelectionDocumentId,
+    order: &'a [u64],
+    ids: &'a [SelectionSourceId],
+    text_key: &'a dyn Fn(SelectionSourceId) -> String,
+    opacity: &'a [Vec<aqua_core::scene::GpuiTextOpacityRange>],
+}
+type ProjectedRender = (
+    Element,
+    Arc<[SelectionSource]>,
+    Arc<SelectionSourceBatch>,
+    ProjectedGeometry,
+);
 
 struct Leaf {
     range: Range<usize>,
@@ -29,7 +68,7 @@ struct Leaf {
     table_continues: bool,
     rich_without_source: bool,
     fence: Option<super::fence::Fence>,
-    fallback_note: Option<String>,
+    fallback_note: Option<editor_core::Problem>,
     rich_index: Option<usize>,
 }
 
@@ -38,7 +77,7 @@ struct LeafView<'a> {
     content: &'a IndexedLeafContent,
     table_continues: bool,
     fence: Option<&'a super::fence::Fence>,
-    fallback_note: Option<&'a str>,
+    fallback_note: Option<&'a editor_core::Problem>,
     rich_index: Option<usize>,
 }
 
@@ -49,7 +88,7 @@ impl Leaf {
             content: &self.content,
             table_continues: self.table_continues,
             fence: self.fence.as_ref(),
-            fallback_note: self.fallback_note.as_deref(),
+            fallback_note: self.fallback_note.as_ref(),
             rich_index: self.rich_index,
         }
     }
@@ -64,30 +103,86 @@ struct CachedSources {
     rows: Vec<Range<usize>>,
 }
 
-pub fn leaf_signatures(
-    source: &str,
-    command: Option<&str>,
-) -> Result<Vec<u64>, MarkdownIndexError> {
-    let index = MarkdownIndex::build(source)?;
-    (0..index.leaves().len())
-        .map(|ordinal| {
+#[derive(Debug)]
+pub struct ShapedSource {
+    source: String,
+    command: Option<String>,
+    index: MarkdownIndex,
+    signatures: Arc<[u64]>,
+}
+
+impl ShapedSource {
+    pub fn new(source: &str, command: Option<&str>) -> Result<Self, MarkdownIndexError> {
+        let index = MarkdownIndex::build(source)?;
+        Self::shaped(index, 0, &[], source.to_owned(), command.map(str::to_owned))
+    }
+
+    pub fn extend(self, source: &str, command: Option<&str>) -> Result<Self, MarkdownIndexError> {
+        match source.strip_prefix(self.source.as_str()) {
+            Some(appended) if self.command.as_deref() == command => self.append(appended),
+            Some(_) | None => Self::new(source, command),
+        }
+    }
+
+    pub fn append(mut self, appended: &str) -> Result<Self, MarkdownIndexError> {
+        if appended.is_empty() {
+            return Ok(self);
+        }
+        self.source.push_str(appended);
+        let (index, kept) = self.index.append(&self.source)?;
+        Self::shaped(
+            index,
+            kept,
+            &self.signatures[..kept],
+            self.source,
+            self.command,
+        )
+    }
+
+    fn shaped(
+        index: MarkdownIndex,
+        kept: usize,
+        settled: &[u64],
+        source: String,
+        command: Option<String>,
+    ) -> Result<Self, MarkdownIndexError> {
+        let mut signatures = Vec::with_capacity(index.leaves().len());
+        signatures.extend_from_slice(settled);
+        for ordinal in kept..index.leaves().len() {
             let context = index
                 .context(ordinal)
                 .ok_or(MarkdownIndexError::InvalidShape)?;
-            let table_continues = context.table_source.is_some()
-                && index
-                    .context(ordinal + 1)
-                    .and_then(|next| next.table_source)
-                    == context.table_source;
-            Ok(leaf_signature(
-                source,
+            signatures.push(leaf_signature(
+                &source,
                 &index.leaves()[ordinal].source_range(),
                 context,
-                table_continues,
-                command.filter(|_| ordinal == 0),
-            ))
+                table_continues(&index, ordinal, context),
+                command.as_deref().filter(|_| ordinal == 0),
+            ));
+        }
+        Ok(Self {
+            source,
+            command,
+            index,
+            signatures: signatures.into(),
         })
-        .collect()
+    }
+
+    pub fn signatures(&self) -> &Arc<[u64]> {
+        &self.signatures
+    }
+
+    pub fn resident_bytes(&self) -> usize {
+        self.source.capacity() + self.index.resident_bytes() + size_of_val(&*self.signatures)
+    }
+}
+
+fn table_continues(index: &MarkdownIndex, ordinal: usize, context: &LeafContext) -> bool {
+    context.table_source.is_some()
+        && index
+            .context(ordinal + 1)
+            .and_then(|next| next.table_source)
+            == context.table_source
 }
 
 fn leaf_signature(
@@ -108,6 +203,7 @@ fn leaf_signature(
 }
 
 pub(super) struct ProjectedDocument {
+    index: MarkdownIndex,
     leaves: Vec<Leaf>,
     cached_sources: RefCell<Option<Rc<CachedSources>>>,
 }
@@ -117,70 +213,109 @@ impl ProjectedDocument {
         engine: &MarkdownEngine,
         source: &str,
         command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<Self, MarkdownIndexError> {
         let index = MarkdownIndex::build(source)?;
-        let mut leaves = Vec::with_capacity(index.leaves().len());
-        for ordinal in 0..index.leaves().len() {
-            let context = index
-                .context(ordinal)
-                .cloned()
-                .ok_or(MarkdownIndexError::InvalidShape)?;
-            let table_continues = context.table_source.is_some()
-                && index
-                    .context(ordinal + 1)
-                    .and_then(|next| next.table_source)
-                    == context.table_source;
-            let mut content = index.normalize_leaf(ordinal, 0, source, engine)?;
-            if let (0, Some(command), IndexedLeafContent::Block(Block::Paragraph { spans, .. })) =
-                (ordinal, command, &mut content)
-            {
-                super::mark_command_spans(spans, command);
-            }
-            let rich = match &content {
-                IndexedLeafContent::Block(Block::Code(code)) => {
-                    crate::ui::rich::prepare(code.language.as_deref(), &code.source, code.closed)
-                }
-                _ => None,
-            };
-            let rich_without_source = matches!(
-                &rich,
-                Some(
-                    crate::ui::rich::RichFence::Ready(_)
-                        | crate::ui::rich::RichFence::Pending { .. }
-                )
-            ) || matches!(
-                &content,
-                IndexedLeafContent::Block(Block::Code(code)) if code.diagram.is_some()
-            );
-            let fallback_note = match rich {
-                Some(crate::ui::rich::RichFence::Invalid { note }) => Some(note),
-                _ => None,
-            };
-            let fence = match &content {
-                IndexedLeafContent::Block(Block::Code(code))
-                    if !rich_without_source && code.diagram.is_none() =>
-                {
-                    Some(super::fence::Fence::new(code))
-                }
-                _ => None,
-            };
-            let range = index.leaves()[ordinal].source_range();
-            let signature = leaf_signature(source, &range, &context, table_continues, command.filter(|_| ordinal == 0));
-            leaves.push(Leaf {
-                range,
-                signature,
-                context,
-                content,
-                table_continues,
-                rich_without_source,
-                fence,
-                fallback_note,
-                rich_index: None,
-            });
+        Self::projected(index, Vec::new(), engine, source, command, memo)
+    }
+
+    pub(super) fn append(
+        self,
+        engine: &MarkdownEngine,
+        source: &str,
+        command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
+    ) -> Result<(Self, usize), MarkdownIndexError> {
+        let (index, kept) = self.index.append(source)?;
+        let mut leaves = self.leaves;
+        leaves.truncate(kept);
+        Ok((
+            Self::projected(index, leaves, engine, source, command, memo)?,
+            kept,
+        ))
+    }
+
+    fn projected(
+        index: MarkdownIndex,
+        mut leaves: Vec<Leaf>,
+        engine: &MarkdownEngine,
+        source: &str,
+        command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
+    ) -> Result<Self, MarkdownIndexError> {
+        leaves.reserve(index.leaves().len().saturating_sub(leaves.len()));
+        for ordinal in leaves.len()..index.leaves().len() {
+            leaves.push(Self::leaf(&index, ordinal, engine, source, command, memo)?);
         }
         Ok(Self {
+            index,
             leaves,
             cached_sources: RefCell::new(None),
+        })
+    }
+
+    fn leaf(
+        index: &MarkdownIndex,
+        ordinal: usize,
+        engine: &MarkdownEngine,
+        source: &str,
+        command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
+    ) -> Result<Leaf, MarkdownIndexError> {
+        let leaf_context = index
+            .context(ordinal)
+            .cloned()
+            .ok_or(MarkdownIndexError::InvalidShape)?;
+        let table_continues = table_continues(index, ordinal, &leaf_context);
+        let mut content = index.normalize_leaf(ordinal, 0, source, engine, memo)?;
+        if let (0, Some(command), IndexedLeafContent::Block(Block::Paragraph { spans, .. })) =
+            (ordinal, command, &mut content)
+        {
+            super::mark_command_spans(spans, command);
+        }
+        let rich = match &content {
+            IndexedLeafContent::Block(Block::Code(code)) => {
+                crate::ui::rich::prepare(code.language.as_deref(), &code.source, code.closed)
+            }
+            IndexedLeafContent::Block(_) | IndexedLeafContent::TableRow { .. } => None,
+        };
+        let rich_without_source = matches!(
+            &rich,
+            Some(crate::ui::rich::RichFence::Ready(_) | crate::ui::rich::RichFence::Pending { .. })
+        ) || matches!(
+            &content,
+            IndexedLeafContent::Block(Block::Code(code)) if code.diagram.is_some()
+        );
+        let fallback_note = match rich {
+            Some(crate::ui::rich::RichFence::Invalid { note }) => Some(note),
+            _ => None,
+        };
+        let fence = match &content {
+            IndexedLeafContent::Block(Block::Code(code))
+                if !rich_without_source && code.diagram.is_none() =>
+            {
+                Some(super::fence::Fence::new(code))
+            }
+            IndexedLeafContent::Block(_) | IndexedLeafContent::TableRow { .. } => None,
+        };
+        let range = index.leaves()[ordinal].source_range();
+        let signature = leaf_signature(
+            source,
+            &range,
+            &leaf_context,
+            table_continues,
+            command.filter(|_| ordinal == 0),
+        );
+        Ok(Leaf {
+            range,
+            signature,
+            context: leaf_context,
+            content,
+            table_continues,
+            rich_without_source,
+            fence,
+            fallback_note,
+            rich_index: None,
         })
     }
     pub(super) fn len(&self) -> usize {
@@ -196,40 +331,53 @@ impl ProjectedDocument {
         Some(self.leaves.get(row)?.range.clone())
     }
 
-    pub(super) fn bind_rich<'a>(&mut self, entries: impl Iterator<Item = (usize, &'a CodeFence)>) {
-        let mut indices: HashMap<_, VecDeque<usize>> = HashMap::new();
-        for (index, fence) in entries {
-            indices
-                .entry((&fence.language, fence.source.as_str(), fence.closed))
-                .or_default()
-                .push_back(index);
-        }
+    pub(super) fn code_fences(&self) -> impl Iterator<Item = &CodeFence> {
+        self.leaves.iter().filter_map(|leaf| match &leaf.content {
+            IndexedLeafContent::Block(Block::Code(fence)) => Some(fence),
+            IndexedLeafContent::Block(_) | IndexedLeafContent::TableRow { .. } => None,
+        })
+    }
+
+    pub(super) fn code_fences_before(&self, row: usize) -> usize {
+        self.leaves[..row]
+            .iter()
+            .filter(|leaf| matches!(&leaf.content, IndexedLeafContent::Block(Block::Code(_))))
+            .count()
+    }
+
+    pub(super) fn bind_rich(&mut self, bound: impl Fn(usize) -> bool) {
+        let mut fence = 0;
         for leaf in &mut self.leaves {
-            if let IndexedLeafContent::Block(Block::Code(fence)) = &leaf.content {
-                leaf.rich_index = indices
-                    .get_mut(&(&fence.language, fence.source.as_str(), fence.closed))
-                    .and_then(VecDeque::pop_front);
+            if let IndexedLeafContent::Block(Block::Code(_)) = &leaf.content {
+                leaf.rich_index = bound(fence).then_some(fence);
+                fence += 1;
             }
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one pass building every projected row's selection sources and the shared batch"
+    )]
     fn selection_sources(
         &self,
-        theme: &ArtisanTheme,
-        document: SelectionDocumentId,
+        render: LeafRender<'_>,
         owner: Option<&str>,
-        batch_owner: SelectionBatchOwner,
         revision: &Cell<u64>,
-        prefix: &[u64],
         source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
     ) -> Result<Rc<CachedSources>, PresenterError> {
-        if let Some(cached) = self.cached_sources.borrow().as_ref() {
-            if cached.document == document
-                && cached.owner.as_deref() == owner
-                && cached.prefix == prefix
-            {
-                return Ok(cached.clone());
-            }
+        let theme = render.body.theme;
+        let SelectionPlace {
+            document,
+            order: prefix,
+        } = render.place;
+        let batch_owner = render.batch_owner;
+        if let Some(cached) = self.cached_sources.borrow().as_ref()
+            && cached.document == document
+            && cached.owner.as_deref() == owner
+            && cached.prefix == prefix
+        {
+            return Ok(Rc::clone(cached));
         }
         let mut sources = Vec::new();
         let mut rows = Vec::with_capacity(self.leaves.len());
@@ -312,7 +460,7 @@ impl ProjectedDocument {
             document,
             batch_owner,
             next_revision,
-            sources.clone(),
+            Arc::clone(&sources),
         ));
         let cached = Rc::new(CachedSources {
             document,
@@ -322,86 +470,41 @@ impl ProjectedDocument {
             batch,
             rows,
         });
-        *self.cached_sources.borrow_mut() = Some(cached.clone());
+        *self.cached_sources.borrow_mut() = Some(Rc::clone(&cached));
         Ok(cached)
     }
 
     pub(super) fn render(
         &self,
         row: usize,
-        theme: &ArtisanTheme,
-        tone: BodyTone,
-        document: SelectionDocumentId,
+        render: LeafRender<'_>,
         owner: Option<&str>,
-        reveal: Option<&super::reveal::PreparedReveal>,
-        batch_owner: SelectionBatchOwner,
         revision: &Cell<u64>,
-        prefix: &[u64],
         source_id: &mut dyn FnMut(usize) -> SelectionSourceId,
-        on_link: Option<Rc<dyn Fn(LinkAction)>>,
-        on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-        scope: Option<ResourceScope>,
-        rich: Option<&dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError>>,
-        ordinary: Option<
-            &dyn Fn(
-                usize,
-                &super::fence::Fence,
-                &[SelectionSource],
-                Option<&str>,
-            ) -> Result<Element, PresenterError>,
-        >,
-    ) -> Result<
-        (
-            Element,
-            Arc<[SelectionSource]>,
-            Arc<SelectionSourceBatch>,
-            ProjectedGeometry,
-        ),
-        PresenterError,
-    > {
+    ) -> Result<ProjectedRender, PresenterError> {
         let target = self
             .leaves
             .get(row)
             .ok_or(PresenterError::Unavailable("projected row"))?;
-        let cached = self.selection_sources(
-            theme,
-            document,
-            owner,
-            batch_owner,
-            revision,
-            prefix,
-            source_id,
-        )?;
-        let (element, geometry) = render_leaf(
-            &target.view(),
-            row,
-            &cached.sources[cached.rows[row].clone()],
-            cached.rows[row].start,
-            row + 1 == self.leaves.len(),
-            theme,
-            tone,
-            document,
-            reveal,
-            batch_owner,
-            prefix,
-            on_link,
-            on_color,
-            scope,
-            rich,
-            ordinary,
-        )?;
+        let cached = self.selection_sources(render, owner, revision, source_id)?;
+        let slots = LeafSlots {
+            sources: &cached.sources[cached.rows[row].clone()],
+            start: cached.rows[row].start,
+            last: row + 1 == self.leaves.len(),
+        };
+        let (element, geometry) = render_leaf(&target.view(), row, slots, render)?;
         Ok((
             element,
-            cached.sources.clone(),
-            cached.batch.clone(),
+            Arc::clone(&cached.sources),
+            Arc::clone(&cached.batch),
             geometry,
         ))
     }
 }
 
-pub const PROSE_MEASURE_PX: f32 = 672.0;
+const PROSE_MEASURE_PX: f32 = 672.0;
 
-pub fn prose_measure(is_code_block: bool) -> Length {
+fn prose_measure(is_code_block: bool) -> Length {
     if is_code_block {
         Length::Auto
     } else {
@@ -409,31 +512,33 @@ pub fn prose_measure(is_code_block: bool) -> Length {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one projected leaf render: reveal fades, content per leaf kind, list markers and frame"
+)]
 fn render_leaf(
     target: &LeafView<'_>,
     row: usize,
-    target_sources: &[SelectionSource],
-    slot_start: usize,
-    final_row: bool,
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    reveal: Option<&super::reveal::PreparedReveal>,
-    batch_owner: SelectionBatchOwner,
-    prefix: &[u64],
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<ResourceScope>,
-    rich: Option<&dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError>>,
-    ordinary: Option<
-        &dyn Fn(
-            usize,
-            &super::fence::Fence,
-            &[SelectionSource],
-            Option<&str>,
-        ) -> Result<Element, PresenterError>,
-    >,
+    slots: LeafSlots<'_>,
+    render: LeafRender<'_>,
 ) -> Result<(Element, ProjectedGeometry), PresenterError> {
+    let LeafSlots {
+        sources: target_sources,
+        start: slot_start,
+        last: final_row,
+    } = slots;
+    let LeafRender {
+        body,
+        place: SelectionPlace {
+            document,
+            order: prefix,
+        },
+        reveal,
+        batch_owner,
+        rich,
+        ordinary,
+    } = render;
+    let theme = body.theme;
     let target_ids: Vec<_> = target_sources.iter().map(|source| source.id).collect();
     let text_key = |id: SelectionSourceId| format!("markdown-reveal-{batch_owner:?}-{}", id.0);
     let text_slots = matches!(
@@ -448,7 +553,7 @@ fn render_leaf(
             .map(|(index, source)| ProjectedTextLeaf {
                 key: text_key(source.id),
                 slot: slot_start + index,
-                text: source.text.clone(),
+                text: Arc::clone(&source.text),
             })
             .collect()
     } else {
@@ -464,7 +569,7 @@ fn render_leaf(
         text.iter()
             .map(|leaf| {
                 reveal
-                    .fades(leaf.slot, leaf.text.clone())
+                    .fades(leaf.slot, &leaf.text)
                     .into_iter()
                     .map(|fade| aqua_core::scene::GpuiTextOpacityRange {
                         bytes: fade.range,
@@ -489,47 +594,41 @@ fn render_leaf(
         "\n"
     };
     let content = match target.content {
-        IndexedLeafContent::Block(Block::Paragraph { spans, .. }) => interactive_leaf_with_opacity(
+        IndexedLeafContent::Block(Block::Paragraph { spans, .. }) => interactive_leaf(
             spans,
-            theme,
-            tone,
-            document,
-            target_ids[0],
-            row_order,
-            separator,
-            on_link,
-            on_color,
-            scope,
-            None,
+            body,
+            LeafSource {
+                document,
+                id: target_ids[0],
+                order: row_order,
+                separator,
+            },
+            LeafKind::Prose,
             opacity[0].clone(),
         )
         .map_err(PresenterError::Inline)?
         .element
         .with_key(text_key(target_ids[0])),
-        IndexedLeafContent::Block(Block::Heading { level, spans, .. }) => {
-            interactive_leaf_with_opacity(
-                spans,
-                theme,
-                BodyTone::Foreground,
+        IndexedLeafContent::Block(Block::Heading { level, spans, .. }) => interactive_leaf(
+            spans,
+            body.with_tone(BodyTone::Foreground),
+            LeafSource {
                 document,
-                target_ids[0],
-                row_order,
+                id: target_ids[0],
+                order: row_order,
                 separator,
-                on_link,
-                on_color,
-                scope,
-                Some(*level),
-                opacity[0].clone(),
-            )
-            .map_err(PresenterError::Inline)?
-            .element
-            .with_key(text_key(target_ids[0]))
-        }
+            },
+            LeafKind::Heading(*level),
+            opacity[0].clone(),
+        )
+        .map_err(PresenterError::Inline)?
+        .element
+        .with_key(text_key(target_ids[0])),
         IndexedLeafContent::Block(Block::Html { source }) => {
             raw_leaf(
                 source,
                 theme,
-                tone,
+                body.tone,
                 document,
                 target_ids[0],
                 row_order,
@@ -542,24 +641,22 @@ fn render_leaf(
             alignments,
             cells,
         } => table_row(
-            theme,
-            tone,
-            document,
-            &row_order,
+            body,
+            CellLeaves {
+                document,
+                order: &row_order,
+                ids: &target_ids,
+                text_key: &text_key,
+                opacity: &opacity,
+            },
             *header,
             target.table_continues,
             alignments,
             cells,
-            &target_ids,
-            &text_key,
-            &opacity,
-            on_link,
-            on_color,
-            scope,
         )?,
         IndexedLeafContent::Block(Block::Code(fence)) => {
             if let Some(code) = target.fence {
-                if code.has_colors() && on_color.is_none() {
+                if code.has_colors() && body.on_color.is_none() {
                     return Err(PresenterError::Unavailable("code color actions"));
                 }
                 ordinary.ok_or(PresenterError::Unavailable("code copy services"))?(
@@ -578,7 +675,9 @@ fn render_leaf(
                 )?
             }
         }
-        _ => return Err(PresenterError::Unavailable("projected nested flow")),
+        IndexedLeafContent::Block(_) => {
+            return Err(PresenterError::Unavailable("projected nested flow"));
+        }
     };
     let gap: f32 = target
         .context
@@ -617,8 +716,8 @@ fn render_leaf(
         };
         let style = TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: ProseTypography::BODY_SIZE_PX,
-            line_height_px: ProseTypography::BODY_LINE_PX,
+            size_px: theme.typography.size(ProseTypography::BODY_SIZE_PX),
+            line_height_px: theme.typography.size(ProseTypography::BODY_LINE_PX),
             weight: if level.number.is_some() {
                 FontWeight::NORMAL
             } else {
@@ -627,11 +726,14 @@ fn render_leaf(
             letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
         };
-        let marker = ui::Text::new(marker)
+        let mut marker = ui::Text::new(marker)
             .text_style(style)
             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
             .wrap(false)
             .build();
+        if level.task.is_some() {
+            marker = marker.aria_hidden();
+        }
         frame = frame.child(
             ui::Box::new()
                 .style(Style::new().absolute_at(
@@ -647,8 +749,17 @@ fn render_leaf(
                 .build(),
         );
     }
+    let mut frame = frame.build().with_key(frame_key.clone());
+    if let Some(item) = target.context.lists.last().filter(|level| level.first) {
+        frame = frame
+            .role(aqua_core::Role::ListItem)
+            .aria_level(target.context.lists.len());
+        if let Some(checked) = item.task {
+            frame = frame.aria_checked(checked);
+        }
+    }
     Ok((
-        frame.build().with_key(frame_key.clone()),
+        frame,
         ProjectedGeometry {
             frame_key,
             text,
@@ -730,29 +841,10 @@ pub(super) fn stored_leaf_sources(
 pub(super) fn render_stored_leaf(
     leaf: &super::stored::StoredLeaf,
     row: usize,
-    target_sources: &[SelectionSource],
-    slot_start: usize,
-    final_row: bool,
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    reveal: Option<&super::reveal::PreparedReveal>,
-    batch_owner: SelectionBatchOwner,
-    prefix: &[u64],
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<ResourceScope>,
+    slots: LeafSlots<'_>,
     fence: Option<&super::fence::Fence>,
-    fallback_note: Option<&str>,
-    rich: Option<&dyn Fn(usize, &CodeFence) -> Result<Element, PresenterError>>,
-    ordinary: Option<
-        &dyn Fn(
-            usize,
-            &super::fence::Fence,
-            &[SelectionSource],
-            Option<&str>,
-        ) -> Result<Element, PresenterError>,
-    >,
+    fallback_note: Option<&editor_core::Problem>,
+    render: LeafRender<'_>,
 ) -> Result<(Element, ProjectedGeometry), PresenterError> {
     let target = LeafView {
         context: &leaf.context,
@@ -762,24 +854,7 @@ pub(super) fn render_stored_leaf(
         fallback_note,
         rich_index: Some(row),
     };
-    render_leaf(
-        &target,
-        row,
-        target_sources,
-        slot_start,
-        final_row,
-        theme,
-        tone,
-        document,
-        reveal,
-        batch_owner,
-        prefix,
-        on_link,
-        on_color,
-        scope,
-        rich,
-        ordinary,
-    )
+    render_leaf(&target, row, slots, render)
 }
 
 fn margins(shape: BlockShape, item: bool) -> (f32, f32) {
@@ -838,21 +913,21 @@ fn indexed_gap(spacing: LeafSpacing) -> f32 {
 }
 
 fn table_row(
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    order: &[u64],
+    body: BodyContext<'_>,
+    leaves: CellLeaves<'_>,
     header: bool,
     continues: bool,
     alignments: &[TableAlignment],
     cells: &[TableCell],
-    ids: &[SelectionSourceId],
-    text_key: &dyn Fn(SelectionSourceId) -> String,
-    opacity: &[Vec<aqua_core::scene::GpuiTextOpacityRange>],
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-    on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
-    scope: Option<ResourceScope>,
 ) -> Result<Element, PresenterError> {
+    let theme = body.theme;
+    let CellLeaves {
+        document,
+        order,
+        ids,
+        text_key,
+        opacity,
+    } = leaves;
     let count = alignments.len();
     if count == 0 {
         return Ok(ui::Box::new().build());
@@ -897,18 +972,16 @@ fn table_row(
             let mut order = order.to_vec();
             order.push(column as u64);
             cell = cell.child(
-                interactive_table_leaf_with_opacity(
+                interactive_leaf(
                     &value.spans,
-                    theme,
-                    tone,
-                    header,
-                    document,
-                    *id,
-                    order,
-                    if column == 0 { "\n" } else { "\t" },
-                    on_link.clone(),
-                    on_color.clone(),
-                    scope.clone(),
+                    body,
+                    LeafSource {
+                        document,
+                        id: *id,
+                        order,
+                        separator: if column == 0 { "\n" } else { "\t" },
+                    },
+                    LeafKind::TableCell { header },
                     opacity.get(column).cloned().unwrap_or_default(),
                 )
                 .map_err(PresenterError::Inline)?
@@ -916,7 +989,17 @@ fn table_row(
                 .with_key(text_key(*id)),
             );
         }
-        grid = grid.child(cell.build());
+        let role = if header {
+            aqua_core::Role::ColumnHeader
+        } else {
+            aqua_core::Role::Cell
+        };
+        grid = grid.child(cell.build().role(role).collection_semantics(
+            aqua_core::CollectionSemantics {
+                column_index: Some(column),
+                ..aqua_core::CollectionSemantics::default()
+            },
+        ));
     }
-    Ok(grid.build())
+    Ok(grid.build().role(aqua_core::Role::Row))
 }

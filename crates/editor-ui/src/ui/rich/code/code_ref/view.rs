@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use std::sync::Arc;
 
 use aqua_text::TextStyle;
 use aqua_ui::{
@@ -15,8 +16,6 @@ use crate::ui::{
     rich::actions::{OpenReference, ResourceScope},
     theme::ArtisanTheme,
 };
-
-const LINE_PX: f32 = TextRole::Code.spec().line;
 
 impl CodeRefBlock {
     pub(crate) fn copy(&self) -> String {
@@ -36,7 +35,7 @@ impl CodeRefBlock {
         let action = OpenReference {
             scope,
             path: reference.path.clone(),
-            line: reference.start,
+            line: reference.lines.map(|lines| lines.start),
         };
         let path = Button::new(
             format!("{id}-path"),
@@ -80,21 +79,23 @@ impl CodeRefBlock {
 }
 
 fn text_style(theme: &ArtisanTheme, mono: bool) -> TextStyle {
-    match mono {
-        true => TextRole::Code.style(theme),
-        false => TextRole::Label.style(theme),
+    if mono {
+        TextRole::Code.style(theme)
+    } else {
+        TextRole::Label.style(theme)
     }
 }
 
 fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
     let count = block.lines.len();
-    let start = block.reference.start.unwrap_or(1);
+    let start = block.reference.lines.map_or(1, |lines| lines.start);
     let largest = start.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     let gutter = f32::from(u16::try_from(largest.max(1).ilog10() + 1).unwrap_or(u16::MAX))
         .mul_add(Space::S8.px(), Space::S8.px());
     let width = block.width + gutter + Space::S12.px();
-    let height = super::super::super::charts::scale::f32_of_count(count.min(18)) * LINE_PX;
-    let lines = block.lines.clone();
+    let line = TextRole::Code.line_px(theme);
+    let height = super::super::super::charts::scale::f32_of_count(count.min(18)) * line;
+    let lines = Arc::clone(&block.lines);
     let theme = *theme;
     let rows = List::new()
         .items(0..count)
@@ -113,7 +114,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
                 .build();
             UiBox::new()
                 .width(Length::Pct(100.0))
-                .height(LINE_PX)
+                .height(line)
                 .spaced(Space::S12)
                 .style(Style::new().min_width(Length::Px(0.0)))
                 .clip(true)
@@ -130,7 +131,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
                             Style::new()
                                 .flex_grow(1.0)
                                 .min_width(Length::Px(0.0))
-                                .min_height(Length::Px(LINE_PX)),
+                                .min_height(Length::Px(line)),
                         )
                         .child(source)
                         .build(),
@@ -143,7 +144,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
                 .min_width(Length::Px(width))
                 .height(Length::Px(height)),
         )
-        .estimated_row_height(Length::Px(LINE_PX))
+        .estimated_row_height(Length::Px(line))
         .virtualize()
         .build()
         .with_key(format!("{id}-excerpt-list"));

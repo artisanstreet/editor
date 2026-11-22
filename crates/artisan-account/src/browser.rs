@@ -3,7 +3,7 @@ use sha2::{Digest as _, Sha256};
 use std::{io, time::Duration};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-const REQUEST_LIMIT: usize = 8 * 1024;
+const REQUEST_LIMIT: usize = 16 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,7 +24,7 @@ impl Provider {
     }
 
     #[must_use]
-    pub const fn slug(self) -> &'static str {
+    const fn slug(self) -> &'static str {
         match self {
             Self::Google => "google",
             Self::GitHub => "github",
@@ -43,7 +43,7 @@ pub enum Problem {
 
 impl Problem {
     #[must_use]
-    pub fn of(slug: &str) -> Self {
+    fn of(slug: &str) -> Self {
         match slug {
             "denied" | "cancelled" => Self::Denied,
             "unavailable" => Self::Unavailable,
@@ -54,7 +54,7 @@ impl Problem {
     }
 
     #[must_use]
-    pub const fn slug(self) -> &'static str {
+    const fn slug(self) -> &'static str {
         match self {
             Self::Denied => "denied",
             Self::Unavailable => "unavailable",
@@ -79,7 +79,9 @@ impl Problem {
                 "That email already signs in another way. Use the emailed link instead.".to_owned()
             }
             Self::Unfinished => {
-                format!("{name} sign-in didn't finish in the browser. Press the button to try again.")
+                format!(
+                    "{name} sign-in didn't finish in the browser. Press the button to try again."
+                )
             }
         }
     }
@@ -87,16 +89,41 @@ impl Problem {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Arrival {
-    Code(String),
-    Problem(Problem),
+    Callback(Callback),
     Unrelated,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Callback {
+    Code(String),
+    Problem(Problem),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReceiveError {
+    #[error("listen for the browser's sign-in callback")]
+    Listen(#[source] io::Error),
+    #[error("accept the browser's sign-in callback connection")]
+    Accept(#[source] io::Error),
+    #[error("the browser didn't call back within {}s", after.as_secs())]
+    TimedOut { after: Duration },
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct Handoff {
     verifier: String,
     challenge: String,
     state: String,
+}
+
+impl std::fmt::Debug for Handoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handoff")
+            .field("verifier", &"redacted")
+            .field("challenge", &self.challenge)
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 impl Handoff {
@@ -160,18 +187,20 @@ pub fn arrival(target: &str, state: &str) -> Arrival {
     };
     match (field("state") == Some(state), field("code"), field("error")) {
         (false, _, _) => Arrival::Unrelated,
-        (true, _, Some(error)) => Arrival::Problem(Problem::of(error)),
-        (true, Some(code), None) if !code.is_empty() => Arrival::Code(code.to_owned()),
-        (true, _, None) => Arrival::Problem(Problem::Unfinished),
+        (true, _, Some(error)) => Arrival::Callback(Callback::Problem(Problem::of(error))),
+        (true, Some(code), None) if !code.is_empty() => {
+            Arrival::Callback(Callback::Code(code.to_owned()))
+        }
+        (true, _, None) => Arrival::Callback(Callback::Problem(Problem::Unfinished)),
     }
 }
 
 #[must_use]
-pub fn done_location(auth_origin: &str, arrival: &Arrival) -> String {
+pub fn done_location(auth_origin: &str, callback: &Callback) -> String {
     let base = format!("{}/desktop/done", auth_origin.trim_end_matches('/'));
-    match arrival {
-        Arrival::Problem(problem) => format!("{base}?problem={}", problem.slug()),
-        Arrival::Code(_) | Arrival::Unrelated => base,
+    match callback {
+        Callback::Problem(problem) => format!("{base}?problem={}", problem.slug()),
+        Callback::Code(_) => base,
     }
 }
 
@@ -195,40 +224,92 @@ pub async fn receive(
     listener: std::net::TcpListener,
     state: &str,
     auth_origin: &str,
-) -> io::Result<Arrival> {
-    let listener = tokio::net::TcpListener::from_std(listener)?;
+    within: Duration,
+) -> Result<Callback, ReceiveError> {
+    let listener = tokio::net::TcpListener::from_std(listener).map_err(ReceiveError::Listen)?;
+    tokio::time::timeout(within, callback(&listener, state, auth_origin))
+        .await
+        .map_err(|_elapsed| ReceiveError::TimedOut { after: within })?
+}
+
+async fn callback(
+    listener: &tokio::net::TcpListener,
+    state: &str,
+    auth_origin: &str,
+) -> Result<Callback, ReceiveError> {
     loop {
-        let (mut stream, _) = listener.accept().await?;
-        let Ok(Ok(head)) = tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await else {
-            continue;
+        let (mut stream, _) = listener.accept().await.map_err(ReceiveError::Accept)?;
+        let arrival = match read_get_target(&mut stream).await {
+            Ok(target) => arrival(&target, state),
+            Err(RequestError::NotGet) => Arrival::Unrelated,
+            Err(
+                error @ (RequestError::Read(_)
+                | RequestError::TooLarge { .. }
+                | RequestError::TimedOut),
+            ) => {
+                tracing::debug!(%error, "skipped an unreadable sign-in callback connection");
+                continue;
+            }
         };
-        let arrival = request_target(&head).map_or(Arrival::Unrelated, |target| arrival(target, state));
         let response = match &arrival {
             Arrival::Unrelated => {
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned()
             }
-            Arrival::Code(_) | Arrival::Problem(_) => format!(
+            Arrival::Callback(callback) => format!(
                 "HTTP/1.1 303 See Other\r\nLocation: {}\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                done_location(auth_origin, &arrival)
+                done_location(auth_origin, callback)
             ),
         };
-        stream.write_all(response.as_bytes()).await.ok();
-        stream.shutdown().await.ok();
-        if !matches!(arrival, Arrival::Unrelated) {
-            return Ok(arrival);
+        if let Err(error) = answer(&mut stream, &response).await {
+            tracing::warn!(%error, "the browser did not receive the sign-in callback page");
+        }
+        if let Arrival::Callback(callback) = arrival {
+            return Ok(callback);
         }
     }
 }
 
-async fn read_head(stream: &mut tokio::net::TcpStream) -> io::Result<String> {
+async fn answer(stream: &mut tokio::net::TcpStream, response: &str) -> io::Result<()> {
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RequestError {
+    #[error("reading the browser's request")]
+    Read(#[source] io::Error),
+    #[error("the browser's request is over {limit} bytes")]
+    TooLarge { limit: usize },
+    #[error("the browser didn't finish its request within {READ_TIMEOUT:?}")]
+    TimedOut,
+    #[error("the browser's request isn't a GET")]
+    NotGet,
+}
+
+pub async fn read_get_target(stream: &mut tokio::net::TcpStream) -> Result<String, RequestError> {
+    let head = tokio::time::timeout(READ_TIMEOUT, read_head(stream))
+        .await
+        .map_err(|_elapsed| RequestError::TimedOut)??;
+    request_target(&head)
+        .map(str::to_owned)
+        .ok_or(RequestError::NotGet)
+}
+
+async fn read_head(stream: &mut tokio::net::TcpStream) -> Result<String, RequestError> {
     let mut head = Vec::new();
     let mut chunk = [0_u8; 1024];
-    while !head.windows(4).any(|window| window == b"\r\n\r\n") && head.len() < REQUEST_LIMIT {
-        let read = stream.read(&mut chunk).await?;
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).await.map_err(RequestError::Read)?;
         if read == 0 {
             break;
         }
         head.extend_from_slice(&chunk[..read]);
+        if head.len() > REQUEST_LIMIT {
+            return Err(RequestError::TooLarge {
+                limit: REQUEST_LIMIT,
+            });
+        }
     }
     Ok(String::from_utf8_lossy(&head).into_owned())
 }

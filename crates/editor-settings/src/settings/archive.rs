@@ -2,30 +2,31 @@ use std::collections::HashSet;
 
 use artisan_api::ThreadId;
 
-use editor_core::HostData;
+use editor_core::{HostData, Problem};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ArchiveForm {
-    pub host: Option<String>,
-    pub restoring: HashSet<ThreadId>,
-    pub error: Option<String>,
-    pub ids: Vec<ThreadId>,
+    pub(crate) host: Option<String>,
+    pub(crate) restoring: HashSet<ThreadId>,
+    pub(crate) error: Option<Problem>,
+    pub(crate) ids: Vec<ThreadId>,
     generation: u64,
     dirty: bool,
 }
 
+#[derive(Debug)]
 pub struct ArchiveRequest {
-    pub host: String,
-    pub thread: ThreadId,
+    pub(crate) host: String,
+    pub(crate) thread: ThreadId,
     generation: u64,
 }
 
 impl ArchiveForm {
-    pub fn invalidate(&mut self) {
+    pub(crate) fn invalidate(&mut self) {
         self.dirty = true;
     }
 
-    pub fn sync(&mut self, host: Option<&HostData>) {
+    pub(crate) fn sync(&mut self, host: Option<&HostData>) {
         let id = host.map(|host| host.id.0.clone());
         if self.host != id {
             self.host = id;
@@ -41,7 +42,7 @@ impl ArchiveForm {
         self.ids = host
             .map(|host| {
                 host.thread_page(true)
-                    .ids
+                    .ids()
                     .iter()
                     .filter(|id| host.threads.get(*id).is_some_and(|thread| thread.archived))
                     .cloned()
@@ -50,7 +51,7 @@ impl ArchiveForm {
             .unwrap_or_default();
     }
 
-    pub fn begin(&mut self, thread: ThreadId) -> Option<ArchiveRequest> {
+    pub(crate) fn begin(&mut self, thread: ThreadId) -> Option<ArchiveRequest> {
         let host = self.host.clone()?;
         if !self.restoring.insert(thread.clone()) {
             return None;
@@ -63,13 +64,13 @@ impl ArchiveForm {
         })
     }
 
-    pub fn complete(&mut self, request: &ArchiveRequest, result: Result<(), String>) {
+    pub(crate) fn complete(&mut self, request: &ArchiveRequest, result: Result<(), Problem>) {
         if self.host.as_ref() != Some(&request.host) || self.generation != request.generation {
             return;
         }
         self.restoring.remove(&request.thread);
-        if let Err(error) = result {
-            self.error = Some(format!("Couldn't unarchive the thread: {error}"));
+        if let Err(problem) = result {
+            self.error = Some(problem);
         }
     }
 }

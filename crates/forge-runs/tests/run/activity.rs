@@ -2,8 +2,8 @@ use super::*;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_native_worker_resumed_in_the_same_turn_returns_to_the_inspector() {
-    let ready = Arc::new(tokio::sync::Notify::new());
-    let finish = Arc::new(tokio::sync::Notify::new());
+    let ready = Arc::new(Notify::new());
+    let finish = Arc::new(Notify::new());
     let script_ready = Arc::clone(&ready);
     let script_finish = Arc::clone(&finish);
     let fixture = fixture(Arc::new(move |_, io| {
@@ -46,10 +46,10 @@ async fn a_native_worker_resumed_in_the_same_turn_returns_to_the_inspector() {
         .send_message(&fixture.thread_id, message("work"))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), ready.notified())
+    tokio::time::timeout(test_support::wait::LIVENESS, ready.notified())
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(test_support::wait::LIVENESS, async {
         loop {
             let summary = fixture
                 .hub

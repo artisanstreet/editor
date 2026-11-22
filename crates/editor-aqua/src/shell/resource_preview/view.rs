@@ -1,4 +1,4 @@
-use std::{ops::Range, rc::Rc, sync::Arc};
+use std::{rc::Rc, sync::Arc};
 
 use aqua_text::document::{
     SelectionDocumentId, SelectionSource, SelectionSourceError, SelectionSourceId, SourceSlice,
@@ -9,15 +9,13 @@ use aqua_ui::{
     style::{Length, Style},
 };
 
-use super::{PreviewText, ResourcePreview};
+use super::{LineWindow, PreviewError, ResourcePreview};
 use crate::ui::{
-    dialog::Dialog,
     kit::{Button, ButtonTone, Hover, Space, Spaced, Surface, TextRole},
     theme::ArtisanTheme,
 };
 
 const WELL: Surface = Surface::Inset;
-const LINE: f32 = TextRole::Code.spec().line;
 const GUTTER: f32 = 64.0;
 const CHROME: f32 = 180.0;
 const MIN_HEIGHT: f32 = 120.0;
@@ -27,13 +25,18 @@ pub enum Action {
     CopyPath { generation: u64, text: String },
     CopyFile { generation: u64, text: Arc<str> },
     Dismiss { generation: u64 },
+    Retry { generation: u64 },
 }
 
 struct Prepared {
-    text: Arc<str>,
-    ranges: Vec<Range<usize>>,
-    start_line: usize,
+    window: LineWindow,
     target_line: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the preview of {path} was shown before its lines were registered for selection")]
+pub struct UnpreparedError {
+    path: String,
 }
 
 pub struct ViewState {
@@ -44,8 +47,18 @@ pub struct ViewState {
     jump: Option<usize>,
 }
 
+impl std::fmt::Debug for ViewState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewState").finish_non_exhaustive()
+    }
+}
+
 impl ViewState {
-    pub fn new(generation: u64, document: SelectionDocumentId, source: SelectionSourceId) -> Self {
+    pub(crate) fn new(
+        generation: u64,
+        document: SelectionDocumentId,
+        source: SelectionSourceId,
+    ) -> Self {
         Self {
             generation,
             document,
@@ -55,43 +68,48 @@ impl ViewState {
         }
     }
 
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         preview: &ResourcePreview,
         app: &mut aqua::UiApp,
     ) -> Result<bool, SelectionSourceError> {
-        let Some(Ok(content)) = &preview.content else {
+        let Some(Ok(content)) = preview.content() else {
+            return Ok(false);
+        };
+        let Some(window) = content.window() else {
             return Ok(false);
         };
         if self.prepared.is_some() {
             return Ok(false);
         }
-        let prepared = Arc::new(prepare_text(content, preview.target_line));
         app.register_selection_source_in(
             self.document,
             SelectionSource {
                 id: self.source,
                 order: vec![0],
-                text: Arc::clone(&prepared.text),
+                text: Arc::clone(window.text()),
                 separator: Arc::from(""),
                 copies: Vec::new(),
             },
         )?;
-        self.jump = (!content.offsets.is_empty()).then(|| {
+        self.jump = Some(
             preview
                 .target_line
-                .saturating_sub(content.start_line)
-                .min(content.offsets.len() - 1)
-        });
-        self.prepared = Some(prepared);
+                .saturating_sub(window.start_line())
+                .min(window.len() - 1),
+        );
+        self.prepared = Some(Arc::new(Prepared {
+            window: window.clone(),
+            target_line: preview.target_line,
+        }));
         Ok(true)
     }
 
-    pub fn pending_jump(&self) -> Option<usize> {
+    pub(crate) fn pending_jump(&self) -> Option<usize> {
         self.jump
     }
 
-    pub fn sync_jump(&mut self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_jump(&mut self, app: &mut aqua::UiApp) -> bool {
         let Some(index) = self.jump else {
             return false;
         };
@@ -106,33 +124,27 @@ impl ViewState {
         true
     }
 
-    pub fn jumped(&mut self, index: usize) {
-        if self.jump == Some(index) {
-            self.jump = None;
-        }
-    }
-
-    pub fn release(&mut self, app: &mut aqua::UiApp) {
+    pub(crate) fn release(&mut self, app: &mut aqua::UiApp) {
         if self.prepared.take().is_some() {
             app.unregister_selection_source_in(self.document, self.source);
         }
         self.jump = None;
     }
 
-    pub fn content(
+    pub(crate) fn content(
         &self,
         preview: &ResourcePreview,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         viewport_height: f32,
-        emit: Rc<dyn Fn(Action)>,
-    ) -> Result<Element, &'static str> {
+        emit: &Rc<dyn Fn(Action)>,
+    ) -> Result<Element, UnpreparedError> {
         let generation = self.generation;
         let path = preview.path.clone();
-        let copy_path = Rc::clone(&emit);
+        let copy_path = Rc::clone(emit);
         let mut body = UiBox::new().layout("column").spaced(Space::S12).child(
             Button::text(
                 "resource-copy-path",
-                theme,
+                *theme,
                 ButtonTone::Neutral,
                 "Copy path",
             )
@@ -140,24 +152,43 @@ impl ViewState {
                 copy_path(Action::CopyPath {
                     generation,
                     text: path.clone(),
-                })
+                });
             })
             .build(),
         );
-        match &preview.content {
-            None => body = body.child(body_text(&theme, "Reading source…")),
-            Some(Err(error)) => body = body.child(body_text(&theme, error)),
+        match preview.content() {
+            None => body = body.child(body_text(theme, "Reading source…")),
+            Some(Err(error)) if error.retryable() => {
+                let retry = Rc::clone(emit);
+                body = body.child(
+                    crate::ui::kit::ProblemNotice::new("resource-problem", *theme, &failure(error))
+                        .action(
+                            Button::text(
+                                "resource-retry",
+                                *theme,
+                                ButtonTone::Neutral,
+                                "Try again",
+                            )
+                            .on_activate(move |_| retry(Action::Retry { generation }))
+                            .build(),
+                        )
+                        .build(),
+                );
+            }
+            Some(Err(error)) => {
+                body = body.child(
+                    crate::ui::kit::ProblemNotice::new("resource-problem", *theme, &failure(error))
+                        .build(),
+                );
+            }
             Some(Ok(content)) => {
-                let Some(prepared) = &self.prepared else {
-                    return Err("Resource preview selection has not been registered.");
-                };
-                let full: Arc<str> = Arc::from(content.text.as_str());
-                let copy_file = Rc::clone(&emit);
+                let full = Arc::clone(content.full());
+                let copy_file = Rc::clone(emit);
                 body = body
                     .child(
                         Button::text(
                             "resource-copy-text",
-                            theme,
+                            *theme,
                             ButtonTone::Neutral,
                             "Copy file",
                         )
@@ -165,57 +196,41 @@ impl ViewState {
                             copy_file(Action::CopyFile {
                                 generation,
                                 text: Arc::clone(&full),
-                            })
+                            });
                         })
                         .build(),
                     )
-                    .child(body_text(&theme, &content.note()))
-                    .child(lines_view(
-                        &theme,
+                    .child(body_text(theme, &content.note()));
+                if content.window().is_some() {
+                    let prepared = self.prepared.as_ref().ok_or_else(|| UnpreparedError {
+                        path: preview.path.clone(),
+                    })?;
+                    body = body.child(lines_view(
+                        theme,
                         viewport_height,
                         self.document,
                         self.source,
                         Arc::clone(prepared),
                     ));
+                }
             }
         }
         Ok(body.build())
     }
-
-    pub fn dialog(
-        &self,
-        preview: &ResourcePreview,
-        theme: ArtisanTheme,
-        viewport_height: f32,
-        emit: Rc<dyn Fn(Action)>,
-    ) -> Result<Dialog, &'static str> {
-        let content = self.content(preview, theme, viewport_height, Rc::clone(&emit))?;
-        let generation = self.generation;
-        Ok(
-            Dialog::new("resource-preview", theme, preview.path.clone(), content)
-                .max_width(1100.0)
-                .on_dismiss(move |_| emit(Action::Dismiss { generation })),
-        )
-    }
 }
 
-fn prepare_text(content: &PreviewText, target_line: usize) -> Prepared {
-    let mut text = String::new();
-    let mut ranges = Vec::with_capacity(content.offsets.len());
-    for (index, range) in content.offsets.iter().enumerate() {
-        if index > 0 {
-            text.push('\n');
+fn failure(error: &PreviewError) -> crate::core::Problem {
+    let headline = match error {
+        PreviewError::Unpaired { .. } => {
+            "This reference has no available paired Forge. You can copy its path."
         }
-        let start = text.len();
-        text.push_str(&content.text[range.clone()]);
-        ranges.push(start..text.len());
-    }
-    Prepared {
-        text: Arc::from(text),
-        ranges,
-        start_line: content.start_line,
-        target_line,
-    }
+        PreviewError::Read { .. } => "Couldn't read this resource.",
+        PreviewError::NotText { .. } => "This resource is not a UTF-8 text file.",
+        PreviewError::HostGone { .. } => {
+            "The Forge holding this resource disconnected. Try again once it is back."
+        }
+    };
+    crate::core::Problem::caused_by(headline, error)
 }
 
 fn body_text(theme: &ArtisanTheme, text: &str) -> Element {
@@ -233,19 +248,22 @@ fn lines_view(
     prepared: Arc<Prepared>,
 ) -> Element {
     let theme = *theme;
-    let count = prepared.ranges.len();
+    let line_height = TextRole::Code.line_px(&theme);
+    let count = prepared.window.len();
     let lines = List::new()
         .items(0..count)
         .key(|index| *index)
         .row(move |index| {
-            let line = prepared.start_line + *index;
-            let range = &prepared.ranges[*index];
-            let text = &prepared.text[range.clone()];
-            let visible = &text[..text.floor_char_boundary(text.len().min(16 * 1024))];
+            let line = prepared.window.start_line() + *index;
+            let range = prepared.window.range(*index);
+            let text = prepared.window.line(*index);
+            let visible = text
+                .get(..text.floor_char_boundary(text.len().min(16 * 1024)))
+                .expect("invariant: floor_char_boundary returns a char boundary");
             let target = line == prepared.target_line;
             let mut row = UiBox::new()
                 .width(Length::Pct(100.0))
-                .height(LINE)
+                .height(line_height)
                 .spaced(Space::S12);
             if target {
                 row = row
@@ -283,7 +301,7 @@ fn lines_view(
         })
         .virtualize()
         .measured_uniform_rows()
-        .estimated_row_height(Length::Px(LINE))
+        .estimated_row_height(Length::Px(line_height))
         .style(
             Style::new()
                 .width(Length::Pct(100.0))

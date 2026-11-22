@@ -2,7 +2,11 @@
 name = "artisan-markdown-index"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
+
+[lib]
+doctest = false
 
 [dependencies]
 pulldown-cmark = { workspace = true, features = ["serde"] }

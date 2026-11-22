@@ -1,8 +1,9 @@
 use super::Concentration;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of, f64_of, index_of, percent};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{CursorIcon, GpuiHsla, InputEvent, Key, Modifiers, NamedKey, Role};
+use aqua_core::{CursorIcon, GpuiHsla, InputEvent, NamedKey};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
@@ -29,7 +30,7 @@ impl ConcentrationState {
             hover: None,
             probe: Rc::new(Cell::new(None)),
         });
-        (entry.hover, entry.probe.clone())
+        (entry.hover, Rc::clone(&entry.probe))
     }
     fn hover(&self, id: &str, x: f32, y: f32) -> bool {
         let selected =
@@ -63,7 +64,14 @@ impl ConcentrationState {
                 Some(selected.map_or(0, |index| index.saturating_add(1).min(100)))
             }
             NamedKey::Enter => Some(selected.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.hover = next.map(|index| f64_of(index) / 100.0);
         true
@@ -169,26 +177,32 @@ fn shapes(
 }
 
 impl Concentration {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the concentration view takes each of its frame, label, readout and navigation factories"
+    )]
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: ConcentrationState,
-        frame: FrameFactory,
-        plot_label: PlotLabelFactory,
-        readout: ReadoutFactory,
-        empty: EmptyFactory,
-        navigation_frame: NavigationFrame,
+        frame: &FrameFactory,
+        plot_label: &PlotLabelFactory,
+        readout: &ReadoutFactory,
+        empty: &EmptyFactory,
+        navigation_frame: &NavigationFrame,
         invalidate: Rc<dyn Fn()>,
     ) -> Element {
         let Some(curve) = self.curve() else {
             return empty("No values to rank");
         };
-        let (hover, probe) = states.ensure(&id);
+        let (hover, probe) = states.ensure(id);
         let cutoff = self.highlight();
-        let held = Concentration::share_of_total(&curve, cutoff);
-        let shape_list: Rc<[Shape]> = shapes(theme, &curve, cutoff, hover).into();
-        let paint_probe = probe.clone();
+        let held = Self::share_of_total(&curve, cutoff);
+        let plot =
+            scene::Scene::of_shapes(shapes(theme, &curve, cutoff, hover), scene::Clip::Bounds);
+        let paint_probe = Rc::clone(&probe);
         let canvas = ui::Canvas::new()
             .style(
                 Style::new()
@@ -198,7 +212,7 @@ impl Concentration {
             )
             .on_paint(move |bounds| {
                 paint_probe.set(Some(bounds));
-                scene::source_scene(bounds, &shape_list)
+                plot.paint(bounds)
             })
             .build();
         let marker = plot_label(
@@ -224,7 +238,7 @@ impl Concentration {
             .child(marker);
         let mut selection_label = None;
         if let Some(share) = hover {
-            let held = Concentration::share_of_total(&curve, share);
+            let held = Self::share_of_total(&curve, share);
             let heading = format!("Top {} of {}", percent(share), self.items());
             selection_label = Some(format!("{heading}: {} of {}", percent(held), self.total()));
             plot = plot.child(readout(
@@ -236,12 +250,12 @@ impl Concentration {
             ));
         }
         let moving = states.clone();
-        let move_id = id.clone();
-        let move_probe = probe.clone();
-        let move_invalidate = invalidate.clone();
+        let move_id = id.to_owned();
+        let move_probe = probe;
+        let move_invalidate = Rc::clone(&invalidate);
         let leaving = states.clone();
-        let leave_id = id.clone();
-        let leave_invalidate = invalidate.clone();
+        let leave_id = id.to_owned();
+        let leave_invalidate = Rc::clone(&invalidate);
         let plot = plot
             .build()
             .with_key(format!("{id}-plot"))
@@ -269,40 +283,28 @@ impl Concentration {
             label.push(' ');
             label.push_str(selection);
         }
-        let keyboard = states.clone();
-        let key = id.clone();
-        let mut nav = ui::Box::new()
-            .style(
-                Style::new()
-                    .width(Length::Pct(100.0))
-                    .height(Length::Pct(100.0)),
-            )
-            .child(plot)
-            .build()
-            .with_key(format!("{id}-navigation"))
-            .role(Role::Group)
-            .focusable(true)
-            .tab_index(0)
-            .aria_label(label)
-            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                    return InputResponse::default();
-                };
-                let Key::Named(code) = key_event.key else {
-                    return InputResponse::default();
-                };
-                if !keyboard.key(&key, code, key_event.modifiers.contains(Modifiers::ALT)) {
-                    return InputResponse::default();
+        let keyboard = states;
+        let key = id.to_owned();
+        let nav = navigation_group(
+            ui::Box::new()
+                .style(
+                    Style::new()
+                        .width(Length::Pct(100.0))
+                        .height(Length::Pct(100.0)),
+                )
+                .child(plot)
+                .build(),
+            id,
+            label,
+            selection_label,
+            move |code, alt| {
+                let handled = keyboard.key(&key, code, alt);
+                if handled {
+                    invalidate();
                 }
-                invalidate();
-                InputResponse {
-                    stop_propagation: true,
-                    ..InputResponse::default()
-                }
-            });
-        if let Some(selection) = selection_label {
-            nav = nav.aria_value(selection);
-        }
+                handled
+            },
+        );
         let nav = navigation_frame(nav, theme.colors.ring.to_reference_paint());
         frame(
             nav,
@@ -312,41 +314,6 @@ impl Concentration {
     }
 }
 
-#[cfg(feature = "test-support")]
-pub struct ConcentrationFixture {
-    model: Concentration,
-    state: ConcentrationState,
-}
-#[cfg(feature = "test-support")]
-impl ConcentrationFixture {
-    pub fn new(json: &str) -> Self {
-        let model = serde_json::from_str(json).expect("valid concentration");
-        let state = ConcentrationState::default();
-        state.ensure("test");
-        Self { model, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        self.model = serde_json::from_str(json).expect("valid concentration");
-        self.state.ensure("test");
-    }
-    pub fn hover(&self, x: f32, y: f32) -> bool {
-        self.state.hover("test", x, y)
-    }
-    pub fn selected(&self) -> Option<f64> {
-        self.state.ensure("test").0
-    }
-    pub fn key(&self, key: NamedKey, alt: bool) -> bool {
-        self.state.key("test", key, alt)
-    }
-    pub fn held(&self) -> Option<f64> {
-        Some(Concentration::share_of_total(
-            &self.model.curve()?,
-            self.selected()?,
-        ))
-    }
-    pub fn sample_points(&self, limit: usize) -> Vec<(f64, f64)> {
-        self.model
-            .curve()
-            .map_or_else(Vec::new, |curve| sample(&curve, limit))
-    }
-}
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/charts/concentration/view.rs"]
+mod tests;

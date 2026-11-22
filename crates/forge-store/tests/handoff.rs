@@ -1,8 +1,8 @@
 #![cfg(test)]
 
 use artisan_api::{
-    CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, Run, RunId, RunStatus,
-    ThreadId, Usage, now,
+    CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, Run, RunId, RunState,
+    RunStatus, ThreadId, Usage, now,
 };
 use forge_store::Store;
 
@@ -34,14 +34,12 @@ async fn running(store: &Store) -> Run {
             config: Some(config),
             engine: EngineId::Codex,
             model: None,
-            status: RunStatus::Running,
+            state: RunState::Running,
             usage: Usage::default(),
             session_id: Some("live-session".into()),
-            error: None,
             seq: 0,
             input_cutoff: 0,
             started_at: now(),
-            ended_at: None,
             continuation: None,
         })
         .await
@@ -88,7 +86,7 @@ async fn joining_preserves_running_agents_and_serializes_independent_writers() {
             .await
             .unwrap()
             .unwrap()
-            .status,
+            .status(),
         RunStatus::Running
     );
 }
@@ -121,7 +119,9 @@ async fn joined_generations_replay_external_and_local_commits_in_sequence_order(
     assert_eq!(changes.recv().await.unwrap().seq, Some(b.seq));
     assert_eq!(cursor, b.seq);
     second.synchronize(&mut cursor).await.unwrap();
-    assert!(changes.try_recv().is_err());
+    changes
+        .try_recv()
+        .expect_err("a caught-up synchronize emits nothing more");
 }
 
 #[tokio::test]
@@ -141,7 +141,7 @@ async fn abandoned_run_recovery_cannot_interrupt_another_generations_run() {
             .await
             .unwrap()
             .unwrap()
-            .status,
+            .status(),
         RunStatus::Interrupted
     );
     assert_eq!(
@@ -159,7 +159,7 @@ async fn incompatible_candidate_cannot_migrate_or_recover_the_active_store() {
     connection
         .pragma_update(None, "user_version", 9000)
         .unwrap();
-    assert!(Store::join(directory.path()).is_err());
+    Store::join(directory.path()).expect_err("a database from a newer Forge is refused");
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |row| row.get::<_, u64>(0))

@@ -1,3 +1,4 @@
+use super::close;
 use aqua_core::Size;
 use aqua_reactive::Runtime;
 use aqua_ui::binding::View;
@@ -16,10 +17,13 @@ fn a_rule_occupies_the_height_it_declares() {
     let column = UiBox::new()
         .layout("column")
         .child(UiBox::new().height(1.0).build().with_key("above"))
-        .child(Divider::Rule.build(&theme, 0.0))
+        .child(Divider::Rule.build(theme, 0.0))
         .child(UiBox::new().height(1.0).build().with_key("below"))
         .build();
-    assert!(mounted.set_content(&mut tree, vec![column]).is_ok(), "the rule mounts");
+    assert!(
+        mounted.set_content(&mut tree, vec![column]).is_ok(),
+        "the rule mounts"
+    );
     assert!(
         mounted
             .compute_layout(&mut tree, Size::new(200.0, 200.0), &NaiveMeasurer)
@@ -34,9 +38,8 @@ fn a_rule_occupies_the_height_it_declares() {
     let (Some(above), Some(below)) = (top("above"), top("below")) else {
         panic!("both neighbours are laid out");
     };
-    assert_eq!(
-        below - above - 1.0,
-        Divider::Rule.height(),
+    assert!(
+        close(below - above - 1.0, Divider::Rule.height(theme)),
         "a virtualized list can reserve a rule's height without measuring it"
     );
 }

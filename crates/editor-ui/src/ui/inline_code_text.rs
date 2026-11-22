@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::ops::Range;
 
 use aqua_core::GpuiTextColor;
@@ -7,6 +8,10 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use super::theme::{ArtisanTheme, ProseTypography};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "code, strong, emphasis and strike are independent marks that combine freely"
+)]
 pub struct InlineStyle {
     pub code: bool,
     pub strong: bool,
@@ -59,7 +64,8 @@ impl InlineRuns {
                         style.strikethrough = true;
                     }
                 }
-                StyledSpan::new(&self.text[run.range.clone()], style).gpui_source_color(source)
+                StyledSpan::new(slice(&self.text, run.range.clone()), style)
+                    .gpui_source_color(source)
             })
             .collect()
     }
@@ -109,7 +115,14 @@ pub fn inline_runs(raw: &str) -> InlineRuns {
             | Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => {
                 (" ".to_owned(), false)
             }
-            _ => continue,
+            Event::Start(_)
+            | Event::End(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::Html(_)
+            | Event::FootnoteReference(_)
+            | Event::Rule
+            | Event::TaskListMarker(_) => continue,
         };
         let style = InlineStyle {
             code,

@@ -1,8 +1,8 @@
-use editor_sources::SourceProviderExt;
 use super::fold::{PlainSection, TextSection};
 use artisan_api::{ApprovalRequest, Item, ItemKind, TextContent};
+use editor_sources::SourceProviderExt;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SourceField {
     Plain(PlainSection),
     Text(TextSection),
@@ -125,11 +125,11 @@ impl SourceField {
     }
 }
 
-use editor_core::{Core, HostId, HostInstance};
-use editor_sources::{ContentAction, ContentEffect, ContentText, ContentView};
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use artisan_api::{ContentRef, ItemId};
-use std::collections::HashMap;
+use editor_core::{Core, HostId, HostInstance};
+use editor_sources::{ContentAction, ContentEffect, ContentText, ContentView};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -141,9 +141,16 @@ struct Owner {
 
 #[derive(Default)]
 pub struct SourceOwners {
-    owners: HashMap<(ItemId, SourceField), Owner>,
+    owners: BTreeMap<(ItemId, SourceField), Owner>,
 }
 
+impl std::fmt::Debug for SourceOwners {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceOwners").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
 pub struct SourceAction {
     host: HostId,
     instance: HostInstance,
@@ -154,12 +161,13 @@ pub struct SourceAction {
 }
 
 impl SourceAction {
-    pub fn matches_item(&self, item: &Item) -> bool {
+    pub(crate) fn matches_item(&self, item: &Item) -> bool {
         item.id == self.item
             && matches!(self.field.text(item), Some(TextContent::Stored(source)) if source == &self.source)
     }
 }
 
+#[derive(Debug)]
 pub struct SourceExport {
     host: HostId,
     instance: HostInstance,
@@ -171,10 +179,10 @@ pub struct SourceExport {
 }
 
 impl SourceExport {
-    pub fn item(&self) -> &ItemId {
+    pub(crate) fn item(&self) -> &ItemId {
         &self.item
     }
-    pub fn matches_item(&self, item: &Item) -> bool {
+    pub(crate) fn matches_item(&self, item: &Item) -> bool {
         item.id == self.item
             && matches!(self.field.text(item), Some(TextContent::Stored(source)) if source == &self.source)
     }
@@ -183,6 +191,12 @@ impl SourceExport {
 pub enum SourceEffect {
     SavePath(SourceExport),
     Clipboard(editor_sources::CopiedSource),
+}
+
+impl std::fmt::Debug for SourceEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceEffect").finish_non_exhaustive()
+    }
 }
 
 impl SourceOwners {
@@ -197,7 +211,7 @@ impl SourceOwners {
                     && owner.text.is_export_pending(export.generation)
             })
     }
-    pub fn dispatch_changed(
+    pub(crate) fn dispatch_changed(
         &mut self,
         core: &Core,
         action: SourceAction,
@@ -212,7 +226,7 @@ impl SourceOwners {
         (before != after, effect)
     }
 
-    pub fn drain_all(&mut self, core: &Core) -> (bool, Vec<SourceEffect>) {
+    pub(crate) fn drain_all(&mut self, core: &Core) -> (bool, Vec<SourceEffect>) {
         let mut changed = false;
         let mut effects = Vec::new();
         for ((item, field), owner) in &mut self.owners {
@@ -270,7 +284,7 @@ impl SourceOwners {
         }
         true
     }
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.owners.clear();
     }
 
@@ -334,7 +348,7 @@ impl SourceOwners {
         &self,
         id: &ItemId,
         field: &SourceField,
-        theme: editor_ui::theme::ArtisanTheme,
+        theme: &editor_ui::theme::ArtisanTheme,
         document: SelectionDocumentId,
         source_id: SelectionSourceId,
         emit: Rc<dyn Fn(SourceAction)>,
@@ -345,7 +359,7 @@ impl SourceOwners {
         let item = id.clone();
         let field = field.clone();
         let source = owner.text.window().source().clone();
-        let callback = Rc::new(move |action| {
+        let callback: Rc<dyn Fn(ContentAction)> = Rc::new(move |action| {
             emit(SourceAction {
                 host: host.clone(),
                 instance,
@@ -353,14 +367,14 @@ impl SourceOwners {
                 field: field.clone(),
                 source: source.clone(),
                 action,
-            })
+            });
         });
         Some(editor_sources::content_view(
             &owner.text,
             theme,
             document,
             source_id,
-            callback,
+            &callback,
         ))
     }
 
@@ -377,7 +391,8 @@ impl SourceOwners {
         {
             return None;
         }
-        match editor_sources::dispatch_content(&mut owner.text, core, action.action)? {
+        let effect = editor_sources::dispatch_content(&mut owner.text, core, action.action)?;
+        match effect {
             ContentEffect::SavePath(generation) => Some(SourceEffect::SavePath(SourceExport {
                 host: action.host,
                 instance: action.instance,
@@ -411,22 +426,6 @@ impl SourceOwners {
             owner
                 .text
                 .finish_export_result(core, request.generation, result);
-        }
-    }
-
-    pub fn drain(&mut self, core: &Core, id: &ItemId, field: &SourceField) -> Option<SourceEffect> {
-        let owner = self.owners.get_mut(&(id.clone(), field.clone()))?;
-        match editor_sources::drain_content(&mut owner.text, core)? {
-            ContentEffect::Clipboard(copied) => Some(SourceEffect::Clipboard(copied)),
-            ContentEffect::SavePath(generation) => Some(SourceEffect::SavePath(SourceExport {
-                host: owner.host.clone(),
-                instance: owner.instance,
-                item: id.clone(),
-                field: field.clone(),
-                source: owner.text.window().source().clone(),
-                identity: owner.text.identity(),
-                generation,
-            })),
         }
     }
 

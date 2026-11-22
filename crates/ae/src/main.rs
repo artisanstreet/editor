@@ -1,9 +1,3 @@
-//! `ae`: installs and manages Artisan's apps (Forge, the Editor and itself)
-//! on this machine, and Forge's paired devices and engines.
-//!
-//! In a terminal it asks what it needs to know; every question has a flag,
-//! so agents and scripts run it without one.
-
 mod account;
 mod bundle;
 mod editor;
@@ -11,6 +5,7 @@ mod engine;
 mod forge;
 mod install;
 mod legacy;
+mod paths;
 mod platform;
 mod release;
 mod service;
@@ -19,13 +14,11 @@ mod sys;
 mod ui;
 mod wsl;
 
-use anyhow::Result;
 use artisan_api::EngineId;
 use artisan_paths::App;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-/// `0.4.2 (abc1234, x86_64-unknown-linux-gnu)`
 pub const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -38,8 +31,12 @@ pub const LONG_VERSION: &str = concat!(
 #[derive(Parser)]
 #[command(name = "ae", version = LONG_VERSION, about = "Install and manage Artisan: Forge, the Editor and engines")]
 struct Cli {
-    /// The WSL distribution whose Forge to use (Windows, when several have one).
-    #[arg(long, global = true, value_name = "NAME")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        help = "The WSL distribution whose Forge to use (Windows, when several have one)"
+    )]
     distro: Option<String>,
     #[command(subcommand)]
     command: Command,
@@ -47,53 +44,55 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install or reinstall the Editor and Forge (asks where).
-    Install(install::InstallArgs),
-    /// Update what is installed to the newest release.
+    #[command(about = "Install or reinstall the Editor and Forge (asks where)")]
+    Install(Box<install::InstallArgs>),
+    #[command(about = "Update what is installed to the newest release")]
     Update {
-        /// Don't ask to confirm.
-        #[arg(long, short)]
+        #[arg(long, short, help = "Don't ask to confirm")]
         yes: bool,
     },
-    /// Remove apps (asks which); their data stays unless --purge.
+    #[command(about = "Remove apps (asks which); their data stays unless --purge")]
     Uninstall {
-        /// Only these apps.
+        #[arg(help = "Only these apps")]
         apps: Vec<AppArg>,
-        /// Also delete their data: threads, settings, paired devices.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Also delete their data: threads, settings, paired devices"
+        )]
         purge: bool,
-        /// Don't ask.
-        #[arg(long, short)]
+        #[arg(long, short, help = "Don't ask")]
         yes: bool,
     },
-    /// What is installed, whether Forge runs, and problems.
+    #[command(about = "What is installed, whether Forge runs, and problems")]
     Status {
         #[arg(long)]
         json: bool,
     },
-    /// Open the Editor, optionally on a folder.
+    #[command(about = "Open the Editor, optionally on a folder")]
     Open { path: Option<PathBuf> },
-    /// Start, stop or restart Forge.
+    #[command(about = "Start, stop or restart Forge")]
     Forge {
         #[command(subcommand)]
         command: ForgeCommand,
     },
-    /// Make a one-time code that pairs an Editor with Forge.
+    #[command(about = "Make a one-time code that pairs an Editor with Forge")]
     Pair {
-        /// Print `{code, forge_certificate, forge_fingerprint, expires_at, address}` and return.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Print `{code, forge_certificate, forge_fingerprint, expires_at, address}` and return"
+        )]
         json: bool,
     },
-    /// List the devices paired with Forge, or unpair one.
+    #[command(about = "List the devices paired with Forge, or unpair one")]
     Devices {
         #[arg(long)]
         json: bool,
         #[command(subcommand)]
         command: Option<DevicesCommand>,
     },
-    /// Enroll this Forge machine into an AST account.
+    #[command(about = "Enroll this Forge machine into an Artisan account")]
     Account(account::AccountArgs),
-    /// Forge's engines: list, install, sign in.
+    #[command(about = "Forge's engines: list, install, sign in")]
     Engine {
         #[command(subcommand)]
         command: EngineCommand,
@@ -126,7 +125,7 @@ enum ForgeCommand {
 
 #[derive(Subcommand)]
 enum DevicesCommand {
-    /// Unpair a device (asks which); the id may be shortened.
+    #[command(about = "Unpair a device (asks which); the id may be shortened")]
     Revoke {
         id: Option<String>,
         #[arg(long, short)]
@@ -134,56 +133,127 @@ enum DevicesCommand {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum EngineCommand {
-    /// Every engine, its version and account.
+    #[command(about = "Every engine, its version and account")]
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Install engines, or update them to the newest version (asks which).
+    #[command(about = "Install engines, or update them to the newest version (asks which)")]
     Install { engines: Vec<EngineId> },
-    /// Sign an engine in to its account (asks which).
+    #[command(about = "Sign an engine in to its account (asks which)")]
     Login {
         engine: Option<EngineId>,
-        /// Claude only: sign in to claude.ai for claude.ai mode, in a
-        /// browser window on this device.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Claude only: sign in to claude.ai for claude.ai mode, in a browser window on this device"
+        )]
         claude_ai: bool,
-        /// Read the claude.ai session from stdin: an `ae` on the device
-        /// with the browser captured it.
-        #[arg(long, hide = true)]
+        #[arg(
+            long,
+            hide = true,
+            help = "Read the claude.ai session from stdin: an `ae` on the device with the browser captured it"
+        )]
         session_stdin: bool,
-        /// Capture the claude.ai session here and print it, for an `ae` in
-        /// WSL to keep.
-        #[arg(long, hide = true)]
+        #[arg(
+            long,
+            hide = true,
+            help = "Capture the claude.ai session here and print it, for an `ae` in WSL to keep"
+        )]
         capture_only: bool,
     },
-    /// Sign an engine out of its account (asks which).
+    #[command(about = "Sign an engine out of its account (asks which)")]
     Logout {
         engine: Option<EngineId>,
-        /// Claude only: forget the claude.ai session.
-        #[arg(long)]
+        #[arg(long, help = "Claude only: forget the claude.ai session")]
         claude_ai: bool,
     },
 }
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    init_tracing();
-    match run(cli) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+    let recent = match diagnostics::subscribe("warn", std::io::stderr) {
+        Ok(recent) => recent,
         Err(error) => {
-            eprintln!("error: {error:#}");
+            ui::status(format_args!("error: {}", diagnostics::chain(&error)));
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    match App::Ae.data() {
+        Ok(data) => diagnostics::CrashReporter {
+            app: App::Ae,
+            version: LONG_VERSION,
+            data,
+            recent,
+        }
+        .install(),
+        Err(error) => tracing::warn!(
+            "crash reports are off: find ae's data folder: {}",
+            diagnostics::chain(&error)
+        ),
+    }
+    match run(cli) {
+        Ok(code) => code,
+        Err(error) => {
+            ui::status(format_args!("error: {}", diagnostics::chain(&error)));
             std::process::ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+enum AeError {
+    #[error(transparent)]
+    ForgeTarget(#[from] wsl::ForgeTargetError),
+    #[error(transparent)]
+    Forward(#[from] wsl::ForwardError),
+    #[error(transparent)]
+    ClaudeAiIntoWsl(#[from] engine::IntoWslError),
+    #[error(transparent)]
+    Recover(#[from] install::RecoverError),
+    #[error(transparent)]
+    Install(#[from] install::InstallError),
+    #[error(transparent)]
+    Update(#[from] install::UpdateError),
+    #[error(transparent)]
+    Uninstall(#[from] install::UninstallError),
+    #[error(transparent)]
+    Open(#[from] editor::OpenError),
+    #[error(transparent)]
+    ForgeService(#[from] ForgeServiceError),
+    #[error(transparent)]
+    Pair(#[from] forge::PairError),
+    #[error(transparent)]
+    Devices(#[from] forge::ListDevicesError),
+    #[error(transparent)]
+    Unpair(#[from] forge::UnpairError),
+    #[error(transparent)]
+    Account(#[from] account::AccountError),
+    #[error(transparent)]
+    Engine(#[from] engine::EngineError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ForgeServiceError {
+    #[error(transparent)]
+    Locate(#[from] paths::LocateError),
+    #[error("check whether Forge is running")]
+    Running(#[source] service::RunningError),
+    #[error("Forge isn't installed here; run `ae install`")]
+    NotInstalled,
+    #[error(transparent)]
+    Address(#[from] service::AddressError),
+    #[error(transparent)]
+    Start(#[from] service::StartError),
+    #[error(transparent)]
+    Stop(#[from] service::StopError),
+    #[error(transparent)]
+    Restart(#[from] service::RestartError),
+}
+
+fn run(cli: Cli) -> Result<std::process::ExitCode, AeError> {
     let apps = |apps: Vec<AppArg>| -> Vec<App> { apps.into_iter().map(App::from).collect() };
-    // Forge's commands go to WSL when Forge is there rather than here.
-    // A claude.ai capture runs where the browser is, never forwarded.
     let forge_command = matches!(
         cli.command,
         Command::Forge { .. }
@@ -201,8 +271,6 @@ fn run(cli: Cli) -> Result<()> {
         }
     );
     if forge_command && let Some(distro) = wsl::forge_target(cli.distro.as_deref())? {
-        // The browser is on this side: sign in here, and hand the session
-        // to the `ae` beside the Forge.
         if let Command::Engine {
             command:
                 EngineCommand::Login {
@@ -212,52 +280,61 @@ fn run(cli: Cli) -> Result<()> {
                 },
         } = &cli.command
         {
-            return engine::claude_ai_into_wsl(&distro);
+            return Ok(engine::claude_ai_into_wsl(&distro)?);
         }
-        return wsl::forward(&distro);
+        return Ok(wsl::forward(&distro)?);
     }
-    match cli.command {
-        Command::Install(args) => install::install(&args),
-        Command::Update { yes } => install::update(yes),
+    if forge_command {
+        install::recover_interrupted()?;
+    }
+    let ran: Result<(), AeError> = match cli.command {
+        Command::Install(args) => Ok(install::install(&args)?),
+        Command::Update { yes } => Ok(install::update(yes)?),
         Command::Uninstall {
             apps: chosen,
             purge,
             yes,
-        } => install::uninstall(&apps(chosen), purge, yes),
+        } => Ok(install::uninstall(&apps(chosen), purge, yes)?),
         Command::Status { json } => {
+            install::recover_before("showing the status anyway");
             status::status(json);
             Ok(())
         }
-        Command::Open { path } => editor::open(path.as_deref()),
-        Command::Forge { command } => forge_service(&command),
-        Command::Pair { json } => forge::pair(json),
+        Command::Open { path } => Ok(editor::open(path.as_deref())?),
+        Command::Forge { command } => Ok(forge_service(&command)?),
+        Command::Pair { json } => Ok(forge::pair(json)?),
         Command::Devices { json, command } => match command {
-            None => forge::devices(json),
-            Some(DevicesCommand::Revoke { id, yes }) => forge::revoke(id.as_deref(), yes),
+            None => Ok(forge::devices(json)?),
+            Some(DevicesCommand::Revoke { id, yes }) => Ok(forge::revoke(id.as_deref(), yes)?),
         },
-        Command::Account(args) => account::run(&args),
-        Command::Engine { command } => engine::run(command),
-    }
+        Command::Account(args) => Ok(account::run(&args)?),
+        Command::Engine { command } => Ok(engine::run(command)?),
+    };
+    ran.map(|()| std::process::ExitCode::SUCCESS)
 }
 
-fn forge_service(command: &ForgeCommand) -> Result<()> {
-    anyhow::ensure!(
-        App::Forge.binary()?.is_file(),
-        "Forge isn't installed here; run `ae install`"
-    );
-    let address = service::address();
+fn forge_service(command: &ForgeCommand) -> Result<(), ForgeServiceError> {
+    if !paths::binary(App::Forge)?.is_file() {
+        return Err(ForgeServiceError::NotInstalled);
+    }
+    let address = service::address()?;
     let started = |pid: Option<u32>| {
         let pid = pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default();
         format!("Forge is running on {address}{pid}")
     };
     match command {
         ForgeCommand::Start => {
-            if service::is_running() && service::listening(address) {
+            if service::is_running().map_err(ForgeServiceError::Running)?
+                && service::listening(address)
+            {
                 ui::success(format!("Forge is already running on {address}"));
                 return Ok(());
             }
-            ui::task("Starting Forge", "Forge started", service::start)
-                .map(|pid| ui::success(started(pid)))
+            let pid = ui::task("Starting Forge", "Forge started", || {
+                service::start(service::Readiness::Recorded)
+            })?;
+            ui::success(started(pid));
+            Ok(())
         }
         ForgeCommand::Stop => {
             let was = ui::task("Stopping Forge", "Forge stopped", service::stop)?;
@@ -266,18 +343,10 @@ fn forge_service(command: &ForgeCommand) -> Result<()> {
             }
             Ok(())
         }
-        ForgeCommand::Restart => ui::task("Restarting Forge", "Forge restarted", service::restart)
-            .map(|pid| ui::success(started(pid))),
+        ForgeCommand::Restart => {
+            let pid = ui::task("Restarting Forge", "Forge restarted", service::restart)?;
+            ui::success(started(pid));
+            Ok(())
+        }
     }
-}
-
-/// Warnings and up on stderr, unless `RUST_LOG` says more.
-fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
 }

@@ -1,5 +1,5 @@
 use super::*;
-use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
+use editor_core::{ForgeClient, HostConfig, HostKind};
 
 fn fixture() -> (
     tempfile::TempDir,
@@ -8,11 +8,8 @@ fn fixture() -> (
     aqua::images::ImageAssets,
     Preview,
 ) {
-    let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
-    .unwrap();
+    let directory = tempfile::tempdir().expect("temp dir");
+    let mut core = test_support::editor::core::test_core(directory.path());
     let config = HostConfig {
         id: HostId("preview".into()),
         name: "preview".into(),
@@ -23,18 +20,21 @@ fn fixture() -> (
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().expect("identity"),
     )
-    .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
-    let instance = core.host(&config.id).unwrap().instance();
+    .expect("client");
+    test_support::editor::core::connect_client(&mut core, &config, client);
+    let instance = core.host(&config.id).expect("host").instance();
     let assets = aqua::images::ImageAssets::default();
     let image = assets
-        .insert(aqua_media::decode::DecodedImage::from_rgba(2, 1, vec![255; 8]).unwrap())
-        .unwrap();
+        .insert(aqua_media::decode::DecodedImage::from_rgba(2, 1, vec![255; 8]).expect("image"))
+        .expect("asset");
     let fetcher = MediaFetcher::new("preview", |_| {
-        Box::pin(async { Err(super::super::source::MediaFailure::Missing) })
+        Box::pin(async {
+            Err(crate::ui::media::source::MediaLoadError::Fetch(
+                super::super::source::MediaFailure::Missing,
+            ))
+        })
     })
     .owned_by(&[42], 1);
     let sources = vec![
@@ -52,7 +52,7 @@ fn fixture() -> (
         image,
         Instant::now(),
     )
-    .unwrap();
+    .expect("preview");
     (directory, core, config, assets, preview)
 }
 
@@ -62,7 +62,10 @@ fn navigation_and_swipes_obey_boundaries_and_dismissal_rules() {
     let now = Instant::now();
     assert!(!preview.dispatch(6, Action::Navigate(true), &core, now, false));
     assert!(!preview.dispatch(7, Action::Navigate(false), &core, now, false));
-    let viewport = Size { w: 1000.0, h: 800.0 };
+    let viewport = Size {
+        w: 1000.0,
+        h: 800.0,
+    };
     let point = |x: f32, y: f32| aqua_core::Point { x, y };
     let act = |preview: &mut Preview, action| preview.dispatch(7, action, &core, now, false);
     assert!(!act(
@@ -157,7 +160,7 @@ fn the_wheel_zooms_about_the_cursor_and_drags_pan_only_where_the_picture_overflo
     for _ in 0..40 {
         act(&mut preview, wheel(-16.0));
     }
-    assert_eq!(preview.zoom, 8.0);
+    assert_eq!((preview.zoom).to_bits(), 8.0_f32.to_bits());
     assert_eq!(preview.pan, point(0.0, 0.0));
 
     act(
@@ -197,11 +200,10 @@ fn replacement_host_cannot_drive_a_preview_from_the_previous_instance() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert_ne!(core.host(&config.id).unwrap().instance(), old);
     assert!(!preview.is_live(&core));
     assert!(!preview.dispatch(7, Action::Navigate(true), &core, Instant::now(), false));
@@ -269,7 +271,7 @@ fn mounted_preview_emits_source_frame_with_supported_entrance_transform() {
         UiBox::new()
             .width(viewport.w)
             .height(viewport.h)
-            .child(preview.view(theme, viewport, when, false, Rc::new(|_, _| {})))
+            .child(preview.view(&theme, viewport, when, false, Rc::new(|_, _| {})))
             .build()
     })
     .unwrap();
@@ -281,14 +283,57 @@ fn mounted_preview_emits_source_frame_with_supported_entrance_transform() {
         .iter()
         .filter_map(|(_, item)| match item {
             DisplayItem::PushTransform(transform) => Some(transform),
-            _ => None,
+            DisplayItem::SrgbaRect { .. }
+            | DisplayItem::Shader { .. }
+            | DisplayItem::Shape { .. }
+            | DisplayItem::PushGpuiQuadPulse(_)
+            | DisplayItem::PopGpuiQuadPulse
+            | DisplayItem::GpuiSvg { .. }
+            | DisplayItem::GpuiTransformedSvg { .. }
+            | DisplayItem::GpuiShadow { .. }
+            | DisplayItem::GpuiPath { .. }
+            | DisplayItem::GpuiMesh { .. }
+            | DisplayItem::GpuiBorder { .. }
+            | DisplayItem::GpuiBackground { .. }
+            | DisplayItem::Quad { .. }
+            | DisplayItem::PushRoundedClip { .. }
+            | DisplayItem::Shadow { .. }
+            | DisplayItem::PushTextColorMap(_)
+            | DisplayItem::PopTextColorMap
+            | DisplayItem::PushGpuiTextColorMap(_)
+            | DisplayItem::PushGpuiTextShimmer(_)
+            | DisplayItem::PopGpuiTextColorMap
+            | DisplayItem::PushGpuiTextColor(_)
+            | DisplayItem::PopGpuiTextColor
+            | DisplayItem::PushGpuiTextOpacity(_)
+            | DisplayItem::PopGpuiTextOpacity
+            | DisplayItem::PushGpuiTextSelection(_)
+            | DisplayItem::PopGpuiTextSelection
+            | DisplayItem::PushGpuiSourceTextColor(_)
+            | DisplayItem::PopGpuiSourceTextColor
+            | DisplayItem::PushContentBlur { .. }
+            | DisplayItem::PopContentBlur
+            | DisplayItem::PopTransform
+            | DisplayItem::Image { .. }
+            | DisplayItem::Vector { .. }
+            | DisplayItem::Rect { .. }
+            | DisplayItem::PushClip { .. }
+            | DisplayItem::PushGpuiContentMask { .. }
+            | DisplayItem::PopClip
+            | DisplayItem::PushOpacity(_)
+            | DisplayItem::PopOpacity
+            | DisplayItem::BackdropBlurRounded { .. }
+            | DisplayItem::BackdropBlurPath { .. }
+            | DisplayItem::BackdropBlur { .. }
+            | DisplayItem::Text { .. }
+            | DisplayItem::External { .. } => None,
         })
         .collect();
     assert!(transforms.iter().any(|transform| transform.a > 0.96
         && transform.a < 1.0
-        && transform.a == transform.d
-        && transform.b == 0.0
-        && transform.c == 0.0
+        && transform.a.to_bits() == transform.d.to_bits()
+        && transform.b.abs() < f32::EPSILON
+        && transform.c.abs() < f32::EPSILON
         && transform.tx.is_finite()
         && transform.ty.is_finite()));
     assert_eq!(
@@ -307,14 +352,8 @@ fn ready_only_preview_retains_image_and_ignores_gallery_navigation() {
     let image = gallery.image.as_ref().unwrap().clone();
     let weak = image.downgrade();
     let now = Instant::now();
-    let mut preview = Preview::from_ready(
-        11,
-        config.id.clone(),
-        instance,
-        image,
-        "attachment-1".into(),
-        now,
-    );
+    let mut preview =
+        Preview::from_ready(11, config.id, instance, image, "attachment-1".into(), now);
     drop(gallery);
     assert!(weak.upgrade().is_some());
     assert_eq!(preview.opener_key(), Some("attachment-1"));
@@ -355,11 +394,77 @@ fn ready_only_preview_rejects_replaced_host_and_stale_actions() {
     let client = ForgeClient::new(
         &config.address,
         &config.fingerprint,
-        core.identity.as_ref().unwrap(),
+        core.identity().unwrap(),
     )
     .unwrap();
-    core.add_test_host(&config, client);
-    core.host_mut(&config.id).unwrap().test_stop_connection();
+    test_support::editor::core::connect_client(&mut core, &config, client);
     assert!(!preview.is_live(&core));
     assert!(!preview.dispatch(11, Action::Close, &core, Instant::now(), false));
+}
+
+#[test]
+fn a_failed_preview_names_the_cause_and_retries_the_fetch() {
+    use aqua::UiApp;
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use std::cell::RefCell;
+
+    let (_directory, core, _config, assets, mut preview) = fixture();
+    let now = Instant::now();
+    assert!(preview.dispatch(7, Action::Navigate(true), &core, now, true));
+    let Content::Gallery { loader, .. } = &preview.content else {
+        unreachable!("the fixture opens a gallery")
+    };
+    let loader = loader.clone();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while preview.failure.is_none() {
+        loader.drain(&assets);
+        preview.refresh(&core);
+        assert!(Instant::now() < deadline, "the missing file fails in time");
+        std::thread::yield_now();
+    }
+    let texts = |preview: &Preview, actions: &Rc<RefCell<Vec<Action>>>| {
+        let sink = Rc::clone(actions);
+        let view = preview.view(
+            &ArtisanTheme::resolved(),
+            Size { w: 800.0, h: 600.0 },
+            now,
+            true,
+            Rc::new(move |_, action| sink.borrow_mut().push(action)),
+        );
+        let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+        app.mount(|_| view).unwrap();
+        app.set_viewport(800.0, 600.0, 1.0);
+        app.build_frame().unwrap();
+        let said: Vec<String> = app
+            .tree()
+            .traverse()
+            .into_iter()
+            .filter_map(|node| match &app.tree().get(node)?.kind {
+                aqua_ui::tree::NodeKind::Text(text) => Some(text.text().to_owned()),
+                aqua_ui::tree::NodeKind::Box(_)
+                | aqua_ui::tree::NodeKind::Media(_)
+                | aqua_ui::tree::NodeKind::Scroll(_)
+                | aqua_ui::tree::NodeKind::Canvas(_)
+                | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
+            })
+            .collect();
+        (app, said)
+    };
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let (mut app, said) = texts(&preview, &actions);
+    assert!(said.iter().any(|text| text == "File not found"));
+    assert!(said.iter().any(|text| text == "Try again"));
+    assert!(app.focus_key("image-preview-retry"));
+    let enter = KeyEvent {
+        key: Key::Named(NamedKey::Enter),
+        modifiers: Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&InputEvent::KeyDown(enter));
+    app.handle_input(&InputEvent::KeyUp(enter));
+    assert_eq!(actions.borrow().as_slice(), &[Action::Retry]);
+    assert!(preview.dispatch(7, Action::Retry, &core, now, true));
+    let (_app, said) = texts(&preview, &actions);
+    assert!(said.iter().any(|text| text == "Loading image…"));
 }

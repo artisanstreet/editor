@@ -3,11 +3,12 @@ use crate::inspector::{AgentCard, Inspector, InspectorAction, agent_card, render
 use crate::shell::context_meter::ContextReading;
 use crate::ui::hint_card::{Phrase, hint_card};
 use crate::ui::kit::{Divider, IconSize, Inset, Row, RowItem, Space, Spaced, Surface, TextRole};
+use crate::ui::scroll_edge::{Edge, ScrollEdges};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_core::Role;
 use aqua_core::scene::GpuiQuadPulse;
 use aqua_text::overflow::OverflowMode;
-use aqua_ui::element::{Box as UiBox, Element};
+use aqua_ui::element::{Box as UiBox, Element, Scroll};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use artisan_api::{EngineId, ItemId, Status, TextContent, ThreadId};
@@ -18,6 +19,15 @@ const SURFACE: Surface = Surface::Inset;
 const WIDTH: f32 = 320.0;
 const DOT: f32 = 6.0;
 const PULSE_MS: u32 = 1_600;
+pub const AGENTS_KEY: &str = "artisan-overview-agents";
+pub const AGENTS_EDGE_TOP: &str = "artisan-overview-agents-edge-top";
+pub const AGENTS_EDGE_BOTTOM: &str = "artisan-overview-agents-edge-bottom";
+const OUTER_WIDTH: f32 = WIDTH + 2.0 * Inset::Frame.px();
+
+#[must_use]
+pub(crate) fn fits(content_width: f32) -> bool {
+    content_width - crate::shell::layout::CHAT_MIN_WIDTH >= OUTER_WIDTH
+}
 
 #[derive(Clone)]
 pub struct Subagent {
@@ -30,7 +40,13 @@ pub struct Subagent {
     pub card: AgentCard,
 }
 
-#[derive(Clone)]
+impl std::fmt::Debug for Subagent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subagent").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Overview {
     pub project: Option<String>,
     pub machine: Option<String>,
@@ -41,12 +57,11 @@ pub struct Overview {
 
 impl Overview {
     #[must_use]
-    pub fn of(core: &Core, inspector: &Inspector, context: Option<ContextReading>) -> Self {
-        let host = inspector.open.as_ref().and_then(|(host, _)| core.host(host));
+    pub(crate) fn of(core: &Core, inspector: &Inspector, context: Option<ContextReading>) -> Self {
+        let host = inspector.open().and_then(|(host, _)| core.host(host));
         let project = host.and_then(|host| {
             inspector
-                .open
-                .as_ref()
+                .open()
                 .and_then(|(_, thread)| host.threads.get(thread))
                 .map(|thread| &thread.project_id)
         });
@@ -58,7 +73,7 @@ impl Overview {
             branch: project.and_then(|project| host?.repository(project)?.branch.clone()),
             context,
             agents: inspector
-                .summary
+                .summary()
                 .agents
                 .iter()
                 .map(|agent| Subagent {
@@ -66,7 +81,9 @@ impl Overview {
                     thread: agent.thread.clone(),
                     label: agent.label.clone(),
                     task: match &agent.description {
-                        TextContent::Inline(text) => text.lines().next().unwrap_or_default().to_owned(),
+                        TextContent::Inline(text) => {
+                            text.lines().next().unwrap_or_default().to_owned()
+                        }
                         TextContent::Stored(_) => String::new(),
                     },
                     status: agent.status,
@@ -78,8 +95,16 @@ impl Overview {
     }
 
     fn has_facts(&self) -> bool {
-        self.project.is_some() || self.machine.is_some() || self.branch.is_some() || self.context.is_some()
+        self.project.is_some()
+            || self.machine.is_some()
+            || self.branch.is_some()
+            || self.context.is_some()
     }
+}
+
+#[must_use]
+pub fn agents_edge_color(theme: &ArtisanTheme) -> Oklch {
+    crate::ui::chrome::card::Surfaces::of(theme).inner
 }
 
 #[must_use]
@@ -87,7 +112,8 @@ pub fn card(
     theme: &ArtisanTheme,
     overview: &Overview,
     reduced: bool,
-    emit: Rc<dyn Fn(InspectorAction)>,
+    emit: &Rc<dyn Fn(InspectorAction)>,
+    panel: &OverviewPanel<'_>,
 ) -> Option<Element> {
     if !overview.has_facts() && overview.agents.is_empty() {
         return None;
@@ -115,38 +141,118 @@ pub fn card(
     .collect::<Vec<_>>();
     let rule = (!facts.is_empty() && !overview.agents.is_empty())
         .then(|| Divider::Rule.build(theme, SURFACE.padding_px()));
-    let agents = overview
-        .agents
-        .iter()
-        .map(|agent| subagent(theme, agent, reduced, Rc::clone(&emit)));
-    let content = UiBox::new()
+    let agents = (!overview.agents.is_empty()).then(|| {
+        let rows = UiBox::new().layout("column").children(
+            overview
+                .agents
+                .iter()
+                .map(|agent| subagent(theme, agent, reduced, Rc::clone(emit))),
+        );
+        let list = Scroll::new()
+            .layout("column")
+            .preserve_offset(true)
+            .style(shrinking())
+            .child(rows.build())
+            .build()
+            .with_key(AGENTS_KEY)
+            .role(Role::List)
+            .aria_label(editor_ui::locale::count(
+                overview.agents.len(),
+                "agent",
+                "agents",
+            ));
+        let edge = agents_edge_color(theme);
+        UiBox::new()
+            .layout("column")
+            .style(shrinking())
+            .child(list)
+            .child(panel.edges.band(AGENTS_EDGE_TOP, Edge::Top, edge))
+            .child(panel.edges.band(AGENTS_EDGE_BOTTOM, Edge::Bottom, edge))
+            .build()
+    });
+    let fixed = UiBox::new()
         .layout("column")
+        .style(Style::new().flex_shrink(0.0))
         .children(facts)
         .children(rule)
+        .build();
+    let content = UiBox::new()
+        .layout("column")
+        .style(shrinking())
+        .child(fixed)
         .children(agents)
         .build();
-    Some(
-        UiBox::new()
-            .layout("row")
-            .padded(Space::from(Inset::Frame))
-            .style(
-                Style::new()
-                    .width(Length::Px(WIDTH + 2.0 * Inset::Frame.px()))
-                    .flex_shrink(0.0)
-                    .align(AlignItems::START),
-            )
-            .child(SURFACE.build(theme, vec![content]).style(Style::new().flex_grow(1.0)))
-            .build()
-            .with_key("artisan-thread-overview")
-            .debug_selector("artisan-thread-overview"),
+    Some(frame(
+        SURFACE
+            .build(theme, vec![content])
+            .style(Style::new().max_height(Length::Px(panel.height))),
+        AlignItems::START,
+        "artisan-thread-overview",
+    ))
+}
+
+#[derive(Debug)]
+pub struct OverviewPanel<'a> {
+    height: f32,
+    edges: &'a ScrollEdges,
+}
+
+impl<'a> OverviewPanel<'a> {
+    #[must_use]
+    pub fn in_window(window_height: f32, edges: &'a ScrollEdges) -> Self {
+        Self {
+            height: panel_height(window_height),
+            edges,
+        }
+    }
+}
+
+fn shrinking() -> Style {
+    Style::new().flex_shrink(1.0).min_height(Length::Px(0.0))
+}
+
+#[must_use]
+pub(crate) fn panel_height(viewport_height: f32) -> f32 {
+    2.0f32
+        .mul_add(
+            -Inset::Frame.px(),
+            viewport_height - crate::shell::layout::TITLEBAR_HEIGHT,
+        )
+        .max(0.0)
+}
+
+#[must_use]
+pub(crate) fn panel(theme: &ArtisanTheme, inspector: Element) -> Element {
+    frame(
+        SURFACE
+            .build(theme, vec![inspector])
+            .style(Style::new().min_height(Length::Pct(0.0))),
+        AlignItems::STRETCH,
+        "artisan-thread-inspector",
     )
+}
+
+fn frame(surface: Element, align: AlignItems, key: &'static str) -> Element {
+    UiBox::new()
+        .layout("row")
+        .padded(Space::from(Inset::Frame))
+        .style(
+            Style::new()
+                .width(Length::Px(OUTER_WIDTH))
+                .flex_shrink(0.0)
+                .align(align),
+        )
+        .child(surface.style(Style::new().flex_grow(1.0)))
+        .build()
+        .with_key(key)
+        .debug_selector(key)
 }
 
 fn fact(theme: &ArtisanTheme, icon: AssetId, title: &str, value: &str) -> Element {
     RowItem::new(
         format!("artisan-overview-fact-{title}"),
         *theme,
-        Row::KeyRow,
+        Row::Key,
         SURFACE,
         format!("{title}: {value}"),
     )
@@ -169,7 +275,7 @@ fn context(theme: &ArtisanTheme, reading: &ContextReading) -> Element {
     RowItem::new(
         "artisan-overview-context",
         theme,
-        Row::KeyRow,
+        Row::Key,
         SURFACE,
         reading.percent_sentence(),
     )
@@ -232,7 +338,12 @@ fn subagent(
             .spaced(Row::MenuItem.gap())
             .style(body())
             .child(label(&theme, &agent.label, theme.colors.text, Span::Fit))
-            .child(label(&theme, &agent.task, theme.colors.text_muted, Span::Fill))
+            .child(label(
+                &theme,
+                &agent.task,
+                theme.colors.text_muted,
+                Span::Fill,
+            ))
             .build(),
     )
     .trailing(
@@ -249,7 +360,7 @@ fn subagent(
             .build(),
     )
     .on_activate(move || emit(open.clone()))
-    .hint(move || render_agent_card(&tooltip, theme))
+    .hint(move || render_agent_card(&tooltip, &theme))
     .build()
 }
 
@@ -283,6 +394,8 @@ fn dot(color: Oklch, pulsing: bool) -> Element {
         .build()
 }
 
+const FIT_WIDEST_PCT: f32 = 70.0;
+
 #[derive(Clone, Copy)]
 enum Span {
     Fit,
@@ -297,21 +410,14 @@ fn label(theme: &ArtisanTheme, words: &str, color: Oklch, span: Span) -> Element
         .wrap(false)
         .overflow(OverflowMode::EndEllipsis)
         .build();
-    let (grow, justify) = match span {
-        Span::Fit => (0.0, JustifyContent::START),
-        Span::Fill => (1.0, JustifyContent::START),
-        Span::Trail => (1.0, JustifyContent::END),
+    let base = Style::new()
+        .justify(JustifyContent::START)
+        .min_width(Length::Pct(0.0))
+        .clip(true);
+    let style = match span {
+        Span::Fit => base.flex_shrink(0.0).max_width(Length::Pct(FIT_WIDEST_PCT)),
+        Span::Fill => base.flex_grow(1.0),
+        Span::Trail => base.justify(JustifyContent::END).flex_grow(1.0),
     };
-    UiBox::new()
-        .layout("row")
-        .style(
-            Style::new()
-                .justify(justify)
-                .flex_grow(grow)
-                .flex_shrink(1.0)
-                .min_width(Length::Pct(0.0))
-                .clip(true),
-        )
-        .child(text)
-        .build()
+    UiBox::new().layout("row").style(style).child(text).build()
 }

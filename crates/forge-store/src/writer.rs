@@ -1,46 +1,186 @@
-//! The one writer: a thread with its own connection that runs each job in a
-//! transaction and publishes the resulting envelopes in commit order.
-
-use crate::read::{self, tag, to_body};
-use crate::{CONTINUE_AFTER_RESTART_KEY, MAX_RESTART_CONTINUATIONS, ProjectNotFound, project_name};
-use anyhow::{Context, Result};
+use crate::content::ContentError;
+use crate::error::AtStep as _;
+use crate::error::StorageError;
+use crate::read::{self, tag, to_body, to_value};
+use crate::{
+    CONTINUE_AFTER_RESTART_KEY, CreateThreadError, MAX_RESTART_CONTINUATIONS, RunMoved,
+    SendRejected, project_name,
+};
 use artisan_api::{
-    Continuation, CreateProject, CreateThread, Envelope, Event, Item, ItemId, Project, Run, RunId,
-    RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
+    Continuation, CreateProject, CreateThread, Envelope, Event, Item, ItemId, ItemKind, Project,
+    Run, RunId, RunOutcome, RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread,
 };
 use forge_content::ItemTexts as _;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
-pub type Job = Box<dyn FnOnce(&mut Writer) + Send>;
+pub(crate) type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
-pub struct Writer {
+pub const SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_MESSAGE_TEXT_BYTES: u64 = 32 * 1024 * 1024;
+
+type Result<T, E = StorageError> = std::result::Result<T, E>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum WriteFailure {
+    #[error("thread {thread} does not exist")]
+    ThreadNotFound { thread: ThreadId },
+    #[error("item {item} belongs to thread {stored}, not {requested}")]
+    ItemMoved {
+        item: ItemId,
+        stored: ThreadId,
+        requested: ThreadId,
+    },
+    #[error("item {item} is not a user message")]
+    NotAnInput { item: ItemId },
+    #[error("saving setting {key} would make the settings {bytes} bytes; the limit is 8 MiB")]
+    SettingsFull { key: String, bytes: u64 },
+    #[error(transparent)]
+    RunMoved(#[from] RunMoved),
+    #[error(transparent)]
+    Content(#[from] ContentError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InputFailure {
+    #[error("the message was refused")]
+    Rejected(#[source] SendRejected),
+    #[error("read the metadata of image {}", path.display())]
+    ImageMetadata {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Write(#[from] WriteFailure),
+}
+
+impl From<StorageError> for InputFailure {
+    fn from(error: StorageError) -> Self {
+        Self::Write(error.into())
+    }
+}
+
+impl From<ContentError> for InputFailure {
+    fn from(error: ContentError) -> Self {
+        Self::Write(error.into())
+    }
+}
+
+impl From<SendRejected> for InputFailure {
+    fn from(rejected: SendRejected) -> Self {
+        Self::Rejected(rejected)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UpdateThreadFailure {
+    #[error("the config sets a context window its engine does not offer")]
+    InvalidConfig,
+    #[error("the config is {bytes} bytes; the limit is {MAX_CONFIG_BYTES}")]
+    ConfigTooLarge { bytes: usize },
+    #[error("the title is {bytes} bytes; the limit is {MAX_TITLE_BYTES}")]
+    TitleTooLong { bytes: usize },
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+pub const MAX_TITLE_BYTES: usize = 1024;
+pub const MAX_CONFIG_BYTES: usize = 16 * 1024;
+
+pub(crate) enum ConfigProblem {
+    ContextWindow,
+    TooLarge { bytes: usize },
+}
+
+pub(crate) fn config_problem(config: &artisan_api::EngineConfig) -> Option<ConfigProblem> {
+    let bytes = crate::encoded::len(config);
+    if bytes > MAX_CONFIG_BYTES {
+        return Some(ConfigProblem::TooLarge { bytes });
+    }
+    let offered = !config.options.contains_key("context_window")
+        || (matches!(
+            config.engine,
+            artisan_api::EngineId::Claude | artisan_api::EngineId::Codex
+        ) && config.context_window_override().is_some());
+    (!offered).then_some(ConfigProblem::ContextWindow)
+}
+
+pub(crate) fn title_too_long(title: Option<&String>) -> Option<usize> {
+    title
+        .map(String::len)
+        .filter(|bytes| *bytes > MAX_TITLE_BYTES)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Durability {
+    Acknowledged,
+    Background,
+}
+
+impl Durability {
+    const fn synchronous(self) -> &'static str {
+        match self {
+            Self::Acknowledged => "FULL",
+            Self::Background => "NORMAL",
+        }
+    }
+}
+
+pub(crate) struct Commits {
+    pub(crate) count: Arc<AtomicU64>,
+    pub(crate) committed: std::sync::mpsc::SyncSender<()>,
+}
+
+impl Commits {
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::AcqRel);
+        match self.committed.try_send(()) {
+            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(())) => {}
+            Err(std::sync::mpsc::TrySendError::Disconnected(())) => {
+                tracing::warn!("the store checkpointer has stopped; the WAL grows until restart");
+            }
+        }
+    }
+}
+
+pub(crate) struct Writer {
     conn: Connection,
+    durability: Durability,
     head: Arc<AtomicU64>,
-    events: Option<broadcast::Sender<Envelope>>,
+    events: Option<crate::feed::Feed>,
     hot: Arc<crate::hot::HotPages>,
-    commits: Arc<AtomicU64>,
+    commits: Commits,
+    clock: artisan_api::WallClock,
 }
 
 impl Writer {
     pub(crate) fn new(
         conn: Connection,
         head: Arc<AtomicU64>,
-        events: Option<broadcast::Sender<Envelope>>,
+        events: Option<crate::feed::Feed>,
         hot: Arc<crate::hot::HotPages>,
-        commits: Arc<AtomicU64>,
+        commits: Commits,
+        clock: artisan_api::WallClock,
     ) -> Result<Self> {
         let seq = read::max_seq(&conn)?;
         head.store(seq, Ordering::Release);
+        let durability = Durability::Background;
+        conn.pragma_update(None, "synchronous", durability.synchronous())
+            .at("set the commit durability")?;
         Ok(Self {
             conn,
+            durability,
             head,
             events,
             hot,
             commits,
+            clock,
         })
     }
 
@@ -50,51 +190,53 @@ impl Writer {
         }
     }
 
-    pub(crate) fn transact<R>(&mut self, job: impl FnOnce(&mut Tx<'_>) -> Result<R>) -> Result<R> {
+    pub(crate) const fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub(crate) fn transact<R, E: From<StorageError>>(
+        &mut self,
+        durability: Durability,
+        job: impl FnOnce(&mut Tx<'_>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        if self.durability != durability {
+            self.conn
+                .pragma_update(None, "synchronous", durability.synchronous())
+                .at("set the commit durability")?;
+            self.durability = durability;
+        }
         let sql = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .context("begin write transaction")?;
+            .at("begin a write transaction")?;
         let seq = read::max_seq(&sql)?;
         let mut tx = Tx {
             sql,
             seq,
             events: Vec::new(),
-            #[cfg(any(feature = "legacy-import", test))]
-            stamp: None,
+            clock: self.clock.clone(),
         };
         let result = job(&mut tx)?;
-        let Tx {
-            sql, seq, events, ..
-        } = tx;
-        sql.commit().context("commit write transaction")?;
-        self.commits.fetch_add(1, Ordering::AcqRel);
+        let (sql, seq, mut events) = (tx.sql, tx.seq, tx.events);
+        events.sort_by_key(|envelope| envelope.seq);
+        sql.commit().at("commit")?;
+        self.commits.note();
         self.hot.committed(&events);
         self.head.fetch_max(seq, Ordering::AcqRel);
-        if let Some(sender) = &self.events {
+        if let Some(feed) = &self.events {
             for envelope in events {
-                sender.send(envelope).ok();
+                feed.send(envelope);
             }
         }
         Ok(result)
     }
 }
 
-pub struct Tx<'c> {
+pub(crate) struct Tx<'c> {
     pub(crate) sql: Transaction<'c>,
     seq: Seq,
     events: Vec<Envelope>,
-    #[cfg(any(feature = "legacy-import", test))]
-    stamp: Option<Stamp>,
-}
-
-/// Timestamps a write uses instead of the clock: the legacy import keeps the
-/// old database's times this way.
-#[cfg(any(feature = "legacy-import", test))]
-#[derive(Clone, Copy, Debug)]
-pub struct Stamp {
-    pub(crate) created_at: Timestamp,
-    pub(crate) updated_at: Timestamp,
+    clock: artisan_api::WallClock,
 }
 
 impl Deref for Tx<'_> {
@@ -106,18 +248,6 @@ impl Deref for Tx<'_> {
 }
 
 impl Tx<'_> {
-    #[cfg(any(feature = "legacy-import", test))]
-    pub(crate) fn with_stamp<R>(
-        &mut self,
-        stamp: Stamp,
-        job: impl FnOnce(&mut Self) -> Result<R>,
-    ) -> Result<R> {
-        let previous = self.stamp.replace(stamp);
-        let result = job(self);
-        self.stamp = previous;
-        result
-    }
-
     pub(crate) fn create_project(&mut self, request: CreateProject) -> Result<Project> {
         if let Some(existing) = read::project(self, &request.id)? {
             return Ok(existing);
@@ -133,14 +263,50 @@ impl Tx<'_> {
         })
     }
 
-    pub(crate) fn create_thread(&mut self, request: CreateThread) -> Result<Thread> {
-        if let Some(existing) = read::thread(self, &request.id)? {
+    pub(crate) fn create_thread(
+        &mut self,
+        request: CreateThread,
+    ) -> Result<Thread, CreateThreadError> {
+        let storage = |source| CreateThreadError::Storage {
+            thread: request.id.clone(),
+            source,
+        };
+        if let Some(existing) = read::thread(self, &request.id).map_err(storage)? {
             return Ok(existing);
         }
-        if read::project(self, &request.project_id)?.is_none() {
-            return Err(ProjectNotFound(request.project_id).into());
+        match config_problem(&request.config) {
+            Some(ConfigProblem::ContextWindow) => {
+                return Err(CreateThreadError::InvalidConfig { thread: request.id });
+            }
+            Some(ConfigProblem::TooLarge { bytes }) => {
+                return Err(CreateThreadError::ConfigTooLarge {
+                    thread: request.id,
+                    bytes,
+                });
+            }
+            None => {}
         }
+        if let Some(bytes) = title_too_long(request.title.as_ref()) {
+            return Err(CreateThreadError::TitleTooLong {
+                thread: request.id,
+                bytes,
+            });
+        }
+        let project = read::project(self, &request.project_id)
+            .map_err(storage)?
+            .ok_or_else(|| CreateThreadError::ProjectNotFound {
+                thread: request.id.clone(),
+                project: request.project_id.clone(),
+            })?;
+        if project.removed {
+            return Err(CreateThreadError::ProjectRemoved {
+                thread: request.id,
+                project: request.project_id,
+            });
+        }
+        self.check_lineage(&request)?;
         let created_at = self.created_at();
+        let thread = request.id.clone();
         self.save_thread(Thread {
             id: request.id,
             project_id: request.project_id,
@@ -159,13 +325,66 @@ impl Tx<'_> {
             spawned_by: request.spawned_by,
             parked_until: None,
         })
+        .map_err(|source| CreateThreadError::Storage { thread, source })
+    }
+
+    fn check_lineage(&self, request: &CreateThread) -> Result<(), CreateThreadError> {
+        let thread = &request.id;
+        let storage = |source| CreateThreadError::Storage {
+            thread: thread.clone(),
+            source,
+        };
+        let Some(parent) = &request.parent_thread_id else {
+            return match &request.spawned_by {
+                None => Ok(()),
+                Some(agent) => Err(CreateThreadError::AgentWithoutParent {
+                    thread: thread.clone(),
+                    agent: agent.clone(),
+                }),
+            };
+        };
+        if parent == thread || read::thread(self, parent).map_err(storage)?.is_none() {
+            return Err(CreateThreadError::ParentNotFound {
+                thread: thread.clone(),
+                parent: parent.clone(),
+            });
+        }
+        let Some(agent) = &request.spawned_by else {
+            return Ok(());
+        };
+        let runs_this_thread = read::item(self, agent)
+            .map_err(storage)?
+            .is_some_and(|item| {
+                item.thread_id == *parent
+                    && matches!(&item.kind, ItemKind::Agent { thread: runs, .. }
+                    if runs.as_ref().is_none_or(|runs| runs == thread))
+            });
+        if runs_this_thread {
+            Ok(())
+        } else {
+            Err(CreateThreadError::AgentNotInParent {
+                thread: thread.clone(),
+                parent: parent.clone(),
+                agent: agent.clone(),
+            })
+        }
     }
 
     pub(crate) fn update_thread(
         &mut self,
         id: &ThreadId,
         update: UpdateThread,
-    ) -> Result<Option<Thread>> {
+    ) -> Result<Option<Thread>, UpdateThreadFailure> {
+        match update.config.as_ref().and_then(config_problem) {
+            Some(ConfigProblem::ContextWindow) => return Err(UpdateThreadFailure::InvalidConfig),
+            Some(ConfigProblem::TooLarge { bytes }) => {
+                return Err(UpdateThreadFailure::ConfigTooLarge { bytes });
+            }
+            None => {}
+        }
+        if let Some(bytes) = title_too_long(update.title.as_ref()) {
+            return Err(UpdateThreadFailure::TitleTooLong { bytes });
+        }
         let Some(mut thread) = read::thread(self, id)? else {
             return Ok(None);
         };
@@ -188,11 +407,12 @@ impl Tx<'_> {
                 thread.marked_unread = false;
             }
         }
-        self.save_thread(thread).map(Some)
+        Ok(Some(self.save_thread(thread)?))
     }
 
-    pub(crate) fn upsert_run(&mut self, run: Run) -> Result<Run> {
-        let changed_status = read::run(self, &run.id)?.is_none_or(|old| old.status != run.status);
+    pub(crate) fn upsert_run(&mut self, run: Run) -> Result<Run, WriteFailure> {
+        let changed_status =
+            read::run(self, &run.id)?.is_none_or(|old| old.status() != run.status());
         let run = self.save_run(run)?;
         if changed_status {
             self.mark_activity(&run.thread_id, run.seq)?;
@@ -200,34 +420,49 @@ impl Tx<'_> {
         Ok(run)
     }
 
-    #[cfg_attr(
-        not(any(feature = "legacy-import", test)),
-        expect(
-            clippy::unused_self,
-            reason = "the stamp override exists only for imports and tests"
-        )
-    )]
     pub(crate) fn created_at(&self) -> Timestamp {
-        #[cfg(any(feature = "legacy-import", test))]
-        if let Some(stamp) = self.stamp {
-            return stamp.created_at;
-        }
-        now()
+        self.clock.now()
     }
 
-    #[cfg_attr(
-        not(any(feature = "legacy-import", test)),
-        expect(
-            clippy::unused_self,
-            reason = "the stamp override exists only for imports and tests"
-        )
-    )]
     fn updated_at(&self) -> Timestamp {
-        #[cfg(any(feature = "legacy-import", test))]
-        if let Some(stamp) = self.stamp {
-            return stamp.updated_at;
+        self.clock.now()
+    }
+
+    pub(crate) fn stamped(&self) -> crate::content::Stamped<'_> {
+        crate::content::Stamped {
+            conn: &self.sql,
+            now: self.now(),
         }
-        now()
+    }
+
+    pub(crate) fn now(&self) -> Timestamp {
+        self.clock.now()
+    }
+
+    pub(crate) fn attempt<T>(
+        &mut self,
+        step: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<Result<T>> {
+        self.sql
+            .execute_batch(include_str!("sql/writer/attempt.sql"))
+            .at("writer/attempt.sql")?;
+        let (seq, events) = (self.seq, self.events.len());
+        match step(self) {
+            Ok(done) => {
+                self.sql
+                    .execute_batch(include_str!("sql/writer/keep_attempt.sql"))
+                    .at("writer/keep_attempt.sql")?;
+                Ok(Ok(done))
+            }
+            Err(failed) => {
+                self.sql
+                    .execute_batch(include_str!("sql/writer/undo_attempt.sql"))
+                    .at("writer/undo_attempt.sql")?;
+                self.seq = seq;
+                self.events.truncate(events);
+                Ok(Err(failed))
+            }
+        }
     }
 
     pub(crate) const fn next_seq(&mut self) -> Seq {
@@ -252,16 +487,14 @@ impl Tx<'_> {
         }
         project.seq = self.next_seq();
         self.sql
-            .prepare_cached(
-                "INSERT INTO projects (id, seq, body) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, body = excluded.body",
-            )?
+            .prepare_cached(include_str!("sql/state/save_project.sql"))
+            .at("state/save_project.sql")?
             .execute(params![
                 project.id.as_str(),
                 project.seq,
                 to_body(&project)?
             ])
-            .with_context(|| format!("save project {}", project.id))?;
+            .at("state/save_project.sql")?;
         self.emit(
             project.seq,
             Event::Project {
@@ -272,14 +505,6 @@ impl Tx<'_> {
     }
 
     pub(crate) fn save_thread(&mut self, mut thread: Thread) -> Result<Thread> {
-        anyhow::ensure!(
-            !thread.config.options.contains_key("context_window")
-                || (matches!(
-                    thread.config.engine,
-                    artisan_api::EngineId::Claude | artisan_api::EngineId::Codex
-                ) && thread.config.context_window_override().is_some()),
-            "invalid context window override"
-        );
         let old = read::thread(self, &thread.id)?;
         let is_new = old.is_none();
         let advances_activity = old
@@ -303,12 +528,10 @@ impl Tx<'_> {
             thread.activity_at = thread.updated_at;
         }
         self.sql
-            .prepare_cached(
-                "INSERT INTO threads (id, seq, body) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, body = excluded.body",
-            )?
+            .prepare_cached(include_str!("sql/state/save_thread.sql"))
+            .at("state/save_thread.sql")?
             .execute(params![thread.id.as_str(), thread.seq, to_body(&thread)?])
-            .with_context(|| format!("save thread {}", thread.id))?;
+            .at("state/save_thread.sql")?;
         self.emit(
             thread.seq,
             Event::Thread {
@@ -318,25 +541,23 @@ impl Tx<'_> {
         Ok(thread)
     }
 
-    /// Records the engine's own id for an item, which answers and later
-    /// events address it by. It is Forge's alone and never on the wire.
     pub(crate) fn set_native_id(&self, id: &ItemId, native_id: Option<&str>) -> Result<()> {
         if let Some(native_id) = native_id {
             self.sql
-                .prepare_cached(
-                    "UPDATE items SET native_id=?2 WHERE id=?1 AND native_id IS NOT ?2",
-                )?
+                .prepare_cached(include_str!("sql/items/set_native_id.sql"))
+                .at("items/set_native_id.sql")?
                 .execute(params![id.as_str(), native_id])
-                .with_context(|| format!("save the engine id of item {id}"))?;
+                .at("items/set_native_id.sql")?;
         }
         Ok(())
     }
 
-    /// Saves only this item: `old` is its stored version, `None` for a new
-    /// item, whose position is its creation seq. Thread activity belongs to
-    /// accepted input and run boundaries.
-    pub(crate) fn save_item(&mut self, mut item: Item, old: Option<Item>) -> Result<Item> {
-        crate::content::normalize(self, &mut item, old.as_ref())?;
+    pub(crate) fn save_item(
+        &mut self,
+        mut item: Item,
+        old: Option<Item>,
+    ) -> Result<Item, WriteFailure> {
+        crate::content::normalize(&self.stamped(), &mut item, old.as_ref())?;
         let new = old.is_none();
         if let Some(old) = old {
             item.seq = old.seq;
@@ -345,12 +566,19 @@ impl Tx<'_> {
                 return Ok(old);
             }
         } else {
-            let exists: bool = self.sql.query_row(
-                "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1)",
-                [item.thread_id.as_str()],
-                |row| row.get(0),
-            )?;
-            anyhow::ensure!(exists, "thread {} not found", item.thread_id);
+            let exists: bool = self
+                .sql
+                .query_row(
+                    include_str!("sql/state/thread_exists.sql"),
+                    [item.thread_id.as_str()],
+                    |row| row.get(0),
+                )
+                .at("state/thread_exists.sql")?;
+            if !exists {
+                return Err(WriteFailure::ThreadNotFound {
+                    thread: item.thread_id,
+                });
+            }
         }
         item.seq = self.next_seq();
         item.updated_at = self.updated_at();
@@ -358,49 +586,49 @@ impl Tx<'_> {
             item.position = item.seq;
         }
         let edits = match &item.kind {
-            artisan_api::ItemKind::Tool { tool, .. } if item.status == Status::Done => {
+            ItemKind::Tool { tool, .. } if item.status == Status::Done => {
                 crate::content::edit_totals(self, tool)?
             }
-            artisan_api::ItemKind::UserMessage { .. }
-            | artisan_api::ItemKind::AssistantMessage { .. }
-            | artisan_api::ItemKind::Tool { .. }
-            | artisan_api::ItemKind::Agent { .. }
-            | artisan_api::ItemKind::Question { .. }
-            | artisan_api::ItemKind::Plan { .. }
-            | artisan_api::ItemKind::Image { .. }
-            | artisan_api::ItemKind::Compaction { .. }
-            | artisan_api::ItemKind::Notice { .. }
-            | artisan_api::ItemKind::Error { .. } => None,
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Tool { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => None,
         };
-        // The kind's serde tag, read from the body so it cannot drift from it.
+        let outline = read::outline_entry(self, &item)?;
+        let place_before = crate::work_spans::stored(self, &item.id)?;
         self.sql
-            .prepare_cached(
-                "INSERT INTO items (id, thread_id, position, seq, run_id, status, body,
-                     edit_added, edit_removed, kind_type, parent_id, work)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, json_extract(?7, '$.kind.type'), ?10, ?11)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, run_id = excluded.run_id,
-                     status = excluded.status, body = excluded.body,
-                     edit_added = excluded.edit_added, edit_removed = excluded.edit_removed,
-                     kind_type = excluded.kind_type, parent_id = excluded.parent_id,
-                     work = excluded.work",
-            )?
+            .prepare_cached(include_str!("sql/items/save.sql"))
+            .at("items/save.sql")?
             .execute(params![
                 item.id.as_str(),
                 item.thread_id.as_str(),
                 item.position,
                 item.seq,
                 item.run_id.as_ref().map(RunId::as_str),
-                tag(&item.status)?,
+                tag(&item.status),
                 to_body(&item)?,
                 edits.as_ref().map(|stats| stats.added),
                 edits.as_ref().map(|stats| stats.removed),
-                item.parent_id.as_ref().map(artisan_api::ItemId::as_str),
+                item.parent_id.as_ref().map(ItemId::as_str),
                 item.folds_into_work(),
+                outline,
             ])
-            .with_context(|| format!("save item {} in thread {}", item.id, item.thread_id))?;
+            .at("items/save.sql")?;
+        crate::work_spans::moved(
+            self,
+            &item.thread_id,
+            item.position,
+            &place_before,
+            &crate::work_spans::Place::of(&item),
+        )?;
         crate::content::own(self, &item)?;
-        crate::recall::index(self, &item)
-            .with_context(|| format!("index item {} for recall", item.id))?;
+        crate::recall::index(self, &item)?;
         self.emit(item.seq, Event::Item { item: item.clone() });
 
         Ok(item)
@@ -410,24 +638,25 @@ impl Tx<'_> {
         &mut self,
         mut new: crate::NewItem,
         blob_dir: &std::path::Path,
-    ) -> Result<(Item, bool)> {
-        // Normalize the retry before equality: Inline producer bytes and an
-        // existing immutable reference represent the same idempotent input.
+    ) -> Result<(Item, bool), InputFailure> {
         new.kind
-            .try_visit_texts_mut(|text| crate::content::normalize_text(self, text))?;
+            .try_visit_texts_mut(|text| crate::content::normalize_text(&self.stamped(), text))?;
         if let Some(existing) = read::item(self, &new.id)? {
             let same = existing.thread_id == new.thread_id
                 && matches!((&existing.kind, &new.kind),
-                (artisan_api::ItemKind::UserMessage { text: a, images: ai, .. },
-                 artisan_api::ItemKind::UserMessage { text: b, images: bi, .. }) if a == b && ai == bi);
-            anyhow::ensure!(same, crate::SendRejected::IdConflict(new.id));
+                (ItemKind::UserMessage { text: a, images: ai, .. },
+                 ItemKind::UserMessage { text: b, images: bi, .. }) if a == b && ai == bi);
+            if !same {
+                return Err(SendRejected::IdConflict(new.id).into());
+            }
             return Ok((existing, false));
         }
-        if let artisan_api::ItemKind::UserMessage { text, images, .. } = &new.kind {
-            if text.byte_len() > 32 * 1024 * 1024 {
-                return Err(
-                    crate::SendRejected::Payload("message text exceeds 32 MiB".into()).into(),
-                );
+        if let ItemKind::UserMessage { text, images, .. } = &new.kind {
+            if text.byte_len() > MAX_MESSAGE_TEXT_BYTES {
+                return Err(SendRejected::TextTooLarge {
+                    bytes: text.byte_len(),
+                }
+                .into());
             }
             crate::blobs::input_images(blob_dir, images)?;
         }
@@ -435,45 +664,48 @@ impl Tx<'_> {
         Ok((item, true))
     }
 
-    /// What an accepted command does to its thread in the command's commit:
-    /// activity, optionally the default config, and the draft it consumed.
     pub(crate) fn accept_command(
         &mut self,
         mut thread: Thread,
         seq: Seq,
         remember_config: bool,
         draft: Option<artisan_api::DraftRevision>,
-    ) -> Result<()> {
+    ) -> Result<(), WriteFailure> {
         thread.activity_seq = seq;
         if remember_config {
-            self.save_setting(
-                "default_engine_config".into(),
-                serde_json::to_value(&thread.config)?,
-            )?;
+            self.save_setting("default_engine_config".into(), to_value(&thread.config)?)?;
             self.remember_model_config(&thread.config)?;
         }
         self.save_thread(thread)?;
         if let Some(draft) = draft {
-            // Keep the tombstone and revision so an older write cannot
-            // resurrect the draft.
-            self.sql.execute(
-                "UPDATE drafts SET body='null', revision=revision+1 WHERE scope=?1 AND revision=?2",
-                params![draft.scope, draft.revision],
-            )?;
+            self.sql
+                .execute(
+                    include_str!("sql/settings/clear_draft.sql"),
+                    params![draft.scope, draft.revision],
+                )
+                .at("settings/clear_draft.sql")?;
         }
         Ok(())
     }
 
-    pub(crate) fn mark_activity(&mut self, id: &artisan_api::ThreadId, seq: Seq) -> Result<()> {
-        let mut thread =
-            read::thread(self, id)?.with_context(|| format!("thread {id} not found"))?;
+    pub(crate) fn mark_activity(&mut self, id: &ThreadId, seq: Seq) -> Result<(), WriteFailure> {
+        let mut thread = read::thread(self, id)?
+            .ok_or_else(|| WriteFailure::ThreadNotFound { thread: id.clone() })?;
         thread.activity_seq = thread.activity_seq.max(seq);
         self.save_thread(thread)?;
         Ok(())
     }
 
-    pub(crate) fn save_run(&mut self, mut run: Run) -> Result<Run> {
+    pub(crate) fn save_run(&mut self, mut run: Run) -> Result<Run, WriteFailure> {
         if let Some(old) = read::run(self, &run.id)? {
+            if old.thread_id != run.thread_id {
+                return Err(RunMoved {
+                    run: run.id,
+                    stored: old.thread_id,
+                    requested: run.thread_id,
+                }
+                .into());
+            }
             run.seq = old.seq;
             if run == old {
                 return Ok(old);
@@ -481,34 +713,63 @@ impl Tx<'_> {
         }
         run.seq = self.next_seq();
         self.sql
-            .prepare_cached(
-                "INSERT INTO runs (id, thread_id, seq, status, body) VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, status = excluded.status,
-                     body = excluded.body",
-            )?
+            .prepare_cached(include_str!("sql/runs/save.sql"))
+            .at("runs/save.sql")?
             .execute(params![
                 run.id.as_str(),
                 run.thread_id.as_str(),
                 run.seq,
-                tag(&run.status)?,
+                tag(&run.status()),
                 to_body(&run)?,
             ])
-            .with_context(|| format!("save run {} of thread {}", run.id, run.thread_id))?;
+            .at("runs/save.sql")?;
         self.emit(run.seq, Event::Run { run: run.clone() });
         Ok(run)
     }
 
-    /// Files `config` as the one its model comes back with, replacing the
-    /// model's earlier entry whatever it was named.
+    pub(crate) fn object_setting(
+        &self,
+        key: &str,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, StorageError> {
+        match read::setting(self, key)? {
+            None | Some(serde_json::Value::Null) => Ok(serde_json::Map::new()),
+            Some(serde_json::Value::Object(object)) => Ok(object),
+            Some(other) => {
+                tracing::warn!(
+                    key,
+                    found = json_kind(&other),
+                    "replacing a damaged setting that should hold an object"
+                );
+                Ok(serde_json::Map::new())
+            }
+        }
+    }
+
+    pub(crate) fn remembered_model_configs(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, artisan_api::EngineConfig>, StorageError> {
+        let mut configs = std::collections::BTreeMap::new();
+        for (key, value) in self.object_setting(artisan_api::MODEL_CONFIGS_KEY)? {
+            match serde_json::from_value(value) {
+                Ok(config) => {
+                    configs.insert(key, config);
+                }
+                Err(error) => tracing::warn!(
+                    key,
+                    %error,
+                    "a remembered model config doesn't read here, so it is kept but not used"
+                ),
+            }
+        }
+        Ok(configs)
+    }
+
     pub(crate) fn remember_model_config(
         &mut self,
         config: &artisan_api::EngineConfig,
-    ) -> Result<()> {
-        let mut harnesses = match read::setting(self, artisan_api::HARNESS_CONFIGS_KEY)? {
-            Some(serde_json::Value::Object(configs)) => configs,
-            _ => serde_json::Map::new(),
-        };
-        harnesses.insert(config.engine.to_string(), serde_json::to_value(config)?);
+    ) -> Result<(), WriteFailure> {
+        let mut harnesses = self.object_setting(artisan_api::HARNESS_CONFIGS_KEY)?;
+        harnesses.insert(config.engine.to_string(), to_value(config)?);
         self.save_setting(
             artisan_api::HARNESS_CONFIGS_KEY.into(),
             serde_json::Value::Object(harnesses),
@@ -516,39 +777,61 @@ impl Tx<'_> {
         let Some(model) = &config.model else {
             return Ok(());
         };
-        let mut configs = match read::setting(self, artisan_api::MODEL_CONFIGS_KEY)? {
-            Some(serde_json::Value::Object(configs)) => configs,
-            _ => serde_json::Map::new(),
-        };
+        let mut configs = self.object_setting(artisan_api::MODEL_CONFIGS_KEY)?;
+        let key = artisan_api::model_config_key(config.engine, model);
+        if let Some(kept) = configs.get(&key)
+            && let Err(error) = serde_json::from_value::<artisan_api::EngineConfig>(kept.clone())
+        {
+            tracing::warn!(
+                key,
+                %error,
+                "a remembered model config doesn't read here, so it is kept and this choice isn't remembered"
+            );
+            return Ok(());
+        }
         configs.retain(|_, value| {
-            serde_json::from_value::<artisan_api::EngineConfig>(value.clone())
-                .ok()
-                .is_none_or(|saved| {
-                    saved.engine != config.engine || saved.model.as_ref() != Some(model)
-                })
+            match serde_json::from_value::<artisan_api::EngineConfig>(value.clone()) {
+                Ok(saved) => saved.engine != config.engine || saved.model.as_ref() != Some(model),
+                Err(_kept_unread) => true,
+            }
         });
-        configs.insert(
-            artisan_api::model_config_key(config.engine, model),
-            serde_json::to_value(config)?,
-        );
+        configs.insert(key, to_value(config)?);
         self.save_setting(
             artisan_api::MODEL_CONFIGS_KEY.into(),
             serde_json::Value::Object(configs),
         )
     }
 
-    pub(crate) fn save_setting(&mut self, key: String, value: serde_json::Value) -> Result<()> {
-        if read::setting(self, &key)?.as_ref() == Some(&value) {
+    pub(crate) fn save_setting(
+        &mut self,
+        key: String,
+        value: serde_json::Value,
+    ) -> Result<(), WriteFailure> {
+        let old = read::setting(self, &key)?;
+        if old.as_ref() == Some(&value) {
             return Ok(());
+        }
+        let body = to_body(&value)?;
+        let old_bytes = old
+            .as_ref()
+            .map(to_body)
+            .transpose()?
+            .map_or(0, |old| old.len());
+        if body.len() > old_bytes {
+            let stored: u64 = self
+                .query_row(include_str!("sql/settings/bytes.sql"), [], |row| row.get(0))
+                .at("settings/bytes.sql")?;
+            let bytes = (stored + body.len() as u64).saturating_sub(old_bytes as u64);
+            if bytes > SETTINGS_BYTES {
+                return Err(WriteFailure::SettingsFull { key, bytes });
+            }
         }
         let seq = self.next_seq();
         self.sql
-            .prepare_cached(
-                "INSERT INTO kv (key, seq, value) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (key) DO UPDATE SET seq = excluded.seq, value = excluded.value",
-            )?
-            .execute(params![key, seq, to_body(&value)?])
-            .with_context(|| format!("save setting {key}"))?;
+            .prepare_cached(include_str!("sql/settings/save.sql"))
+            .at("settings/save.sql")?
+            .execute(params![key, seq, body])
+            .at("settings/save.sql")?;
         if value == serde_json::Value::Bool(false) {
             for continuation in [Continuation::Overloaded, Continuation::UsageLimit] {
                 if crate::park_setting(continuation) == Some(key.as_str()) {
@@ -560,28 +843,39 @@ impl Tx<'_> {
         Ok(())
     }
 
-    pub(crate) fn recover_threads(&mut self, threads: Option<Vec<ThreadId>>) -> Result<()> {
-        let scope = threads
-            .map(|threads| serde_json::to_string(&threads))
-            .transpose()?;
-        let ended_at = now();
-        let runs: Vec<Run> = read::many(self, include_str!("sql/recovery/runs.sql"), [&scope])?;
+    pub(crate) fn recover_threads(
+        &mut self,
+        threads: Option<Vec<ThreadId>>,
+    ) -> Result<(), WriteFailure> {
+        let scope = threads.map(|threads| to_body(&threads)).transpose()?;
+        let ended_at = self.now();
+        let runs: Vec<Run> = read::many(
+            self,
+            "recovery/runs.sql",
+            include_str!("sql/recovery/runs.sql"),
+            [&scope],
+        )?;
         let interrupted = runs.len();
         let mut continued = 0;
         for mut run in runs {
-            run.status = RunStatus::Interrupted;
-            run.ended_at.get_or_insert(ended_at);
+            run.finish(RunOutcome::Interrupted, None, ended_at)
+                .expect("invariant: recovery reads only runs that are still running");
             let run = self.save_run(run)?;
             if self.continue_after_restart(&run)? {
                 continued += 1;
             }
         }
-        let items: Vec<Item> = read::items(self, include_str!("sql/recovery/items.sql"), [&scope])?;
+        let items: Vec<Item> = read::items(
+            self,
+            "recovery/items.sql",
+            include_str!("sql/recovery/items.sql"),
+            [&scope],
+        )?;
         let mut cancelled = 0;
         for mut item in items {
             if matches!(
                 item.kind,
-                artisan_api::ItemKind::Question {
+                ItemKind::Question {
                     blocking: false,
                     ..
                 }
@@ -589,11 +883,9 @@ impl Tx<'_> {
             {
                 continue;
             }
-            // An agent Forge started runs in its own thread, which recovers
-            // (and carries on) by itself; its item follows that thread.
             if matches!(
                 item.kind,
-                artisan_api::ItemKind::Agent {
+                ItemKind::Agent {
                     thread: Some(_),
                     ..
                 }
@@ -616,12 +908,20 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Queues a run a restart cut short to carry on by itself, unless that
-    /// is turned off; returns whether it did. See [`Self::may_carry_on`].
     pub(crate) fn continue_after_restart(&self, run: &Run) -> Result<bool> {
-        let enabled = read::setting(self, CONTINUE_AFTER_RESTART_KEY)?
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true);
+        let stored = read::setting(self, CONTINUE_AFTER_RESTART_KEY)?;
+        let enabled =
+            match artisan_api::switch_decl(CONTINUE_AFTER_RESTART_KEY).switch(stored.as_ref()) {
+                artisan_api::Switch::Damaged(on) => {
+                    tracing::warn!(
+                        key = CONTINUE_AFTER_RESTART_KEY,
+                        on,
+                        "the setting is neither on nor off, so it follows its default"
+                    );
+                    on
+                }
+                artisan_api::Switch::Stored(on) | artisan_api::Switch::Unset(on) => on,
+            };
         if !enabled || !self.may_carry_on(run)? {
             return Ok(false);
         }
@@ -629,9 +929,6 @@ impl Tx<'_> {
         Ok(true)
     }
 
-    /// Whether a run that stopped short (a restart, a failure that passes)
-    /// carries on: its engine session exists, nothing newer is waiting to
-    /// go, and a turn that keeps taking Forge down doesn't restart it forever.
     fn may_carry_on(&self, run: &Run) -> Result<bool> {
         if run.session_id.is_none() {
             return Ok(false);
@@ -642,17 +939,17 @@ impl Tx<'_> {
         if thread.archived {
             return Ok(false);
         }
-        // Undelivered messages start the next run anyway.
-        let pending: bool = self.query_row(
-            "SELECT EXISTS(SELECT 1 FROM items WHERE thread_id=?1 AND status='running'
-                AND kind_type='user_message')",
-            [run.thread_id.as_str()],
-            |row| row.get(0),
-        )?;
+        let pending: bool = self
+            .query_row(
+                include_str!("sql/items/has_running_input.sql"),
+                [run.thread_id.as_str()],
+                |row| row.get(0),
+            )
+            .at("items/has_running_input.sql")?;
         if pending {
             return Ok(false);
         }
-        if run.status != RunStatus::Interrupted {
+        if run.status() != RunStatus::Interrupted {
             return Ok(true);
         }
         let chain = self.continuation_chain(
@@ -663,80 +960,64 @@ impl Tx<'_> {
         Ok(chain < MAX_RESTART_CONTINUATIONS)
     }
 
-    /// Asks for the thread's stopped turn to carry on; the dispatcher
-    /// starts it like pending input. A request already waiting stays.
     pub(crate) fn request_continue(
         &self,
-        thread: &artisan_api::ThreadId,
+        thread: &ThreadId,
         continuation: Continuation,
     ) -> Result<()> {
         self.sql
-            .prepare_cached(
-                "INSERT INTO continues (thread_id, seq, reason) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (thread_id) DO NOTHING",
-            )?
-            .execute(params![thread.as_str(), self.seq, tag(&continuation)?])
-            .with_context(|| format!("ask thread {thread} to continue"))?;
+            .prepare_cached(include_str!("sql/continues/request.sql"))
+            .at("continues/request.sql")?
+            .execute(params![thread.as_str(), self.seq, tag(&continuation)])
+            .at("continues/request.sql")?;
         Ok(())
     }
 
-    /// Parks the thread's failed turn until `park.due_at`, when the
-    /// dispatcher starts it like any continue request; the thread shows
-    /// when. Turns parking can't help (no session to resume, archived,
-    /// messages already waiting) stay failed. Returns whether it parked.
     pub(crate) fn park(&mut self, run: &Run, park: crate::Park) -> Result<bool> {
         if !self.may_carry_on(run)? {
             return Ok(false);
         }
         self.sql
-            .prepare_cached(
-                "INSERT INTO continues (thread_id, seq, reason, due_at) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (thread_id) DO UPDATE SET seq = excluded.seq,
-                   reason = excluded.reason, due_at = excluded.due_at",
-            )?
+            .prepare_cached(include_str!("sql/continues/park.sql"))
+            .at("continues/park.sql")?
             .execute(params![
                 run.thread_id.as_str(),
                 self.seq,
-                tag(&park.continuation)?,
+                tag(&park.continuation),
                 park.due_at
             ])
-            .with_context(|| format!("park thread {}", run.thread_id))?;
+            .at("continues/park.sql")?;
         self.set_parked(&run.thread_id, Some(park.due_at))?;
         Ok(true)
     }
 
-    /// Drops the thread's parked turn, if it has one: the user stopped it,
-    /// archived the thread or turned the setting off. Returns whether it had one.
-    pub(crate) fn unpark(&mut self, thread: &artisan_api::ThreadId) -> Result<bool> {
+    pub(crate) fn unpark(&mut self, thread: &ThreadId) -> Result<bool> {
         let dropped = self
             .sql
-            .prepare_cached("DELETE FROM continues WHERE thread_id=?1 AND due_at IS NOT NULL")?
+            .prepare_cached(include_str!("sql/continues/unpark.sql"))
+            .at("continues/unpark.sql")?
             .execute([thread.as_str()])
-            .with_context(|| format!("unpark thread {thread}"))?;
+            .at("continues/unpark.sql")?;
         self.set_parked(thread, None)?;
         Ok(dropped > 0)
     }
 
-    /// Drops every turn parked for `continuation`, when its setting goes off.
-    pub(crate) fn unpark_all(&mut self, continuation: Continuation) -> Result<()> {
+    fn unpark_all(&mut self, continuation: Continuation) -> Result<()> {
         let threads: Vec<String> = self
             .sql
-            .prepare_cached(
-                "SELECT thread_id FROM continues WHERE reason=?1 AND due_at IS NOT NULL",
-            )?
-            .query_map([tag(&continuation)?], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
+            .prepare_cached(include_str!("sql/continues/parked_for.sql"))
+            .at("continues/parked_for.sql")?
+            .query_map([tag(&continuation)], |row| row.get(0))
+            .at("continues/parked_for.sql")?
+            .collect::<rusqlite::Result<_>>()
+            .at("continues/parked_for.sql")?;
         for thread in threads {
-            self.unpark(&artisan_api::ThreadId(thread))?;
+            self.unpark(&ThreadId(thread))?;
         }
         Ok(())
     }
 
-    fn set_parked(
-        &mut self,
-        thread: &artisan_api::ThreadId,
-        until: Option<artisan_api::Timestamp>,
-    ) -> Result<()> {
+    fn set_parked(&mut self, thread: &ThreadId, until: Option<Timestamp>) -> Result<()> {
         if let Some(mut saved) = read::thread(self, thread)?
             && saved.parked_until != until
         {
@@ -746,17 +1027,16 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// How many runs in a row, newest first, carried the thread's turn on
-    /// for `continuation`.
     pub(crate) fn continuation_chain(
         &self,
-        thread: &artisan_api::ThreadId,
+        thread: &ThreadId,
         continuation: Continuation,
         limit: usize,
     ) -> Result<usize> {
         let recent: Vec<Run> = read::many(
             self,
-            "SELECT body FROM runs WHERE thread_id=?1 ORDER BY rowid DESC LIMIT ?2",
+            "runs/chain.sql",
+            include_str!("sql/runs/chain.sql"),
             params![thread.as_str(), limit],
         )?;
         Ok(recent
@@ -765,21 +1045,26 @@ impl Tx<'_> {
             .count())
     }
 
-    /// Takes the thread's continue request, if it has one.
-    pub(crate) fn take_continue(
-        &mut self,
-        thread: &artisan_api::ThreadId,
-    ) -> Result<Option<Continuation>> {
+    pub(crate) fn take_continue(&mut self, thread: &ThreadId) -> Result<Option<Continuation>> {
         let reason: Option<String> = self
             .sql
-            .prepare_cached("DELETE FROM continues WHERE thread_id=?1 RETURNING reason")?
+            .prepare_cached(include_str!("sql/continues/take.sql"))
+            .at("continues/take.sql")?
             .query_row([thread.as_str()], |row| row.get(0))
             .optional()
-            .with_context(|| format!("take the continue request of thread {thread}"))?;
+            .at("continues/take.sql")?;
         self.set_parked(thread, None)?;
-        reason
-            .map(|reason| serde_json::from_value(serde_json::Value::String(reason)))
-            .transpose()
-            .context("read a continue request")
+        reason.map(read::untag).transpose()
+    }
+}
+
+pub(crate) const fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
     }
 }

@@ -2,33 +2,32 @@ pub mod compaction;
 pub mod factory;
 pub mod motion;
 pub mod navigator;
-pub mod notice;
-pub mod request;
+mod notice;
+mod request;
 pub mod resources;
 pub mod reveal;
-pub mod row;
 pub mod row_cache;
 pub mod row_sources;
 pub mod source_actions;
 pub mod status;
 pub mod transcript;
-pub mod work;
+pub(crate) mod work;
 
 use crate::conversation::adapter::{Action, RowModel};
 use crate::conversation::disclosure::RowDisclosure;
 use crate::conversation::fold::Row;
-use editor_ui::kit::{Button, ButtonTone, Divider, IconSize, Space};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
+use editor_ui::kit::{Button, ButtonTone, Divider, IconSize, Space};
+use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
 pub type Dispatch = Rc<dyn Fn(Action)>;
 
-pub const COLUMN_MAX: f32 = 768.0;
-pub const GUTTER: Space = Space::S24;
-pub const CHAIN_INDENT: Space = Space::S24;
+const COLUMN_MAX: f32 = 768.0;
+const GUTTER: Space = Space::S24;
+const CHAIN_INDENT: Space = Space::S24;
 const CHAIN_RULE: f32 = 2.0;
 const STATUS_TAIL: Space = Space::S8;
 const EDGE_INSET: Space = Space::S2;
@@ -36,8 +35,8 @@ const COMPOSER_LIFT: Space = Space::S24;
 const COMPOSER_LIFT_NARROW: Space = Space::S16;
 const NARROW: f32 = 640.0;
 
-pub fn reading_width(viewport: f32) -> f32 {
-    viewport.min(COLUMN_MAX) - 2.0 * GUTTER.px()
+fn reading_width(viewport: f32) -> f32 {
+    2.0f32.mul_add(-GUTTER.px(), viewport.min(COLUMN_MAX))
 }
 
 fn strut(width: f32) -> Element {
@@ -81,7 +80,7 @@ pub fn scoped_dispatch(
     Some(Rc::new(move |action| emit(scope.bind(action))))
 }
 
-pub fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<Element> {
+fn load_row(row: &Row, theme: &ArtisanTheme, dispatch: Dispatch) -> Option<Element> {
     let (key, label, action) = match row {
         Row::EarlierWork { first, .. } => (
             format!("earlier-work-{first}"),
@@ -93,9 +92,20 @@ pub fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<El
             "Load newer messages",
             Action::LoadNewer,
         ),
-        _ => return None,
+        Row::Projected { .. }
+        | Row::Work { .. }
+        | Row::WorkHeader(_)
+        | Row::WorkEntry { .. }
+        | Row::Chain { .. }
+        | Row::Text { .. }
+        | Row::Prompt(_)
+        | Row::Compaction(_)
+        | Row::Image(_)
+        | Row::Status(_)
+        | Row::AgentResult(_)
+        | Row::AgentStatus(..) => return None,
     };
-    let button = Button::text(key, theme, ButtonTone::Neutral, label)
+    let button = Button::text(key, *theme, ButtonTone::Neutral, label)
         .on_activate(move |_| {
             dispatch(action.clone());
         })
@@ -110,12 +120,12 @@ pub fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<El
     )
 }
 
-pub fn row_frame(
+pub(crate) fn row_frame(
     model: &RowModel,
     disclosure: RowDisclosure,
     held: bool,
     content: Option<Element>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
 ) -> Element {
     row_frame_with_body_observer(model, disclosure, held, content, theme, None)
 }
@@ -125,7 +135,7 @@ fn row_frame_with_body_observer(
     disclosure: RowDisclosure,
     held: bool,
     content: Option<Element>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     body_observer: Option<Rc<dyn Fn(aqua_core::Rect)>>,
 ) -> Element {
     let gap = disclosure.gap.unwrap_or(model.gap);
@@ -136,7 +146,18 @@ fn row_frame_with_body_observer(
             .get(id)
             .is_some_and(|item| crate::conversation::activity::category(item).is_some()),
         Row::Text { slot, .. } => slot.is_card(),
-        _ => false,
+        Row::Projected { .. }
+        | Row::Work { .. }
+        | Row::WorkHeader(_)
+        | Row::EarlierWork { .. }
+        | Row::Chain { .. }
+        | Row::Prompt(_)
+        | Row::Compaction(_)
+        | Row::Image(_)
+        | Row::Gap
+        | Row::Status(_)
+        | Row::AgentResult(_)
+        | Row::AgentStatus(..) => false,
     };
     let content = content.map(|content| {
         if !chained {
@@ -144,7 +165,7 @@ fn row_frame_with_body_observer(
         }
         let rule = UiBox::new()
             .width(CHAIN_RULE)
-            .style(Divider::guide(&theme))
+            .style(Divider::guide(theme))
             .style(Style::new().absolute_at(
                 Some((IconSize::Md.px() - CHAIN_RULE) / 2.0),
                 Some(-gap),
@@ -160,13 +181,15 @@ fn row_frame_with_body_observer(
             .child(filling(content))
             .build()
     });
-    let top = match content.is_some() && !held && !deferred {
-        true => gap,
-        false => 0.0,
+    let top = if content.is_some() && !held && !deferred {
+        gap
+    } else {
+        0.0
     };
-    let tail = match content.is_some() && matches!(model.row, Row::Status(_)) {
-        true => STATUS_TAIL.px(),
-        false => 0.0,
+    let tail = if content.is_some() && matches!(model.row, Row::Status(_)) {
+        STATUS_TAIL.px()
+    } else {
+        0.0
     };
     let mut column = UiBox::new()
         .layout("column")
@@ -213,12 +236,12 @@ fn row_frame_with_body_observer(
         .build()
 }
 
-pub fn measured_row_frame(
+fn measured_row_frame(
     model: &RowModel,
     disclosure: RowDisclosure,
     held: bool,
     content: Option<Element>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     body_observer: Rc<dyn Fn(aqua_core::Rect)>,
     painted: Rc<dyn Fn(aqua_core::Rect)>,
 ) -> Element {
@@ -246,9 +269,10 @@ pub const TRANSCRIPT_FRAME: &str = "conversation-transcript-frame";
 
 #[must_use]
 pub fn composer_lift(viewport_width: f32) -> f32 {
-    match viewport_width >= NARROW {
-        true => COMPOSER_LIFT,
-        false => COMPOSER_LIFT_NARROW,
+    if viewport_width >= NARROW {
+        COMPOSER_LIFT
+    } else {
+        COMPOSER_LIFT_NARROW
     }
     .px()
 }
@@ -316,126 +340,25 @@ pub fn thread_frame(
     .build()
 }
 
-pub fn observed_row_frame(
-    model: &RowModel,
-    disclosure: RowDisclosure,
-    held: bool,
-    content: Option<Element>,
-    theme: ArtisanTheme,
-    observed: Rc<dyn Fn(aqua_core::Rect)>,
-) -> Element {
-    let frame = row_frame(model, disclosure, held, content, theme);
-    let probe = aqua_ui::element::Canvas::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-        .on_observe(move |tree, node| {
-            if let Some(bounds) = tree.pre_transform_rect(node) {
-                observed(bounds);
-            }
-        })
-        .build()
-        .exclude_from_hit_testing();
-    UiBox::new()
-        .width(Length::Pct(100.0))
-        .child(frame)
-        .child(probe)
-        .build()
-}
-
-pub fn thread_element(
-    conversation: &crate::conversation::controller::Conversation,
-    estimated_height: f32,
-    row: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> Element>,
-    viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    composer: Option<Element>,
-    viewport_width: f32,
-) -> Element {
-    let list = transcript::list(
-        conversation,
-        estimated_height,
-        row,
-        viewport,
-        initial_height,
-    );
-    thread_frame(
-        list,
-        overlays,
-        composer,
-        None,
-        viewport_width,
-        conversation.reveal(std::time::Instant::now()),
-    )
-}
-
-pub fn try_thread_element(
-    conversation: &crate::conversation::controller::Conversation,
-    estimated_height: f32,
-    row: transcript::PreparedRowFactory,
-    viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    composer: Option<Element>,
-    viewport_width: f32,
-) -> Element {
-    let list = transcript::try_list(
-        conversation,
-        estimated_height,
-        row,
-        viewport,
-        initial_height,
-    );
-    thread_frame(
-        list,
-        overlays,
-        composer,
-        None,
-        viewport_width,
-        conversation.reveal(std::time::Instant::now()),
-    )
-}
-
-pub fn batched_thread_element(
-    conversation: &crate::conversation::controller::Conversation,
-    estimated_height: f32,
-    row: transcript::BatchedRowFactory,
-    viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    composer: Option<Element>,
-    viewport_width: f32,
-) -> Element {
-    let list = transcript::batched_list(
-        conversation,
-        estimated_height,
-        row,
-        viewport,
-        initial_height,
-    );
-    thread_frame(
-        list,
-        overlays,
-        composer,
-        None,
-        viewport_width,
-        conversation.reveal(std::time::Instant::now()),
-    )
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the batched thread layout composes the row factory, viewport, overlays, composer and drawer"
+)]
 pub fn layout_batched_thread_element(
     conversation: &crate::conversation::controller::Conversation,
     estimated_height: f32,
     row: transcript::LayoutBatchedRowFactory,
     revision: transcript::RowRevision,
     viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
+    initial_height: transcript::InitialHeight,
+    mut overlays: Vec<Element>,
     composer: Option<Element>,
     drawer: Option<Element>,
     viewport_width: f32,
 ) -> Element {
+    overlays.push(crate::conversation::announce::announcer(
+        &crate::conversation::announce::current(conversation),
+    ));
     let list = transcript::layout_batched_list(
         conversation,
         estimated_height,
@@ -450,6 +373,6 @@ pub fn layout_batched_thread_element(
         composer,
         drawer,
         viewport_width,
-        conversation.reveal(std::time::Instant::now()),
+        conversation.reveal(conversation.clock().now()),
     )
 }

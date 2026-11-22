@@ -18,8 +18,7 @@ fn key(key: NamedKey) -> InputEvent {
     })
 }
 
-#[test]
-fn navigation_copies_the_selected_original_payload_and_dismisses() {
+fn focused_owner() -> (UiApp, aqua_core::NodeId) {
     let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         UiBox::new()
@@ -40,8 +39,14 @@ fn navigation_copies_the_selected_original_payload_and_dismisses() {
     app.build_frame().unwrap();
     assert!(app.focus_key("owner"));
     let owner = app.tree().focused().unwrap();
+    (app, owner)
+}
+
+#[test]
+fn navigation_copies_the_selected_original_payload_and_dismisses() {
+    let (mut app, owner) = focused_owner();
     let effects = Rc::new(RefCell::new(Vec::new()));
-    let capture = effects.clone();
+    let capture = Rc::clone(&effects);
     let menu = ShowCopyMenu {
         position: Point::new(30.0, 30.0),
         entries: vec![
@@ -62,10 +67,10 @@ fn navigation_copies_the_selected_original_payload_and_dismisses() {
     .unwrap()
     .unwrap();
     app.build_frame().unwrap();
-    assert!(host.handle_input(&mut app, &key(NamedKey::Down)));
-    assert!(host.handle_input(&mut app, &key(NamedKey::Down)));
-    host.handle_input(&mut app, &key(NamedKey::Enter));
-    host.sync(&mut app);
+    assert!(host.handle_input(&mut app, &key(NamedKey::Down)).unwrap());
+    assert!(host.handle_input(&mut app, &key(NamedKey::Down)).unwrap());
+    host.handle_input(&mut app, &key(NamedKey::Enter)).unwrap();
+    host.sync(&mut app).unwrap();
     assert!(!host.is_open(&app));
     assert_eq!(app.tree().focused(), Some(owner));
     let effects = effects.borrow();
@@ -81,28 +86,9 @@ fn navigation_copies_the_selected_original_payload_and_dismisses() {
 
 #[test]
 fn disposal_during_entrance_releases_motion_and_restores_focus() {
-    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.mount(|_| {
-        UiBox::new()
-            .width(400.0)
-            .height(300.0)
-            .child(
-                UiBox::new()
-                    .width(80.0)
-                    .height(30.0)
-                    .build()
-                    .with_key("owner")
-                    .focusable(true),
-            )
-            .build()
-    })
-    .unwrap();
-    app.set_viewport(400.0, 300.0, 1.0);
-    app.build_frame().unwrap();
-    assert!(app.focus_key("owner"));
-    let owner = app.tree().focused().unwrap();
+    let (mut app, owner) = focused_owner();
     let effects = Rc::new(RefCell::new(Vec::new()));
-    let capture = effects.clone();
+    let capture = Rc::clone(&effects);
     let menu = ShowCopyMenu {
         position: Point::new(30.0, 30.0),
         entries: vec![CopyEntry::primary("Copy Value", "red")],

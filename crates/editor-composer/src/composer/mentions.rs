@@ -3,38 +3,37 @@ use std::ops::Range;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Trigger {
-    pub sigil: char,
-    pub range: Range<usize>,
-    pub query: String,
-    pub at_start: bool,
+    sigil: char,
+    range: Range<usize>,
+    query: String,
+    at_start: bool,
 }
 
-pub fn trigger(text: &str, caret: usize) -> Option<Trigger> {
-    if caret > text.len() || !text.is_char_boundary(caret) {
-        return None;
-    }
-    let start = text[..caret]
+fn trigger(text: &str, caret: usize) -> Option<Trigger> {
+    let (before, after) = text.split_at_checked(caret)?;
+    let start = before
         .char_indices()
         .rev()
         .find(|(_, c)| c.is_whitespace())
         .map_or(0, |(at, c)| at + c.len_utf8());
-    let sigil = text[start..]
+    let (lead, word) = before.split_at_checked(start)?;
+    let sigil = word
         .chars()
         .next()
         .filter(|sigil| matches!(sigil, '$' | '@' | '/'))?;
-    let query_start = start + sigil.len_utf8();
-    if caret < query_start || caret - query_start > MAX_SKILL_NAME_BYTES {
+    let query = word.get(sigil.len_utf8()..)?;
+    if query.len() > MAX_SKILL_NAME_BYTES {
         return None;
     }
-    let end = text[caret..]
+    let end = after
         .char_indices()
         .find(|(_, c)| c.is_whitespace())
         .map_or(text.len(), |(at, _)| caret + at);
     Some(Trigger {
         sigil,
         range: start..end,
-        query: text[query_start..caret].to_owned(),
-        at_start: text[..start].trim().is_empty(),
+        query: query.to_owned(),
+        at_start: lead.trim().is_empty(),
     })
 }
 
@@ -46,7 +45,7 @@ pub enum Kind {
     Thread,
 }
 impl Kind {
-    pub const fn sigil(self) -> char {
+    const fn sigil(self) -> char {
         match self {
             Self::Skill => '$',
             Self::Connector | Self::Thread => '@',
@@ -57,10 +56,10 @@ impl Kind {
 
 #[derive(Clone, Debug)]
 pub struct Row {
-    pub kind: Kind,
-    pub name: String,
-    pub title: String,
-    pub description: String,
+    pub(crate) kind: Kind,
+    name: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
     search_name: String,
     search_title: String,
 }
@@ -68,13 +67,15 @@ pub struct Row {
 impl Row {
     #[must_use]
     pub fn new(kind: Kind, name: String, title: String, description: String) -> Self {
+        let search_name = name.to_lowercase();
+        let search_title = title.to_lowercase();
         Self {
             kind,
-            search_name: name.to_lowercase(),
-            search_title: title.to_lowercase(),
             name,
             title,
             description,
+            search_name,
+            search_title,
         }
     }
 }
@@ -92,11 +93,11 @@ enum Steering {
     Keys,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Mentions {
     pub catalog: Vec<Row>,
-    pub threads: Vec<String>,
-    pub current: Option<Trigger>,
+    threads: Vec<String>,
+    pub(crate) current: Option<Trigger>,
     pub rows: Vec<usize>,
     pub highlighted: usize,
     reveal: Option<Reveal>,
@@ -106,8 +107,26 @@ pub struct Mentions {
     dismissed: Option<(usize, String)>,
 }
 
+fn offered_threads<'a, T>(
+    newest_first: impl IntoIterator<Item = (T, &'a str, bool)>,
+) -> (Vec<(T, &'a str)>, Vec<String>) {
+    let mut titles = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut offered = Vec::new();
+    let mut offered_titles = std::collections::HashSet::new();
+    for (thread, title, archived) in newest_first {
+        if seen.insert(title) {
+            titles.push(title.to_owned());
+        }
+        if !archived && offered_titles.insert(title) {
+            offered.push((thread, title));
+        }
+    }
+    (offered, titles)
+}
+
 impl Mentions {
-    pub fn refresh(
+    pub(crate) fn refresh(
         &mut self,
         host: &editor_core::HostData,
         engine: Option<artisan_api::EngineId>,
@@ -130,15 +149,12 @@ impl Mentions {
                 add(Kind::Skill, skill.name.clone(), skill.description.clone());
             }
         }
-        if let Some(Ok(servers)) = host
-            .setting("mcp_servers")
-            .map(|value| serde_json::from_value::<Vec<artisan_api::McpServer>>(value.clone()))
-        {
+        if let Ok(servers) = host.mcp_servers() {
             for server in servers {
                 add(
                     Kind::Connector,
-                    server.name,
-                    server.url.unwrap_or(server.command),
+                    server.name.clone(),
+                    server.url.clone().unwrap_or_else(|| server.command.clone()),
                 );
             }
         }
@@ -166,16 +182,12 @@ impl Mentions {
         threads.sort_by(|(a, _), (b, _)| {
             (b.activity_seq, b.seq, &b.id).cmp(&(a.activity_seq, a.seq, &a.id))
         });
-        let mut titles = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (thread, title) in threads {
-            if !seen.insert(title) {
-                continue;
-            }
-            titles.push(title.to_owned());
-            if thread.archived {
-                continue;
-            }
+        let (offered, titles) = offered_threads(
+            threads
+                .into_iter()
+                .map(|(thread, title)| (thread, title, thread.archived)),
+        );
+        for (thread, title) in offered {
             rows.push(Row::new(
                 Kind::Thread,
                 title.to_owned(),
@@ -242,7 +254,7 @@ impl Mentions {
         self.highlighted = self.first_of_trigger();
         self.reveal_at(Reveal::Section);
     }
-    pub fn clear_trigger(&mut self) {
+    pub(crate) fn clear_trigger(&mut self) {
         if self.current.is_some() {
             self.current = None;
             self.dismissed = None;
@@ -251,13 +263,13 @@ impl Mentions {
         }
     }
 
-    pub fn dismiss(&mut self) {
+    pub(crate) fn dismiss(&mut self) {
         if let Some(trigger) = &self.current {
             self.dismissed = Some((trigger.range.start, trigger.query.clone()));
         }
         self.rebuild();
     }
-    pub fn up(&mut self) {
+    pub(crate) fn up(&mut self) {
         if !self.rows.is_empty() {
             self.highlighted = (self.highlighted + self.rows.len() - 1) % self.rows.len();
             self.steer_by_keys();
@@ -273,7 +285,7 @@ impl Mentions {
         self.steering = Steering::Keys;
         self.reveal_at(Reveal::Highlighted);
     }
-    pub fn hover(&mut self, index: usize, inside: bool) {
+    pub(crate) fn hover(&mut self, index: usize, inside: bool) {
         match inside {
             true if index < self.rows.len() => {
                 self.hovered = Some(index);
@@ -289,7 +301,7 @@ impl Mentions {
             }
         }
     }
-    pub fn pointer_at(&mut self, pointer: Option<aqua_core::Point>) -> bool {
+    pub(crate) fn pointer_at(&mut self, pointer: Option<aqua_core::Point>) -> bool {
         if pointer == self.pointer {
             return false;
         }
@@ -306,7 +318,7 @@ impl Mentions {
             Some(_) | None => false,
         }
     }
-    pub fn kinds(&self) -> Vec<Kind> {
+    fn kinds(&self) -> Vec<Kind> {
         self.rows
             .iter()
             .filter_map(|index| self.catalog.get(*index).map(|row| row.kind))
@@ -316,12 +328,12 @@ impl Mentions {
         self.reveal = Some(reveal);
     }
 
-    pub const fn mark_revealed(&mut self) {
+    pub(crate) const fn mark_revealed(&mut self) {
         self.reveal = None;
     }
 
     #[must_use]
-    pub fn scroll(&self, kept: f32, metrics: Metrics) -> f32 {
+    pub(crate) fn scroll(&self, kept: f32, metrics: Metrics) -> f32 {
         self.reveal.map_or(kept, |reveal| {
             scroll_offset(&self.kinds(), self.highlighted, reveal, kept, metrics)
         })
@@ -339,7 +351,7 @@ impl Mentions {
             })
             .unwrap_or(0)
     }
-    pub fn replacement(&self, text: &str, index: usize) -> Option<(Range<usize>, String)> {
+    pub(crate) fn replacement(&self, text: &str, index: usize) -> Option<(Range<usize>, String)> {
         let trigger = self.current.as_ref()?;
         let row = self.catalog.get(*self.rows.get(index)?)?;
         let tail = text.get(trigger.range.end..)?;
@@ -436,7 +448,7 @@ impl Mentions {
                 .map(|row| row.name.as_str())
                 .collect::<Vec<_>>(),
         );
-        let threads = self.threads.clone();
+        let threads = artisan_mentions::ThreadTitles::new(&self.threads);
         let colors = theme.colors;
         std::rc::Rc::new(move |text| {
             let mut tokens = Vec::new();
@@ -463,8 +475,7 @@ impl Mentions {
                     });
                 }
             }
-            let titles = threads.iter().map(String::as_str).collect::<Vec<_>>();
-            for mention in artisan_mentions::thread_mentions(text, &titles) {
+            for mention in threads.mentions(text) {
                 tokens.push(StyledToken {
                     range: mention.range,
                     glyph: Some(editor_assets::AssetId::TABLER_MESSAGE_CIRCLE),
@@ -496,10 +507,10 @@ impl Mentions {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
-    pub divider: f32,
-    pub heading: f32,
-    pub row: f32,
-    pub viewport: f32,
+    pub(crate) divider: f32,
+    pub(crate) heading: f32,
+    pub(crate) row: f32,
+    pub(crate) viewport: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -546,9 +557,10 @@ fn scroll_offset(
         return kept.clamp(0.0, max);
     };
     let section_first = highlighted == 0 || kinds.get(highlighted - 1) != kinds.get(highlighted);
-    let top = match section_first {
-        true => span.section_top,
-        false => span.top,
+    let top = if section_first {
+        span.section_top
+    } else {
+        span.top
     };
     let offset = match reveal {
         Reveal::Section => top,

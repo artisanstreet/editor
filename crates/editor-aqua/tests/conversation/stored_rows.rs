@@ -1,146 +1,109 @@
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
-use aqua_text::{SharedFonts, SharedRuns};
-use artisan_api::{
-    Collection, CollectionRef, ContentId, ContentRef, Item, ItemId, ItemKind, Status, ThreadId,
-};
-use editor_aqua::conversation::adapter::RowModel;
+use artisan_api::ThreadId;
+use artisan_api::{Collection, CollectionRef, ContentId, ContentRef, Item, ItemKind, Status};
+use axum::http::StatusCode;
 use editor_aqua::conversation::controller::Conversation;
 use editor_aqua::conversation::fold::{Row, RowKey};
-use editor_aqua::conversation::presentation::{MarkdownOwners, PresentationScope};
-use editor_aqua::conversation::view::factory::{RealizedRow, RowFactory};
+use editor_aqua::conversation::presentation::MarkdownOwners;
+use editor_aqua::conversation::presentation::PresentationScope;
+use editor_aqua::conversation::view::factory::{RowServiceParts, RowServices};
 use editor_aqua::conversation::view::row_cache::RowCache;
-use editor_aqua::conversation::view::status::StatusShimmers;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+use test_support::editor::core::{StubbedHost, connect, remote_host, test_core};
+use test_support::editor::forge::empty_state;
+use test_support::editor::rows::{
+    listed, realized, row_factory, row_list, row_model, service_parts, source_ids,
+};
+use test_support::editor::ui::{click, mount, mounted, ui_app};
+use test_support::items::item;
 
 fn question(id: &str, digit: char) -> Arc<Item> {
     Arc::new(Item {
-        id: ItemId(id.into()),
-        thread_id: ThreadId("thread".into()),
         position: if id == "one" { 1 } else { 2 },
-        seq: 1,
-        run_id: None,
-        parent_id: None,
         status: Status::AwaitingUser,
-        created_at: 0,
-        updated_at: 0,
-        kind: ItemKind::Question {
-            blocking: true,
-            questions: Collection::Stored(CollectionRef {
-                source: ContentRef {
-                    id: ContentId(digit.to_string().repeat(64)),
-                    bytes: 10,
-                    lines: 1,
-                },
-                count: 1,
-            }),
-            answers: None,
-            answer_text: None,
-        },
+        ..item(
+            id,
+            "thread",
+            1,
+            ItemKind::Question {
+                blocking: true,
+                questions: Collection::Stored(CollectionRef {
+                    source: ContentRef {
+                        id: ContentId(digit.to_string().repeat(64)),
+                        bytes: 10,
+                        lines: 1,
+                    },
+                    count: 1,
+                }),
+                answers: None,
+                answer_text: None,
+            },
+        )
     })
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one eviction scenario walked step by step"
+)]
 fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_eviction() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
-    let config = HostConfig {
-        id: HostId("question-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    core.add_test_host(&config, client);
-    let mut conversation = Conversation::new(&core);
-    conversation.open_thread(&mut core, config.id.clone(), ThreadId("thread".into()));
-    let scope = PresentationScope::capture(&conversation, &core).unwrap();
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    let mut conversation = Conversation::new(&stubbed.core);
+    let host = stubbed.host.clone();
+    conversation.open_thread(&mut stubbed.core, host, ThreadId::from("thread"));
+    let scope = PresentationScope::capture(&conversation, &stubbed.core).unwrap();
+    let StubbedHost {
+        core,
+        forge,
+        directory: _directory,
+        ..
+    } = stubbed;
     let provider = core.source_provider(&scope.host, scope.instance).unwrap();
+    let sources = provider.clone();
     let cache = Rc::new(RefCell::new(RowCache::default()));
     let markdown = Rc::new(RefCell::new(MarkdownOwners::new(SelectionDocumentId(415))));
     let items = [question("one", '1'), question("two", '2')];
     let rows = items
         .iter()
-        .map(|item| RealizedRow {
-            model: RowModel {
-                row: Row::Prompt(item.id.clone()),
-                version: 1,
-                items: HashMap::from([(item.id.clone(), item.clone())]),
-                live: HashMap::new(),
-                ui: HashMap::new(),
-                run: None,
-                author: None,
-                gap: 0.0,
-                end: 0.0,
-            },
-            disclosure: Default::default(),
-            held: false,
-        })
+        .map(|item| realized(row_model(Row::Prompt(item.id.clone()), [Arc::clone(item)])))
         .collect();
-    let ids = Rc::new(Cell::new(0));
-    let allocate = ids.clone();
+    let (ids, allocate) = source_ids(0);
     let emitted = Rc::new(RefCell::new(Vec::new()));
-    let capture = emitted.clone();
+    let capture = Rc::clone(&emitted);
     let factory = Rc::new(
-        RowFactory::new(
+        row_factory(
+            RowServices::new(
+                &scope,
+                RowServiceParts {
+                    provider: sources,
+                    document: SelectionDocumentId(415),
+                    on_source: Rc::new(move |action| capture.borrow_mut().push(action)),
+                    ..service_parts(&core, &scope)
+                },
+            )
+            .unwrap(),
             rows,
             scope.clone(),
             markdown,
-            Rc::new(RefCell::new(StatusShimmers::default())),
-            *ArtisanTheme::for_mode(ThemeMode::Dark),
             true,
-            Rc::new(move || {
-                allocate.set(allocate.get() + 1);
-                SelectionSourceId(allocate.get())
-            }),
-            Rc::new(|| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
+            allocate,
         )
-        .with_row_cache(cache.clone())
-        .with_sources(
-            provider.clone(),
-            SelectionDocumentId(415),
-            Rc::new(move |action| capture.borrow_mut().push(action)),
-        )
-        .unwrap(),
+        .with_row_cache(Rc::clone(&cache)),
     );
     let keys = [
         RowKey::Item(items[0].id.clone()),
         RowKey::Item(items[1].id.clone()),
     ];
-    let callback = factory.callback();
-    let callback_keys = keys.clone();
-    let list = aqua_ui::collection::List::new()
-        .items(vec![0_usize, 1])
-        .key(|index: &usize| format!("stored-question-{index}"))
-        .try_batched_row(move |index: &usize| callback(*index, &callback_keys[*index]))
-        .virtualize()
-        .estimated_row_height(aqua_ui::style::Length::Px(120.0))
-        .style(
-            aqua_ui::style::Style::new()
-                .width(aqua_ui::style::Length::Px(600.0))
-                .height(aqua_ui::style::Length::Px(500.0)),
-        )
-        .build();
-    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.set_viewport(800.0, 600.0, 1.0);
-    app.mount(|_| list).unwrap();
-    app.layout().unwrap();
+    let mut app = mounted(
+        800.0,
+        600.0,
+        row_list(&factory, listed(keys.clone()), 120.0, 500.0),
+    );
     app.build_frame().unwrap();
     let first = cache.borrow().get(&keys[0]).unwrap();
     let second = cache.borrow().get(&keys[1]).unwrap();
@@ -155,127 +118,124 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         2
     );
     assert_eq!(ids.get(), 2);
-    let browser = first.question_browser_for_tests().unwrap();
-    let other_browser = second.question_browser_for_tests().unwrap();
-    assert!(!Rc::ptr_eq(&browser, &other_browser));
-    let ItemKind::Question {
-        questions: Collection::Stored(other_source),
-        ..
-    } = &items[1].kind
-    else {
-        panic!("expected stored questions")
+    let realize = |row: usize| {
+        mounted(
+            800.0,
+            600.0,
+            factory.realize(row, &keys[row]).unwrap().element,
+        )
     };
-    other_browser.borrow_mut().retry(&core);
-    let _other_completion = other_browser.borrow_mut().completion_for_tests();
-    assert_eq!(other_browser.borrow().window().source(), other_source);
-    assert!(matches!(
-        other_browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Loading
-    ));
-    let reference = items[0].kind.clone();
-    let ItemKind::Question {
-        questions: Collection::Stored(reference),
-        ..
-    } = reference
-    else {
-        panic!("expected stored questions")
+    let has = |app: &aqua::UiApp, key: &str| {
+        app.tree()
+            .last_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key)))
+            .is_some()
     };
-    let page = artisan_api::CollectionRange {
-        source: reference.source.clone(),
-        start: 0,
-        end: 1,
-        total: 1,
-        records: vec![artisan_api::Question {
-            id: "ready".into(),
-            header: None,
-            text: artisan_api::TextContent::Inline("Ready question".into()),
-            multi_select: false,
-            options: Collection::Inline(Vec::new()),
-        }],
+    let failed = |app: &aqua::UiApp| has(app, "collection-retry");
+    let loading = |app: &aqua::UiApp| {
+        test_support::editor::ui::painted_texts(app).contains(&"Loading entry…".to_owned())
+            && !failed(app)
     };
-    let old = browser.borrow_mut().completion_for_tests();
-    let failed = browser.borrow_mut().completion_for_tests();
-    deliver(
-        &browser,
-        &failed,
-        Err(anyhow::anyhow!("test failure")),
-        &core,
+    let ready = |app: &aqua::UiApp| has(app, "collection-entry-0");
+    let resolve = |id: &artisan_api::ItemId| items.iter().find(|item| &item.id == id).cloned();
+    let settle = |row: usize, what: &str, done: &dyn Fn(&aqua::UiApp) -> bool| {
+        let owner = if row == 0 { &first } else { &second };
+        test_support::wait::wait_until(what, Duration::from_secs(10), || {
+            drop(owner.drain_sources(&core, &scope, &provider, resolve));
+            done(&realize(row))
+        });
+    };
+    let page = |id: &str, text: &str, row: usize| {
+        let ItemKind::Question {
+            questions: Collection::Stored(reference),
+            ..
+        } = &items[row].kind
+        else {
+            panic!("expected stored questions")
+        };
+        artisan_api::CollectionRange {
+            source: reference.source.clone(),
+            start: 0,
+            end: 1,
+            total: 1,
+            records: vec![artisan_api::Question {
+                id: id.into(),
+                header: None,
+                text: artisan_api::TextContent::Inline(text.into()),
+                multi_select: false,
+                options: Collection::Inline(Vec::new()),
+            }],
+        }
+    };
+    let other_read = forge.take("GET", &records('2'));
+    forge.take("GET", &records('1')).fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "test failure",
     );
-    assert!(matches!(
-        browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Failed(_)
-    ));
-    deliver(&browser, &old, Ok(page.clone()), &core);
-    assert!(matches!(
-        browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Failed(_)
-    ));
-    assert_eq!(other_browser.borrow().window().source(), other_source);
-    assert!(matches!(
-        other_browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Loading
-    ));
-    let failed_row = factory.realize(0, &keys[0]).unwrap().element;
-    let mut failed_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    failed_app.set_viewport(800.0, 600.0, 1.0);
-    failed_app.mount(|_| failed_row).unwrap();
-    failed_app.layout().unwrap();
-    click_key(&mut failed_app, "collection-retry");
+    settle(0, "the first read fails", &failed);
+    let mut failed_app = realize(0);
+    click(&mut failed_app, "collection-retry");
+    let superseded = emitted.borrow_mut().pop().unwrap();
+    click(&mut failed_app, "collection-retry");
+    let newer = emitted.borrow_mut().pop().unwrap();
+    assert!(superseded.dispatch(&core, &scope, &items[0]).0);
+    let old = forge.take("GET", &records('1'));
+    let (changed, effect) = newer.dispatch(&core, &scope, &items[0]);
+    assert!(
+        !changed,
+        "a second retry keeps showing the load already running"
+    );
+    assert!(effect.is_none());
+    forge.take("GET", &records('1')).fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "test failure",
+    );
+    settle(0, "the current read fails", &failed);
+    old.respond(page("ready", "Ready question", 0));
+    settle(0, "the superseded read lands", &|_| true);
+    assert!(failed(&realize(0)));
+    assert!(!ready(&realize(0)));
+    assert!(loading(&realize(1)));
+    click(&mut failed_app, "collection-retry");
     let stale = emitted.borrow_mut().pop().unwrap();
     let mut changed = (*items[0]).clone();
     changed.seq += 1;
     assert!(!stale.dispatch(&core, &scope, &changed).0);
-    assert!(matches!(
-        browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Failed(_)
-    ));
-    click_key(&mut failed_app, "collection-retry");
+    assert!(failed(&realize(0)));
+    click(&mut failed_app, "collection-retry");
     let action = emitted.borrow_mut().pop().unwrap();
     assert!(action.dispatch(&core, &scope, &items[0]).0);
-    assert!(matches!(
-        browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Loading
-    ));
-    let ready = browser.borrow_mut().completion_for_tests();
-    deliver(&browser, &ready, Ok(page), &core);
+    assert!(loading(&realize(0)));
+    forge
+        .take("GET", &records('1'))
+        .respond(page("ready", "Ready question", 0));
+    settle(0, "the retried read lands", &ready);
     assert!(
-        matches!(browser.borrow().window().state(), editor_aqua::core::RangeState::Ready(page) if page.records[0].id == "ready")
+        test_support::editor::ui::painted_texts(&realize(0))
+            .contains(&"1. Ready question".to_owned())
     );
-    assert_eq!(other_browser.borrow().window().source(), other_source);
-    assert!(matches!(
-        other_browser.borrow().window().state(),
-        editor_aqua::core::RangeState::Loading
-    ));
-    let ready_row = factory.realize(0, &keys[0]).unwrap().element;
-    let mut ready_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    ready_app.set_viewport(800.0, 600.0, 1.0);
-    ready_app.mount(|_| ready_row).unwrap();
-    ready_app.layout().unwrap();
-    click_key(&mut ready_app, "collection-entry-0");
+    assert!(loading(&realize(1)));
+    let mut ready_app = realize(0);
+    click(&mut ready_app, "collection-entry-0");
     let choose = emitted.borrow_mut().pop().expect("question row action");
     assert!(choose.dispatch(&core, &scope, &items[0]).0);
-    assert_eq!(
-        browser.borrow().inline_text.as_deref(),
-        Some("Ready question")
+    let detail = realize(0);
+    assert!(has(&detail, "collection-back"));
+    assert!(
+        test_support::editor::ui::painted_texts(&detail).contains(&"Ready question".to_owned())
     );
-    let detail_factory = factory.callback();
-    let detail_key = keys[0].clone();
-    let list = aqua_ui::collection::List::new()
-        .items(vec![0_usize])
-        .key(|_: &usize| "question-detail-row")
-        .try_batched_row(move |index: &usize| detail_factory(*index, &detail_key))
-        .virtualize()
-        .estimated_row_height(aqua_ui::style::Length::Px(200.0))
-        .style(
-            aqua_ui::style::Style::new()
-                .width(aqua_ui::style::Length::Px(600.0))
-                .height(aqua_ui::style::Length::Px(500.0)),
-        )
-        .build();
-    let mut detail_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    detail_app.set_viewport(800.0, 600.0, 1.0);
-    detail_app.mount(|_| list).unwrap();
-    detail_app.layout().unwrap();
+    other_read.respond(page("other", "Other question", 1));
+    settle(1, "the other row's read lands", &ready);
+    assert!(
+        test_support::editor::ui::painted_texts(&realize(1))
+            .contains(&"1. Other question".to_owned())
+    );
+    let mut detail_app = mounted(
+        800.0,
+        600.0,
+        row_list(&factory, listed([keys[0].clone()]), 200.0, 500.0),
+    );
     assert!(
         detail_app.unregister_selection_source_in(SelectionDocumentId(415), SelectionSourceId(1))
     );
@@ -291,8 +251,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         .is_none()
     );
     drop(failed_app);
-    drop(browser);
-    drop(other_browser);
+    drop(detail);
     let weak = Rc::downgrade(&first);
     drop(first);
     drop(second);
@@ -300,7 +259,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
     assert!(weak.upgrade().is_some());
     drop(app);
     assert!(weak.upgrade().is_none());
-    let mut cleanup_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let mut cleanup_app = ui_app(800.0, 600.0);
     cache.borrow().drain_cleanup(&mut cleanup_app);
 }
 
@@ -309,24 +268,9 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
     use artisan_api::{NoticeKind, TextContent};
     use editor_aqua::conversation::content::{SourceEffect, SourceField, SourceOwners};
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
-    let config = HostConfig {
-        id: HostId("export-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    core.add_test_host(&config, client);
+    let mut core = test_core(dir.path());
+    let config = remote_host("export-host");
+    connect(&mut core, &config);
     let instance = core.host(&config.id).unwrap().instance();
     let provider = core.source_provider(&config.id, instance).unwrap();
     let reference = ContentRef {
@@ -334,31 +278,25 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
         bytes: 10,
         lines: 1,
     };
-    let item = Arc::new(Item {
-        id: ItemId("notice".into()),
-        thread_id: ThreadId("thread".into()),
-        position: 1,
-        seq: 1,
-        run_id: None,
-        parent_id: None,
-        status: Status::Done,
-        created_at: 0,
-        updated_at: 0,
-        kind: ItemKind::Notice {
+    let item = Arc::new(item(
+        "notice",
+        "thread",
+        1,
+        ItemKind::Notice {
             kind: NoticeKind::Info,
             text: TextContent::Stored(reference),
         },
-    });
+    ));
     let mut owners = SourceOwners::default();
     let actions = Rc::new(RefCell::new(Vec::new()));
     let make_view = |owners: &mut SourceOwners| {
         assert!(owners.open_provider(&provider, &item, SourceField::Notice));
-        let actions = actions.clone();
+        let actions = Rc::clone(&actions);
         owners
             .view(
                 &item.id,
                 &SourceField::Notice,
-                *ArtisanTheme::for_mode(ThemeMode::Dark),
+                ArtisanTheme::for_mode(ThemeMode::Dark),
                 SelectionDocumentId(416),
                 SelectionSourceId(1),
                 Rc::new(move |action| actions.borrow_mut().push(action)),
@@ -367,39 +305,9 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
             .element
     };
     let click_export = |element| {
-        let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-        app.set_viewport(800.0, 600.0, 1.0);
-        app.mount(|_| element).unwrap();
-        app.layout().unwrap();
-        let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("source-export"));
-        let node = app
-            .tree()
-            .traverse()
-            .into_iter()
-            .find(|node| {
-                app.tree()
-                    .get(*node)
-                    .is_some_and(|record| record.key == Some(key))
-            })
-            .unwrap();
-        let bounds = app.tree().visual_rect(node).unwrap();
-        let down = aqua_core::PointerEvent {
-            contact: 1,
-            kind: aqua_core::PointerKind::Mouse,
-            position: aqua_core::Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
-            buttons: 1,
-        };
-        aqua_ui::events::dispatch_input(
-            app.tree_mut(),
-            &aqua_core::InputEvent::PointerDown(down, aqua_core::PointerButton::Primary),
-        );
-        aqua_ui::events::dispatch_input(
-            app.tree_mut(),
-            &aqua_core::InputEvent::PointerUp(
-                aqua_core::PointerEvent { buttons: 0, ..down },
-                aqua_core::PointerButton::Primary,
-            ),
-        );
+        let mut app = ui_app(800.0, 600.0);
+        mount(&mut app, element);
+        click(&mut app, "source-export");
     };
     click_export(make_view(&mut owners));
     let Some(SourceEffect::SavePath(old)) =
@@ -421,58 +329,6 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
     assert!(owners.export_is_current(&new));
 }
 
-fn deliver(
-    browser: &Rc<RefCell<editor_aqua::sources::CollectionBrowser<artisan_api::Question>>>,
-    completion: &editor_aqua::core::RangeCompletion<
-        artisan_api::CollectionRange<artisan_api::Question>,
-    >,
-    result: anyhow::Result<artisan_api::CollectionRange<artisan_api::Question>>,
-    core: &Core,
-) {
-    editor_aqua::core::runtime::runtime().block_on(async {
-        let send = completion.complete(result);
-        tokio::pin!(send);
-        let deadline = tokio::time::sleep(std::time::Duration::from_secs(10));
-        tokio::pin!(deadline);
-        loop {
-            tokio::select! {
-                admitted = &mut send => { assert!(admitted); break; }
-                () = &mut deadline => panic!("range completion was not admitted"),
-                () = tokio::task::yield_now() => { browser.borrow_mut().drain(core); }
-            }
-        }
-    });
-    browser.borrow_mut().drain(core);
-}
-
-fn click_key(app: &mut aqua::UiApp, key: &str) {
-    let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
-    let node = app
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|node| {
-            app.tree()
-                .get(*node)
-                .is_some_and(|record| record.key == Some(key))
-        })
-        .unwrap();
-    let bounds = app.tree().visual_rect(node).unwrap();
-    let down = aqua_core::PointerEvent {
-        contact: 1,
-        kind: aqua_core::PointerKind::Mouse,
-        position: aqua_core::Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
-        buttons: 1,
-    };
-    aqua_ui::events::dispatch_input(
-        app.tree_mut(),
-        &aqua_core::InputEvent::PointerDown(down, aqua_core::PointerButton::Primary),
-    );
-    aqua_ui::events::dispatch_input(
-        app.tree_mut(),
-        &aqua_core::InputEvent::PointerUp(
-            aqua_core::PointerEvent { buttons: 0, ..down },
-            aqua_core::PointerButton::Primary,
-        ),
-    );
+fn records(digit: char) -> String {
+    format!("/content/{}/records", digit.to_string().repeat(64))
 }

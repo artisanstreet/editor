@@ -1,44 +1,77 @@
 use super::{page_record, raw_rows};
-use editor_core::{
-    CollectionWindow, ContentWindow, Core, ForgeClient, HostData, HostId, HostInstance, RangeState,
-    delivery::Delivery, runtime::runtime,
-};
 use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef, TextContent};
+use editor_core::{
+    CollectionWindow, CompletionKey, CompletionSlot, ContentWindow, Core, ForgeClient, HostData,
+    HostId, HostInstance, RangeState,
+    client::{CopyContentError, ExportContentError},
+    delivery::OwnedDelivery,
+};
 use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::Arc};
-use tokio_util::task::AbortOnDropHandle;
 
 static COPIES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
+#[derive(Debug)]
 enum Completion {
     Copy(
-        ContentRef,
-        anyhow::Result<String>,
+        CompletionKey,
+        Result<String, CopyContentError>,
         tokio::sync::SemaphorePermit<'static>,
     ),
-    Export(ContentRef, anyhow::Result<()>),
+    Export(CompletionKey, Result<(), ExportContentError>),
 }
 
+#[derive(Debug)]
 pub struct CopiedSource {
     text: String,
     host: HostId,
     instance: HostInstance,
+    failure: std::rc::Weak<std::cell::RefCell<Option<editor_core::Problem>>>,
     _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Copied {
+    Written,
+    Failed,
+    Abandoned,
+}
+
 impl CopiedSource {
-    pub fn write(self, core: &Core, write: impl FnOnce(String)) -> bool {
+    pub fn write<E: std::error::Error>(
+        self,
+        core: &Core,
+        write: impl FnOnce(String) -> Result<(), E>,
+    ) -> Copied {
         if core.host_if_instance(&self.host, self.instance).is_none() {
-            return false;
+            return Copied::Abandoned;
         }
-        write(self.text);
-        true
+        match write(self.text) {
+            Ok(()) => Copied::Written,
+            Err(error) => {
+                tracing::warn!(
+                    host = %self.host,
+                    error = %diagnostics::chain(&error),
+                    "could not put the copied source on the clipboard"
+                );
+                match self.failure.upgrade() {
+                    Some(failure) => {
+                        *failure.borrow_mut() = Some(editor_core::Problem::caused_by(
+                            "Couldn't put the source on the clipboard.",
+                            &error,
+                        ));
+                        Copied::Failed
+                    }
+                    None => Copied::Abandoned,
+                }
+            }
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowViewState {
     Loading,
-    Failed(String),
+    Failed(editor_core::Problem),
     Ready(usize),
 }
 
@@ -58,7 +91,7 @@ pub struct ContentViewState {
     source: ContentRef,
     window: WindowViewState,
     busy: bool,
-    error: Option<String>,
+    error: Option<editor_core::Problem>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,28 +103,24 @@ pub struct CollectionViewState {
     inline: bool,
 }
 
+#[derive(Debug)]
 pub struct ContentText {
     identity: u64,
     window: ContentWindow,
-    pub rows: Vec<Range<usize>>,
-    pub page: Option<Arc<ContentRange>>,
-    pub error: Option<String>,
+    pub(crate) rows: Vec<Range<usize>>,
+    page: Option<Arc<ContentRange>>,
+    error: Option<editor_core::Problem>,
+    clipboard_failure: std::rc::Rc<std::cell::RefCell<Option<editor_core::Problem>>>,
     client: ForgeClient,
     host: HostId,
     instance: HostInstance,
-    action: Option<AbortOnDropHandle<()>>,
+    action: CompletionSlot,
     picking: Option<u64>,
     picker_generation: u64,
-    delivery: Delivery<Completion>,
+    delivery: OwnedDelivery<Completion>,
 }
 
 impl ContentText {
-    #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(
-        &mut self,
-    ) -> editor_core::RangeCompletion<artisan_api::ContentRange> {
-        self.window.completion_for_tests()
-    }
     pub fn new(host: &HostData, source: ContentRef) -> Self {
         Self::from_parts(
             host.client.clone(),
@@ -114,13 +143,14 @@ impl ContentText {
             rows: Vec::new(),
             page: None,
             error: None,
+            clipboard_failure: std::rc::Rc::default(),
             client,
             host,
             instance,
-            action: None,
+            action: CompletionSlot::default(),
             picking: None,
             picker_generation: 0,
-            delivery: Delivery::new(NonZeroUsize::MIN),
+            delivery: OwnedDelivery::new(NonZeroUsize::MIN),
         }
     }
 
@@ -134,46 +164,52 @@ impl ContentText {
             source: self.window.source().clone(),
             window: window_view_state(&self.window),
             busy: self.busy(),
-            error: self.error.clone(),
+            error: self.shown_error(),
         }
+    }
+
+    pub const fn error(&self) -> Option<&editor_core::Problem> {
+        self.error.as_ref()
+    }
+
+    pub fn shown_error(&self) -> Option<editor_core::Problem> {
+        self.error
+            .clone()
+            .or_else(|| self.clipboard_failure.borrow().clone())
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
+        self.clipboard_failure.borrow_mut().take();
     }
 
     pub fn window(&self) -> &ContentWindow {
         &self.window
     }
 
-    pub fn retry(&mut self, core: &Core) {
+    pub(crate) fn retry(&mut self, core: &Core) {
         if self.reconcile(core) {
             self.window.retry();
         }
     }
 
     pub fn action_wake(&self) -> &aqua::mailbox::Mailbox<()> {
-        self.delivery
-            .wake_mailbox()
-            .expect("source action wake mailbox")
+        self.delivery.mailbox()
     }
 
-    pub fn reconcile(&mut self, core: &Core) -> bool {
+    fn reconcile(&mut self, core: &Core) -> bool {
         if core.host_if_instance(&self.host, self.instance).is_some() {
             return true;
         }
-        self.action = None;
+        self.action.cancel();
         self.picking = None;
         self.window.disconnect();
         self.sync();
         false
     }
 
-    #[cfg(feature = "test-support")]
-    pub fn action_finished(&self) -> bool {
-        self.action
-            .as_ref()
-            .is_some_and(|action| action.is_finished())
-    }
-
     pub fn busy(&self) -> bool {
-        self.action.is_some() || self.picking.is_some()
+        self.action.is_running() || self.picking.is_some()
     }
 
     pub fn is_export_pending(&self, generation: u64) -> bool {
@@ -181,14 +217,14 @@ impl ContentText {
     }
 
     pub fn set_source(&mut self, source: ContentRef) {
-        self.action = None;
+        self.action.cancel();
         self.picking = None;
-        self.error = None;
+        self.clear_error();
         self.window.set_source(source);
         self.sync();
     }
 
-    pub fn sync(&mut self) {
+    fn sync(&mut self) {
         let RangeState::Ready(page) = self.window.state() else {
             self.page = None;
             self.rows.clear();
@@ -201,7 +237,7 @@ impl ContentText {
         self.page = Some(Arc::clone(page));
     }
 
-    pub fn previous(&mut self, core: &Core) {
+    pub(crate) fn previous(&mut self, core: &Core) {
         if !self.reconcile(core) {
             return;
         }
@@ -213,7 +249,7 @@ impl ContentText {
         }
     }
 
-    pub fn next(&mut self, core: &Core) {
+    pub(crate) fn next(&mut self, core: &Core) {
         if !self.reconcile(core) {
             return;
         }
@@ -226,22 +262,26 @@ impl ContentText {
         if !self.reconcile(core) || self.busy() {
             return;
         }
-        self.error = None;
+        self.clear_error();
         let client = self.client.clone();
         let source = self.window.source().clone();
         let sender = self.delivery.sender();
-        self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let permit = COPIES.acquire().await.expect("copy semaphore stays open");
-            let result = client.copy_content(&source, 32 * 1024 * 1024).await;
-            let _ = sender.send(Completion::Copy(source, result, permit)).await;
-        })));
+        self.action
+            .spawn(&self.host, self.instance, move |key| async move {
+                let permit = COPIES
+                    .acquire()
+                    .await
+                    .expect("invariant: the static copy semaphore is never closed");
+                let result = client.copy_content(&source, 32 * 1024 * 1024).await;
+                sender.offer(Completion::Copy(key, result, permit)).await;
+            });
     }
 
     pub fn begin_export(&mut self, core: &Core) -> Option<u64> {
         if !self.reconcile(core) || self.busy() {
             return None;
         }
-        self.error = None;
+        self.clear_error();
         self.picker_generation = self.picker_generation.wrapping_add(1);
         self.picking = Some(self.picker_generation);
         self.picking
@@ -264,22 +304,28 @@ impl ContentText {
         match result {
             Ok(Some(path)) => self.export(core, path),
             Ok(None) => {}
-            Err(error) => self.error = Some(format!("Couldn't export source: {error}")),
+            Err(error) => {
+                self.error = Some(editor_core::Problem::detailed(
+                    "Couldn't choose where to export the source.",
+                    error,
+                ));
+            }
         }
     }
 
-    pub fn export(&mut self, core: &Core, path: PathBuf) {
+    fn export(&mut self, core: &Core, path: PathBuf) {
         if !self.reconcile(core) || self.busy() {
             return;
         }
-        self.error = None;
+        self.clear_error();
         let client = self.client.clone();
         let source = self.window.source().clone();
         let sender = self.delivery.sender();
-        self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let result = client.export_content(&source, path).await;
-            let _ = sender.send(Completion::Export(source, result)).await;
-        })));
+        self.action
+            .spawn(&self.host, self.instance, move |key| async move {
+                let result = client.export_content(&source, path).await;
+                sender.offer(Completion::Export(key, result)).await;
+            });
     }
 
     pub fn drain(&mut self, core: &Core) -> Option<CopiedSource> {
@@ -292,33 +338,41 @@ impl ContentText {
         let mut copied = None;
         for completion in self.delivery.drain() {
             match completion {
-                Completion::Copy(source, result, permit) if &source == self.window.source() => {
-                    self.action = None;
+                Completion::Copy(key, result, permit) if self.action.finish(core, &key) => {
                     match result {
                         Ok(text) => {
                             copied = Some(CopiedSource {
                                 text,
                                 host: self.host.clone(),
                                 instance: self.instance,
+                                failure: std::rc::Rc::downgrade(&self.clipboard_failure),
                                 _permit: permit,
-                            })
+                            });
                         }
-                        Err(error) => self.error = Some(format!("Couldn't copy source: {error:#}")),
+                        Err(error) => {
+                            self.error = Some(editor_core::Problem::caused_by(
+                                "Couldn't copy the source.",
+                                &error,
+                            ));
+                        }
                     }
                 }
-                Completion::Export(source, result) if &source == self.window.source() => {
-                    self.action = None;
+                Completion::Export(key, result) if self.action.finish(core, &key) => {
                     if let Err(error) = result {
-                        self.error = Some(format!("Couldn't export source: {error:#}"));
+                        self.error = Some(editor_core::Problem::caused_by(
+                            "Couldn't export the source.",
+                            &error,
+                        ));
                     }
                 }
-                _ => {}
+                Completion::Copy(..) | Completion::Export(..) => {}
             }
         }
         copied
     }
 }
 
+#[derive(Debug)]
 pub struct CollectionPreview {
     pub label: String,
     pub detail: Option<TextContent>,
@@ -326,23 +380,18 @@ pub struct CollectionPreview {
     pub disabled: bool,
 }
 
+#[derive(Debug)]
 pub struct CollectionBrowser<T: serde::de::DeserializeOwned + Send + 'static> {
     identity: u64,
     window: CollectionWindow<T>,
-    pub selected: Option<(u64, Arc<CollectionRange<T>>)>,
-    pub detail: Option<ContentText>,
-    pub inline_text: Option<String>,
+    selected: Option<(u64, Arc<CollectionRange<T>>)>,
+    detail: Option<ContentText>,
+    inline_text: Option<String>,
     host: HostId,
     instance: HostInstance,
 }
 
 impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
-    #[cfg(feature = "test-support")]
-    pub fn completion_for_tests(
-        &mut self,
-    ) -> editor_core::RangeCompletion<artisan_api::CollectionRange<T>> {
-        self.window.completion_for_tests()
-    }
     pub fn new(host: &HostData, source: CollectionRef) -> Self {
         Self::from_parts(
             host.client.clone(),
@@ -374,7 +423,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         self.identity
     }
 
-    pub fn reconcile(&mut self, core: &Core) -> bool {
+    pub(crate) fn reconcile(&mut self, core: &Core) -> bool {
         if core.host_if_instance(&self.host, self.instance).is_some() {
             return true;
         }
@@ -394,6 +443,22 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
             detail: self.detail.as_ref().map(ContentText::view_state),
             inline: self.inline_text.is_some(),
         }
+    }
+
+    pub const fn selected(&self) -> Option<&(u64, Arc<CollectionRange<T>>)> {
+        self.selected.as_ref()
+    }
+
+    pub const fn detail(&self) -> Option<&ContentText> {
+        self.detail.as_ref()
+    }
+
+    pub const fn detail_mut(&mut self) -> Option<&mut ContentText> {
+        self.detail.as_mut()
+    }
+
+    pub(crate) fn inline_text(&self) -> Option<&str> {
+        self.inline_text.as_deref()
     }
 
     pub fn window(&self) -> &CollectionWindow<T> {

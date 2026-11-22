@@ -18,9 +18,10 @@ pub enum Divider {
 }
 
 fn shades(theme: &ArtisanTheme) -> (Oklch, Oklch) {
-    match theme.colors.mode.is_dark() {
-        true => (BLACK.with_alpha(0.22), WHITE.with_alpha(0.08)),
-        false => (GRAY_900.with_alpha(0.08), WHITE.with_alpha(0.9)),
+    if theme.colors.mode.is_dark() {
+        (BLACK.with_alpha(0.22), WHITE.with_alpha(0.08))
+    } else {
+        (GRAY_900.with_alpha(0.08), WHITE.with_alpha(0.9))
     }
 }
 
@@ -28,17 +29,6 @@ fn line(color: Oklch) -> Element {
     UiBox::new()
         .height(LINE)
         .style(Style::new().gpui_background(GpuiBackground::Solid(color.to_reference_paint())))
-        .build()
-}
-
-fn upright(color: Oklch) -> Element {
-    UiBox::new()
-        .width(LINE)
-        .style(
-            Style::new()
-                .height(Length::Pct(100.0))
-                .gpui_background(GpuiBackground::Solid(color.to_reference_paint())),
-        )
         .build()
 }
 
@@ -53,33 +43,18 @@ fn rule(theme: &ArtisanTheme) -> UiBox {
 impl Divider {
     #[must_use]
     pub fn guide(theme: &ArtisanTheme) -> Style {
-        Style::new().gpui_background(GpuiBackground::Solid(theme.colors.line.to_reference_paint()))
+        Style::new().gpui_background(GpuiBackground::Solid(
+            theme.colors.line.to_reference_paint(),
+        ))
     }
 
     #[must_use]
-    pub fn vertical(theme: &ArtisanTheme, height: f32) -> Element {
-        let (_, light) = shades(theme);
-        let shade = match theme.colors.mode.is_dark() {
-            true => BLACK.with_alpha(0.6),
-            false => GRAY_900.with_alpha(0.16),
-        };
-        UiBox::new()
-            .layout("row")
-            .height(height)
-            .gap(LINE)
-            .style(Style::new().flex_shrink(0.0))
-            .child(upright(shade))
-            .child(upright(light))
-            .build()
-    }
-
-    #[must_use]
-    pub fn height(&self) -> f32 {
+    pub fn height(&self, theme: &ArtisanTheme) -> f32 {
         let body = match self {
             Self::Rule => 2.0 * LINE,
-            Self::Labelled(_) => TextRole::Caption.spec().line,
+            Self::Labelled(_) => TextRole::Caption.line_px(theme),
         };
-        body + 2.0 * GAP.px()
+        2.0f32.mul_add(GAP.px(), body)
     }
 
     #[must_use]

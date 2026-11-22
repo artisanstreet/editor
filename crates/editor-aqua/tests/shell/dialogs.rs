@@ -1,18 +1,23 @@
 use aqua::prelude::{AquaWindowId, ObservedWindowState, WindowEvent, WindowOptions};
 use aqua::{Aqua, AquaConfig};
 use aqua_protocol::{DialogOutcome, RequestId};
-use editor_aqua::core::{Core, EditorFiles};
+use editor_aqua::core::EditorFiles;
 use editor_aqua::shell::{application::ShellApplication, host::ShellResources, root::RootViews};
 use std::{cell::RefCell, rc::Rc};
 
-pub(super) fn started() -> (Aqua, ShellApplication<RootViews>, AquaWindowId, tempfile::TempDir) {
+pub(super) fn started() -> (
+    Aqua,
+    ShellApplication<RootViews>,
+    AquaWindowId,
+    tempfile::TempDir,
+) {
     let directory = tempfile::tempdir().unwrap();
     let files = EditorFiles {
         dir: directory.path().to_owned(),
     };
     let resources = ShellResources::new(1.0).unwrap();
     let mut app = ShellApplication::new(files.clone(), resources, RootViews::default());
-    let mut core = Core::for_tests(files).unwrap();
+    let mut core = test_support::editor::core::test_core(&files.dir);
     core.set_image_assets(app.shell.images().clone());
     app.shell.core = core;
     app.shell.entry.sync(&app.shell.core);
@@ -30,9 +35,12 @@ pub(super) fn started() -> (Aqua, ShellApplication<RootViews>, AquaWindowId, tem
     (aqua, app, id, directory)
 }
 
-fn recorder() -> (Rc<RefCell<Vec<DialogOutcome>>>, impl FnOnce(DialogOutcome) + 'static) {
+fn recorder() -> (
+    Rc<RefCell<Vec<DialogOutcome>>>,
+    impl FnOnce(DialogOutcome) + 'static,
+) {
     let seen = Rc::new(RefCell::new(Vec::new()));
-    let sink = seen.clone();
+    let sink = Rc::clone(&seen);
     (seen, move |outcome| sink.borrow_mut().push(outcome))
 }
 
@@ -53,10 +61,19 @@ fn routes_are_distinguished_by_request() {
     let (second, second_route) = recorder();
     app.shell.dialogs.route(RequestId(1), first_route);
     app.shell.dialogs.route(RequestId(2), second_route);
-    aqua.dispatch_dialog(&mut app, id, RequestId(2), DialogOutcome::Failed("no".into()));
+    aqua.dispatch_dialog(
+        &mut app,
+        id,
+        RequestId(2),
+        DialogOutcome::Failed("no".into()),
+    );
     assert!(first.borrow().is_empty());
     assert_eq!(*second.borrow(), vec![DialogOutcome::Failed("no".into())]);
-    assert!(app.shell.dialogs.complete(RequestId(1), DialogOutcome::Dismissed));
+    assert!(
+        app.shell
+            .dialogs
+            .complete(RequestId(1), DialogOutcome::Dismissed)
+    );
     assert_eq!(first.borrow().len(), 1);
 }
 
@@ -66,6 +83,10 @@ fn destroying_the_window_drops_pending_routes() {
     let (seen, route) = recorder();
     app.shell.dialogs.route(RequestId(7), route);
     aqua.dispatch_window_event(&mut app, id, &WindowEvent::Destroyed(id));
-    assert!(!app.shell.dialogs.complete(RequestId(7), DialogOutcome::Dismissed));
+    assert!(
+        !app.shell
+            .dialogs
+            .complete(RequestId(7), DialogOutcome::Dismissed)
+    );
     assert!(seen.borrow().is_empty());
 }

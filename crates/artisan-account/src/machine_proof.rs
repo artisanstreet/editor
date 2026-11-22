@@ -1,34 +1,15 @@
-//! Machine request proof: Forge → Core (Core `contracts.md` §3, normative).
-//!
-//! Every machine call that has no grant JWT proves with Ed25519 over a
-//! canonical string (UTF-8, `\n` separators, no trailing newline):
-//! `{timestamp}\n{nonce}\n{METHOD}\n{pathAndQuery}\n{bodyHashHex}`.
-//! Headers: `X-AST-Machine`, `X-AST-Timestamp`, `X-AST-Nonce`,
-//! `Authorization: AST-Machine <base64url signature>`. Server checks id,
-//! `|now - timestamp| <= 300`s, durable nonce dedup (unique
-//! `(subject, nonce)` insert), body-hash compare, Ed25519 verify.
-
-use anyhow::Context as _;
 use base64::Engine as _;
 use sha2::Digest as _;
 
-/// Allowed clock skew for machine proofs (seconds, Core §3).
-pub const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
+const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
 
-/// Minimum raw nonce bytes (Core §3: ≥12 random bytes).
-pub const MIN_NONCE_BYTES: usize = 12;
+const MIN_NONCE_BYTES: usize = 12;
 
-#[cfg(test)]
-pub const EMPTY_BODY_HASH: &str =
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-/// Hex lowercase SHA-256 of raw request body bytes.
 #[must_use]
 pub fn body_hash_hex(body: &[u8]) -> String {
     hex::encode(sha2::Sha256::digest(body))
 }
 
-/// The canonical string over UTF-8 `\n` separators, no trailing newline.
 #[must_use]
 pub fn canonical_request(
     timestamp_sec: i64,
@@ -43,7 +24,7 @@ pub fn canonical_request(
     )
 }
 
-/// A machine-proof verification request (Core §3).
+#[derive(Debug)]
 pub struct MachineProof<'a> {
     pub public: &'a [u8; 32],
     pub body: &'a [u8],
@@ -55,7 +36,6 @@ pub struct MachineProof<'a> {
     pub now_sec: i64,
 }
 
-/// Sign the canonical request with the machine/enrollment private key.
 #[must_use]
 pub fn sign_proof(secret: &[u8; 32], canonical: &str) -> [u8; 64] {
     use ed25519_dalek::Signer as _;
@@ -63,24 +43,39 @@ pub fn sign_proof(secret: &[u8; 32], canonical: &str) -> [u8; 64] {
     key.sign(canonical.as_bytes()).to_bytes()
 }
 
-/// Verify a machine proof: timestamp window, nonce length, body hash
-/// (constant-time), Ed25519 signature. Nonce dedup is server-side state.
-///
-/// Takes a [`MachineProof`] request (8 fields would exceed the argument
-/// limit).
-pub fn verify_machine_proof(proof: &MachineProof<'_>) -> anyhow::Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum MachineProofError {
+    #[error(
+        "the proof timestamp {timestamp_sec} is outside the acceptance window around {now_sec}"
+    )]
+    Stale { timestamp_sec: i64, now_sec: i64 },
+    #[error("decode the proof nonce")]
+    Nonce(#[source] base64::DecodeError),
+    #[error("the proof nonce has {bytes} bytes, fewer than {MIN_NONCE_BYTES}")]
+    ShortNonce { bytes: usize },
+    #[error("read the machine key")]
+    Key(#[source] ed25519_dalek::SignatureError),
+    #[error("decode the proof signature")]
+    SignatureEncoding(#[source] base64::DecodeError),
+    #[error("read the proof signature")]
+    SignatureShape(#[source] ed25519_dalek::SignatureError),
+    #[error("the machine proof signature does not verify")]
+    Signature(#[source] ed25519_dalek::SignatureError),
+}
+
+pub fn verify_machine_proof(proof: &MachineProof<'_>) -> Result<(), MachineProofError> {
     if proof.timestamp_sec.saturating_sub(proof.now_sec).abs() > PROOF_TIMESTAMP_WINDOW_S {
-        anyhow::bail!("the proof timestamp is outside the acceptance window");
+        return Err(MachineProofError::Stale {
+            timestamp_sec: proof.timestamp_sec,
+            now_sec: proof.now_sec,
+        });
     }
     let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(proof.nonce_b64u.as_bytes())
-        .context("decode the proof nonce")?;
+        .map_err(MachineProofError::Nonce)?;
     if nonce.len() < MIN_NONCE_BYTES {
-        anyhow::bail!("the proof nonce is too short");
+        return Err(MachineProofError::ShortNonce { bytes: nonce.len() });
     }
-    // The body hash is recomputed from the received body and covered by the
-    // signature: a tampered body fails verification. No separate transmitted
-    // hash exists to compare against server-side.
     let canonical = canonical_request(
         proof.timestamp_sec,
         proof.nonce_b64u,
@@ -89,83 +84,16 @@ pub fn verify_machine_proof(proof: &MachineProof<'_>) -> anyhow::Result<()> {
         &body_hash_hex(proof.body),
     );
     let key =
-        ed25519_dalek::VerifyingKey::from_bytes(proof.public).context("read the machine key")?;
+        ed25519_dalek::VerifyingKey::from_bytes(proof.public).map_err(MachineProofError::Key)?;
     let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(proof.signature_b64u.as_bytes())
-        .context("decode the proof signature")?;
+        .map_err(MachineProofError::SignatureEncoding)?;
     let signature = ed25519_dalek::Signature::try_from(signature.as_slice())
-        .context("read the proof signature")?;
+        .map_err(MachineProofError::SignatureShape)?;
     key.verify_strict(canonical.as_bytes(), &signature)
-        .context("the machine proof signature does not verify")?;
-    Ok(())
+        .map_err(MachineProofError::Signature)
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
-mod tests {
-    use super::*;
-
-    fn keys() -> ([u8; 32], [u8; 32]) {
-        let secret = [0x41_u8; 32];
-        let public = ed25519_dalek::SigningKey::from_bytes(&secret)
-            .verifying_key()
-            .to_bytes();
-        (secret, public)
-    }
-
-    #[test]
-    fn canonical_string_matches_core_shape() {
-        assert_eq!(
-            canonical_request(1_700_000_000, "bm9uY2U", "post", "/v1/x?a=1", "abc"),
-            "1700000000\nbm9uY2U\nPOST\n/v1/x?a=1\nabc"
-        );
-        assert_eq!(body_hash_hex(b""), EMPTY_BODY_HASH);
-    }
-
-    #[test]
-    fn sign_verify_roundtrip_and_tamper_fails() {
-        use base64::Engine as _;
-        let (secret, public) = keys();
-        let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 16]);
-        let body = br#"{"a":1}"#;
-        let canonical =
-            canonical_request(1_700_000_100, &nonce, "POST", "/v1/m", &body_hash_hex(body));
-        let signature = sign_proof(&secret, &canonical);
-        let signature_b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
-        let proof = MachineProof {
-            public: &public,
-            body,
-            timestamp_sec: 1_700_000_100,
-            nonce_b64u: &nonce,
-            method: "post",
-            path_and_query: "/v1/m",
-            signature_b64u: &signature_b64u,
-            now_sec: 1_700_000_100,
-        };
-        verify_machine_proof(&proof).unwrap();
-        // Tampered body fails.
-        let tampered = MachineProof {
-            body: br#"{"a":2}"#,
-            ..proof
-        };
-        let error = format!("{:#}", verify_machine_proof(&tampered).unwrap_err());
-        assert!(error.contains("does not verify"), "tampered: {error}");
-        // Expired timestamp fails.
-        let expired = MachineProof {
-            now_sec: 1_700_000_100 + PROOF_TIMESTAMP_WINDOW_S + 1,
-            ..proof
-        };
-        let error = format!("{:#}", verify_machine_proof(&expired).unwrap_err());
-        assert!(
-            error.contains("outside the acceptance window"),
-            "expired: {error}"
-        );
-        // Short nonce fails.
-        let short = MachineProof {
-            nonce_b64u: &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1_u8; 4]),
-            ..proof
-        };
-        let error = format!("{:#}", verify_machine_proof(&short).unwrap_err());
-        assert!(error.contains("too short"), "short: {error}");
-    }
-}
+#[path = "../tests/machine_proof/unit.rs"]
+mod tests;

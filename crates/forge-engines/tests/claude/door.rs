@@ -138,8 +138,8 @@ fn a_cancelled_turn_closes_input_whatever_is_running() {
     assert_eq!(
         Door::HeldForBackground.after_result(
             Session {
-                background: true,
                 awaiting_input: true,
+                background: true,
                 ..IDLE
             },
             Ending::Cancelled

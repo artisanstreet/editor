@@ -1,6 +1,3 @@
-#[cfg(feature = "test-support")]
-pub use media::audio::AudioFixture;
-
 pub mod actions;
 pub mod charts;
 pub(crate) mod data;
@@ -23,7 +20,7 @@ pub(crate) enum Prepared {
 }
 
 impl Prepared {
-    pub(crate) fn resident_bytes(&self) -> usize {
+    fn resident_bytes(&self) -> usize {
         match self {
             Self::Chart(value) => value.resident_bytes(),
             Self::Callout(value) => value.resident_bytes(),
@@ -83,8 +80,8 @@ fn prepare_kind(kind: &str, value: &serde_json::Value) -> Option<Result<Prepared
 #[derive(Debug)]
 pub(crate) enum RichFence {
     Pending { kind: String },
-    Ready(Envelope),
-    Invalid { note: String },
+    Ready(Box<Envelope>),
+    Invalid { note: editor_core::Problem },
 }
 
 #[derive(Debug)]
@@ -99,7 +96,7 @@ impl RichFence {
     pub(crate) fn resident_bytes(&self) -> usize {
         match self {
             Self::Pending { kind } => kind.capacity(),
-            Self::Invalid { note } => note.capacity(),
+            Self::Invalid { note } => editor_core::ResidentBytes::resident_bytes(note),
             Self::Ready(envelope) => {
                 envelope.block.resident_bytes()
                     + envelope.title.as_ref().map_or(0, String::capacity)
@@ -131,9 +128,12 @@ pub(crate) fn prepare(language: Option<&str>, source: &str, closed: bool) -> Opt
             .and_then(|value| prepare_value(kind, &value))
     };
     Some(match parsed {
-        Ok(prepared) => RichFence::Ready(prepared),
+        Ok(prepared) => RichFence::Ready(Box::new(prepared)),
         Err(error) => RichFence::Invalid {
-            note: format!("Couldn't draw artisan-{kind}: {error}"),
+            note: editor_core::Problem::detailed(
+                format!("Couldn't draw this artisan-{kind} block."),
+                error,
+            ),
         },
     })
 }
@@ -174,19 +174,25 @@ fn validate_value_budget(root: &serde_json::Value) -> Result<(), String> {
         let count = match value {
             serde_json::Value::Array(values) => values.len(),
             serde_json::Value::Object(values) => values.len(),
-            _ => 0,
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => 0,
         };
         if pending.len().saturating_add(count) > VALUES - visited {
             return Err("rich preview exceeds 32768 JSON values".into());
         }
         match value {
             serde_json::Value::Array(values) => {
-                pending.extend(values.iter().map(|value| (value, depth + 1)))
+                pending.extend(values.iter().map(|value| (value, depth + 1)));
             }
             serde_json::Value::Object(values) => {
-                pending.extend(values.values().map(|value| (value, depth + 1)))
+                pending.extend(values.values().map(|value| (value, depth + 1)));
             }
-            _ => {}
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
         }
     }
     Ok(())

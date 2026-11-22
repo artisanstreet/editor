@@ -287,8 +287,6 @@ try {
   }
   if ($process.HasExited -and -not $closed) { throw "Qualification exited unexpectedly: $($process.ExitCode)" }
   $after = [QualificationWindow]::GetForegroundWindow()
-  $foreground_pid = [uint32]0
-  [void][QualificationWindow]::GetWindowThreadProcessId($after, [ref]$foreground_pid)
   AssertBackground
   [ordered]@{ pid = $process.Id; orderly_close = $closed; foreground_unchanged = ($foreground -eq $after); foreground_stolen = $false; restored_minimized = $restored_minimized; verified_visible_text = $verified_text; logical_width = $request_value.width; logical_height = $request_value.height; dpi = ($scale * 96); client_width = $client.Right; client_height = $client.Bottom; executable_sha256 = (Get-FileHash $binary -Algorithm SHA256).Hash; request = $request_path } |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output_dir "native-result.json")

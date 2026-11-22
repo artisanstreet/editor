@@ -13,19 +13,27 @@ enum Family {
     Gecko,
 }
 
-const GECKO: [&str; 6] = ["firefox", "librewolf", "waterfox", "zen", "floorp", "mullvadbrowser"];
+const GECKO: [&str; 6] = [
+    "firefox",
+    "librewolf",
+    "waterfox",
+    "zen",
+    "floorp",
+    "mullvadbrowser",
+];
 const QUERY_LIMIT: usize = 2000;
 
 #[must_use]
 pub fn program_of(command: &str) -> Option<PathBuf> {
     let command = command.trim();
-    let program = match command.strip_prefix('"') {
-        Some(rest) => rest.split('"').next()?,
-        None => {
-            let lower = command.to_ascii_lowercase();
-            let end = lower.find(".exe").map_or(command.len(), |at| at + 4);
-            &command[..end]
-        }
+    let program = if let Some(rest) = command.strip_prefix('"') {
+        rest.split('"').next()?
+    } else {
+        let lower = command.to_ascii_lowercase();
+        let end = lower.find(".exe").map_or(command.len(), |at| at + 4);
+        command
+            .get(..end)
+            .expect("invariant: ASCII lowercasing keeps the .exe offset on a char boundary")
     };
     (!program.trim().is_empty()).then(|| PathBuf::from(program.trim()))
 }
@@ -49,18 +57,23 @@ pub fn pick(
                 .is_some_and(|own| own.eq_ignore_ascii_case(handler))
         })
     });
-    let index = named.or(default).or((!installed.is_empty()).then_some(0))?;
+    let index = named
+        .or(default)
+        .or_else(|| (!installed.is_empty()).then_some(0))?;
     installed.into_iter().nth(index)
 }
 
 impl Browser {
     fn family(&self) -> Family {
         let path = self.program.to_string_lossy().to_ascii_lowercase();
-        let file = path.rsplit(['\\', '/']).next().unwrap_or_default();
+        let file = path
+            .rsplit_once(['\\', '/'])
+            .map_or(path.as_str(), |(_, file)| file);
         let stem = file.strip_suffix(".exe").unwrap_or(file);
-        match GECKO.contains(&stem) {
-            true => Family::Gecko,
-            false => Family::Chromium,
+        if GECKO.contains(&stem) {
+            Family::Gecko
+        } else {
+            Family::Chromium
         }
     }
 
@@ -79,7 +92,7 @@ impl Browser {
         }
     }
 
-    pub fn search(&self, text: &str) -> std::io::Result<()> {
+    pub(crate) fn search(&self, text: &str) -> std::io::Result<()> {
         std::process::Command::new(&self.program)
             .args(self.search_arguments(text))
             .spawn()
@@ -89,18 +102,18 @@ impl Browser {
 
 #[cfg(not(windows))]
 #[must_use]
-pub fn resolve(_preferred: Option<&str>) -> Option<Browser> {
+pub(crate) fn resolve(_preferred: Option<&str>) -> Option<Browser> {
     None
 }
 
 #[cfg(windows)]
 #[must_use]
-pub fn resolve(preferred: Option<&str>) -> Option<Browser> {
+pub(crate) fn resolve(preferred: Option<&str>) -> Option<Browser> {
     native::resolve(preferred)
 }
 
 #[must_use]
-pub fn icon(program: &Path) -> Option<aqua::prelude::FileIcon> {
+pub(crate) fn icon(program: &Path) -> Option<aqua::prelude::FileIcon> {
     aqua::prelude::file_icon(program, 32)
 }
 
@@ -112,19 +125,36 @@ mod native {
     const CLIENTS: &str = r"Software\Clients\StartMenuInternet";
     const CHOICE: &str =
         r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice";
+    const NOT_FOUND: i32 = 0x8007_0002_u32.cast_signed();
+
+    fn present<T>(result: windows_registry::Result<T>, entry: &str) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) if error.code().0 == NOT_FOUND => None,
+            Err(error) => {
+                tracing::warn!(%error, entry, "skipped a browser registry entry it could not read");
+                None
+            }
+        }
+    }
+
+    fn command(key: &Key, id: &str) -> Option<std::path::PathBuf> {
+        let open = present(key.open(r"shell\open\command"), id)?;
+        program_of(&present(open.get_string(""), id)?)
+    }
 
     fn registered(clients: &Key, id: &str) -> Option<Browser> {
-        let key = clients.open(id).ok()?;
-        let capabilities = key.open("Capabilities").ok();
+        let key = present(clients.open(id), id)?;
+        let capabilities = present(key.open("Capabilities"), id);
         let name = capabilities
             .as_ref()
-            .and_then(|capabilities| capabilities.get_string("ApplicationName").ok())
-            .or_else(|| key.get_string("").ok())
+            .and_then(|capabilities| present(capabilities.get_string("ApplicationName"), id))
+            .or_else(|| present(key.get_string(""), id))
             .filter(|name| !name.trim().is_empty())?;
-        let program = program_of(&key.open(r"shell\open\command").ok()?.get_string("").ok()?)?;
+        let program = command(&key, id)?;
         let https_handler = capabilities
-            .and_then(|capabilities| capabilities.open("URLAssociations").ok())
-            .and_then(|associations| associations.get_string("https").ok());
+            .and_then(|capabilities| present(capabilities.open("URLAssociations"), id))
+            .and_then(|associations| present(associations.get_string("https"), id));
         Some(Browser {
             name,
             program,
@@ -135,13 +165,11 @@ mod native {
     fn installed() -> Vec<Browser> {
         [CURRENT_USER, LOCAL_MACHINE]
             .into_iter()
-            .filter_map(|root| root.open(CLIENTS).ok())
+            .filter_map(|root| present(root.open(CLIENTS), CLIENTS))
             .flat_map(|clients| {
-                let ids: Vec<String> = clients
-                    .keys()
-                    .map(|keys| keys.collect())
-                    .unwrap_or_default();
-                ids.into_iter()
+                present(clients.keys(), CLIENTS)
+                    .into_iter()
+                    .flatten()
                     .filter_map(|id| registered(&clients, &id))
                     .collect::<Vec<_>>()
             })
@@ -149,12 +177,10 @@ mod native {
     }
 
     fn handler(id: &str) -> Option<Browser> {
-        let key = CLASSES_ROOT.open(id).ok()?;
-        let program = program_of(&key.open(r"shell\open\command").ok()?.get_string("").ok()?)?;
-        let name = key
-            .open("Application")
-            .ok()
-            .and_then(|application| application.get_string("ApplicationName").ok())
+        let key = present(CLASSES_ROOT.open(id), id)?;
+        let program = command(&key, id)?;
+        let name = present(key.open("Application"), id)
+            .and_then(|application| present(application.get_string("ApplicationName"), id))
             .or_else(|| {
                 program
                     .file_stem()
@@ -167,11 +193,9 @@ mod native {
         })
     }
 
-    pub fn resolve(preferred: Option<&str>) -> Option<Browser> {
-        let default = CURRENT_USER
-            .open(CHOICE)
-            .ok()
-            .and_then(|choice| choice.get_string("ProgId").ok());
+    pub(super) fn resolve(preferred: Option<&str>) -> Option<Browser> {
+        let default = present(CURRENT_USER.open(CHOICE), CHOICE)
+            .and_then(|choice| present(choice.get_string("ProgId"), CHOICE));
         let mut browsers = installed();
         let known = default.as_deref().is_some_and(|id| {
             browsers.iter().any(|browser| {

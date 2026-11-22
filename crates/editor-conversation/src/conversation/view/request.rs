@@ -1,47 +1,49 @@
 use crate::conversation::adapter::Action;
 use crate::conversation::content::SourceField;
-use editor_ui::kit::{Button, ButtonTone, Row, Space, Spaced, Surface, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{
     Answer, ApprovalRequest, Collection, Decision, Item, ItemKind, Status, ToolKind,
 };
+use editor_ui::kit::{Button, ButtonTone, RowKind, Space, Spaced, Surface, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
-pub type Dispatch = Rc<dyn Fn(Action)>;
+pub(crate) type Dispatch = Rc<dyn Fn(Action)>;
 
 const CARD: Surface = Surface::Card;
 
-pub const fn field_role(mono: bool) -> TextRole {
-    match mono {
-        true => TextRole::Code,
-        false => TextRole::Label,
+pub(crate) const fn field_role(mono: bool) -> TextRole {
+    if mono {
+        TextRole::Code
+    } else {
+        TextRole::Label
     }
 }
 
-fn body(text: impl Into<String>, theme: ArtisanTheme, muted: bool, mono: bool) -> Element {
-    let ink = match muted {
-        true => theme.colors.text_muted,
-        false => theme.colors.text,
+fn body(text: impl Into<String>, theme: &ArtisanTheme, muted: bool, mono: bool) -> Element {
+    let ink = if muted {
+        theme.colors.text_muted
+    } else {
+        theme.colors.text
     };
     field_role(mono)
-        .text(&theme, text.into())
+        .text(theme, text.into())
         .gpui_source_color(ink.to_reference_text_color())
         .build()
 }
 
-fn card(theme: ArtisanTheme, title: &str, details: Element) -> Element {
+fn card(theme: &ArtisanTheme, title: &str, details: Element) -> Element {
     let block = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .padded(Row::FormRow.pad().y)
+        .padded(RowKind::Form.pad().y)
         .spaced(Space::S8)
-        .style(TextRole::Label.inherit(&theme))
-        .child(TextRole::LabelStrong.text(&theme, title.to_owned()).build())
+        .style(TextRole::Label.inherit(theme))
+        .child(TextRole::LabelStrong.text(theme, title.to_owned()).build())
         .child(details)
         .build();
-    CARD.build(&theme, vec![block])
+    CARD.build(theme, vec![block])
         .style(Style::new().width(Length::Pct(100.0)))
 }
 
@@ -55,13 +57,17 @@ fn decision_label(decision: Decision) -> &'static str {
     }
 }
 
-pub fn approval<E>(
+#[expect(
+    clippy::too_many_lines,
+    reason = "one approval request card with its options, details and decided state"
+)]
+pub(crate) fn approval<E>(
     item: &Item,
     sending: bool,
     error: Option<&str>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
-    dispatch: Dispatch,
+    dispatch: &Dispatch,
 ) -> Result<Option<Element>, E> {
     let (approval, files) = match &item.kind {
         ItemKind::Tool { approval, tool, .. } => {
@@ -71,13 +77,34 @@ pub fn approval<E>(
                 } => changes.iter().map(|change| change.path.clone()).collect(),
                 ToolKind::Edit {
                     changes: Collection::Stored(source),
-                } => vec![format!("{} file changes", source.count)],
-                _ => Vec::new(),
+                } => vec![editor_ui::locale::count(
+                    source.count,
+                    "file change",
+                    "file changes",
+                )],
+                ToolKind::AgentMessage { .. }
+                | ToolKind::Agents { .. }
+                | ToolKind::Shell { .. }
+                | ToolKind::Read { .. }
+                | ToolKind::Search { .. }
+                | ToolKind::WebFetch { .. }
+                | ToolKind::WebSearch { .. }
+                | ToolKind::Mcp { .. }
+                | ToolKind::ViewImage { .. }
+                | ToolKind::Workflow { .. }
+                | ToolKind::Other { .. } => Vec::new(),
             };
             (approval.as_ref(), files)
         }
         ItemKind::Plan { approval, .. } => (approval.as_ref(), Vec::new()),
-        _ => (None, Vec::new()),
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => (None, Vec::new()),
     };
     let Some(approval) = approval else {
         return Ok(None);
@@ -105,7 +132,7 @@ pub fn approval<E>(
             }
         }
         ApprovalRequest::Action { .. } => {
-            details = details.child(source(SourceField::ApprovalDescription)?)
+            details = details.child(source(SourceField::ApprovalDescription)?);
         }
     }
     if approval.reason.is_some() {
@@ -119,7 +146,7 @@ pub fn approval<E>(
             .style(Style::new().wrap(true));
         for (index, decision) in approval.options.iter().copied().enumerate() {
             let id = item.id.clone();
-            let dispatch = Rc::clone(&dispatch);
+            let dispatch = Rc::clone(dispatch);
             let tone = match index {
                 0 => ButtonTone::Primary,
                 _ => ButtonTone::Neutral,
@@ -127,7 +154,7 @@ pub fn approval<E>(
             actions = actions.child(
                 Button::text(
                     format!("approve-{}-{index}", item.id),
-                    theme,
+                    *theme,
                     tone,
                     decision_label(decision),
                 )
@@ -136,7 +163,7 @@ pub fn approval<E>(
                     dispatch(Action::Answer {
                         id: id.clone(),
                         answer: Answer::Approval { decision },
-                    })
+                    });
                 })
                 .build(),
             );
@@ -172,9 +199,9 @@ pub fn approval<E>(
     Ok(Some(card(theme, title, details.build())))
 }
 
-pub fn question<E>(
+pub(crate) fn question<E>(
     item: &Item,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
     stored_questions: impl FnOnce(&artisan_api::CollectionRef) -> Result<Element, E>,
     answered: impl FnOnce(&Item, &Collection<artisan_api::Question>) -> Result<Element, E>,
@@ -219,9 +246,9 @@ pub fn question<E>(
     Ok(Some(card(theme, title, details.build())))
 }
 
-pub fn answered<E>(
+pub(crate) fn answered<E>(
     questions: &Collection<artisan_api::Question>,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
     stored: impl FnOnce(&artisan_api::CollectionRef) -> Result<Element, E>,
     answer: impl FnOnce() -> Result<Element, E>,
@@ -252,7 +279,7 @@ pub fn answered<E>(
         .child(answer()?)
         .build();
     let bubble = editor_ui::chat_bubble::ChatBubbleSegment::new(
-        theme,
+        *theme,
         editor_ui::chat_bubble::SegmentPosition::Single,
         content,
     )
@@ -266,7 +293,7 @@ pub fn answered<E>(
         .build())
 }
 
-pub fn question_theme(item: &Item, mut theme: ArtisanTheme) -> ArtisanTheme {
+pub(crate) fn question_theme(item: &Item, mut theme: ArtisanTheme) -> ArtisanTheme {
     if matches!(
         &item.kind,
         ItemKind::Question {

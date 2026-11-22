@@ -1,6 +1,6 @@
 use aqua_core::{InputEvent, Point, ScrollDelta, Size};
 use aqua_ui::element::Box as UiBox;
-use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+use editor_aqua::core::{Screen, SettingsPage};
 use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view};
 use editor_aqua::shell::{host::ShellResources, wheel::keyed_node};
 use editor_aqua::ui::{dialog::DialogHost, theme::ArtisanTheme};
@@ -8,18 +8,10 @@ use std::rc::Rc;
 
 fn settings_scroll(viewport: Size, scale: f32) {
     let directory = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().into(),
-    })
-    .unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
     core.navigate(Screen::Settings(SettingsPage::General));
     let controller = SettingsController::default();
-    let build = BuildInfo {
-        version: String::new(),
-        commit: String::new(),
-        profile: String::new(),
-        target: String::new(),
-    };
+    let build = BuildInfo::default();
     let mut resources = ShellResources::new(scale).unwrap();
     let app = &mut resources.ui;
     let dimensions = editor_aqua::shell::layout::Size {
@@ -34,14 +26,14 @@ fn settings_scroll(viewport: Size, scale: f32) {
     let page = view::build(
         &controller,
         &core,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         &build,
         viewport,
         true,
         Rc::new(|_| {}),
     );
     let dialog = editor_aqua::shell::view::settings_dialog(
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         dimensions,
         UiBox::new().build(),
         page,
@@ -72,20 +64,21 @@ fn settings_scroll(viewport: Size, scale: f32) {
     let page = view::build(
         &controller,
         &core,
-        ArtisanTheme::resolved(),
+        &ArtisanTheme::resolved(),
         &build,
         viewport,
         true,
         Rc::new(|_| {}),
     );
+    let dismiss: Rc<dyn Fn()> = Rc::new(|| {});
     host.refresh_content(
         app,
         editor_aqua::shell::view::settings_panel(
-            ArtisanTheme::resolved(),
+            &ArtisanTheme::resolved(),
             dimensions,
             UiBox::new().build(),
             page,
-            Rc::new(|| {}),
+            &dismiss,
         ),
     )
     .unwrap();

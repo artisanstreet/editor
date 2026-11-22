@@ -14,10 +14,21 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub const ACTIVE: &str = "artisan-active-thread-tab";
-pub const SHEET: &str = "artisan-thread-sheet";
+pub(crate) struct Seam {
+    pub(crate) motion: Rc<RefCell<motion::Motion>>,
+    pub(crate) clock: crate::core::Clock,
+}
 
-pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced: bool) -> Element {
+pub(crate) const ACTIVE: &str = "artisan-active-thread-tab";
+pub(crate) const SHEET: &str = "artisan-thread-sheet";
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one canvas whose prepaint measures, targets and paints the seam in a single pass"
+)]
+pub(crate) fn surface(theme: &ArtisanTheme, seam: Seam, reduced: bool) -> Element {
+    let Seam { motion, clock } = seam;
+    let theme = *theme;
     let geometry = Rc::new(Cell::new(None));
     let measured = Rc::clone(&geometry);
     let targeting = Rc::clone(&motion);
@@ -57,16 +68,14 @@ pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced
                     key,
                     Rect::from_edges(
                         rect.x,
-                        rect.y + (rect.h - crate::frame::strip::HEIGHT) * 0.5,
+                        (rect.h - crate::frame::strip::height(&theme)).mul_add(0.5, rect.y),
                         rect.right(),
                         sheet.y,
                     )
                     .translate(-bounds.x, -bounds.y),
                 )
             });
-            targeting
-                .borrow_mut()
-                .target(local, tab, std::time::Instant::now(), true);
+            targeting.borrow_mut().target(local, tab, clock.now(), true);
             measured.set(Some(sheet));
         })
         .on_paint(move |bounds| {
@@ -77,7 +86,7 @@ pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced
             let target = motion
                 .borrow()
                 .destination()
-                .unwrap_or(Rect::from_edges(local.x, local.y, local.x, local.y));
+                .unwrap_or_else(|| Rect::from_edges(local.x, local.y, local.x, local.y));
             let edge = Edge::of(theme.colors.background, theme.colors.text);
             let colors = [
                 edge.rim_top,
@@ -96,7 +105,7 @@ pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced
                 bounds,
                 damage: Rect::from_edges(
                     sheet.x - 24.0,
-                    sheet.y - crate::frame::strip::HEIGHT - 24.0,
+                    sheet.y - crate::frame::strip::height(&theme) - 24.0,
                     sheet.right() + 24.0,
                     sheet.y + Radius::Shell.px() + 24.0,
                 ),
@@ -127,6 +136,10 @@ const DARK: usize = 24;
 #[expect(
     clippy::disallowed_types,
     reason = "the seam sheet is a path-traced silhouette painted layer by layer; no kit surface can draw it"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one shader parameter block laid out field by field in shader order"
 )]
 fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayItem> {
     let local = Rect {
@@ -165,9 +178,10 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
         gradient(colors[2], colors[3]),
         aqua_core::GpuiBackground::Solid(colors[4]),
     ];
-    let mode = match parameters[DARK] > 0.5 {
-        true => ThemeMode::Dark,
-        false => ThemeMode::Light,
+    let mode = if parameters[DARK] > 0.5 {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
     };
     let mut items = rest_shadows(ArtisanTheme::for_mode(mode))
         .into_iter()
@@ -177,8 +191,8 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
             layer,
         })
         .collect::<Vec<_>>();
-    for (inset, background) in layers.into_iter().enumerate() {
-        let inset = inset as f32;
+    for (inset, background) in (0_u8..).zip(layers) {
+        let inset = f32::from(inset);
         let (commands, body) = outline::split(local, tab, inset);
         let gradient_top = tab
             .filter(|tab| {
@@ -192,7 +206,7 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
             let radius = (Radius::Shell.px() - inset)
                 .max(0.0)
                 .min(body.w * 0.5)
-                .min((local.h - inset * 2.0).max(0.0) * 0.5);
+                .min(inset.mul_add(-2.0, local.h).max(0.0) * 0.5);
             items.push(DisplayItem::GpuiBackground {
                 bounds: body.translate(bounds.x, bounds.y),
                 corners: aqua_core::CornerRadii {
@@ -285,6 +299,6 @@ fn gradient_slice(
                 ],
             }
         }
-        solid => solid,
+        solid @ aqua_core::GpuiBackground::Solid(_) => solid,
     }
 }

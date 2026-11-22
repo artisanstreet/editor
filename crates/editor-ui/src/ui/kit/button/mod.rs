@@ -2,13 +2,13 @@ pub mod special;
 
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::{POLAR_INK, polar_face, soft};
+use crate::ui::kit::control::{Activation, activatable, focus_ring, pressable};
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{Elevation, IconSize, Radius, Space, TextRole, concentric};
-use crate::ui::motion::MotionPolicy;
-use crate::ui::theme::{ArtisanTheme, Cast, Oklch, Opacity};
+use crate::ui::theme::{ArtisanTheme, Cast, Oklch};
 use aqua::ShadowLayer;
-use aqua_core::{CursorIcon, DisplayItem, Insets, Role, Transform2D};
+use aqua_core::{CursorIcon, DisplayItem, Insets};
 use aqua_text::overflow::OverflowMode;
 use aqua_ui::element::{Button as UiButton, Canvas, Element, Key, Text};
 use aqua_ui::style::{Length, Style};
@@ -44,7 +44,7 @@ impl ButtonSize {
     }
 
     #[must_use]
-    pub const fn pad(self) -> Space {
+    const fn pad(self) -> Space {
         match self {
             Self::Md => Space::S12,
             Self::Sm => Space::S8,
@@ -82,12 +82,21 @@ pub struct Button {
     ellipsis: Option<Ellipsis>,
     disabled: bool,
     hover: Hover,
-    motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
     debug_selector: Option<String>,
 }
 
+impl std::fmt::Debug for Button {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Button").finish_non_exhaustive()
+    }
+}
+
 impl Button {
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the button stores this theme copy and paints from it when built"
+    )]
     pub fn new(
         key: impl Into<Key>,
         theme: ArtisanTheme,
@@ -105,12 +114,15 @@ impl Button {
             ellipsis: None,
             disabled: false,
             hover: Hover::Neutral,
-            motion: MotionPolicy::Full,
             on_activate: None,
             debug_selector: None,
         }
     }
 
+    #[expect(
+        clippy::large_types_passed_by_value,
+        reason = "the button stores this theme copy and paints from it when built"
+    )]
     pub fn text(
         key: impl Into<Key>,
         theme: ArtisanTheme,
@@ -118,12 +130,6 @@ impl Button {
         label: impl Into<String>,
     ) -> Self {
         Self::new(key, theme, tone, ButtonSize::Md, Label::Text(label.into()))
-    }
-
-    #[must_use]
-    pub const fn destructive(mut self) -> Self {
-        self.hover = Hover::Destructive;
-        self
     }
 
     #[must_use]
@@ -136,7 +142,7 @@ impl Button {
     pub fn within(mut self, surface: Surface) -> Self {
         self.radius = surface.child_radius().map_or_else(
             || concentric(surface.radius_px(), surface.padding_px()),
-            |radius| radius.px(),
+            Radius::px,
         );
         self
     }
@@ -148,7 +154,7 @@ impl Button {
     }
 
     #[must_use]
-    pub const fn ellipsis(mut self, ellipsis: Ellipsis) -> Self {
+    pub(crate) const fn ellipsis(mut self, ellipsis: Ellipsis) -> Self {
         self.ellipsis = Some(ellipsis);
         self
     }
@@ -156,12 +162,6 @@ impl Button {
     #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn motion_policy(mut self, motion: MotionPolicy) -> Self {
-        self.motion = motion;
         self
     }
 
@@ -286,54 +286,25 @@ impl Button {
         let label = self.label.words().to_owned();
         let tone = self.tone;
         let lift = soft(&theme, Cast::LIFT);
-        if self.disabled {
-            root = root.opacity(Opacity::Disabled.alpha());
-        } else if let Some(handler) = self.on_activate {
-            root = root.on_activate_event(handler);
-        }
-        let element = root
-            .build()
-            .with_key(self.key)
-            .role(Role::Button)
-            .aria_label(label)
-            .gpui_keyboard_activation()
-            .disabled(self.disabled)
-            .focusable(!self.disabled);
-        let element = match self.debug_selector {
-            Some(selector) => element.debug_selector(selector),
-            None => element,
+        let activation = Activation {
+            key: self.key,
+            label,
+            disabled: self.disabled,
+            on_activate: self.on_activate,
+            debug_selector: self.debug_selector,
         };
-        if self.disabled {
-            return element.aria_description("Unavailable");
-        }
-        let focus = Style::new()
-            .border_of(1.0, theme.colors.ring.to_paint())
-            .shadows(vec![ShadowLayer {
-                dx: 0.0,
-                dy: 0.0,
-                blur: 0.0,
-                spread: theme.interaction.focus_ring_width,
-                inset: false,
-                color: theme.colors.ring.at(Opacity::FocusRing).to_paint(),
-            }]);
-        let hover = match tone {
-            ButtonTone::Neutral | ButtonTone::Quiet => Style::new(),
-            ButtonTone::Primary => Style::new().shadows(lift),
-            ButtonTone::Special => Style::new().opacity(0.94),
-        };
-        let element = element
-            .cursor(CursorIcon::Pointer)
-            .focus_visible_style(focus)
-            .hover_style(hover);
-        let element = match fills {
-            true => live::track(element),
-            false => element,
-        };
-        match self.motion {
-            MotionPolicy::Full => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
-            }
-            MotionPolicy::Reduced => element,
-        }
+        activatable(root, activation, |element| {
+            let hover = match tone {
+                ButtonTone::Neutral | ButtonTone::Quiet => Style::new(),
+                ButtonTone::Primary => Style::new().shadows(lift),
+                ButtonTone::Special => Style::new().opacity(0.94),
+            };
+            let element = element
+                .cursor(CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(&theme))
+                .hover_style(hover);
+            let element = if fills { live::track(element) } else { element };
+            pressable(element, &theme, PRESS)
+        })
     }
 }

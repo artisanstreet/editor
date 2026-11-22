@@ -2,7 +2,7 @@ use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, RunId,
     SendMessage, ThreadId,
 };
-use forge_store::{Acceptance, SendRejected, Store};
+use forge_store::{Acceptance, Delivered, InputFailure, SendRejected, Store};
 
 #[expect(
     clippy::unwrap_used,
@@ -40,7 +40,7 @@ fn message(text: String, images: Vec<BlobHash>) -> SendMessage {
     }
 }
 #[tokio::test]
-async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
+async fn a_bounded_input_batch_attempts_only_the_inputs_it_loaded() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let thread = thread(&store).await;
@@ -50,7 +50,6 @@ async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
             .send_message(
                 thread.clone(),
                 message("queued".into(), Vec::new()),
-                false,
                 Acceptance::default(),
             )
             .await
@@ -60,11 +59,11 @@ async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
     }
     let pending = store.pending_inputs(&thread).await.unwrap();
     assert_eq!(pending.items.len(), 32);
-    assert_eq!(pending.cutoff, last);
-    assert!(pending.cutoff > pending.items.last().unwrap().seq);
+    assert_eq!(pending.cutoff, pending.items.last().unwrap().seq);
+    assert!(pending.cutoff < last);
     let ids = pending.items.iter().map(|item| item.id.clone()).collect();
     store
-        .accept_inputs(thread.clone(), RunId::new(), ids)
+        .accept_inputs(thread.clone(), RunId::new(), ids, Delivered::Initial)
         .await
         .unwrap();
     let rest = store.pending_inputs(&thread).await.unwrap();
@@ -81,7 +80,6 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
         .send_message(
             thread.clone(),
             message(text.clone(), Vec::new()),
-            false,
             Acceptance::default(),
         )
         .await
@@ -91,7 +89,6 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
         .send_message(
             thread.clone(),
             message("tail".into(), Vec::new()),
-            false,
             Acceptance::default(),
         )
         .await
@@ -100,9 +97,14 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
     let pending = store.pending_inputs(&thread).await.unwrap();
     assert_eq!(pending.items.len(), 1);
     assert_eq!(pending.items[0], first);
-    assert_eq!(pending.cutoff, later.seq);
+    assert_eq!(pending.cutoff, first.seq);
     store
-        .accept_inputs(thread.clone(), RunId::new(), vec![first.id])
+        .accept_inputs(
+            thread.clone(),
+            RunId::new(),
+            vec![first.id],
+            Delivered::Initial,
+        )
         .await
         .unwrap();
     assert_eq!(store.pending_inputs(&thread).await.unwrap().items, [later]);
@@ -117,14 +119,13 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .send_message(
             thread.clone(),
             message("x".repeat(32 * 1024 * 1024 + 1), Vec::new()),
-            false,
             Acceptance::default(),
         )
         .await
         .unwrap_err();
     assert!(matches!(
-        too_large.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *too_large.cause,
+        InputFailure::Rejected(SendRejected::TextTooLarge { .. })
     ));
     assert_eq!(store.head(), head);
     let hash = BlobHash("a".repeat(64));
@@ -132,28 +133,26 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .send_message(
             thread.clone(),
             message("missing".into(), vec![hash.clone()]),
-            false,
             Acceptance::default(),
         )
         .await
         .unwrap_err();
     assert!(matches!(
-        missing.downcast_ref::<SendRejected>(),
-        Some(SendRejected::MissingBlob(_))
+        *missing.cause,
+        InputFailure::Rejected(SendRejected::MissingBlob(_))
     ));
     assert_eq!(store.head(), head);
     let count = store
         .send_message(
             thread.clone(),
             message("too many".into(), vec![hash; 129]),
-            false,
             Acceptance::default(),
         )
         .await
         .unwrap_err();
     assert!(matches!(
-        count.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *count.cause,
+        InputFailure::Rejected(SendRejected::TooManyImages { count: 129 })
     ));
     assert_eq!(store.head(), head);
     let mut hashes = Vec::new();
@@ -162,7 +161,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         let path = dir
             .path()
             .join("blobs")
-            .join(&hash.as_str()[..2])
+            .join(hash.as_str().split_at(2).0)
             .join(hash.as_str())
             .with_extension("webp");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -176,14 +175,13 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         .send_message(
             thread,
             message("too much image data".into(), hashes),
-            false,
             Acceptance::default(),
         )
         .await
         .unwrap_err();
     assert!(matches!(
-        total.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *total.cause,
+        InputFailure::Rejected(SendRejected::ImagesTooLarge { .. })
     ));
     assert_eq!(store.head(), head);
 }
@@ -199,7 +197,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
         let path = dir
             .path()
             .join("blobs")
-            .join(&hash.as_str()[..2])
+            .join(hash.as_str().split_at(2).0)
             .join(hash.as_str())
             .with_extension("webp");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -211,7 +209,6 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
             .send_message(
                 thread.clone(),
                 message(format!("image-{n}"), vec![hash]),
-                false,
                 Acceptance::default(),
             )
             .await
@@ -221,12 +218,14 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
     }
     let pending = store.pending_inputs(&thread).await.unwrap();
     assert_eq!(pending.items.len(), 4);
-    assert_eq!(pending.cutoff, last);
+    assert_eq!(pending.cutoff, pending.items.last().unwrap().seq);
+    assert!(pending.cutoff < last);
     store
         .accept_inputs(
             thread.clone(),
             RunId::new(),
             pending.items.into_iter().map(|item| item.id).collect(),
+            Delivered::Initial,
         )
         .await
         .unwrap();
@@ -246,13 +245,12 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
         .send_message(
             thread,
             message("invalid oversized blob".into(), vec![hash]),
-            false,
             Acceptance::default(),
         )
         .await
         .unwrap_err();
     assert!(matches!(
-        error.downcast_ref::<SendRejected>(),
-        Some(SendRejected::Payload(_))
+        *error.cause,
+        InputFailure::Rejected(SendRejected::ImageTooLarge { .. })
     ));
 }

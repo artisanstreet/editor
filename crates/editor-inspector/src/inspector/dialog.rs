@@ -1,49 +1,60 @@
 use super::{StreamState, accepts_item, command_lines, shell_output};
+use artisan_api::{Item, ItemId, ItemKind, LiveTarget, Status, TextContent, ThreadId, ToolKind};
 use editor_core::{
-        Core, CoreEvent, HostEvent, HostId, HostInstance, delivery::Delivery, runtime::runtime,
-    };
+    CompletionKey, CompletionSlot, Core, CoreEvent, HostEvent, HostId, HostInstance,
+    client::CallError, delivery::Delivery,
+};
 use editor_sources::ContentText;
 use editor_ui::markdown::terminal::TerminalScreen;
-use artisan_api::{Item, ItemId, ItemKind, LiveTarget, Status, TextContent, ThreadId, ToolKind};
 use std::{num::NonZeroUsize, ops::Range, sync::Arc};
-use tokio_util::task::AbortOnDropHandle;
 
-struct Completion(u64, anyhow::Result<Item>);
+struct Completion(CompletionKey, Result<Item, CallError>);
 
 pub struct TerminalDialog {
-    pub job: Option<Job>,
-    pub error: Option<String>,
-    pub loading: bool,
-    pub following: bool,
+    pub(crate) job: Option<Job>,
+    error: Option<editor_core::Problem>,
+    pub(crate) following: bool,
     generation: u64,
-    load: Option<AbortOnDropHandle<()>>,
+    fetch: CompletionSlot,
     delivery: Delivery<Completion>,
 }
 
+impl std::fmt::Debug for TerminalDialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalDialog").finish_non_exhaustive()
+    }
+}
+
 pub struct Job {
-    pub host: HostId,
-    pub instance: HostInstance,
-    pub thread: ThreadId,
-    pub item: ItemId,
-    pub data: Option<Arc<Item>>,
-    pub command: String,
-    pub commands: Vec<Range<usize>>,
-    pub cwd: Option<String>,
-    pub status: Status,
-    pub screen: TerminalScreen,
-    pub unverified: bool,
-    pub command_source: Option<ContentText>,
-    pub output_source: Option<ContentText>,
+    pub(crate) host: HostId,
+    pub(crate) instance: HostInstance,
+    thread: ThreadId,
+    pub(crate) item: ItemId,
+    pub(crate) data: Option<Arc<Item>>,
+    pub(crate) command: String,
+    pub(crate) commands: Vec<Range<usize>>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) status: Status,
+    pub(crate) screen: TerminalScreen,
+    pub(crate) unverified: bool,
+    pub(crate) command_source: Option<ContentText>,
+    pub(crate) output_source: Option<ContentText>,
     stream: StreamState,
     source: Option<(Option<u64>, usize, u64)>,
 }
 
+impl std::fmt::Debug for Job {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Job").finish_non_exhaustive()
+    }
+}
+
 impl Job {
-    pub fn missing(&self) -> bool {
+    fn missing(&self) -> bool {
         self.unverified || self.screen.cleared_earlier() || self.screen.truncated_line_count() > 0
     }
 
-    pub fn copy_output(&self) -> String {
+    pub(crate) fn copy_output(&self) -> String {
         let mut text = self.screen.plain_text();
         if self.unverified {
             text.push_str("\n[Live output only; Forge supplied no final snapshot.]");
@@ -52,17 +63,26 @@ impl Job {
     }
 }
 
-impl TerminalDialog {
-    pub fn new(core: &Core) -> Self {
+impl Default for TerminalDialog {
+    fn default() -> Self {
         Self {
             job: None,
             error: None,
-            loading: false,
             following: true,
             generation: 0,
-            load: None,
-            delivery: Delivery::with_wake(NonZeroUsize::MIN, core.wake_mailbox().sender()),
+            fetch: CompletionSlot::default(),
+            delivery: Delivery::new(NonZeroUsize::MIN),
         }
+    }
+}
+
+impl TerminalDialog {
+    pub const fn job(&self) -> Option<&Job> {
+        self.job.as_ref()
+    }
+
+    pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
+        self.delivery.wake_mailbox()
     }
 
     pub fn open(&mut self, core: &Core, open: Option<&(HostId, ThreadId)>, item: &ItemId) -> bool {
@@ -96,19 +116,26 @@ impl TerminalDialog {
         true
     }
 
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 
-    pub fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.generation = self.generation.wrapping_add(1);
-        self.load = None;
+        self.fetch.cancel();
         self.job = None;
         self.error = None;
-        self.loading = false;
     }
 
-    pub fn follow(&mut self, open: Option<&(HostId, ThreadId)>) {
+    pub const fn error(&self) -> Option<&editor_core::Problem> {
+        self.error.as_ref()
+    }
+
+    pub const fn loading(&self) -> bool {
+        self.fetch.is_running()
+    }
+
+    pub(crate) fn follow(&mut self, open: Option<&(HostId, ThreadId)>) {
         if self
             .job
             .as_ref()
@@ -116,11 +143,6 @@ impl TerminalDialog {
         {
             self.close();
         }
-    }
-
-    #[cfg(feature = "test-support")]
-    pub fn fetch_finished(&self) -> bool {
-        self.load.as_ref().is_some_and(|load| load.is_finished())
     }
 
     pub fn fetch(&mut self, core: &Core) {
@@ -132,14 +154,13 @@ impl TerminalDialog {
         };
         let client = host.client.clone();
         let item = job.item.clone();
-        let generation = self.generation;
         let sender = self.delivery.sender();
-        self.loading = true;
         self.error = None;
-        self.load = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let result = client.item(&item).await;
-            let _ = sender.send(Completion(generation, result)).await;
-        })));
+        self.fetch
+            .spawn(&job.host, job.instance, move |key| async move {
+                let result = client.item(&item).await;
+                sender.offer(Completion(key, result)).await;
+            });
     }
 
     pub fn drain(&mut self, core: &Core) -> bool {
@@ -153,25 +174,28 @@ impl TerminalDialog {
             return true;
         }
         let mut changed = false;
-        for Completion(generation, result) in self.delivery.drain() {
-            if generation != self.generation {
+        for Completion(key, result) in self.delivery.drain() {
+            if !self.fetch.finish(core, &key) {
                 continue;
             }
-            self.load = None;
-            self.loading = false;
             match result {
                 Ok(item) => {
                     self.set_item(Arc::new(item));
                     self.sync(core);
                 }
-                Err(error) => self.error = Some(format!("Couldn't load shell output: {error:#}")),
+                Err(error) => {
+                    self.error = Some(editor_core::Problem::calling_forge(
+                        "Couldn't load the shell output.",
+                        &error,
+                    ));
+                }
             }
             changed = true;
         }
         changed
     }
 
-    pub fn on_core_event(&mut self, core: &Core, event: &CoreEvent) -> bool {
+    pub(crate) fn on_core_event(&mut self, core: &Core, event: &CoreEvent) -> bool {
         let Some(job) = &self.job else {
             return false;
         };
@@ -203,7 +227,15 @@ impl TerminalDialog {
                 self.sync(core);
                 true
             }
-            _ => false,
+            HostEvent::ImagesChanged
+            | HostEvent::EngineInstall { .. }
+            | HostEvent::ThreadSummaryChanged { .. }
+            | HostEvent::Changed
+            | HostEvent::WslDistro { .. }
+            | HostEvent::ThreadChanged { .. }
+            | HostEvent::Item(_)
+            | HostEvent::Live { .. }
+            | HostEvent::EditorCall { .. } => false,
         }
     }
 
@@ -216,7 +248,7 @@ impl TerminalDialog {
         }
     }
 
-    pub fn sync(&mut self, core: &Core) {
+    fn sync(&mut self, core: &Core) {
         let Some(job) = &mut self.job else {
             return;
         };
@@ -229,7 +261,9 @@ impl TerminalDialog {
             ..
         } = &item.kind
         else {
-            self.error = Some("This item is not a shell command.".into());
+            self.error = Some(editor_core::Problem::new(
+                "This item isn't a shell command.",
+            ));
             return;
         };
         let Some(host) = core.host_if_instance(&job.host, job.instance) else {
@@ -323,7 +357,7 @@ pub struct Layout {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Row {
+pub(crate) enum Row {
     Command(usize),
     Missing,
     Output(usize),
@@ -331,7 +365,7 @@ pub enum Row {
 }
 
 impl Layout {
-    pub fn of(job: &Job) -> Self {
+    pub(crate) fn of(job: &Job) -> Self {
         Self {
             commands: job.commands.len(),
             lead: job.commands.len() + usize::from(job.missing()),
@@ -341,15 +375,15 @@ impl Layout {
         }
     }
 
-    pub const fn total(self) -> usize {
+    pub(crate) const fn total(self) -> usize {
         self.lead + self.lines + 1
     }
 
-    pub const fn output(self) -> Range<usize> {
+    const fn output(self) -> Range<usize> {
         self.lead..self.lead + self.lines
     }
 
-    pub fn row(self, index: usize) -> Option<Row> {
+    pub(crate) fn row(self, index: usize) -> Option<Row> {
         if index < self.commands {
             Some(Row::Command(index))
         } else if index < self.lead {

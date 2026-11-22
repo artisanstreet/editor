@@ -20,22 +20,23 @@ fn mounted_panel(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
     use aqua_text::{SharedFonts, SharedRuns};
     use editor_aqua::conversation::adapter::Action;
     let markers = outline(count);
-    let sink = jumps.clone();
+    let sink = jumps;
     let dispatch: Dispatch = Rc::new(move |action| {
         if let Action::Jump(position) = action {
             sink.borrow_mut().push(position);
         }
     });
-    let menu = navigator::panel(&markers, None, None, ArtisanTheme::resolved(), 1.0, dispatch);
+    let menu = navigator::panel(
+        &markers,
+        None,
+        None,
+        &ArtisanTheme::resolved(),
+        1.0,
+        dispatch,
+    );
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.mount(|_| {
-        UiBox::new()
-            .width(900.0)
-            .height(700.0)
-            .child(menu)
-            .build()
-    })
-    .unwrap();
+    app.mount(|_| UiBox::new().width(900.0).height(700.0).child(menu).build())
+        .unwrap();
     app.set_viewport(900.0, 700.0, 1.0);
     app.build_frame().unwrap();
     app
@@ -66,7 +67,7 @@ fn press_and_release(app: &mut aqua::UiApp, at: Point) {
 #[test]
 fn clicking_a_panel_row_jumps_to_its_turn() {
     let jumps = Rc::new(RefCell::new(Vec::new()));
-    let mut app = mounted_panel(8, jumps.clone());
+    let mut app = mounted_panel(8, Rc::clone(&jumps));
     let at = row_center(&app, "item-3");
     press_and_release(&mut app, at);
     assert_eq!(&*jumps.borrow(), &[30]);
@@ -76,12 +77,17 @@ fn clicking_a_panel_row_jumps_to_its_turn() {
 fn clicking_a_row_of_the_scrolled_panel_jumps_to_its_turn() {
     use aqua_ui::tree::NodeKind;
     let jumps = Rc::new(RefCell::new(Vec::new()));
-    let mut app = mounted_panel(40, jumps.clone());
+    let mut app = mounted_panel(40, Rc::clone(&jumps));
     let scroll = app
         .tree()
         .traverse()
         .into_iter()
-        .find(|node| matches!(app.tree().get(*node).map(|r| &r.kind), Some(NodeKind::Scroll(_))))
+        .find(|node| {
+            matches!(
+                app.tree().get(*node).map(|r| &r.kind),
+                Some(NodeKind::Scroll(_))
+            )
+        })
         .expect("panel list scrolls");
     assert!(app.tree_mut().scroll_to(scroll, Point::new(0.0, 360.0)));
     app.build_frame().unwrap();

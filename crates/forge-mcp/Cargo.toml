@@ -2,23 +2,36 @@
 name = "forge-mcp"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "The Artisan MCP: what an agent can do with Artisan, served to every engine through Forge's gateway."
 
+[lib]
+doctest = false
+
 [dependencies]
-anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
-forge-runs = { path = "../forge-runs" }
-forge-store = { path = "../forge-store" }
+artisan-api.workspace = true
+diagnostics.workspace = true
+forge-runs.workspace = true
+forge-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["sync", "rt", "time"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "rt", "time"] }
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
-forge-engines = { path = "../forge-engines" }
+divan.workspace = true
+forge-engines.workspace = true
 tempfile.workspace = true
+tokio-util.workspace = true
+test-support = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bench]]
+name = "transcript"
+harness = false
 
 [lints]
 workspace = true

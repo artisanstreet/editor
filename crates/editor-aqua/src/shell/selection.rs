@@ -1,7 +1,7 @@
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use std::{cell::Cell, rc::Rc};
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SelectionAllocator(Rc<Cell<u64>>);
 
 impl SelectionAllocator {
@@ -10,7 +10,7 @@ impl SelectionAllocator {
             .0
             .get()
             .checked_add(1)
-            .expect("selection identity exhausted");
+            .expect("invariant: selection ids never exhaust u64");
         self.0.set(id);
         id
     }
@@ -58,26 +58,37 @@ impl SelectionAllocator {
 }
 
 pub struct SelectionScope {
-    pub key: u64,
-    pub inspector: crate::inspector::SourceIds,
-    pub conversation: SelectionDocumentId,
-    pub question: (SelectionDocumentId, SelectionSourceId),
-    pub question_options: (SelectionDocumentId, SelectionSourceId),
-    pub question_option_detail: (SelectionDocumentId, SelectionSourceId),
+    pub(crate) key: u64,
+    pub(crate) inspector: crate::inspector::SourceIds,
+    pub(crate) conversation: SelectionDocumentId,
+    pub(crate) question: (SelectionDocumentId, SelectionSourceId),
+    pub(crate) question_options: (SelectionDocumentId, SelectionSourceId),
+    pub(crate) question_option_detail: (SelectionDocumentId, SelectionSourceId),
     allocator: SelectionAllocator,
 }
 
+impl std::fmt::Debug for SelectionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectionScope").finish_non_exhaustive()
+    }
+}
+
 impl SelectionScope {
-    pub fn source_allocator(&self) -> Rc<dyn Fn() -> SelectionSourceId> {
+    #[must_use]
+    pub const fn conversation(&self) -> SelectionDocumentId {
+        self.conversation
+    }
+
+    pub(crate) fn source_allocator(&self) -> Rc<dyn Fn() -> SelectionSourceId> {
         let allocator = self.allocator.clone();
         Rc::new(move || SelectionSourceId(allocator.next()))
     }
 
-    pub fn next_source(&self) -> SelectionSourceId {
+    pub(crate) fn next_source(&self) -> SelectionSourceId {
         SelectionSourceId(self.allocator.next())
     }
 
-    pub fn next_document(&self) -> SelectionDocumentId {
+    pub(crate) fn next_document(&self) -> SelectionDocumentId {
         SelectionDocumentId(self.allocator.next())
     }
 }

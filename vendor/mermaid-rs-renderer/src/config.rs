@@ -1,3 +1,4 @@
+use crate::error::LoadConfigError;
 use crate::theme::Theme;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -1494,7 +1495,7 @@ struct ConfigFile {
     timeline: Option<TimelineConfigFile>,
 }
 
-pub fn load_config(path: Option<&Path>) -> anyhow::Result<Config> {
+pub fn load_config(path: Option<&Path>) -> Result<Config, LoadConfigError> {
     load_config_with_theme(path, None)
 }
 
@@ -1504,14 +1505,16 @@ pub fn load_config(path: Option<&Path>) -> anyhow::Result<Config> {
 pub fn load_config_with_theme(
     path: Option<&Path>,
     cli_theme: Option<&str>,
-) -> anyhow::Result<Config> {
+) -> Result<Config, LoadConfigError> {
     let mut config = Config::default();
     let cli_theme = match cli_theme {
-        Some(name) => Some(Theme::from_name(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "unknown theme preset '{name}' (expected one of: default, dark, forest, neutral, modern)"
+        Some(name) => {
+            Some(
+                Theme::from_name(name).ok_or_else(|| LoadConfigError::UnknownTheme {
+                    name: name.to_string(),
+                })?,
             )
-        })?),
+        }
         None => None,
     };
     let Some(path) = path else {
@@ -1522,8 +1525,15 @@ pub fn load_config_with_theme(
         return Ok(config);
     };
 
-    let contents = std::fs::read_to_string(path)?;
-    let parsed: ConfigFile = serde_json::from_str(&contents)?;
+    let contents = std::fs::read_to_string(path).map_err(|source| LoadConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let parsed: ConfigFile =
+        serde_json::from_str(&contents).map_err(|source| LoadConfigError::Decode {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
     if let Some(theme_name) = parsed.theme.as_deref()
         && let Some(theme) = Theme::from_name(theme_name)

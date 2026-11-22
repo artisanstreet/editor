@@ -1,0 +1,13 @@
+[package]
+name = "build-info"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Stamps the commit and target triple into a binary for `--version`, rebuilding when Git's HEAD moves."
+publish = false
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

@@ -35,12 +35,17 @@ fn layout(outline: Option<f32>) -> Placed {
         UiBox::new()
             .layout("row")
             .width(1200.0)
-            .children(strip::strip(&ArtisanTheme::resolved(), &[tab], false, &emit))
+            .children(strip::strip(
+                &ArtisanTheme::resolved(),
+                &[tab],
+                false,
+                &emit,
+            ))
             .build()
     })
-    .unwrap();
+    .expect("the test view lays out");
     app.set_viewport(1200.0, 200.0, 1.0);
-    app.build_frame().unwrap();
+    app.build_frame().expect("the test frame builds");
     let tree = app.tree();
     let labels = tree
         .traverse()
@@ -57,7 +62,10 @@ fn layout(outline: Option<f32>) -> Placed {
     let chevron = tree
         .traverse()
         .into_iter()
-        .find(|id| tree.get(*id).is_some_and(|node| node.key == Some(chevron_key)))
+        .find(|id| {
+            tree.get(*id)
+                .is_some_and(|node| node.key == Some(chevron_key))
+        })
         .and_then(|id| tree.rect(id))
         .map(|rect| (rect.x, rect.right()));
     Placed { labels, chevron }
@@ -77,7 +85,7 @@ fn the_outline_chevron_follows_the_title_without_squeezing_the_labels() {
     };
     for label in ["artisanstreet", "Open PR list"] {
         assert!(width(&plain, label) > 0.0);
-        assert_eq!(width(&plain, label), width(&outlined, label), "{label}");
+        test_support::assert_near!(width(&plain, label), width(&outlined, label), "{label}");
     }
     let title_right = outlined
         .labels

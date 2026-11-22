@@ -1,3 +1,4 @@
+use aqua::Instant;
 use editor_aqua::ui::text::wheel_glide::{WheelGlide, WheelInput};
 use std::time::Duration;
 
@@ -32,7 +33,7 @@ fn whole_lines_are_notches_and_fractions_are_precise() {
 #[test]
 fn a_notch_glides_down_over_several_frames_to_its_distance() {
     let mut glide = WheelGlide::default();
-    glide.push_down(100.0, 60.0, 500.0);
+    glide.push_down(100.0, 60.0, 500.0, Instant::ZERO);
     assert!(glide.active());
     let (offset, frames) = settle(&mut glide, 100.0, 500.0);
     assert!((offset - 160.0).abs() < 0.001);
@@ -43,8 +44,8 @@ fn a_notch_glides_down_over_several_frames_to_its_distance() {
 #[test]
 fn ticks_accumulate_in_one_direction() {
     let mut glide = WheelGlide::default();
-    glide.push_down(0.0, 50.0, 500.0);
-    glide.push_down(0.0, 50.0, 500.0);
+    glide.push_down(0.0, 50.0, 500.0, Instant::ZERO);
+    glide.push_down(0.0, 50.0, 500.0, Instant::ZERO);
     let (offset, _) = settle(&mut glide, 0.0, 500.0);
     assert!((offset - 100.0).abs() < 0.001);
 }
@@ -52,8 +53,8 @@ fn ticks_accumulate_in_one_direction() {
 #[test]
 fn reversing_the_wheel_drops_the_queued_distance() {
     let mut glide = WheelGlide::default();
-    glide.push_down(250.0, 100.0, 500.0);
-    glide.push_down(250.0, -30.0, 500.0);
+    glide.push_down(250.0, 100.0, 500.0, Instant::ZERO);
+    glide.push_down(250.0, -30.0, 500.0, Instant::ZERO);
     let (offset, _) = settle(&mut glide, 250.0, 500.0);
     assert!((offset - 220.0).abs() < 0.001);
 }
@@ -61,16 +62,16 @@ fn reversing_the_wheel_drops_the_queued_distance() {
 #[test]
 fn the_glide_stops_at_both_edges() {
     let mut glide = WheelGlide::default();
-    glide.push_down(450.0, 400.0, 500.0);
+    glide.push_down(450.0, 400.0, 500.0, Instant::ZERO);
     assert!((settle(&mut glide, 450.0, 500.0).0 - 500.0).abs() < 0.001);
-    glide.push_down(30.0, -400.0, 500.0);
+    glide.push_down(30.0, -400.0, 500.0, Instant::ZERO);
     assert!(settle(&mut glide, 30.0, 500.0).0.abs() < 0.001);
 }
 
 #[test]
 fn a_glide_in_an_unscrollable_list_never_starts() {
     let mut glide = WheelGlide::default();
-    glide.push_down(0.0, 80.0, 0.0);
+    glide.push_down(0.0, 80.0, 0.0, Instant::ZERO);
     assert!(!glide.active());
     assert_eq!(glide.step_down_elapsed(0.0, 0.0, FRAME), None);
 }
@@ -78,7 +79,7 @@ fn a_glide_in_an_unscrollable_list_never_starts() {
 #[test]
 fn cancelling_drops_the_backlog() {
     let mut glide = WheelGlide::default();
-    glide.push_down(0.0, 80.0, 500.0);
+    glide.push_down(0.0, 80.0, 500.0, Instant::ZERO);
     glide.cancel();
     assert!(!glide.active());
     assert_eq!(glide.step_down_elapsed(0.0, 500.0, FRAME), None);
@@ -87,7 +88,7 @@ fn cancelling_drops_the_backlog() {
 #[test]
 fn content_shrinking_under_a_glide_ends_it_at_the_new_edge() {
     let mut glide = WheelGlide::default();
-    glide.push_down(100.0, 200.0, 500.0);
+    glide.push_down(100.0, 200.0, 500.0, Instant::ZERO);
     let next = glide.step_down_elapsed(100.0, 120.0, FRAME).unwrap();
     assert!(next <= 120.0);
     let (offset, _) = settle(&mut glide, next, 120.0);
@@ -98,7 +99,7 @@ fn content_shrinking_under_a_glide_ends_it_at_the_new_edge() {
 fn the_same_time_travels_the_same_distance_at_any_refresh_rate() {
     let travel = |frame_ms, frames| {
         let mut glide = WheelGlide::default();
-        glide.push_down(0.0, 100.0, 500.0);
+        glide.push_down(0.0, 100.0, 500.0, Instant::ZERO);
         let mut offset = 0.0;
         for _ in 0..frames {
             offset = glide

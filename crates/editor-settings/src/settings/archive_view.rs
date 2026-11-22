@@ -15,17 +15,20 @@ use super::{
 };
 use editor_core::HostData;
 use editor_ui::{
-    kit::{ButtonTone, Density, Row as KitRow, Space, Spaced, TextRole},
+    kit::{ButtonTone, Density, Row as KitRow, RowKind, Space, Spaced, TextRole},
     select::{Select, SelectEntry, SelectMenu},
     theme::ArtisanTheme,
 };
 
 const AGE_WIDTH: f32 = 112.0;
 const ACTION_WIDTH: f32 = 96.0;
-const VISIBLE_ROWS: usize = 8;
+const VISIBLE_ROWS: u8 = 8;
 
-fn row_height() -> f32 {
-    KitRow::ListItem(Density::Tall).lines() + Space::S2.px() + 2.0 * KitRow::FormRow.pad().y.px()
+fn row_height(theme: &ArtisanTheme) -> f32 {
+    2.0f32.mul_add(
+        RowKind::Form.pad().y.px(),
+        KitRow::ListItem(Density::Tall).lines(theme) + Space::S2.px(),
+    )
 }
 
 fn column(width: f32, child: Element) -> Element {
@@ -36,14 +39,8 @@ fn column(width: f32, child: Element) -> Element {
         .build()
 }
 
-
 fn entries() -> Vec<SelectEntry<Option<u32>>> {
-    let choices = artisan_api::setting_decl(THREAD_RETENTION_DAYS_KEY)
-        .and_then(|decl| match decl.kind {
-            artisan_api::SettingKind::Choice { values } => Some(values),
-            _ => None,
-        })
-        .unwrap_or(&[]);
+    let choices = artisan_api::choice_values(THREAD_RETENTION_DAYS_KEY);
     choices
         .iter()
         .map(|days| {
@@ -52,7 +49,9 @@ fn entries() -> Vec<SelectEntry<Option<u32>>> {
                 match days {
                     None => "Never".into(),
                     Some(365) => "After a year".into(),
-                    Some(days) => format!("After {days} days"),
+                    Some(days) => {
+                        format!("After {}", editor_ui::locale::count(*days, "day", "days"))
+                    }
                 },
             )
         })
@@ -72,30 +71,30 @@ fn selected(host: &HostData) -> Option<u32> {
 pub fn retention_menu(
     controller: &SettingsController,
     host: &HostData,
-    theme: ArtisanTheme,
+    theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> SelectMenu<Option<u32>> {
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     let host_id = host.id.clone();
     let instance = host.instance();
     SelectMenu::new(
-        theme,
+        *theme,
         Some(selected(host)),
         entries(),
-        controller.retention_select.clone(),
+        Rc::clone(&controller.retention_select),
         ui::CONTROL_WIDTH,
     )
     .on_change(move |days| change(ViewAction::SetRetention(host_id.clone(), instance, days)))
     .on_open_change(move |open| emit(ViewAction::RetentionMenu(open)))
 }
 
-pub fn cleanup(
+pub(crate) fn cleanup(
     controller: &SettingsController,
     host: &HostData,
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let change = emit.clone();
+    let change = Rc::clone(&emit);
     let host_id = host.id.clone();
     let instance = host.instance();
     let select = Select::new(
@@ -103,7 +102,7 @@ pub fn cleanup(
         *theme,
         Some(selected(host)),
         entries(),
-        controller.retention_select.clone(),
+        Rc::clone(&controller.retention_select),
     )
     .label("Delete inactive threads")
     .on_change(move |days| change(ViewAction::SetRetention(host_id.clone(), instance, days)))
@@ -122,17 +121,13 @@ pub fn cleanup(
 fn span(millis: i64) -> String {
     let left = millis.max(60_000);
     let (count, unit) = if left >= 86_400_000 {
-        (left / 86_400_000, "day")
+        (left / 86_400_000, ("day", "days"))
     } else if left >= 3_600_000 {
-        (left / 3_600_000, "hour")
+        (left / 3_600_000, ("hour", "hours"))
     } else {
-        (left / 60_000, "minute")
+        (left / 60_000, ("minute", "minutes"))
     };
-    if count == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{count} {unit}s")
-    }
+    editor_ui::locale::count(count, unit.0, unit.1)
 }
 
 #[derive(Clone)]
@@ -144,11 +139,15 @@ struct Row {
     restoring: bool,
 }
 
-pub fn archived(
+#[expect(
+    clippy::too_many_lines,
+    reason = "the archive page is one virtualized list with its header, empty and error states"
+)]
+pub(crate) fn archived(
     controller: &SettingsController,
     host: &HostData,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let page = host.thread_page(true);
     let rows: Vec<Row> = controller
@@ -173,7 +172,7 @@ pub fn archived(
             theme,
             vec![ui::note(
                 theme,
-                if page.loading {
+                if page.is_loading() {
                     "Loading archived threads…"
                 } else {
                     "No archived threads."
@@ -183,24 +182,30 @@ pub fn archived(
     } else {
         let header = UiBox::new()
             .spaced(Space::S16)
-            .padded(KitRow::FormRow.pad().y)
+            .padded(RowKind::Form.pad().y)
             .style(Style::new().align(AlignItems::CENTER))
-            .child(ui::grow(ui::line(theme, TextRole::Caption, Ink::Muted, "Thread")))
+            .child(ui::grow(ui::line(
+                theme,
+                TextRole::Caption,
+                Ink::Muted,
+                "Thread",
+            )))
             .child(column(
                 AGE_WIDTH,
                 ui::grow(ui::line(theme, TextRole::Caption, Ink::Muted, "Archived")),
             ))
             .child(UiBox::new().width(ACTION_WIDTH).build())
             .build();
-        let height = rows.len().min(VISIBLE_ROWS) as f32 * row_height();
+        let visible = u8::try_from(rows.len()).map_or(VISIBLE_ROWS, |rows| rows.min(VISIBLE_ROWS));
+        let height = f32::from(visible) * row_height(theme);
         let theme = *theme;
-        let row_emit = emit.clone();
+        let row_emit = Rc::clone(emit);
         let list = List::new()
             .items(rows)
             .key(|row| format!("archived-{}", row.id))
             .row(move |row| {
                 let id = row.id.clone();
-                let send = row_emit.clone();
+                let send = Rc::clone(&row_emit);
                 let button = ui::button(
                     &theme,
                     format!("settings-archived-{}-unarchive", row.id),
@@ -216,11 +221,16 @@ pub fn archived(
                 UiBox::new()
                     .width(Length::Pct(100.0))
                     .spaced(Space::S16)
-                    .padded(KitRow::FormRow.pad().y)
+                    .padded(RowKind::Form.pad().y)
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(ui::grow(
                         ui::stack(Space::S2)
-                            .child(ui::line(&theme, TextRole::Label, Ink::Plain, row.title.clone()))
+                            .child(ui::line(
+                                &theme,
+                                TextRole::Label,
+                                Ink::Plain,
+                                row.title.clone(),
+                            ))
                             .child(ui::line(
                                 &theme,
                                 TextRole::Caption,
@@ -246,48 +256,50 @@ pub fn archived(
                     .width(Length::Pct(100.0))
                     .height(Length::Px(height)),
             )
-            .estimated_row_height(Length::Px(row_height()))
+            .estimated_row_height(Length::Px(row_height(&theme)))
             .build()
             .with_key("archived-threads");
         ui::card(&theme, vec![header, list])
     };
     let mut body = ui::stack(Space::S8).child(card);
-    if let Some(error) = &page.error {
-        body = body.child(ui::error_text(theme, error));
+    if let Some(problem) = page.error() {
+        body = body.child(ui::problem(theme, "archived-page-error", problem).build());
     }
-    if !page.at_latest || page.error.is_some() {
-        let send = emit.clone();
+    if !page.at_latest() || page.error().is_some() {
+        let send = Rc::clone(emit);
         body = body.child(ui::button(
             theme,
             "archived-latest",
             "Latest archived threads",
             ButtonTone::Quiet,
-            page.loading,
+            page.is_loading(),
             move || send(ViewAction::ArchiveLatest),
         ));
     }
-    if page.next.is_some() {
-        let send = emit.clone();
+    if page.has_older() {
+        let send = Rc::clone(emit);
         body = body.child(ui::button(
             theme,
             "archived-older",
-            if page.loading {
+            if page.is_loading() {
                 "Loading…"
             } else {
                 "Older archived threads"
             },
             ButtonTone::Quiet,
-            page.loading,
+            page.is_loading(),
             move || send(ViewAction::ArchiveOlder),
         ));
     }
-    if let Some(error) = &controller.archive.error {
-        body = body.child(ui::error_text(theme, error));
+    if let Some(problem) = &controller.archive.error {
+        body = body.child(ui::problem(theme, "archived-restore-error", problem).build());
     }
     ui::section(
         theme,
         "Archived",
-        Some("Archived threads leave the sidebar. They stay here until you restore them."),
+        Some(
+            "Archived threads leave the sidebar and stay here until you restore them, unless Cleanup deletes them first.",
+        ),
         None,
         body.build(),
     )

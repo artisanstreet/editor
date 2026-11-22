@@ -90,7 +90,6 @@ cargo_build() {
 linux_out="$output_root/linux/$profile_dir"
 windows_out="$output_root/windows/x86_64-pc-windows-gnu/$profile_dir"
 if [[ -n "$ARTISAN_DEV_BLAZE" ]]; then windows_out="$root/target/dev/windows/x86_64-pc-windows-gnu/$profile_dir"; fi
-stage="$output_root/stage"
 
 want_forge=true
 want_editor=true
@@ -121,16 +120,22 @@ if [[ "$client_only" == true ]]; then
         exit 0
     fi
     [[ -f "$windows_out/editor-aqua.exe" ]] || die "native Aqua Editor build output is missing"
-    source_path="$(wslpath -w "$windows_out/editor-aqua.exe")"
-    source_literal="${source_path//\'/\'\'}"
     unset LD_LIBRARY_PATH
+    windows_temp="$(powershell.exe -NoProfile -NonInteractive -Command '[IO.Path]::GetTempPath()' | tr -d '\r')"
+    clients="$(wslpath -u "$windows_temp")"
+    while IFS= read -r -d '' previous; do
+        if rm -f "$previous/Artisan Editor Dev.exe" 2>/dev/null; then
+            rm -rf "$previous"
+        fi
+    done < <(find "$clients" -maxdepth 1 -type d -name 'artisan-editor-dev-*' -mmin +1 -print0)
+    directory="$(mktemp -d "$clients/artisan-editor-dev-XXXXXXXX")"
+    cp "$windows_out/editor-aqua.exe" "$directory/Artisan Editor Dev.exe"
+    executable="$(wslpath -w "$directory/Artisan Editor Dev.exe")"
+    executable_literal="${executable//\'/\'\'}"
     powershell.exe -NoProfile -NonInteractive -Command "
         \$ErrorActionPreference = 'Stop'
-        \$directory = Join-Path ([IO.Path]::GetTempPath()) ('artisan-editor-dev-' + [Guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path \$directory | Out-Null
-        \$executable = Join-Path \$directory 'Artisan Editor Dev.exe'
-        Copy-Item -LiteralPath '$source_literal' -Destination \$executable
-        \$client = Start-Process -FilePath \$executable -WorkingDirectory \$directory -PassThru
+        \$executable = '$executable_literal'
+        \$client = Start-Process -FilePath \$executable -WorkingDirectory (Split-Path -Parent \$executable) -PassThru
         Write-Output ('dev: opened client PID ' + \$client.Id + ' from ' + \$executable)
     "
     exit 0
@@ -146,9 +151,7 @@ else
     cargo_build cargo-linux linux "${linux_args[@]}"
 fi
 if [[ "$windows" == true && "$want_editor" == true ]]; then
-    windows_args=(-p ae --bin ae)
-    if [[ "$want_editor" == true ]]; then windows_args+=("${editor_args[@]}"); fi
-    cargo_build cargo-windows windows "${windows_args[@]}"
+    cargo_build cargo-windows windows -p ae --bin ae "${editor_args[@]}"
 fi
 
 if [[ "$command" == build ]]; then
@@ -159,7 +162,9 @@ fi
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n1)"
 commit="$(git -C "$root" rev-parse --short=10 HEAD)"
 if ! git -C "$root" diff --quiet HEAD 2>/dev/null; then commit="$commit.dirty"; fi
-rm -rf "$stage"
+mkdir -p "$output_root"
+stage="$(mktemp -d "$output_root/stage-XXXXXXXX")"
+trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/linux"
 echo "$version-dev+$commit" > "$stage/linux/VERSION"
 for binary in ae forge; do
@@ -169,18 +174,14 @@ if [[ "$windows" == true && "$want_editor" == true ]]; then
     mkdir -p "$stage/windows"
     echo "$version-dev+$commit" > "$stage/windows/VERSION"
     if [[ -f "$windows_out/ae.exe" ]]; then cp "$windows_out/ae.exe" "$stage/windows/"; fi
-    if [[ "$want_editor" == true ]]; then
-        [[ -f "$windows_out/editor-aqua.exe" ]] || die "native Aqua Editor build output is missing"
-        cp "$windows_out/editor-aqua.exe" "$stage/windows/Artisan Editor.exe"
-    fi
+    [[ -f "$windows_out/editor-aqua.exe" ]] || die "native Aqua Editor build output is missing"
+    cp "$windows_out/editor-aqua.exe" "$stage/windows/Artisan Editor.exe"
 fi
 
 forge_place=none
 editor_place=none
 if [[ "$want_forge" == true ]]; then forge_place=here; fi
-if [[ "$want_editor" == true ]]; then
-    editor_place=windows
-fi
+if [[ "$want_editor" == true ]]; then editor_place=windows; fi
 
 unset LD_LIBRARY_PATH
 install_args=("$stage/linux/ae" install --from "$stage" --forge "$forge_place" --editor "$editor_place" --yes)
@@ -190,8 +191,11 @@ if [[ "$want_forge" == true ]] && command -v systemd-run >/dev/null 2>&1 && syst
     for name in WSL_DISTRO_NAME WSL_INTEROP WSLENV; do
         if [[ -n "${!name:-}" ]]; then install_environment+=(--setenv="$name=${!name}"); fi
     done
+    trap - EXIT
+    # shellcheck disable=SC2016
     systemd-run --user --collect --wait --unit="artisan-dev-install-$(date +%s)-$$" \
-        --working-directory="$root" "${install_environment[@]}" "${install_args[@]}"
+        --working-directory="$root" "${install_environment[@]}" \
+        "$BASH" -c 'trap "rm -rf \"\$0\"" EXIT; "$@"' "$stage" "${install_args[@]}"
 else
     "${install_args[@]}"
 fi

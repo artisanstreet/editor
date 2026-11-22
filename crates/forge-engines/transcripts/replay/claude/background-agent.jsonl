@@ -1,0 +1,30 @@
+{"kind":"transcript","source":"synthetic"}
+{"kind":"launch"}
+{"kind":"in","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Have an agent review the parser\"}]},\"parent_tool_use_id\":null,\"session_id\":\"\"}"}
+{"kind":"in","text":"{\"type\":\"control_request\",\"request_id\":\"artisan-title\",\"request\":{\"subtype\":\"generate_session_title\",\"description\":\"Have an agent review the parser\",\"persist\":true}}"}
+{"kind":"out","text":"{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/work\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"model\":\"claude-haiku-5-5\",\"permissionMode\":\"default\",\"tools\":[],\"mcp_servers\":[{\"name\":\"artisan\",\"status\":\"connected\"}]}"}
+{"kind":"out","text":"{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Have an agent review the parser\"}]},\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"artisan-title\",\"response\":{\"title\":\"Delegating the review\"}}}"}
+{"kind":"out","text":"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_spawn\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_spawn\",\"name\":\"mcp__artisan__spawn_agent\",\"input\":{\"task\":\"Review the parser\",\"prompt\":\"Review the parser for unhandled input.\",\"background\":true}}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"call","server":"artisan","request":{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"spawn_agent","arguments":{"task":"Review the parser","prompt":"Review the parser for unhandled input.","background":true}}}}
+{"kind":"out","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_spawn\",\"content\":[{\"type\":\"text\",\"text\":\"Started the parser review. Its result arrives as a message when it finishes.\"}]}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_waiting\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"An agent is reviewing the parser; its report will follow.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"An agent is reviewing the parser; its report will follow.\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"usage\":{}}"}
+{"kind":"closed"}
+{"kind":"launch"}
+{"kind":"in","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Review the parser for unhandled input.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"\"}"}
+{"kind":"in","text":"{\"type\":\"control_request\",\"request_id\":\"artisan-title\",\"request\":{\"subtype\":\"generate_session_title\",\"description\":\"Review the parser for unhandled input.\",\"persist\":true}}"}
+{"kind":"out","text":"{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/work\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a1\",\"model\":\"claude-haiku-5-5\",\"permissionMode\":\"default\",\"tools\":[],\"mcp_servers\":[{\"name\":\"artisan\",\"status\":\"connected\"}]}"}
+{"kind":"out","text":"{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Review the parser for unhandled input.\"}]},\"session_id\":\"00000000-0000-4000-8000-00000000c1a1\"}"}
+{"kind":"out","text":"{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"artisan-title\",\"response\":{\"title\":\"Reviewing the parser\"}}}"}
+{"kind":"gate","name":"report"}
+{"kind":"out","text":"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_review\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"The parser rejects every malformed input.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a1\"}"}
+{"kind":"out","text":"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"The parser rejects every malformed input.\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a1\",\"usage\":{}}"}
+{"kind":"closed"}
+{"kind":"launch"}
+{"kind":"in","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Artisan] Agent \\\"{{any}}\\\" (Claude Code, {{any}}) finished.\\nIts last reply:\\n\\nThe parser rejects every malformed input.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"\"}"}
+{"kind":"out","text":"{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/work\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"model\":\"claude-haiku-5-5\",\"permissionMode\":\"default\",\"tools\":[],\"mcp_servers\":[{\"name\":\"artisan\",\"status\":\"connected\"}]}"}
+{"kind":"out","text":"{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Artisan] Agent \\\"{{any}}\\\" (Claude Code, {{any}}) finished.\\nIts last reply:\\n\\nThe parser rejects every malformed input.\"}]},\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_reported\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"The review found nothing to fix.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"The review found nothing to fix.\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"usage\":{}}"}
+{"kind":"closed"}

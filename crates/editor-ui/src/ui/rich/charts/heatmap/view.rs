@@ -1,10 +1,11 @@
 use super::{Heatmap, HeatmapData, Scale};
 use crate::ui::kit::Space;
+use crate::ui::rich::charts::keyboard::navigation_group;
 use crate::ui::rich::charts::scale::{f32_of, f32_of_count, f64_of, reading};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::rich::kit::{diverging_color, sequential_color};
 use crate::ui::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens};
-use aqua_core::{GpuiBackground, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
+use aqua_core::{GpuiBackground, InputEvent, Insets, NamedKey};
 use aqua_text::FontWeight;
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
@@ -33,7 +34,7 @@ pub(crate) fn envelope(
     subtitle: Option<&str>,
     caption: Option<&str>,
     content: Element,
-    text: EnvelopeTextFactory,
+    text: &EnvelopeTextFactory,
 ) -> Element {
     use crate::ui::kit::{Spaced, TextRole as Type};
     let mut body = ui::Box::new().layout("column").spaced(Space::S12).style(
@@ -73,7 +74,7 @@ impl HeatmapState {
     fn sync(&self, id: &str, model: &Heatmap) -> (Option<(usize, usize)>, Probe, u64) {
         let mut entries = self.0.borrow_mut();
         let entry = entries.entry(id.to_owned()).or_insert_with(|| Entry {
-            model: model.0.clone(),
+            model: Arc::clone(&model.0),
             selected: None,
             plot: Rc::new(Cell::new(None)),
             reveal: None,
@@ -85,20 +86,19 @@ impl HeatmapState {
                 entry.reveal = None;
                 entry.reset = entry.reset.wrapping_add(1);
             }
-            entry.model = model.0.clone();
+            entry.model = Arc::clone(&model.0);
         }
-        (entry.selected, entry.plot.clone(), entry.reset)
+        (entry.selected, Rc::clone(&entry.plot), entry.reset)
     }
 
     fn hover(&self, id: &str, row: usize, columns: usize, x: f32, y: f32) -> bool {
-        let selected = if columns > 0 && (0.0..1.0).contains(&x) && (0.0..1.0).contains(&y) {
-            Some((
-                row,
-                super::super::scale::index_of(f64::from(x) * f64_of(columns)).min(columns - 1),
-            ))
-        } else {
-            None
-        };
+        let selected =
+            (columns > 0 && (0.0..1.0).contains(&x) && (0.0..1.0).contains(&y)).then(|| {
+                (
+                    row,
+                    super::super::scale::index_of(f64::from(x) * f64_of(columns)).min(columns - 1),
+                )
+            });
         let mut entries = self.0.borrow_mut();
         let Some(entry) = entries.get_mut(id) else {
             return false;
@@ -106,6 +106,18 @@ impl HeatmapState {
         let changed = entry.selected != selected;
         entry.selected = selected;
         changed
+    }
+
+    fn leave(&self, id: &str, row: usize) -> bool {
+        let mut entries = self.0.borrow_mut();
+        let Some(entry) = entries.get_mut(id) else {
+            return false;
+        };
+        if entry.selected.is_none_or(|(selected, _)| selected != row) {
+            return false;
+        }
+        entry.selected = None;
+        true
     }
 
     fn key(&self, id: &str, rows: usize, columns: usize, code: NamedKey, alt: bool) -> bool {
@@ -130,7 +142,14 @@ impl HeatmapState {
                 Some(current.map_or(0, |index| index.saturating_add(1).min(count - 1)))
             }
             NamedKey::Enter => Some(current.unwrap_or(0)),
-            _ => return false,
+            NamedKey::Tab
+            | NamedKey::Delete
+            | NamedKey::Insert
+            | NamedKey::ContextMenu
+            | NamedKey::PageUp
+            | NamedKey::PageDown
+            | NamedKey::Function(_)
+            | NamedKey::Unidentified => return false,
         };
         entry.selected = next.map(|index| (index / columns, index % columns));
         entry.reveal = next.map(|index| index / columns);
@@ -158,28 +177,33 @@ impl HeatmapState {
 }
 
 impl Heatmap {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the heatmap view takes its text, empty, readout and navigation factories with its state"
+    )]
     pub(crate) fn view(
         &self,
-        id: String,
+        id: &str,
         theme: &ArtisanTheme,
         states: HeatmapState,
-        text: TextFactory,
-        empty: EmptyFactory,
-        readout: ReadoutFactory,
-        navigation_frame: NavigationFrame,
-        invalidate: Rc<dyn Fn()>,
+        text: &TextFactory,
+        empty: &EmptyFactory,
+        readout: &ReadoutFactory,
+        navigation_frame: &NavigationFrame,
+        invalidate: &Rc<dyn Fn()>,
     ) -> Element {
         let (rows, columns) = (self.rows(), self.columns());
         if rows == 0 || columns == 0 || !self.has_data {
             return empty("No data to map");
         }
-        let (selected, plot, reset) = states.sync(&id, self);
+        let (selected, plot, reset) = states.sync(id, self);
         let theme = *theme;
         let model = self.clone();
         let row_states = states.clone();
-        let row_id = id.clone();
-        let row_text = text.clone();
-        let row_invalidate = invalidate.clone();
+        let row_id = id.to_owned();
+        let row_text = Rc::clone(text);
+        let row_invalidate = Rc::clone(invalidate);
         let height = theme.density.control_sm;
         let list = List::new()
             .items(0..rows)
@@ -194,10 +218,13 @@ impl Heatmap {
             .row(move |row| {
                 let row = *row;
                 let probe: Probe = Rc::new(Cell::new(None));
-                let moving = probe.clone();
+                let moving = Rc::clone(&probe);
                 let state = row_states.clone();
                 let key = row_id.clone();
-                let invalidate = row_invalidate.clone();
+                let invalidate = Rc::clone(&row_invalidate);
+                let leaving = row_states.clone();
+                let leave_key = row_id.clone();
+                let leave_invalidate = Rc::clone(&row_invalidate);
                 let content = row_canvas(&model, &theme, row, selected, probe);
                 let plot = ui::Box::new()
                     .style(
@@ -220,6 +247,11 @@ impl Heatmap {
                             invalidate();
                         }
                         InputResponse::default()
+                    })
+                    .on_hover_change(move |hovered| {
+                        if !hovered && leaving.leave(&leave_key, row) {
+                            leave_invalidate();
+                        }
                     });
                 ui::Box::new()
                     .layout("row")
@@ -286,7 +318,7 @@ impl Heatmap {
                     .build(),
             );
         }
-        let plot_probe = plot.clone();
+        let plot_probe = plot;
         let mut content = ui::Box::new()
             .layout("column")
             .width(Length::Pct(100.0))
@@ -332,41 +364,22 @@ impl Heatmap {
             label.push(' ');
             label.push_str(selection);
         }
-        let keyboard = states.clone();
-        let key = id.clone();
-        let keyboard_invalidate = invalidate.clone();
-        let mut navigation = content
-            .build()
-            .with_key(format!("{id}-navigation"))
-            .role(Role::Group)
-            .focusable(true)
-            .tab_index(0)
-            .aria_label(label)
-            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::KeyDown(key_event)) = &event.input else {
-                    return InputResponse::default();
-                };
-                let Key::Named(code) = key_event.key else {
-                    return InputResponse::default();
-                };
-                if !keyboard.key(
-                    &key,
-                    rows,
-                    columns,
-                    code,
-                    key_event.modifiers.contains(Modifiers::ALT),
-                ) {
-                    return InputResponse::default();
+        let keyboard = states;
+        let key = id.to_owned();
+        let keyboard_invalidate = Rc::clone(invalidate);
+        let navigation = navigation_group(
+            content.build(),
+            id,
+            label,
+            selection_label,
+            move |code, alt| {
+                let handled = keyboard.key(&key, rows, columns, code, alt);
+                if handled {
+                    keyboard_invalidate();
                 }
-                keyboard_invalidate();
-                InputResponse {
-                    stop_propagation: true,
-                    ..InputResponse::default()
-                }
-            });
-        if let Some(label) = selection_label {
-            navigation = navigation.aria_value(label);
-        }
+                handled
+            },
+        );
         let navigation = navigation_frame(navigation, theme.colors.ring.to_reference_paint());
         let (count, low, high) = match self.scale {
             Scale::Sequential => (7, "fewer".to_owned(), "more".to_owned()),
@@ -476,7 +489,7 @@ fn row_canvas(
             dash: false,
         });
     }
-    let shapes: Rc<[Shape]> = shapes.into();
+    let scene = scene::Scene::of_shapes(shapes, scene::Clip::Bounds);
     ui::Canvas::new()
         .style(
             Style::new()
@@ -486,46 +499,7 @@ fn row_canvas(
         )
         .on_paint(move |bounds| {
             probe.set(Some(bounds));
-            scene::source_scene(bounds, &shapes)
+            scene.paint(bounds)
         })
         .build()
-}
-
-#[cfg(feature = "test-support")]
-pub struct HeatmapFixture {
-    model: Heatmap,
-    state: HeatmapState,
-}
-
-#[cfg(feature = "test-support")]
-impl HeatmapFixture {
-    pub fn new(json: &str) -> Self {
-        let model = serde_json::from_str(json).expect("valid heatmap");
-        let state = HeatmapState::default();
-        state.sync("test", &model);
-        Self { model, state }
-    }
-    pub fn replace(&mut self, json: &str) {
-        self.model = serde_json::from_str(json).expect("valid heatmap");
-        self.state.sync("test", &self.model);
-    }
-    pub fn selected(&self) -> Option<(usize, usize)> {
-        self.state.sync("test", &self.model).0
-    }
-    pub fn hover(&self, row: usize, x: f32, y: f32) -> bool {
-        self.state.hover("test", row, self.model.columns(), x, y)
-    }
-    pub fn key(&self, code: NamedKey, alt: bool) -> bool {
-        self.state
-            .key("test", self.model.rows(), self.model.columns(), code, alt)
-    }
-    pub fn pending_reveal(&self) -> Option<(String, usize)> {
-        self.state.pending_reveal("test")
-    }
-    pub fn revealed(&self, key: &str, index: usize) {
-        self.state.revealed("test", key, index);
-    }
-    pub fn generation(&self) -> u64 {
-        self.state.sync("test", &self.model).2
-    }
 }

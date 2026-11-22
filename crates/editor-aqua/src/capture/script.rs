@@ -1,6 +1,32 @@
-use anyhow::{Context, Result, bail};
 use aqua_core::{Key, Modifiers, NamedKey, Point};
 use std::{path::PathBuf, time::Duration};
+
+#[derive(Debug, thiserror::Error)]
+pub enum StepError {
+    #[error("expected {expected}")]
+    Arguments { expected: &'static str },
+    #[error("not a number: {word}")]
+    Number {
+        word: String,
+        #[source]
+        source: std::num::ParseFloatError,
+    },
+    #[error("expected a finite number: {word}")]
+    NotFinite { word: String },
+    #[error("unknown step")]
+    Unknown,
+    #[error("not a key: {text}")]
+    Key { text: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("line {line}: {text}")]
+pub struct ScriptError {
+    line: usize,
+    text: String,
+    #[source]
+    source: StepError,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
@@ -8,10 +34,10 @@ pub enum Button {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Keystroke {
-    pub key: Key,
-    pub modifiers: Modifiers,
+    pub(crate) key: Key,
+    pub(crate) modifiers: Modifiers,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -24,12 +50,13 @@ pub enum Step {
     Key(Keystroke),
     Settle(Duration),
     Capture(PathBuf),
+    StopForge,
     Quit,
 }
 
-pub const DEFAULT_SETTLE: Duration = Duration::from_secs(20);
+const DEFAULT_SETTLE: Duration = Duration::from_secs(20);
 
-pub fn parse(text: &str) -> Result<Vec<Step>> {
+pub(crate) fn parse(text: &str) -> Result<Vec<Step>, ScriptError> {
     text.lines()
         .enumerate()
         .filter(|(_, line)| {
@@ -37,55 +64,68 @@ pub fn parse(text: &str) -> Result<Vec<Step>> {
             !line.is_empty() && !line.starts_with('#')
         })
         .map(|(number, line)| {
-            parse_step(line.trim_start()).with_context(|| format!("line {}: {line}", number + 1))
+            parse_step(line.trim_start()).map_err(|source| ScriptError {
+                line: number + 1,
+                text: line.to_owned(),
+                source,
+            })
         })
         .collect()
 }
 
-fn parse_step(line: &str) -> Result<Step> {
+fn arguments<T>(expected: &'static str) -> Result<T, StepError> {
+    Err(StepError::Arguments { expected })
+}
+
+fn parse_step(line: &str) -> Result<Step, StepError> {
     let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
-    let numbers = || -> Result<Vec<f32>> { rest.split_whitespace().map(finite_number).collect() };
-    let position = || -> Result<Point> {
+    let numbers =
+        || -> Result<Vec<f32>, StepError> { rest.split_whitespace().map(finite_number).collect() };
+    let position = || -> Result<Point, StepError> {
         match numbers()?.as_slice() {
             [x, y] => Ok(Point::new(*x, *y)),
-            _ => bail!("expected <x> <y>"),
+            _ => arguments("<x> <y>"),
         }
     };
     Ok(match command {
         "wait" => match numbers()?.as_slice() {
             [ms] if (0.0..=3_600_000.0).contains(ms) => {
-                Step::Wait(Duration::from_millis(ms.round() as u64))
+                Step::Wait(Duration::from_millis(crate::measure::whole_millis(*ms)))
             }
-            _ => bail!("expected <milliseconds>"),
+            _ => return arguments("<milliseconds>"),
         },
         "move" => Step::Move(position()?),
         "click" => Step::Click(position()?, Button::Left),
         "rclick" => Step::Click(position()?, Button::Right),
         "scroll" => match numbers()?.as_slice() {
             [x, y, delta] => Step::Scroll(Point::new(*x, *y), *delta),
-            _ => bail!("expected <x> <y> <pixels>"),
+            _ => return arguments("<x> <y> <pixels>"),
         },
         "type" => Step::Type(rest.to_owned()),
         "key" => Step::Key(parse_keystroke(rest.trim())?),
         "settle" => match numbers()?.as_slice() {
             [] => Step::Settle(DEFAULT_SETTLE),
             [ms] if (1.0..=3_600_000.0).contains(ms) => {
-                Step::Settle(Duration::from_millis(ms.round() as u64))
+                Step::Settle(Duration::from_millis(crate::measure::whole_millis(*ms)))
             }
-            _ => bail!("expected an optional <timeout milliseconds>"),
+            _ => return arguments("an optional <timeout milliseconds>"),
         },
         "capture" if !rest.trim().is_empty() => Step::Capture(PathBuf::from(rest.trim())),
+        "stop-forge" => Step::StopForge,
         "quit" => Step::Quit,
-        _ => bail!("unknown step"),
+        _ => return Err(StepError::Unknown),
     })
 }
 
-fn finite_number(word: &str) -> Result<f32> {
-    let value = word
-        .parse::<f32>()
-        .with_context(|| format!("not a number: {word}"))?;
+fn finite_number(word: &str) -> Result<f32, StepError> {
+    let value = word.parse::<f32>().map_err(|source| StepError::Number {
+        word: word.to_owned(),
+        source,
+    })?;
     if !value.is_finite() {
-        bail!("expected a finite number: {word}");
+        return Err(StepError::NotFinite {
+            word: word.to_owned(),
+        });
     }
     Ok(value)
 }
@@ -101,23 +141,26 @@ const MODIFIER_PREFIXES: [(&str, Modifiers); 8] = [
     ("meta-", Modifiers::LOGO),
 ];
 
-pub fn parse_keystroke(text: &str) -> Result<Keystroke> {
+fn parse_keystroke(text: &str) -> Result<Keystroke, StepError> {
     let mut modifiers = Modifiers::NONE;
     let mut rest = text;
-    while let Some((prefix, flag)) = MODIFIER_PREFIXES
-        .iter()
-        .find(|(prefix, _)| rest.len() > prefix.len() && rest.starts_with(prefix))
-    {
+    while let Some((remainder, flag)) = MODIFIER_PREFIXES.iter().find_map(|(prefix, flag)| {
+        rest.strip_prefix(prefix)
+            .filter(|remainder| !remainder.is_empty())
+            .map(|remainder| (remainder, flag))
+    }) {
         modifiers = modifiers.union(*flag);
-        rest = &rest[prefix.len()..];
+        rest = remainder;
     }
     Ok(Keystroke {
-        key: parse_key(rest).with_context(|| format!("not a key: {text}"))?,
+        key: parse_key(rest).ok_or_else(|| StepError::Key {
+            text: text.to_owned(),
+        })?,
         modifiers,
     })
 }
 
-fn parse_key(name: &str) -> Result<Key> {
+fn parse_key(name: &str) -> Option<Key> {
     let named = match name {
         "enter" | "return" => Some(NamedKey::Enter),
         "tab" => Some(NamedKey::Tab),
@@ -136,26 +179,26 @@ fn parse_key(name: &str) -> Result<Key> {
         _ => None,
     };
     if let Some(named) = named {
-        return Ok(Key::Named(named));
+        return Some(Key::Named(named));
     }
     if name == "space" {
-        return Ok(Key::Char(' '));
+        return Some(Key::Char(' '));
     }
     if let Some(number) = name
         .strip_prefix('f')
         .and_then(|digits| digits.parse::<u8>().ok())
         .filter(|number| (1..=24).contains(number))
     {
-        return Ok(Key::Named(NamedKey::Function(number)));
+        return Some(Key::Named(NamedKey::Function(number)));
     }
     let mut characters = name.chars();
     match (characters.next(), characters.next()) {
-        (Some(character), None) => Ok(Key::Char(character)),
-        _ => bail!("unknown key name"),
+        (Some(character), None) => Some(Key::Char(character)),
+        _ => None,
     }
 }
 
-pub fn types_text(keystroke: &Keystroke) -> Option<char> {
+pub(crate) fn types_text(keystroke: &Keystroke) -> Option<char> {
     match keystroke.key {
         Key::Char(character)
             if !keystroke.modifiers.contains(Modifiers::CONTROL)
@@ -164,6 +207,6 @@ pub fn types_text(keystroke: &Keystroke) -> Option<char> {
         {
             Some(character)
         }
-        _ => None,
+        Key::Char(_) | Key::Named(_) => None,
     }
 }

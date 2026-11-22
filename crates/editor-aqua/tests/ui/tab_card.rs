@@ -32,9 +32,12 @@ fn tab_card_prepaints_measured_tab_before_paint_and_updates_after_layout() {
         app.tree_mut()
             .emit_scene()
             .into_iter()
-            .filter_map(|(_, item)| match item {
-                DisplayItem::GpuiPath { path, .. } => Some(path.commands_local.clone()),
-                _ => None,
+            .filter_map(|(_, item)| {
+                if let DisplayItem::GpuiPath { path, .. } = item {
+                    Some(path.commands_local.clone())
+                } else {
+                    None
+                }
             })
             .nth(1)
             .expect("shell emitted on first frame")

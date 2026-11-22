@@ -2,7 +2,7 @@ use super::Surface;
 use crate::ui::chrome::card::{Edge, Surfaces};
 use crate::ui::kit::divider::Divider;
 use crate::ui::kit::hover::Hover;
-use crate::ui::kit::row::Row;
+use crate::ui::kit::row::{Row, RowKind};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_core::geometry::CornerRadii;
 use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Insets};
@@ -41,12 +41,12 @@ impl Band {
     }
 
     #[must_use]
-    pub const fn opens(self) -> bool {
+    const fn opens(self) -> bool {
         matches!(self, Self::Only | Self::First)
     }
 
     #[must_use]
-    pub const fn closes(self) -> bool {
+    const fn closes(self) -> bool {
         matches!(self, Self::Only | Self::Last)
     }
 
@@ -107,19 +107,20 @@ impl Band {
     pub fn build(self, theme: &ArtisanTheme, selected: bool, content: Element) -> Element {
         let surfaces = Surfaces::of(theme);
         let edge = Edge::of(surfaces.bg, surfaces.ink);
-        let highlight = match self.opens() {
-            true => vertical(edge.highlight_top, edge.highlight_bottom),
-            false => GpuiBackground::Solid(surfaces.bg.to_reference_paint()),
+        let highlight = if self.opens() {
+            vertical(edge.highlight_top, edge.highlight_bottom)
+        } else {
+            GpuiBackground::Solid(surfaces.bg.to_reference_paint())
         };
         let padding = self.padding();
-        let pad = Row::FormRow.pad();
+        let pad = RowKind::Form.pad();
         let fill = selected.then(|| {
             UiBox::new()
                 .style(Hover::Neutral.style(theme))
                 .style(
                     Style::new()
                         .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                        .radius(Length::Px(Row::FormRow.radius_in(CARD))),
+                        .radius(Length::Px(Row::radius_in(CARD))),
                 )
                 .build()
                 .exclude_from_hit_testing()

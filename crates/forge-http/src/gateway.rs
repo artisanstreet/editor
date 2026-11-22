@@ -1,9 +1,3 @@
-//! The MCP gateway: a plain-HTTP listener on loopback where the engines
-//! Forge runs reach Forge's own MCP servers, each at `/mcp/<server>/`. Each
-//! thread's address carries its credential, so the caller is known without
-//! a session.
-
-use anyhow::{Context, Result};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -17,13 +11,25 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::Instrument as _;
 
-/// Binds the gateway, tells `hub` its address, and serves until `shutdown`.
-pub async fn start(hub: &Hub, shutdown: CancellationToken, tasks: &TaskTracker) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum StartGatewayError {
+    #[error("listen for the MCP gateway on loopback")]
+    Bind(#[source] std::io::Error),
+    #[error("read the MCP gateway's address")]
+    Address(#[source] std::io::Error),
+}
+
+pub(crate) async fn start(
+    hub: &Hub,
+    shutdown: CancellationToken,
+    tasks: &TaskTracker,
+) -> Result<(), StartGatewayError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .context("listen for the MCP gateway on loopback")?;
-    let address = listener.local_addr()?;
+        .map_err(StartGatewayError::Bind)?;
+    let address = listener.local_addr().map_err(StartGatewayError::Address)?;
     let computer = ComputerMcp::for_host(hub);
     hub.set_gateway(format!("http://{address}/mcp/"), computer.is_some());
     let artisan = Served {
@@ -61,7 +67,6 @@ pub async fn start(hub: &Hub, shutdown: CancellationToken, tasks: &TaskTracker) 
     Ok(())
 }
 
-/// One of Forge's servers, with the hub that knows whose credential is whose.
 #[derive(Clone)]
 struct Served<T> {
     hub: Hub,
@@ -73,13 +78,10 @@ async fn serve<T: ToolSet + Clone + 'static>(
     Path(token): Path<String>,
     body: Bytes,
 ) -> Response {
-    let Some(caller) = served.hub.gateway_thread(&token) else {
-        return (
-            StatusCode::NOT_FOUND,
-            "This MCP address is no longer valid.",
-        )
-            .into_response();
-    };
+    let admitted = served.hub.gateway_caller(&token);
+    if matches!(admitted, Err(forge_runs::GatewayRefusal::Unknown)) {
+        return (StatusCode::NOT_FOUND, "This MCP address is not valid.").into_response();
+    }
     let body: Value = match serde_json::from_slice(&body) {
         Ok(body) => body,
         Err(error) => {
@@ -91,16 +93,29 @@ async fn serve<T: ToolSet + Clone + 'static>(
             return (StatusCode::BAD_REQUEST, axum::Json(reply)).into_response();
         }
     };
-    forge_mcp::server::handle(&served.set, &caller, body)
-        .await
-        .map_or_else(
-            || StatusCode::ACCEPTED.into_response(),
-            |reply| axum::Json(reply).into_response(),
-        )
+    let reply = match admitted {
+        Ok(caller) => {
+            let span = tracing::info_span!(
+                "gateway",
+                server = served.set.name(),
+                thread = %caller.thread,
+                run = tracing::field::Empty
+            );
+            if let Some(run) = served.hub.live_run(&caller.thread) {
+                span.record("run", tracing::field::display(run));
+            }
+            forge_mcp::server::handle(&served.set, &caller, body)
+                .instrument(span)
+                .await
+        }
+        Err(refusal) => forge_mcp::server::refuse(&refusal, &body),
+    };
+    reply.map_or_else(
+        || StatusCode::ACCEPTED.into_response(),
+        |reply| axum::Json(reply).into_response(),
+    )
 }
 
-/// The gateway answers every request in its response; it opens no stream
-/// and keeps no session to end.
 async fn no_stream() -> StatusCode {
     StatusCode::METHOD_NOT_ALLOWED
 }

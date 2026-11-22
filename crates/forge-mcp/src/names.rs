@@ -1,4 +1,4 @@
-pub fn canonical(name: &str) -> &str {
+pub(crate) fn canonical(name: &str) -> &str {
     match name {
         "threads_search" => "search_threads",
         "threads_grep" => "grep_threads",

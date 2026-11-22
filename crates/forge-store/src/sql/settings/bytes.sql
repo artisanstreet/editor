@@ -1,0 +1,1 @@
+SELECT COALESCE(SUM(length(CAST(value AS BLOB))), 0) FROM kv

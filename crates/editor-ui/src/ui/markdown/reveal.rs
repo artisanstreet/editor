@@ -1,3 +1,4 @@
+use crate::ui::text::slice::slice;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -42,6 +43,12 @@ pub struct PreparedReveal {
     fully_visible: Cell<bool>,
 }
 
+impl std::fmt::Debug for PreparedReveal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedReveal").finish_non_exhaustive()
+    }
+}
+
 impl Default for PreparedReveal {
     fn default() -> Self {
         Self {
@@ -68,12 +75,13 @@ impl Default for PreparedReveal {
 }
 
 impl PreparedReveal {
-    pub fn has_presented(&self) -> bool {
-        self.presented.get()
-    }
     pub fn mark_presented(&self) {
         self.presented.set(true);
     }
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "streaming, freshness, reduced motion and swift reveal are independent frame inputs"
+    )]
     pub fn begin_frame(
         &self,
         now: Instant,
@@ -128,7 +136,7 @@ impl PreparedReveal {
         if end > text.len() || !text.is_char_boundary(end) {
             return false;
         }
-        let Some((index, _)) = text[..end].char_indices().next_back() else {
+        let Some((index, _)) = slice(text, ..end).char_indices().next_back() else {
             return true;
         };
         let Some(frontier) = app.text_frontier(node, index, aqua_text::CaretAffinity::Downstream)
@@ -152,7 +160,7 @@ impl PreparedReveal {
         let height = self.frontier.get().map_or(0.0, |frontier| {
             (frontier - content_top).max(0.0).min(content_height)
         });
-        self.visible_height.replace(height) != height
+        self.visible_height.replace(height).to_bits() != height.to_bits()
     }
     pub fn visible_height(&self) -> f32 {
         self.visible_height.get()
@@ -162,7 +170,8 @@ impl PreparedReveal {
             .borrow_mut()
             .insert(slot, height)
             .unwrap_or(0.0)
-            != height
+            .to_bits()
+            != height.to_bits()
     }
     pub fn block_panel_height(&self, slot: usize) -> f32 {
         self.block_heights
@@ -200,7 +209,7 @@ impl PreparedReveal {
         let alpha = 0.65_f32.mul_add(progress, 0.35);
         Some((alpha, 4.0 * (1.0 - alpha)))
     }
-    pub fn block_growth(&self, slot: usize) -> f32 {
+    fn block_growth(&self, slot: usize) -> f32 {
         if self.reduced.get() || self.swift.get() || self.rushed.get() {
             return 1.0;
         }
@@ -221,7 +230,7 @@ impl PreparedReveal {
                 )
             })
     }
-    pub fn fades(&self, slot: usize, text: Arc<str>) -> Vec<Fade> {
+    pub fn fades(&self, slot: usize, text: &Arc<str>) -> Vec<Fade> {
         if self.reduced.get() || self.swift.get() || self.rushed.get() {
             self.leaves.borrow_mut().clear();
             return Vec::new();
@@ -232,16 +241,16 @@ impl PreparedReveal {
         }
         let now = self.now.get();
         let leaf = leaves.entry(slot).or_insert_with(|| Leaf {
-            text: text.clone(),
+            text: Arc::clone(text),
             visible: if self.fresh.get() { 0 } else { text.len() },
             marks: VecDeque::new(),
         });
-        if !Arc::ptr_eq(&leaf.text, &text) {
+        if !Arc::ptr_eq(&leaf.text, text) {
             if !text.starts_with(leaf.text.as_ref()) {
                 leaf.visible = text.len();
                 leaf.marks.clear();
             }
-            leaf.text = text.clone();
+            leaf.text = Arc::clone(text);
         }
         if !self.paused.get() && leaf.visible < text.len() {
             leaf.marks.push_back((leaf.visible..text.len(), now));

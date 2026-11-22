@@ -62,7 +62,7 @@ impl AgeGroup {
             .find(|group| group.upper_bound().is_none_or(|bound| elapsed < bound))
             .unwrap_or(Self::Older)
     }
-    pub const fn label(self) -> Option<&'static str> {
+    pub(crate) const fn label(self) -> Option<&'static str> {
         match self {
             Self::LastDay => None,
             Self::LastThreeDays => Some("Last 3 days"),
@@ -83,6 +83,18 @@ pub struct Lists {
     pub history: Vec<HistoryGroup>,
     pub hits: Vec<HitRow>,
     pub next_tick: Option<Timestamp>,
+}
+
+impl Lists {
+    #[must_use]
+    pub fn working(&self) -> std::collections::HashSet<&ThreadId> {
+        self.inbox
+            .iter()
+            .chain(self.history.iter().flat_map(|group| group.rows.iter()))
+            .filter(|row| row.state == RowState::Working)
+            .map(|row| &row.id)
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,7 +213,7 @@ impl Lists {
     }
 }
 
-pub const fn listed(thread: &Thread) -> bool {
+const fn listed(thread: &Thread) -> bool {
     !thread.archived && thread.parent_thread_id.is_none()
 }
 
@@ -320,6 +332,6 @@ impl HostSnapshot for editor_core::HostData {
     }
 
     fn run_status(&self, id: &ThreadId) -> Option<RunStatus> {
-        self.runs.get(id).map(|run| run.status)
+        self.runs.get(id).map(artisan_api::Run::status)
     }
 }

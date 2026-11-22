@@ -1,17 +1,13 @@
-//! `ae forge start|stop|restart` on a detached Forge, through the built
-//! binaries, never an installed service. Every instance is its own Artisan
-//! Street (HOME and XDG folders in a temp dir) with `forge` installed in it
-//! and its own loopback port.
-
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
+    use artisan_paths::App;
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::time::Duration;
+    use test_support::sandbox::{artisan_street, isolate};
 
-    /// The `forge` built beside this `ae` (`cargo test --workspace` builds it).
     fn forge_binary() -> PathBuf {
         let forge = Path::new(env!("CARGO_BIN_EXE_ae")).with_file_name("forge");
         assert!(
@@ -22,46 +18,48 @@ mod tests {
         forge
     }
 
+    const ANY_PORT: &str = "127.0.0.1:0";
+
     struct Instance {
         root: tempfile::TempDir,
         data: PathBuf,
-        address: SocketAddr,
     }
 
     impl Instance {
-        fn new(address: SocketAddr) -> Self {
-            assert!(address.ip().is_loopback(), "{address} is not loopback");
-            assert_ne!(address.port(), 0, "the instance needs a fixed port");
-
+        fn new(listen: &str) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("artisan-detached-service ")
                 .tempdir()
                 .unwrap();
-            let app = root.path().join("data/artisan-street/forge");
+            let app = App::Forge.dir_under(&artisan_street(root.path()));
             let data = app.join("data");
             std::fs::create_dir_all(&data).unwrap();
-            std::fs::copy(forge_binary(), app.join("forge")).unwrap();
+            test_support::executable::install(&forge_binary(), &app.join(App::Forge.binary_name()));
             std::fs::write(
                 data.join("config.json"),
-                format!(r#"{{"listen": "{address}"}}"#),
+                format!(r#"{{"listen": "{listen}"}}"#),
             )
             .unwrap();
-            Self {
-                root,
-                data,
-                address,
-            }
+            Self { root, data }
+        }
+
+        fn address(&self) -> SocketAddr {
+            forge_http::upgrade::gateway(&self.data)
+                .unwrap()
+                .expect("a started Forge records the address its gateway bound")
+                .address
+        }
+
+        fn serving(&self) -> bool {
+            forge_http::upgrade::gateway(&self.data)
+                .unwrap()
+                .is_some_and(|gateway| listening(gateway.address))
         }
 
         fn command(&self, action: &str) -> Command {
             let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
-            command
-                .args(["forge", action])
-                .env("HOME", self.root.path().join("home"))
-                .env("XDG_DATA_HOME", self.root.path().join("data"))
-                // An isolated config folder has no systemd unit, so the
-                // detached branch runs. No installed service is touched.
-                .env("XDG_CONFIG_HOME", self.root.path().join("config"));
+            command.args(["forge", action]);
+            isolate(&mut command, self.root.path());
             command
         }
 
@@ -86,25 +84,18 @@ mod tests {
                 .parse()
                 .unwrap()
         }
+    }
 
-        fn listening(&self) -> bool {
-            TcpStream::connect_timeout(&self.address, Duration::from_millis(250)).is_ok()
-        }
+    fn listening(address: SocketAddr) -> bool {
+        TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok()
     }
 
     impl Drop for Instance {
         fn drop(&mut self) {
             if self.data.join("forge.pid").exists() {
-                // Stop signals a pid only when it runs this instance's own
-                // `forge`, so this can't reach the developer's Forge.
-                self.command("stop").output().ok();
+                let _stopped = self.command("stop").output();
             }
         }
-    }
-
-    fn unused_loopback_address() -> SocketAddr {
-        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-        reservation.local_addr().unwrap()
     }
 
     fn stderr(output: &Output) -> String {
@@ -113,9 +104,10 @@ mod tests {
 
     #[test]
     fn restart_waits_for_its_own_shutdown_and_new_listener() {
-        let instance = Instance::new(unused_loopback_address());
+        let instance = Instance::new(ANY_PORT);
         instance.succeeds("start");
-        assert!(instance.listening(), "start returns once Forge answers");
+        let address = instance.address();
+        assert!(listening(address), "start returns once Forge answers");
         let first = instance.pid();
         let again = instance.succeeds("start");
         assert!(
@@ -128,11 +120,10 @@ mod tests {
         instance.succeeds("restart");
         let second = instance.pid();
         assert_ne!(first, second, "restart starts a new Forge");
-        assert!(instance.listening(), "restart returns once it answers");
+        let address = instance.address();
+        assert!(listening(address), "restart returns once it answers");
 
-        // A pid file in another install doesn't let that install stop this
-        // Forge: the process runs a different `forge`.
-        let other = Instance::new(instance.address);
+        let other = Instance::new(ANY_PORT);
         std::fs::write(other.data.join("forge.pid"), second.to_string()).unwrap();
         let refused = other.succeeds("stop");
         assert!(
@@ -140,14 +131,11 @@ mod tests {
             "{}",
             stderr(&refused)
         );
-        assert!(instance.listening(), "another install can't stop it");
+        assert!(listening(address), "another install can't stop it");
         std::fs::remove_file(other.data.join("forge.pid")).unwrap();
 
         instance.succeeds("stop");
-        assert!(
-            !instance.listening(),
-            "stop waits for the listener to close"
-        );
+        assert!(!listening(address), "stop waits for the listener to close");
         assert!(!instance.data.join("forge.pid").exists());
         let _released = forge_http::lock_data_dir(&instance.data)
             .expect("stop returns only after Forge released its data lock");
@@ -155,7 +143,8 @@ mod tests {
 
     #[test]
     fn service_operations_wait_for_the_existing_lifecycle_owner() {
-        let instance = Instance::new(unused_loopback_address());
+        let instance = Instance::new(ANY_PORT);
+        let mut last = None;
         for action in ["start", "restart", "stop"] {
             let first = std::fs::read(instance.data.join("forge.pid")).ok();
             let lock = std::fs::OpenOptions::new()
@@ -168,25 +157,51 @@ mod tests {
             lock.lock().unwrap();
             let mut command = instance.command(action);
             let mut child = command
-                .stdout(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .unwrap();
-            std::thread::sleep(Duration::from_millis(250));
-            let blocked = child.try_wait().unwrap().is_none();
-            let unchanged = std::fs::read(instance.data.join("forge.pid")).ok() == first
-                && instance.listening() == first.is_some();
-            drop(lock);
-            let output = child.wait_with_output().unwrap();
-            assert!(blocked, "{action} must wait for the lifecycle owner");
+            let (said, lines) = std::sync::mpsc::channel();
+            let reader = std::io::BufReader::new(child.stderr.take().unwrap());
+            let relay = std::thread::spawn(move || {
+                for line in std::io::BufRead::lines(reader) {
+                    if said.send(line.unwrap()).is_err() {
+                        break;
+                    }
+                }
+            });
+            let deadline = std::time::Instant::now() + test_support::wait::LIVENESS;
+            loop {
+                let line = lines
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|error| {
+                        panic!("{action} never says it waits for the lifecycle owner: {error}")
+                    });
+                if line.contains("Waiting for another ae") {
+                    break;
+                }
+            }
             assert!(
-                unchanged,
+                child.try_wait().unwrap().is_none(),
+                "{action} must wait for the lifecycle owner"
+            );
+            assert_eq!(
+                std::fs::read(instance.data.join("forge.pid")).ok(),
+                first,
                 "{action} must preserve the running instance while waiting"
             );
-            assert!(output.status.success(), "{action}: {}", stderr(&output));
+            assert_eq!(instance.serving(), first.is_some());
+            if first.is_some() {
+                last = Some(instance.address());
+            }
+            drop(lock);
+            let status = child.wait().unwrap();
+            relay.join().unwrap();
+            let rest: Vec<String> = lines.try_iter().collect();
+            assert!(status.success(), "{action}: {}", rest.join("\n"));
         }
         assert!(
-            !instance.listening(),
+            !listening(last.expect("the restarted Forge was serving before the stop")),
             "the serialized stop closes the listener"
         );
         assert!(
@@ -199,22 +214,21 @@ mod tests {
     #[test]
     fn start_refuses_an_occupied_port_without_starting_forge() {
         let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
-        let instance = Instance::new(occupied.local_addr().unwrap());
+        let address = occupied.local_addr().unwrap();
+        let instance = Instance::new(&address.to_string());
         let output = instance.run("start");
         assert!(!output.status.success());
         let error = stderr(&output);
         assert!(error.contains("already occupied"), "{error}");
-        assert!(error.contains(&instance.address.to_string()), "{error}");
+        assert!(error.contains(&address.to_string()), "{error}");
         assert!(!instance.data.join("forge.pid").exists());
         assert!(!instance.data.join("forge.log").exists());
-        assert!(instance.listening(), "the other listener is untouched");
+        assert!(listening(address), "the other listener is untouched");
     }
 
     #[test]
     fn start_reports_a_forge_that_exits_and_shows_its_log() {
-        let instance = Instance::new(unused_loopback_address());
-        // Holding this instance's data lock makes its Forge exit before it
-        // binds, a real startup failure that touches no other Forge.
+        let instance = Instance::new(ANY_PORT);
         let _lock = forge_http::lock_data_dir(&instance.data).unwrap();
         let output = instance.run("start");
         assert!(!output.status.success());
@@ -224,18 +238,18 @@ mod tests {
             error.contains("another Forge is using"),
             "the log's last lines are shown: {error}"
         );
-        assert!(!instance.listening());
+        assert!(!instance.serving());
     }
 
     #[test]
     fn start_never_reports_ready_when_the_store_cant_open() {
-        let instance = Instance::new(unused_loopback_address());
+        let instance = Instance::new(ANY_PORT);
         std::fs::create_dir(instance.data.join("forge.sqlite3")).unwrap();
         let output = instance.run("start");
         assert!(!output.status.success());
         let error = stderr(&output);
         assert!(error.contains("exited while starting"), "{error}");
-        assert!(error.contains("open database"), "{error}");
-        assert!(!instance.listening());
+        assert!(error.contains("private database"), "{error}");
+        assert!(!instance.serving());
     }
 }

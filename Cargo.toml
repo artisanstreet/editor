@@ -6,8 +6,10 @@ members = [
     "crates/artisan-markdown-index",
     "crates/artisan-paths",
     "crates/artisan-payload",
+    "crates/build-info",
     "crates/artisan-mentions",
     "crates/claude-ai-browser",
+    "crates/diagnostics",
     "crates/editor-aqua",
     "crates/editor-core",
     "crates/editor-ui",
@@ -29,10 +31,12 @@ members = [
     "crates/forge-mcp",
     "crates/forge-runs",
     "crates/forge-store",
+    "crates/test-support",
 ]
 exclude = [
     "vendor/highlighting/syntect",
     "vendor/highlighting/onig",
+    "vendor/highlighting/onig_sys",
     "vendor/highlighting/validation",
     "vendor/mermaid-rs-renderer",
 ]
@@ -41,23 +45,64 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "BSD-3-Clause"
-repository = "https://github.com/sandersonstabo/artisan-editor"
+repository = "https://github.com/artisanstreet/editor"
 rust-version = "1.98.0"
 version = "0.0.0"
 
 [workspace.dependencies]
-aqua = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-text = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-ui = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-reactive = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
-aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
+artisan-account = { path = "crates/artisan-account" }
+artisan-api = { path = "crates/artisan-api" }
+artisan-markdown-index = { path = "crates/artisan-markdown-index" }
+artisan-mentions = { path = "crates/artisan-mentions" }
+artisan-paths = { path = "crates/artisan-paths" }
+artisan-payload = { path = "crates/artisan-payload" }
+build-info = { path = "crates/build-info" }
+claude-ai-browser = { path = "crates/claude-ai-browser" }
+diagnostics = { path = "crates/diagnostics" }
+editor-aqua = { path = "crates/editor-aqua" }
+editor-assets = { path = "crates/editor-assets" }
+editor-audio = { path = "crates/editor-audio" }
+editor-composer = { path = "crates/editor-composer" }
+editor-conversation = { path = "crates/editor-conversation" }
+editor-core = { path = "crates/editor-core" }
+editor-inspector = { path = "crates/editor-inspector" }
+editor-marketplace = { path = "crates/editor-marketplace" }
+editor-settings = { path = "crates/editor-settings" }
+editor-sidebar = { path = "crates/editor-sidebar" }
+editor-sources = { path = "crates/editor-sources" }
+editor-ui = { path = "crates/editor-ui" }
+forge-computer = { path = "crates/forge-computer" }
+forge-content = { path = "crates/forge-content" }
+forge-engines = { path = "crates/forge-engines" }
+forge-http = { path = "crates/forge-http" }
+forge-isolation = { path = "crates/forge-isolation" }
+forge-mcp = { path = "crates/forge-mcp" }
+forge-runs = { path = "crates/forge-runs" }
+forge-store = { path = "crates/forge-store" }
+test-support = { path = "crates/test-support" }
+semver = "=1.0.28"
+palette = "0.7"
+rustix = "=1.1.6"
+notify = "=8.2.0"
+windows = "=0.62.2"
+addr2line = { version = "=0.27.1", default-features = false, features = ["std", "loader"] }
+backtrace = "=0.3.76"
+libc = "=0.2.189"
+object = { version = "=0.37.3", default-features = false, features = ["read", "std"] }
+aqua = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-text = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-ui = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-reactive = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-fonts-system = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+accesskit_consumer = "=0.39.2"
+aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
+aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "651c3f97462775ab96e668fed803d77befc73588" }
 ropey = "=1.6.1"
 glam = "=0.34.1"
 color = "=0.3.3"
@@ -66,8 +111,15 @@ url = "=2.5.8"
 regex = "=1.13.1"
 data-url = "=0.3.2"
 unicode-width = "=0.2.2"
+unicode-bidi = "=0.3.18"
+whatlang = "=0.18.0"
+icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_calendar = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_datetime = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_decimal = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "=2.3.0", default-features = false }
 vte = { version = "=0.15.0", default-features = false }
-anyhow = "=1.0.104"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 dirs = "=5.0.1"
@@ -76,12 +128,13 @@ ed25519-dalek = "=2.2.0"
 flate2 = "=1.1.10"
 insta = { version = "=1.49.0", features = ["json"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
-tokio-stream = { version = "=0.1.19", features = ["sync"] }
 tokio-util = { version = "=0.7.19", features = ["rt"] }
 tower = { version = "=0.5.3", default-features = false }
 tower-http = { version = "=0.6.11", default-features = false }
 tracing = "=0.1.44"
+tracing-error = "=0.2.1"
 base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
+bytes = "=1.12.1"
 cpal = { version = "=0.18.2", default-features = false }
 fs2 = "=0.4.3"
 futures = { version = "=0.3.34", default-features = false, features = ["executor", "std"] }
@@ -93,19 +146,16 @@ ufbx = "=0.11.3"
 stl_io = "=0.11.0"
 ply-rs-bw = "=4.0.0"
 gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
-mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
-native-dialog = { version = "=0.9.7", default-features = false, features = [
-    "windows_dpi_awareness",
-] }
+mermaid-rs-renderer = { path = "vendor/mermaid-rs-renderer" }
 pulseaudio = "=0.3.1"
-pulldown-cmark = { version = "=0.13.4", default-features = false }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 rcgen = { version = "=0.14.9", default-features = false, features = [
     "crypto",
     "ring",
 ] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt", "std", "tracing-log"] }
-rustls = { version = "=0.23.43", default-features = false, features = [
+rustls = { version = "=0.23.46", default-features = false, features = [
     "logging",
     "ring",
     "std",
@@ -115,16 +165,6 @@ serde_json = { version = "=1.0.151", features = ["preserve_order"] }
 sse-core = { version = "=0.2.3", default-features = false, features = ["std", "stream"] }
 rodio = { version = "=0.21.1", default-features = false, features = ["symphonia-all"] }
 crossbeam-channel = "=0.5.15"
-symphonia = { version = "=0.5.5", default-features = false, features = [
-    "aac",
-    "flac",
-    "isomp4",
-    "mp3",
-    "ogg",
-    "pcm",
-    "vorbis",
-    "wav",
-] }
 syntect = { version = "=5.3.0", default-features = false, features = [
     "parsing",
     "default-syntaxes",
@@ -132,22 +172,33 @@ syntect = { version = "=5.3.0", default-features = false, features = [
 ] }
 image = { version = "=0.25.10", default-features = false }
 webp = { version = "=0.3.1", default-features = false }
-rusqlite = { version = "=0.39.0", features = ["bundled"] }
+rusqlite = { version = "=0.41.1", features = ["bundled"] }
 sha2 = "=0.11.0"
 hex = "=0.4.3"
 similar = "=2.7.0"
+socket2 = "=0.6.5"
 tar = "=0.4.46"
 tempfile = "=3.27.0"
+divan = "=0.1.21"
 thiserror = "=2.0.20"
-tokio = { version = "=1.53.1", default-features = false }
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+tokio = { version = "=1.53.3", default-features = false }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "=1.1.4"
-unicode-segmentation = "=1.13.3"
 uuid = { version = "=1.26.0", default-features = false, features = ["std", "v7"] }
-zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
+elided_lifetimes_in_paths = "deny"
+let_underscore_drop = "deny"
+missing_debug_implementations = "deny"
+redundant_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unit_bindings = "deny"
+unreachable_pub = "deny"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
 
 [profile.dev]
 opt-level = 1
@@ -158,13 +209,21 @@ debug = "line-tables-only"
 opt-level = 3
 debug = false
 
+[profile.test.package.diagnostics]
+debug = "line-tables-only"
+
+[profile.bench]
+lto = false
+codegen-units = 16
+debug = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
-debug = false
-strip = true
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -175,22 +234,50 @@ missing_panics_doc = "allow"
 doc_markdown = "allow"
 must_use_candidate = "allow"
 unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+expect_used = "allow"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 allow_attributes_without_reason = "deny"
-undocumented_unsafe_blocks = "deny"
 clone_on_ref_ptr = "deny"
 rc_buffer = "deny"
 str_to_string = "deny"
 wildcard_enum_match_arm = "deny"
 let_underscore_must_use = "deny"
 missing_assert_message = "deny"
-unwrap_in_result = "deny"
 map_err_ignore = "deny"
+allow_attributes = "deny"
+assertions_on_result_states = "deny"
+empty_drop = "deny"
+empty_structs_with_brackets = "deny"
+exit = "deny"
+float_cmp_const = "deny"
+format_push_string = "deny"
+if_then_some_else_none = "deny"
+infinite_loop = "deny"
+iter_over_hash_type = "deny"
+let_underscore_untyped = "deny"
+lossy_float_literal = "deny"
+mem_forget = "deny"
+mutex_atomic = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+rc_mutex = "deny"
+redundant_type_annotations = "deny"
+renamed_function_params = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_name_method = "deny"
+string_slice = "deny"
+try_err = "deny"
+unneeded_field_pattern = "deny"
+unused_result_ok = "deny"
+verbose_file_reads = "deny"
+missing_const_for_fn = "allow"
+option_if_let_else = "allow"
+redundant_pub_crate = "allow"
+significant_drop_tightening = "allow"
 
 [patch.crates-io]
 syntect = { path = "vendor/highlighting/syntect" }
 onig = { path = "vendor/highlighting/onig" }
+onig_sys = { path = "vendor/highlighting/onig_sys" }

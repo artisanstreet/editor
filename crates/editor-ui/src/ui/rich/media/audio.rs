@@ -1,6 +1,4 @@
 mod view;
-#[cfg(feature = "test-support")]
-pub use view::AudioFixture;
 pub(crate) use view::AudioState;
 
 use crate::ui::media::source::MediaSource;
@@ -14,12 +12,16 @@ pub(crate) struct AudioBlock {
 impl AudioBlock {
     pub(crate) fn resident_bytes(&self) -> usize {
         use crate::ui::rich::kit::{retained_optional, retained_vec};
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             + retained_vec(&self.tracks)
             + self
                 .tracks
                 .iter()
-                .map(|track| track.src.resident_bytes() + retained_optional(track.name.as_ref()))
+                .map(|track| {
+                    track.src.resident_bytes()
+                        + retained_optional(track.name.as_ref())
+                        + retained_optional(track.transcript.as_ref())
+                })
                 .sum::<usize>()
     }
 }
@@ -31,6 +33,8 @@ struct Spec {
     #[serde(default, alias = "label")]
     name: Option<String>,
     #[serde(default)]
+    transcript: Option<String>,
+    #[serde(default)]
     tracks: Vec<Track>,
 }
 
@@ -39,6 +43,8 @@ struct Track {
     src: MediaSource,
     #[serde(default, alias = "label")]
     name: Option<String>,
+    #[serde(default)]
+    transcript: Option<String>,
 }
 
 impl Track {
@@ -52,7 +58,7 @@ impl Track {
             let src = self.src.trim().trim_end_matches('/');
             src.rsplit(['/', '\\']).next().unwrap_or(src).to_owned()
         };
-        String::from(named.map_or_else(file, str::to_owned))
+        named.map_or_else(file, str::to_owned)
     }
 }
 
@@ -67,10 +73,18 @@ impl TryFrom<Spec> for AudioBlock {
                 Track {
                     src,
                     name: spec.name,
+                    transcript: spec.transcript,
                 },
             );
         }
         tracks.retain(|track| !track.src.trim().is_empty());
+        for track in &mut tracks {
+            track.transcript = track
+                .transcript
+                .take()
+                .map(|transcript| transcript.trim().to_owned())
+                .filter(|transcript| !transcript.is_empty());
+        }
         if tracks.len() > 16 {
             return Err("audio preview supports at most 16 tracks".into());
         }

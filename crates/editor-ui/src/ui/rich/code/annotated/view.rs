@@ -12,15 +12,14 @@ use editor_assets::AssetId;
 use super::{AnnotatedCode, Model};
 use crate::ui::{
     kit::{
-        self, Button, ButtonSize, ButtonTone, Corner, Density, Divider, Ellipsis, Hover, Label,
+        Button, ButtonSize, ButtonTone, Corner, Density, Divider, Ellipsis, Hover, Label, Row,
         Space, Spaced, Surface, TextRole,
     },
     rich::actions::{OpenReference, ResourceScope},
     theme::{ArtisanTheme, Opacity},
 };
 
-const LINE_HEIGHT: f32 = TextRole::Code.spec().line;
-const NOTE: kit::Row = kit::Row::ListItem(Density::Dense);
+const NOTE: Row = Row::ListItem(Density::Dense);
 const BADGE: f32 = 16.0;
 const MARKER: f32 = 24.0;
 const EDGE: f32 = 2.0;
@@ -40,7 +39,7 @@ impl AnnotatedState {
         }
     }
 
-    pub(crate) fn update_model(&mut self, model: &AnnotatedCode) -> bool {
+    fn update_model(&mut self, model: &AnnotatedCode) -> bool {
         if Arc::ptr_eq(&self.model, &model.0) {
             return false;
         }
@@ -80,6 +79,11 @@ impl AnnotatedCode {
         self.0.lines.join("\n")
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the annotated code view takes its reference scope, opener, state and invalidation"
+    )]
     pub(crate) fn render(
         &self,
         theme: &ArtisanTheme,
@@ -104,7 +108,7 @@ impl AnnotatedCode {
                 path: path.clone(),
                 line: Some(model.start),
             };
-            let open = open.clone();
+            let open = Rc::clone(&open);
             let owner = Rc::downgrade(&state);
             let rendered = Arc::downgrade(&model);
             body = body.child(
@@ -138,10 +142,11 @@ impl AnnotatedCode {
             + gutter
             + Space::S12.px()
             + if model.notes.is_empty() { 0.0 } else { MARKER };
-        let height = crate::ui::rich::charts::scale::f32_of_count(count.min(18)) * LINE_HEIGHT;
+        let height = crate::ui::rich::charts::scale::f32_of_count(count.min(18))
+            * TextRole::Code.line_px(theme);
         let row_model = Arc::clone(&model);
-        let row_state = state.clone();
-        let row_invalidate = invalidate.clone();
+        let row_state = Rc::clone(&state);
+        let row_invalidate = Rc::clone(&invalidate);
         let row_theme = *theme;
         let row_id = id.to_owned();
         let widest = model
@@ -155,7 +160,7 @@ impl AnnotatedCode {
             .key(|index| *index)
             .virtualize()
             .width_probe(widest)
-            .estimated_row_height(Length::Px(LINE_HEIGHT))
+            .estimated_row_height(Length::Px(TextRole::Code.line_px(theme)))
             .style(
                 Style::new()
                     .width(Length::Pct(100.0))
@@ -170,8 +175,8 @@ impl AnnotatedCode {
                     *index,
                     gutter,
                     active,
-                    row_state.clone(),
-                    row_invalidate.clone(),
+                    Rc::clone(&row_state),
+                    Rc::clone(&row_invalidate),
                 )
             })
             .build()
@@ -186,7 +191,7 @@ impl AnnotatedCode {
                 .with_key(format!("{id}-code-scroll")),
         );
         if !model.notes.is_empty() {
-            let note_height = TextRole::Label.spec().line + 2.0 * NOTE.pad().y.px();
+            let note_height = 2.0f32.mul_add(NOTE.pad().y.px(), TextRole::Label.line_px(theme));
             let height = crate::ui::rich::charts::scale::f32_of_count(model.notes.len().min(6))
                 * note_height;
             let note_model = Arc::clone(&model);
@@ -211,9 +216,9 @@ impl AnnotatedCode {
                         active,
                         scope.clone(),
                         instance,
-                        open.clone(),
-                        state.clone(),
-                        invalidate.clone(),
+                        Rc::clone(&open),
+                        Rc::clone(&state),
+                        Rc::clone(&invalidate),
                     )
                 })
                 .build()
@@ -278,6 +283,10 @@ fn hover(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a code row reads its model line, gutter, active note, state and invalidation"
+)]
 fn code_row(
     theme: &ArtisanTheme,
     id: &str,
@@ -289,6 +298,7 @@ fn code_row(
     invalidate: Rc<dyn Fn()>,
 ) -> Element {
     let accent = theme.colors.link;
+    let line = TextRole::Code.line_px(theme);
     let lit = active
         .and_then(|note| model.notes.get(note))
         .is_some_and(|note| note.span.contains(model.number(index)));
@@ -314,7 +324,7 @@ fn code_row(
     }
     let mut row = UiBox::new()
         .width(Length::Pct(100.0))
-        .height(LINE_HEIGHT)
+        .height(line)
         .spaced(Space::S12)
         .clip(true)
         .style(style);
@@ -351,7 +361,7 @@ fn code_row(
                     Style::new()
                         .flex_grow(1.0)
                         .min_width(Length::Px(0.0))
-                        .min_height(Length::Px(LINE_HEIGHT)),
+                        .min_height(Length::Px(line)),
                 )
                 .child(
                     Text::new(model.lines[index].clone())
@@ -372,6 +382,10 @@ fn code_row(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a note row reads its model note, active state, reference scope, opener and state"
+)]
 fn note_row(
     theme: &ArtisanTheme,
     id: &str,
@@ -394,14 +408,14 @@ fn note_row(
     let mut row = UiBox::new()
         .spaced(NOTE.gap())
         .padded(NOTE.pad().y)
-        .radius(NOTE.radius_in(Surface::Card))
+        .radius(Row::radius_in(Surface::Card))
         .style(Style::new().align(AlignItems::FLEX_START));
     if on {
         row = row.style(Hover::Neutral.style(theme));
     }
     row = row.child(
         UiBox::new()
-            .height(TextRole::Label.spec().line)
+            .height(TextRole::Label.line_px(theme))
             .style(Style::new().align(AlignItems::CENTER))
             .child(badge(theme, index + 1, on))
             .build(),

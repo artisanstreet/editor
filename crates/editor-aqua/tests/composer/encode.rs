@@ -15,13 +15,14 @@ fn quad(width: u32, height: u32) -> image::RgbaImage {
 
 fn encoded(image: &image::RgbaImage, format: image::ImageFormat) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
-    match format {
-        image::ImageFormat::Jpeg => image::DynamicImage::ImageRgba8(image.clone())
+    let written = if format == image::ImageFormat::Jpeg {
+        image::DynamicImage::ImageRgba8(image.clone())
             .into_rgb8()
-            .write_to(&mut bytes, format),
-        _ => image.write_to(&mut bytes, format),
-    }
-    .unwrap();
+            .write_to(&mut bytes, format)
+    } else {
+        image.write_to(&mut bytes, format)
+    };
+    written.expect("the test image encodes");
     bytes.into_inner()
 }
 
@@ -72,7 +73,7 @@ fn attachments_in_every_accepted_format_are_sent_as_webp() {
         assert_eq!(preview.width().max(preview.height()), 144);
         assert_quadrants(&preview, [0, 1, 2, 3]);
     }
-    assert!(to_webp(b"%PDF-1.7 not an image").is_err());
+    to_webp(b"%PDF-1.7 not an image").unwrap_err();
 }
 
 #[test]
