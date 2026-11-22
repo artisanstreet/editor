@@ -1,14 +1,16 @@
 use crate::content::ContentError;
 use crate::error::AtStep as _;
 use crate::error::StorageError;
-use crate::writer::{Durability, Job, Writer};
+use crate::writer::{Attempt, Durability, Job, Writer};
 use artisan_api::Item;
 use rusqlite::{Connection, OptionalExtension};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub(crate) const INDEX_VERSION: i64 = 2;
 const BATCH_ITEMS: i64 = 256;
+const STEP: Duration = Duration::from_millis(100);
 const REPORT_EVERY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,10 +20,111 @@ pub struct RetryPace {
 }
 
 impl RetryPace {
-    pub(crate) const SYSTEM: Self = Self {
+    const SYSTEM: Self = Self {
         first: Duration::from_secs(1),
         last: Duration::from_secs(300),
     };
+}
+
+#[derive(Clone)]
+pub(crate) struct StepClock(Arc<dyn Fn() -> Instant + Send + Sync>);
+
+impl StepClock {
+    fn system() -> Self {
+        Self::new(Instant::now)
+    }
+
+    pub(crate) fn new(now: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        Self(Arc::new(now))
+    }
+
+    fn now(&self) -> Instant {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for StepClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StepClock").finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Pacing {
+    pub(crate) retry: RetryPace,
+    pub(crate) step: Duration,
+    pub(crate) clock: StepClock,
+}
+
+impl Pacing {
+    #[must_use]
+    pub fn system() -> Self {
+        Self {
+            retry: RetryPace::SYSTEM,
+            step: STEP,
+            clock: StepClock::system(),
+        }
+    }
+
+    #[must_use]
+    pub fn retrying(self, retry: RetryPace) -> Self {
+        Self { retry, ..self }
+    }
+
+    pub(crate) fn budget(&self, commit_reserve: Duration) -> Budget {
+        let started = self.clock.now();
+        Budget {
+            started,
+            step: self.step,
+            clock: self.clock.clone(),
+            commit_reserve,
+            row_started: started,
+            slowest_row: Duration::ZERO,
+            work_ended: started,
+        }
+    }
+}
+
+pub(crate) struct Budget {
+    started: Instant,
+    step: Duration,
+    clock: StepClock,
+    commit_reserve: Duration,
+    row_started: Instant,
+    slowest_row: Duration,
+    work_ended: Instant,
+}
+
+impl Budget {
+    fn start_rows(&mut self) {
+        self.row_started = self.clock.now();
+    }
+
+    fn another_row_fits(&mut self) -> bool {
+        let now = self.clock.now();
+        self.slowest_row = self.slowest_row.max(now.duration_since(self.row_started));
+        self.row_started = now;
+        now.duration_since(self.started) + self.slowest_row + self.commit_reserve < self.step
+    }
+
+    fn end_work(&mut self) {
+        self.work_ended = self.clock.now();
+    }
+
+    fn commit_took(&self) -> Duration {
+        self.clock.now().duration_since(self.work_ended)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WriteLock {
+    Free,
+    HeldElsewhereSince(Instant),
+}
+
+enum StepEnd {
+    RowsRunOut,
+    OutOfTime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,28 +247,41 @@ pub(crate) enum Batch {
     Stale,
 }
 
-pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
+pub(crate) fn build_batch(
+    conn: &Connection,
+    budget: &mut Budget,
+) -> Result<Batch, BuildIndexError> {
     let after = match index_state(conn).map_err(BuildIndexError::State)? {
         IndexState::Building { after } => after,
         IndexState::Built => return Ok(Batch::AlreadyBuilt),
         IndexState::Stale { .. } => return Ok(Batch::Stale),
     };
     let read = |source| BuildIndexError::Items { after, source };
-    let rows: Vec<(i64, String)> = conn
+    let mut statement = conn
         .prepare_cached(include_str!("../sql/recall/items.sql"))
         .at("recall/items.sql")
-        .map_err(read)?
-        .query_map([after, BATCH_ITEMS], |row| Ok((row.get(0)?, row.get(1)?)))
-        .at("recall/items.sql")
-        .map_err(read)?
-        .collect::<rusqlite::Result<_>>()
+        .map_err(read)?;
+    let mut rows = statement
+        .query([after, BATCH_ITEMS])
         .at("recall/items.sql")
         .map_err(read)?;
-    let (mut items, mut skipped) = (0_u64, 0_u64);
+    let (mut items, mut skipped, mut read_rows) = (0_u64, 0_u64, 0_i64);
     let mut through = after;
-    for (rowid, body) in &rows {
-        through = *rowid;
-        let item = match serde_json::from_str::<Item>(body) {
+    budget.start_rows();
+    let end = loop {
+        if read_rows > 0 && !budget.another_row_fits() {
+            break StepEnd::OutOfTime;
+        }
+        let Some(row) = rows.next().at("recall/items.sql").map_err(read)? else {
+            break StepEnd::RowsRunOut;
+        };
+        let (rowid, body): (i64, String) = (
+            row.get(0).at("recall/items.sql").map_err(read)?,
+            row.get(1).at("recall/items.sql").map_err(read)?,
+        );
+        read_rows += 1;
+        through = rowid;
+        let item = match serde_json::from_str::<Item>(&body) {
             Ok(item) => item,
             Err(error) => {
                 tracing::warn!(row = rowid, %error, "left an item whose body doesn't read out of recall");
@@ -221,9 +337,11 @@ pub(crate) fn build_batch(conn: &Connection) -> Result<Batch, BuildIndexError> {
                 skipped += 1;
             }
         }
-    }
+    };
+    budget.end_work();
     let advance = |source| BuildIndexError::Advance { through, source };
-    if i64::try_from(rows.len()).is_ok_and(|count| count < BATCH_ITEMS) {
+    drop(rows);
+    if matches!(end, StepEnd::RowsRunOut) && read_rows < BATCH_ITEMS {
         conn.execute(include_str!("../sql/recall/finish_index.sql"), [])
             .at("recall/finish_index.sql")
             .map_err(advance)?;
@@ -244,13 +362,13 @@ impl Builder {
     pub(crate) fn spawn(
         jobs: mpsc::Sender<Job>,
         status: watch::Sender<RecallIndex>,
-        pace: RetryPace,
+        pacing: Pacing,
     ) -> std::io::Result<Self> {
         let (stop, stopping) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("forge-store-recall".into())
             .spawn(move || {
-                let reached = build(&jobs, &stopping, pace);
+                let reached = build(&jobs, &stopping, &pacing);
                 status.send_replace(reached);
             })?;
         Ok(Self { stop, thread })
@@ -268,15 +386,34 @@ impl Builder {
 }
 
 enum Reply {
-    Built(Result<Batch, BuildIndexError>),
+    Built {
+        built: Result<Batch, BuildIndexError>,
+        commit: Duration,
+    },
+    LockHeld(StorageError),
     WriterStopped,
 }
 
-fn batch(jobs: &mpsc::Sender<Job>) -> Reply {
+fn batch(jobs: &mpsc::Sender<Job>, pacing: &Pacing, commit_reserve: Duration) -> Reply {
     let (reply, outcome) = oneshot::channel();
+    let pacing = pacing.clone();
     let job: Job = Box::new(move |writer: &mut Writer| {
-        let built = writer.transact(Durability::Background, |tx| build_batch(tx));
-        if reply.send(built).is_err() {
+        let mut budget = pacing.budget(commit_reserve);
+        let attempt = writer.transact_waiting_at_most(pacing.step, Durability::Background, |tx| {
+            build_batch(tx, &mut budget)
+        });
+        let answer = match attempt {
+            Ok(batch) => Reply::Built {
+                built: Ok(batch),
+                commit: budget.commit_took(),
+            },
+            Err(Attempt::LockHeld(held)) => Reply::LockHeld(held),
+            Err(Attempt::Failed(failure)) => Reply::Built {
+                built: Err(failure),
+                commit: Duration::ZERO,
+            },
+        };
+        if reply.send(answer).is_err() {
             tracing::debug!("the recall index builder stopped before its batch finished");
         }
     });
@@ -284,7 +421,7 @@ fn batch(jobs: &mpsc::Sender<Job>) -> Reply {
         return Reply::WriterStopped;
     }
     match outcome.blocking_recv() {
-        Ok(built) => Reply::Built(built),
+        Ok(answer) => answer,
         Err(_writer_stopped) => Reply::WriterStopped,
     }
 }
@@ -303,29 +440,73 @@ fn stopped_while_waiting(stop: &std::sync::mpsc::Receiver<()>, wait: Duration) -
     }
 }
 
+impl WriteLock {
+    fn held(self, items: u64, error: &StorageError) -> Self {
+        match self {
+            Self::Free => {
+                tracing::info!(
+                    items,
+                    error = %diagnostics::chain(error),
+                    "another connection holds the write lock; the recall index waits for it"
+                );
+                Self::HeldElsewhereSince(Instant::now())
+            }
+            held @ Self::HeldElsewhereSince(_) => held,
+        }
+    }
+
+    fn free(self, items: u64) -> Self {
+        match self {
+            Self::Free => Self::Free,
+            Self::HeldElsewhereSince(since) => {
+                tracing::info!(
+                    items,
+                    waited_ms = since.elapsed().as_millis(),
+                    "the write lock is free again; the recall index carries on"
+                );
+                Self::Free
+            }
+        }
+    }
+}
+
 fn build(
     jobs: &mpsc::Sender<Job>,
     stop: &std::sync::mpsc::Receiver<()>,
-    pace: RetryPace,
+    pacing: &Pacing,
 ) -> RecallIndex {
+    let pace = pacing.retry;
     let started = Instant::now();
     let mut reported = started;
     let mut retry = pace.first;
+    let mut lock = WriteLock::Free;
+    let mut slowest_commit = Duration::ZERO;
     let (mut items, mut skipped) = (0_u64, 0_u64);
     while !stop_requested(stop) {
-        match batch(jobs) {
-            Reply::WriterStopped | Reply::Built(Ok(Batch::Stale)) => {
-                return RecallIndex::Incomplete;
+        let (built, commit) = match batch(jobs, pacing, slowest_commit) {
+            Reply::WriterStopped => return RecallIndex::Incomplete,
+            Reply::LockHeld(error) => {
+                lock = lock.held(items, &error);
+                if stopped_while_waiting(stop, pace.first) {
+                    return RecallIndex::Incomplete;
+                }
+                continue;
             }
-            Reply::Built(Ok(Batch::AlreadyBuilt)) => {
+            Reply::Built { built, commit } => (built, commit),
+        };
+        lock = lock.free(items);
+        match built {
+            Ok(Batch::Stale) => return RecallIndex::Incomplete,
+            Ok(Batch::AlreadyBuilt) => {
                 tracing::info!(items, skipped, "another Forge finished the recall index");
                 return RecallIndex::Built;
             }
-            Reply::Built(Ok(Batch::Indexed {
+            Ok(Batch::Indexed {
                 items: indexed,
                 skipped: left_out,
-            })) => {
+            }) => {
                 retry = pace.first;
+                slowest_commit = slowest_commit.max(commit);
                 items += indexed;
                 skipped += left_out;
                 if reported.elapsed() >= REPORT_EVERY {
@@ -333,10 +514,10 @@ fn build(
                     tracing::info!(items, skipped, "building the recall index");
                 }
             }
-            Reply::Built(Ok(Batch::Finished {
+            Ok(Batch::Finished {
                 items: indexed,
                 skipped: left_out,
-            })) => {
+            }) => {
                 tracing::info!(
                     items = items + indexed,
                     skipped = skipped + left_out,
@@ -345,7 +526,7 @@ fn build(
                 );
                 return RecallIndex::Built;
             }
-            Reply::Built(Err(error)) => {
+            Err(error) => {
                 tracing::warn!(
                     items,
                     retry_s = retry.as_secs(),

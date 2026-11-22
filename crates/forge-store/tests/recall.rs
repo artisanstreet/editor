@@ -617,10 +617,10 @@ fn store_counting_advances(
         &lock,
         forge_store::Environment {
             connections,
-            recall_retry: forge_store::RetryPace {
+            recall: forge_store::Pacing::system().retrying(forge_store::RetryPace {
                 first: std::time::Duration::ZERO,
                 last: std::time::Duration::ZERO,
-            },
+            }),
             ..forge_store::Environment::system()
         },
     )?;

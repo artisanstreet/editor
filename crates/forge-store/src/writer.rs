@@ -194,32 +194,58 @@ impl Writer {
         &self.conn
     }
 
+    pub(crate) fn transact_waiting_at_most<R, E: From<StorageError>>(
+        &mut self,
+        lock_wait: std::time::Duration,
+        durability: Durability,
+        job: impl FnOnce(&mut Tx<'_>) -> Result<R, E>,
+    ) -> Result<R, Attempt<E>> {
+        ShortLockWait::begin(self, lock_wait)
+            .map_err(|failure| Attempt::Failed(E::from(failure)))?
+            .attempt(durability, job)
+    }
+
     pub(crate) fn transact<R, E: From<StorageError>>(
         &mut self,
         durability: Durability,
         job: impl FnOnce(&mut Tx<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
+        self.attempt(durability, job).map_err(Attempt::into_failure)
+    }
+
+    fn attempt<R, E: From<StorageError>>(
+        &mut self,
+        durability: Durability,
+        job: impl FnOnce(&mut Tx<'_>) -> Result<R, E>,
+    ) -> Result<R, Attempt<E>> {
+        let failed = |failure: StorageError| Attempt::Failed(E::from(failure));
         if self.durability != durability {
             self.conn
                 .pragma_update(None, "synchronous", durability.synchronous())
-                .at("set the commit durability")?;
+                .at("set the commit durability")
+                .map_err(failed)?;
             self.durability = durability;
         }
-        let sql = self
+        let begun = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .at("begin a write transaction")?;
-        let seq = read::max_seq(&sql)?;
+            .at("begin a write transaction");
+        let sql = match begun {
+            Ok(sql) => sql,
+            Err(failure) if held_elsewhere(&failure) => return Err(Attempt::LockHeld(failure)),
+            Err(failure) => return Err(failed(failure)),
+        };
+        let seq = read::max_seq(&sql).map_err(failed)?;
         let mut tx = Tx {
             sql,
             seq,
             events: Vec::new(),
             clock: self.clock.clone(),
         };
-        let result = job(&mut tx)?;
+        let result = job(&mut tx).map_err(Attempt::Failed)?;
         let (sql, seq, mut events) = (tx.sql, tx.seq, tx.events);
         events.sort_by_key(|envelope| envelope.seq);
-        sql.commit().at("commit")?;
+        sql.commit().at("commit").map_err(failed)?;
         self.commits.note();
         self.hot.committed(&events);
         self.head.fetch_max(seq, Ordering::AcqRel);
@@ -229,6 +255,63 @@ impl Writer {
             }
         }
         Ok(result)
+    }
+}
+
+pub(crate) enum Attempt<E> {
+    LockHeld(StorageError),
+    Failed(E),
+}
+
+impl<E: From<StorageError>> Attempt<E> {
+    fn into_failure(self) -> E {
+        match self {
+            Self::LockHeld(failure) => E::from(failure),
+            Self::Failed(failure) => failure,
+        }
+    }
+}
+
+fn held_elsewhere(failure: &StorageError) -> bool {
+    matches!(
+        failure,
+        StorageError::Sql { source, .. }
+            if source.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+    )
+}
+
+struct ShortLockWait<'w>(&'w mut Writer);
+
+impl<'w> ShortLockWait<'w> {
+    fn begin(writer: &'w mut Writer, lock_wait: std::time::Duration) -> Result<Self> {
+        writer
+            .conn
+            .busy_timeout(lock_wait)
+            .at("shorten the wait for the write lock")?;
+        Ok(Self(writer))
+    }
+}
+
+impl std::ops::DerefMut for ShortLockWait<'_> {
+    fn deref_mut(&mut self) -> &mut Writer {
+        self.0
+    }
+}
+
+impl Deref for ShortLockWait<'_> {
+    type Target = Writer;
+
+    fn deref(&self) -> &Writer {
+        self.0
+    }
+}
+
+impl Drop for ShortLockWait<'_> {
+    fn drop(&mut self) {
+        self.0
+            .conn
+            .busy_timeout(crate::BUSY_TIMEOUT)
+            .expect("invariant: SQLite always accepts a new busy timeout");
     }
 }
 

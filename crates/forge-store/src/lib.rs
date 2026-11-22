@@ -76,7 +76,7 @@ pub use pairing::{
 pub use progress::Progress;
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
-    GrepCursor, GrepCursorError, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery,
+    GrepCursor, GrepCursorError, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, Pacing,
     PrepareIndexError, RecallGrepError, RecallIndex, RecallKind, RecallScope, RecallSearchError,
     RecallTouchingError, RetryPace, SearchCursor, SearchHit, SearchPage, Touch,
 };
@@ -697,7 +697,7 @@ fn recall_builder(
     conn: &Connection,
     jobs: &mpsc::Sender<Job>,
     database: &Path,
-    pace: RetryPace,
+    pacing: Pacing,
 ) -> Result<(Option<recall::Builder>, watch::Receiver<RecallIndex>), OpenStoreError> {
     let state = recall::index_state(conn).map_err(|source| OpenStoreError::RecallState {
         database: database.to_owned(),
@@ -706,7 +706,7 @@ fn recall_builder(
     match state {
         recall::IndexState::Building { .. } => {
             let (status, watching) = watch::channel(RecallIndex::Building);
-            recall::Builder::spawn(jobs.clone(), status, pace)
+            recall::Builder::spawn(jobs.clone(), status, pacing)
                 .map(|builder| (Some(builder), watching))
                 .map_err(|source| OpenStoreError::Spawn {
                     thread: "recall index builder",
@@ -860,7 +860,7 @@ impl Store {
         environment: Environment,
     ) -> Result<Self, OpenStoreError> {
         let upgrading = schema::Upgrade::of(&environment);
-        let recall_retry = environment.recall_retry;
+        let recall_pacing = environment.recall.clone();
         let Environment {
             connections, clock, ..
         } = environment;
@@ -903,7 +903,7 @@ impl Store {
         let mut threads = Threads::default();
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
         let (builder, recall_index) =
-            recall_builder(writer.connection(), &jobs, &database, recall_retry)?;
+            recall_builder(writer.connection(), &jobs, &database, recall_pacing)?;
         threads.writer = Some(
             std::thread::Builder::new()
                 .name("forge-store-writer".into())
