@@ -27,6 +27,7 @@ pub type Dispatch = Rc<dyn Fn(Action)>;
 
 const COLUMN_MAX: f32 = 768.0;
 const GUTTER: Space = Space::S24;
+pub const FULL_CHAT_WIDTH: f32 = COLUMN_MAX + 2.0 * GUTTER.px();
 const CHAIN_INDENT: Space = Space::S24;
 const CHAIN_RULE: f32 = 2.0;
 const STATUS_TAIL: Space = Space::S8;

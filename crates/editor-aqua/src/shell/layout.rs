@@ -1,7 +1,7 @@
 pub use crate::ui::chrome::TITLEBAR_HEIGHT;
 const COLUMN_WIDTH: f32 = 327.0;
 const COLUMN_MIN_WIDTH: f32 = 240.0;
-pub const CHAT_MIN_WIDTH: f32 = 864.0;
+const LAUNCH_CHAT_WIDTH: f32 = 864.0;
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 720.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 480.0;
 
@@ -13,7 +13,7 @@ pub struct Size {
 
 pub(crate) fn launch_size(visible: Option<Size>) -> Size {
     let mut size = Size {
-        width: 2.0_f32.mul_add(COLUMN_WIDTH, CHAT_MIN_WIDTH),
+        width: 2.0_f32.mul_add(COLUMN_WIDTH, LAUNCH_CHAT_WIDTH),
         height: 900.0,
     };
     if let Some(visible) = visible {

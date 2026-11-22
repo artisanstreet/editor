@@ -26,7 +26,7 @@ const OUTER_WIDTH: f32 = WIDTH + 2.0 * Inset::Frame.px();
 
 #[must_use]
 pub(crate) fn fits(content_width: f32) -> bool {
-    content_width - crate::shell::layout::CHAT_MIN_WIDTH >= OUTER_WIDTH
+    content_width - crate::conversation::view::FULL_CHAT_WIDTH >= OUTER_WIDTH
 }
 
 #[derive(Clone)]
