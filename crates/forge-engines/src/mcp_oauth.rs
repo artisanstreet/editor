@@ -4,6 +4,7 @@ use reqwest::{StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::hash::{Hash as _, Hasher as _};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -63,7 +64,62 @@ impl Default for Http {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ShownUrl(Box<UrlIdentity>);
+
+struct UrlIdentity {
+    origin: Option<String>,
+    digest: u32,
+}
+
+impl ShownUrl {
+    #[must_use]
+    fn of(url: &Url) -> Self {
+        let origin = url.host_str().map(|host| match url.port() {
+            Some(port) => format!("{}://{host}:{port}", url.scheme()),
+            None => format!("{}://{host}", url.scheme()),
+        });
+        Self(Box::new(UrlIdentity {
+            origin,
+            digest: digest(url.as_str()),
+        }))
+    }
+
+    #[must_use]
+    fn unparsed(text: &str) -> Self {
+        Self(Box::new(UrlIdentity {
+            origin: None,
+            digest: digest(text),
+        }))
+    }
+
+    #[must_use]
+    fn text(text: &str) -> Self {
+        Url::parse(text).map_or_else(|_| Self::unparsed(text), |url| Self::of(&url))
+    }
+}
+
+fn digest(text: &str) -> u32 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    text.hash(&mut hasher);
+    u32::try_from(hasher.finish() >> 32).expect("invariant: the high half of a u64 fits a u32")
+}
+
+impl std::fmt::Display for ShownUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0.origin {
+            Some(origin) => write!(f, "{origin} (#{:08x})", self.0.digest),
+            None => write!(f, "a URL (#{:08x})", self.0.digest),
+        }
+    }
+}
+
+impl std::fmt::Debug for ShownUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct SecureUrl(Box<Url>);
 
@@ -81,7 +137,13 @@ impl SecureUrl {
 
 impl std::fmt::Display for SecureUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0.as_str())
+        ShownUrl::of(&self.0).fmt(f)
+    }
+}
+
+impl std::fmt::Debug for SecureUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        ShownUrl::of(&self.0).fmt(f)
     }
 }
 
@@ -89,19 +151,22 @@ impl std::fmt::Display for SecureUrl {
 pub enum InsecureUrl {
     #[error("{value} isn't a URL")]
     Invalid {
-        value: String,
+        value: ShownUrl,
         #[source]
         source: url::ParseError,
     },
     #[error("{url} isn't HTTPS")]
-    NotHttps { url: Box<Url> },
+    NotHttps { url: ShownUrl },
 }
 
 impl TryFrom<String> for SecureUrl {
     type Error = InsecureUrl;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let url = Url::parse(&value).map_err(|source| InsecureUrl::Invalid { value, source })?;
+        let url = Url::parse(&value).map_err(|source| InsecureUrl::Invalid {
+            value: ShownUrl::unparsed(&value),
+            source,
+        })?;
         Self::try_from(url)
     }
 }
@@ -113,7 +178,9 @@ impl TryFrom<Url> for SecureUrl {
         if is_secure(&url) {
             Ok(Self(Box::new(url)))
         } else {
-            Err(InsecureUrl::NotHttps { url: Box::new(url) })
+            Err(InsecureUrl::NotHttps {
+                url: ShownUrl::of(&url),
+            })
         }
     }
 }
@@ -235,31 +302,31 @@ fn b64(bytes: &[u8]) -> String {
 pub enum ResponseError {
     #[error("couldn't reach {url}")]
     Unreachable {
-        url: Box<Url>,
+        url: ShownUrl,
         #[source]
         source: reqwest::Error,
     },
     #[error("{url} redirected to {location}, which isn't HTTPS")]
-    InsecureRedirect { url: Box<Url>, location: Box<Url> },
+    InsecureRedirect { url: ShownUrl, location: ShownUrl },
     #[error("{url} redirected a request carrying credentials to {location}, another origin")]
-    CrossOriginRedirect { url: Box<Url>, location: Box<Url> },
+    CrossOriginRedirect { url: ShownUrl, location: ShownUrl },
     #[error("reading the answer from {url}")]
     Read {
-        url: Box<Url>,
+        url: ShownUrl,
         #[source]
         source: reqwest::Error,
     },
     #[error("the answer from {url} is over {limit} bytes")]
-    TooLarge { url: Box<Url>, limit: usize },
+    TooLarge { url: ShownUrl, limit: usize },
     #[error("{url} answered HTTP {status}{}", oauth_reason(.body))]
     Status {
-        url: Box<Url>,
+        url: ShownUrl,
         status: u16,
         body: ErrorBody,
     },
     #[error("the answer from {url} isn't what OAuth expects")]
     Malformed {
-        url: Box<Url>,
+        url: ShownUrl,
         #[source]
         source: serde_json::Error,
     },
@@ -382,7 +449,7 @@ impl ErrorBody {
 }
 
 struct Answer {
-    url: Box<Url>,
+    url: ShownUrl,
     status: StatusCode,
     body: Vec<u8>,
 }
@@ -410,8 +477,8 @@ async fn send(request: reqwest::RequestBuilder, url: &Url) -> Result<Answer, Res
             .send()
             .await
             .map_err(|source| ResponseError::Unreachable {
-                url: Box::new(url.clone()),
-                source,
+                url: ShownUrl::of(url),
+                source: source.without_url(),
             })?;
     if response.status().is_redirection() {
         let location = response
@@ -422,14 +489,14 @@ async fn send(request: reqwest::RequestBuilder, url: &Url) -> Result<Answer, Res
         if let Some(location) = location {
             if !is_secure(&location) {
                 return Err(ResponseError::InsecureRedirect {
-                    url: Box::new(url.clone()),
-                    location: Box::new(location),
+                    url: ShownUrl::of(url),
+                    location: ShownUrl::of(&location),
                 });
             }
             if location.origin() != response.url().origin() {
                 return Err(ResponseError::CrossOriginRedirect {
-                    url: Box::new(url.clone()),
-                    location: Box::new(location),
+                    url: ShownUrl::of(url),
+                    location: ShownUrl::of(&location),
                 });
             }
         }
@@ -440,7 +507,7 @@ async fn send(request: reqwest::RequestBuilder, url: &Url) -> Result<Answer, Res
         .is_some_and(|length| length > MAX_BODY as u64)
     {
         return Err(ResponseError::TooLarge {
-            url: Box::new(url.clone()),
+            url: ShownUrl::of(url),
             limit: MAX_BODY,
         });
     }
@@ -449,20 +516,20 @@ async fn send(request: reqwest::RequestBuilder, url: &Url) -> Result<Answer, Res
         .chunk()
         .await
         .map_err(|source| ResponseError::Read {
-            url: Box::new(url.clone()),
-            source,
+            url: ShownUrl::of(url),
+            source: source.without_url(),
         })?
     {
         if body.len() + chunk.len() > MAX_BODY {
             return Err(ResponseError::TooLarge {
-                url: Box::new(url.clone()),
+                url: ShownUrl::of(url),
                 limit: MAX_BODY,
             });
         }
         body.extend_from_slice(&chunk);
     }
     Ok(Answer {
-        url: Box::new(url.clone()),
+        url: ShownUrl::of(url),
         status,
         body,
     })
@@ -473,7 +540,7 @@ pub enum ProbeError {
     #[error("MCP server {server}'s address {url} isn't a URL")]
     ServerUrl {
         server: String,
-        url: String,
+        url: ShownUrl,
         #[source]
         source: url::ParseError,
     },
@@ -499,7 +566,7 @@ pub async fn probe(
 ) -> Result<Probe, ProbeError> {
     let url = Url::parse(server_url).map_err(|source| ProbeError::ServerUrl {
         server: server.to_owned(),
-        url: server_url.to_owned(),
+        url: ShownUrl::unparsed(server_url),
         source,
     })?;
     let mut request = http
@@ -529,7 +596,7 @@ pub async fn probe(
         .await
         .map_err(|source| ProbeError::Unreachable {
             server: server.to_owned(),
-            source,
+            source: source.without_url(),
         })?;
     let status = response.status();
     if status.is_success() {
@@ -579,14 +646,14 @@ pub enum DiscoveryError {
     #[error("MCP server {server}'s metadata is for {resource}, not {server_url}")]
     ForeignResource {
         server: String,
-        server_url: Box<Url>,
-        resource: Box<Url>,
+        server_url: ShownUrl,
+        resource: ShownUrl,
     },
     #[error("authorization server {issuer} for MCP server {server} calls itself {claimed}")]
     IssuerMismatch {
         server: String,
         issuer: SecureUrl,
-        claimed: String,
+        claimed: ShownUrl,
     },
     #[error(
         "authorization server {issuer} for MCP server {server} doesn't support PKCE with S256, which MCP requires"
@@ -665,8 +732,8 @@ async fn discover(
     if !covers(resource.url(), server_url) {
         return Err(DiscoveryError::ForeignResource {
             server: server.to_owned(),
-            server_url: Box::new(server_url.clone()),
-            resource: Box::new(resource.url().clone()),
+            server_url: ShownUrl::of(server_url),
+            resource: ShownUrl::of(resource.url()),
         });
     }
     let Some(metadata) = first_document::<AuthorizationMetadata>(
@@ -686,7 +753,7 @@ async fn discover(
         return Err(DiscoveryError::IssuerMismatch {
             server: server.to_owned(),
             issuer,
-            claimed: metadata.issuer,
+            claimed: ShownUrl::text(&metadata.issuer),
         });
     }
     if let Some(methods) = &metadata.code_challenge_methods_supported

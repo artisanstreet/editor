@@ -445,6 +445,55 @@ async fn an_unknown_oauth_code_is_shown_but_never_the_providers_description() {
     assert!(told.contains("can't show"), "{told}");
 }
 
+#[tokio::test]
+async fn a_failed_request_never_tells_the_url_path_or_query() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let address = listener.local_addr().expect("a bound address");
+    let hangs_up = tokio::spawn(async move {
+        loop {
+            let (connection, _) = listener.accept().await.expect("a connection");
+            drop(connection);
+        }
+    });
+    let base = Base::default();
+    base.0
+        .set(format!("http://{address}/p4th-sk-secret"))
+        .expect("base is set once");
+    let mut discovery = discovery_at(&base);
+    discovery.token_endpoint =
+        SecureUrl::try_from(base.url("/token?api_key=sk-secret")).expect("loopback is secure");
+    let answer = within(
+        "a refresh against a hung-up token endpoint",
+        Duration::from_secs(10),
+        refresh(
+            &Http::new(),
+            "linear",
+            &discovery,
+            &client_for(&discovery),
+            &Secret::from("refresh-1"),
+            1_000,
+        ),
+    )
+    .await;
+    hangs_up.abort();
+    let Err(
+        failure @ TokenError::Request {
+            source: ResponseError::Unreachable { .. },
+            ..
+        },
+    ) = answer
+    else {
+        panic!("a hung-up token endpoint gave {answer:?}");
+    };
+    let told = diagnostics::chain(&failure);
+    let debugged = format!("{failure:?}");
+    assert!(told.contains(&format!("http://{address} (#")), "{told}");
+    assert!(!told.contains("sk-secret"), "{told}");
+    assert!(!debugged.contains("sk-secret"), "{debugged}");
+}
+
 async fn token_answer(body: Value) -> Result<Tokens, TokenError> {
     let (base, _stub) = token_stub(move || Json(body.clone()).into_response()).await;
     refreshed(&base).await
