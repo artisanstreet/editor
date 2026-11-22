@@ -786,6 +786,39 @@ mod tests {
         assert!(sandbox.installed.is_file(), "Forge is installed: {told}");
     }
 
+    #[test]
+    fn an_install_waiting_on_one_that_dies_mid_swap_puts_its_files_back_before_installing() {
+        let sandbox = Sandbox::new();
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+        let stage = sandbox.stage_forge(&forge_binary());
+        let dying = sandbox.install_lock();
+        dying.lock().expect("the dying installer holds the lock");
+
+        let (installed, told) = sandbox.ae_behind(
+            dying,
+            &[
+                "install", "--editor", "none", "--forge", "keep", "--yes", "--from", &stage,
+            ],
+            || {
+                std::fs::rename(&sandbox.installed, forge.join(".old-0-forge"))
+                    .expect("the dying installer moved Forge aside");
+                std::fs::write(
+                    forge.join(".install-journal"),
+                    r#"{"entries":[{"name":"forge","aside":".old-0-forge"}],"before":{"Forge":{"database":"Nothing"}}}"#,
+                )
+                .expect("the dying installer recorded the move");
+            },
+        );
+
+        assert!(installed.success(), "{told}");
+        assert!(
+            told.contains("Put back the Forge files an interrupted install left half replaced"),
+            "{told}"
+        );
+        assert!(!forge.join(".install-journal").exists(), "{told}");
+        assert!(sandbox.listening(), "the updated Forge serves: {told}");
+    }
+
     fn ae_only_stage(sandbox: &Sandbox) -> String {
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");

@@ -184,6 +184,8 @@ pub(crate) enum ApplyError {
     #[error(transparent)]
     Lock(#[from] InstallLockError),
     #[error(transparent)]
+    Recover(#[from] RecoverError),
+    #[error(transparent)]
     Migrate(#[from] MigrateError),
     #[error(transparent)]
     Here(#[from] InstallHereError),
@@ -1072,7 +1074,7 @@ struct Installing {
     _lock: std::fs::File,
 }
 
-fn recover_interrupted() -> Result<(), RecoverError> {
+fn interrupted_apps() -> Result<Vec<(App, PathBuf)>, RecoverError> {
     let mut interrupted = Vec::new();
     for app in App::ALL {
         let dir = paths::dir(app)?;
@@ -1084,11 +1086,19 @@ fn recover_interrupted() -> Result<(), RecoverError> {
             interrupted.push((app, dir));
         }
     }
-    if interrupted.is_empty() {
+    Ok(interrupted)
+}
+
+pub(crate) fn recover_interrupted() -> Result<(), RecoverError> {
+    if interrupted_apps()?.is_empty() {
         return Ok(());
     }
-    let _installing = install_lock()?;
-    for (app, dir) in interrupted {
+    let installing = install_lock()?;
+    recover_holding(&installing)
+}
+
+fn recover_holding(_installing: &Installing) -> Result<(), RecoverError> {
+    for (app, dir) in interrupted_apps()? {
         recover_app(app, &dir).map_err(|source| RecoverError::Interrupted {
             app,
             journal: swap::journal(&dir),
@@ -1335,7 +1345,8 @@ fn apply(
     yes: bool,
     replaceable: &platform::Replaceable,
 ) -> Result<(), ApplyError> {
-    let _installing = install_lock()?;
+    let installing = install_lock()?;
+    recover_holding(&installing)?;
     let here = plan.here();
     let earlier = legacy::migrate(&here)?;
     install_here(release, origin, &here, replaceable)?;
