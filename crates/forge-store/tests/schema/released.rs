@@ -208,6 +208,7 @@ async fn an_upgrade_interrupted_after_schema_19_finishes_and_finds_its_messages(
             })
             .await
             .expect("search the messages")
+            .hits
             .into_iter()
             .map(|hit| hit.snippet)
             .collect();

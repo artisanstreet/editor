@@ -67,7 +67,7 @@ pub use request::{
     ThreadQuestionnaire, ThreadWindow, ThreadsPage, ThreadsQuery, UpdateThread, WorkSpan,
     WriteDraft,
 };
-pub use search::{TextHit, TextSearchQuery};
+pub use search::{SearchCoverage, TextHit, TextSearchPage, TextSearchQuery};
 pub use secret::Secret;
 pub use settings::{
     EditorCall, EditorReply, SETTINGS, SHOW_ALL_MODELS_KEY, SettingDecl, SettingKind, SettingOwner,

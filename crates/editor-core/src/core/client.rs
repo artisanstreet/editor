@@ -400,12 +400,26 @@ impl ForgeClient {
     pub async fn text_search(
         &self,
         query: &artisan_api::TextSearchQuery,
-    ) -> Result<Vec<artisan_api::TextHit>, CallError> {
-        self.call(
-            self.request(reqwest::Method::GET, "/search/text")
-                .query(query),
-        )
-        .await
+    ) -> Result<artisan_api::TextSearchPage, CallError> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Answer {
+            Page(artisan_api::TextSearchPage),
+            Released(Vec<artisan_api::TextHit>),
+        }
+        let answer = self
+            .call(
+                self.request(reqwest::Method::GET, "/search/text")
+                    .query(query),
+            )
+            .await?;
+        Ok(match answer {
+            Answer::Page(page) => page,
+            Answer::Released(hits) => artisan_api::TextSearchPage {
+                hits,
+                coverage: artisan_api::SearchCoverage::Complete,
+            },
+        })
     }
 
     pub async fn thread(&self, id: &ThreadId) -> Result<Thread, CallError> {

@@ -791,3 +791,35 @@ async fn a_grep_cursor_before_the_first_row_is_refused_and_never_wraps() {
         .expect("grep before the first row");
     assert!(page.matches.is_empty(), "{page:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn message_search_says_older_items_may_be_missing_until_the_index_is_built() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let notes = thread(&store, EngineId::Claude, "Notes").await;
+    store
+        .upsert_item(said(&notes, "the kestrel hovered over the field"))
+        .await
+        .expect("save a note");
+    drop(store);
+    forget_recall_index(dir.path());
+    let advances = Advances::allowing(0);
+    let (store, _lock) = store_counting_advances(dir.path(), &advances, false)
+        .expect("Forge starts and rebuilds the index in the background");
+    advances.refused().await;
+    let search = || {
+        store.text_search(artisan_api::TextSearchQuery {
+            query: "kestrel".into(),
+            limit: None,
+        })
+    };
+
+    let building = search().await.expect("search while the index builds");
+    assert_eq!(building.coverage, artisan_api::SearchCoverage::Indexing);
+
+    advances.lift();
+    assert_eq!(index_built(&store).await, forge_store::RecallIndex::Built);
+    let built = search().await.expect("search once the index is built");
+    assert_eq!(built.coverage, artisan_api::SearchCoverage::Complete);
+    assert_eq!(built.hits.len(), 1, "{built:?}");
+}

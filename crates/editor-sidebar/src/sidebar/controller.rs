@@ -79,13 +79,20 @@ enum Completion {
     Search {
         key: CompletionKey,
         query: String,
-        result: Result<Vec<artisan_api::TextHit>, CallError>,
+        result: Result<artisan_api::TextSearchPage, CallError>,
     },
 }
 
 struct TextHits {
     query: String,
     rows: Vec<super::list::HitRow>,
+    gap: Option<SearchGap>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchGap {
+    Indexing,
+    Incomplete,
 }
 
 enum TextResults {
@@ -398,13 +405,22 @@ impl Sidebar {
         now: Timestamp,
         host: &HostId,
         query: String,
-        result: Result<Vec<artisan_api::TextHit>, CallError>,
+        result: Result<artisan_api::TextSearchPage, CallError>,
     ) {
         match result {
-            Ok(hits) => {
+            Ok(page) => {
                 self.text_results = TextResults::Found(TextHits {
                     query,
-                    rows: hits.iter().filter_map(super::list::HitRow::of).collect(),
+                    rows: page
+                        .hits
+                        .iter()
+                        .filter_map(super::list::HitRow::of)
+                        .collect(),
+                    gap: match page.coverage {
+                        artisan_api::SearchCoverage::Complete => None,
+                        artisan_api::SearchCoverage::Indexing => Some(SearchGap::Indexing),
+                        artisan_api::SearchCoverage::Incomplete => Some(SearchGap::Incomplete),
+                    },
                 });
                 self.sync(core, now);
             }
@@ -907,6 +923,17 @@ impl Sidebar {
             | TextResults::Searching(_)
             | TextResults::Found(_)
             | TextResults::Failed { .. } => TextSearchStatus::Idle,
+        }
+    }
+
+    pub fn text_search_gap(&self) -> Option<SearchGap> {
+        let query = self.search.borrow().text().trim().to_owned();
+        match &self.text_results {
+            TextResults::Found(found) if found.query == query => found.gap,
+            TextResults::Idle
+            | TextResults::Searching(_)
+            | TextResults::Found(_)
+            | TextResults::Failed { .. } => None,
         }
     }
 

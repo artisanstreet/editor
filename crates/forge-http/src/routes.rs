@@ -976,7 +976,7 @@ async fn transcript(
 async fn text_search(
     AppState(app): AppState<App>,
     Query(query): Query<artisan_api::TextSearchQuery>,
-) -> Result<Json<Vec<artisan_api::TextHit>>> {
+) -> Result<Json<artisan_api::TextSearchPage>> {
     Ok(Json(app.hub.store().text_search(query).await?))
 }
 

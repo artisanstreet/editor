@@ -167,7 +167,7 @@ pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + 
             sidebar.open.clone(),
             sidebar.lists.clone(),
         ),
-        visible_load_state(sidebar, core),
+        (visible_load_state(sidebar, core), sidebar.text_search_gap()),
         sidebar.picker.as_ref().map(|picker| {
             (
                 picker.listing.clone(),

@@ -1,7 +1,11 @@
+use crate::RecallIndex;
 use crate::Store;
 use crate::error::AtStep as _;
 use crate::error::{StorageError, operation_error};
-use artisan_api::{ItemId, ProjectId, Seq, TextHit, TextSearchQuery, ThreadId, Timestamp};
+use artisan_api::{
+    ItemId, ProjectId, SearchCoverage, Seq, TextHit, TextSearchPage, TextSearchQuery, ThreadId,
+    Timestamp,
+};
 use folded::Folded;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -139,10 +143,17 @@ impl Store {
     pub async fn text_search(
         &self,
         query: TextSearchQuery,
-    ) -> Result<Vec<TextHit>, TextSearchError> {
+    ) -> Result<TextSearchPage, TextSearchError> {
+        let index = *self.recall_index().borrow();
+        let coverage = match index {
+            RecallIndex::Built => SearchCoverage::Complete,
+            RecallIndex::Building => SearchCoverage::Indexing,
+            RecallIndex::Incomplete => SearchCoverage::Incomplete,
+        };
         let query_chars = query.query.chars().count();
         self.scan(move |conn| text_hits(conn, &query))
             .await
+            .map(|hits| TextSearchPage { hits, coverage })
             .map_err(|cause| TextSearchError {
                 query_chars,
                 cause: Box::new(cause),

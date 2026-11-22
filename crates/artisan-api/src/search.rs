@@ -20,3 +20,17 @@ pub struct TextHit {
     pub offset: (u32, u32),
     pub length: u32,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchCoverage {
+    Complete,
+    Indexing,
+    Incomplete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextSearchPage {
+    pub hits: Vec<TextHit>,
+    pub coverage: SearchCoverage,
+}

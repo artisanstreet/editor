@@ -1,6 +1,6 @@
 use crate::core::Core;
 use crate::sidebar::{
-    controller::{Sidebar, TextSearchStatus},
+    controller::{SearchGap, Sidebar, TextSearchStatus},
     geometry::ThreadPane,
     view::{self, ViewAction},
 };
@@ -177,6 +177,31 @@ fn actionable_notice(
 }
 
 pub fn states(
+    sidebar: &Sidebar,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Vec<Element> {
+    let mut states = notices_and_guidance(sidebar, core, theme, emit);
+    states.extend(sidebar.text_search_gap().map(|gap| {
+        guidance(
+            theme,
+            match gap {
+                SearchGap::Indexing => {
+                    "Forge is still indexing older messages, so some may be missing."
+                }
+                SearchGap::Incomplete => {
+                    "Forge couldn't finish indexing older messages, so some may be missing until it restarts."
+                }
+            }
+            .to_owned(),
+            None,
+        )
+    }));
+    states
+}
+
+fn notices_and_guidance(
     sidebar: &Sidebar,
     core: &Core,
     theme: &ArtisanTheme,

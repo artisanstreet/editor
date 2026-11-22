@@ -77,7 +77,8 @@ async fn a_search_finds_the_message_the_line_and_the_exact_match() {
             limit: None,
         })
         .await
-        .unwrap();
+        .unwrap()
+        .hits;
 
     assert_eq!(hits.len(), 1);
     let hit = &hits[0];
@@ -100,6 +101,7 @@ async fn a_search_finds_the_message_the_line_and_the_exact_match() {
             })
             .await
             .unwrap()
+            .hits
             .is_empty()
     );
 }
@@ -125,7 +127,8 @@ async fn a_long_line_is_cut_around_the_match() {
             limit: None,
         })
         .await
-        .unwrap();
+        .unwrap()
+        .hits;
 
     let hit = &hits[0];
     assert!(hit.snippet.starts_with('…') && hit.snippet.ends_with('…'));
@@ -171,10 +174,10 @@ async fn archived_threads_never_crowd_out_listed_ones() {
             limit: Some(3),
         })
     };
-    let hits = search("PELICAN").await.unwrap();
+    let hits = search("PELICAN").await.unwrap().hits;
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0].thread_id, listed);
-    let short = search("fl").await.unwrap();
+    let short = search("fl").await.unwrap().hits;
     assert_eq!(short.len(), 1, "{short:?}");
     assert_eq!(short[0].thread_id, listed);
 }
@@ -200,6 +203,7 @@ async fn matches(messages: &[&str], query: &str) -> Vec<(usize, String)> {
         })
         .await
         .unwrap()
+        .hits
         .into_iter()
         .map(|hit| {
             let index: usize = hit.thread_title.unwrap().parse().unwrap();
@@ -327,8 +331,8 @@ async fn a_query_with_a_nul_character_searches_instead_of_failing() {
         })
     };
 
-    let found = search("abc\0def").await.unwrap();
+    let found = search("abc\0def").await.unwrap().hits;
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].thread_id, home);
-    assert!(search("zzz\0zzz").await.unwrap().is_empty());
+    assert!(search("zzz\0zzz").await.unwrap().hits.is_empty());
 }

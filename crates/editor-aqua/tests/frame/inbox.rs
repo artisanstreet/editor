@@ -351,3 +351,43 @@ fn a_sidebar_error_stays_until_dismissed() {
         "{texts:?}"
     );
 }
+
+#[test]
+fn message_search_says_older_messages_may_be_missing_while_forge_indexes() {
+    use artisan_api::{SearchCoverage, TextSearchPage};
+    use editor_aqua::sidebar::controller::Sidebar;
+    const INDEXING: &str = "Forge is still indexing older messages, so some may be missing.";
+    let mut forge = live_forge();
+    let mut sidebar = Sidebar::new(false);
+    sidebar.sync(&forge.core, 0);
+    sidebar.search.borrow_mut().set_text("kestrel");
+    let mut search = |coverage| {
+        sidebar.search_text(&forge.core);
+        forge.take("GET", "/search/text").respond(TextSearchPage {
+            hits: Vec::new(),
+            coverage,
+        });
+        test_support::wait::wait_until(
+            "the search answer reaches the sidebar",
+            std::time::Duration::from_secs(10),
+            || {
+                sidebar.drain(&mut forge.core, 0);
+                sidebar.text_search_status()
+                    != editor_aqua::sidebar::controller::TextSearchStatus::Searching
+            },
+        );
+        rendered(&sidebar, &forge.core).1
+    };
+
+    let texts = search(SearchCoverage::Indexing);
+    assert!(texts.iter().any(|text| text == INDEXING), "{texts:?}");
+    assert!(
+        texts
+            .iter()
+            .any(|text| text == "No threads match “kestrel”."),
+        "{texts:?}"
+    );
+
+    let texts = search(SearchCoverage::Complete);
+    assert!(!texts.iter().any(|text| text == INDEXING), "{texts:?}");
+}
