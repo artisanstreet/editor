@@ -9,10 +9,11 @@ pub enum EngineId {
     Codex,
     #[serde(rename = "opencode")]
     OpenCode,
+    Antigravity,
 }
 
 impl EngineId {
-    pub const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::OpenCode];
+    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::OpenCode, Self::Antigravity];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -20,6 +21,7 @@ impl EngineId {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -29,6 +31,7 @@ impl EngineId {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
+            Self::Antigravity => "Antigravity",
         }
     }
 }
@@ -133,6 +136,8 @@ pub struct Model {
     pub lab: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +239,7 @@ pub struct SlashCommand {
 #[serde(rename_all = "snake_case")]
 pub enum Integrity {
     VendorSha256,
+    VendorSha512,
     NpmSha512,
     ArtisanSha256,
 }

@@ -396,6 +396,7 @@ pub struct ColorTokens {
     pub shadow: Oklch,
     pub palette: [Oklch; 8],
     pub claude: Oklch,
+    pub antigravity: Oklch,
     pub ansi: AnsiColors,
     pub frame: Oklch,
     pub background: Oklch,
@@ -523,6 +524,7 @@ mod polar {
     pub(super) const CYAN_600: Lch = (0.609, 0.126, 221.723);
     pub(super) const CYAN_700: Lch = (0.52, 0.105, 223.128);
     pub(super) const CLAUDE_CLAY: Lch = (0.6724, 0.1308, 38.76);
+    pub(super) const ANTIGRAVITY_BLUE: Lch = (0.6346, 0.1975, 258.17);
     pub(super) const CHART: [Lch; 8] = [
         (0.7019, 0.1540, 32.23),
         (0.7979, 0.1127, 59.06),
@@ -607,17 +609,17 @@ impl ColorTokens {
     )]
     fn standard(mode: ThemeMode) -> Self {
         use polar::{
-            AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950, BLACK,
-            BLUE_100, BLUE_200, BLUE_300, BLUE_400, BLUE_500, BLUE_600, BLUE_700, BLUE_900, CHART,
-            CLAUDE_CLAY, CYAN_300, CYAN_400, CYAN_600, CYAN_700, EMERALD_50, EMERALD_300,
-            EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GLASS_INK_DIM,
-            GRAY_50, GRAY_100, GRAY_200, GRAY_300, GRAY_400, GRAY_500, GRAY_600, GRAY_900,
-            INDIGO_50, INDIGO_100, INDIGO_200, INDIGO_300, INDIGO_400, INDIGO_500, INDIGO_600,
-            INDIGO_700, INDIGO_800, INDIGO_900, INDIGO_950, PANEL, PINK_400, PINK_600, POLAR_50,
-            POLAR_100, POLAR_300, POLAR_400, POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900,
-            POLAR_950, PURPLE_300, PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400,
-            RED_500, RED_600, RED_700, RED_950, SKY_400, SKY_700, SLATE_FAINT, SLATE_MUTED, WHITE,
-            under_panel,
+            AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950,
+            ANTIGRAVITY_BLUE, BLACK, BLUE_100, BLUE_200, BLUE_300, BLUE_400, BLUE_500, BLUE_600,
+            BLUE_700, BLUE_900, CHART, CLAUDE_CLAY, CYAN_300, CYAN_400, CYAN_600, CYAN_700,
+            EMERALD_50, EMERALD_300, EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700,
+            EMERALD_950, GLASS_INK_DIM, GRAY_50, GRAY_100, GRAY_200, GRAY_300, GRAY_400, GRAY_500,
+            GRAY_600, GRAY_900, INDIGO_50, INDIGO_100, INDIGO_200, INDIGO_300, INDIGO_400,
+            INDIGO_500, INDIGO_600, INDIGO_700, INDIGO_800, INDIGO_900, INDIGO_950, PANEL,
+            PINK_400, PINK_600, POLAR_50, POLAR_100, POLAR_300, POLAR_400, POLAR_500, POLAR_600,
+            POLAR_700, POLAR_800, POLAR_900, POLAR_950, PURPLE_300, PURPLE_400, PURPLE_600,
+            PURPLE_700, RED_50, RED_300, RED_400, RED_500, RED_600, RED_700, RED_950, SKY_400,
+            SKY_700, SLATE_FAINT, SLATE_MUTED, WHITE, under_panel,
         };
         let dark = mode.is_dark();
         let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
@@ -732,6 +734,7 @@ impl ColorTokens {
             shadow: black.with_alpha(0.06).resolved(),
             palette: CHART.map(token),
             claude: token(CLAUDE_CLAY),
+            antigravity: token(ANTIGRAVITY_BLUE),
             ansi: AnsiColors(ansi.map(token)),
             frame: pick(GRAY_100, POLAR_950),
             background: pick(PANEL, POLAR_900),

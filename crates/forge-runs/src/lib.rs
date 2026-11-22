@@ -775,7 +775,7 @@ impl Hub {
                     })?;
                 return Ok(());
             }
-            EngineId::Codex | EngineId::OpenCode => {}
+            EngineId::Codex | EngineId::OpenCode | EngineId::Antigravity => {}
         }
         if let Some((inbox, _)) = live {
             if inbox.send(Inbound::ClearGoal).await.is_err() {

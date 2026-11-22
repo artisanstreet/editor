@@ -8,6 +8,7 @@ pub fn engine_icon(theme: &ArtisanTheme, engine: EngineId) -> AssetId {
         EngineId::Codex => AssetId::SVGL_OPENAI,
         EngineId::OpenCode if theme.colors.mode == ThemeMode::Dark => AssetId::BRANDS_OPENCODE,
         EngineId::OpenCode => AssetId::BRANDS_OPENCODE_LIGHT,
+        EngineId::Antigravity => AssetId::SVGL_ANTIGRAVITY,
     }
 }
 
@@ -16,6 +17,7 @@ pub fn engine_accent(theme: &ArtisanTheme, engine: EngineId) -> aqua_core::GpuiH
         EngineId::Claude => theme.colors.claude,
         EngineId::Codex => theme.colors.text,
         EngineId::OpenCode => theme.colors.gray.step(9),
+        EngineId::Antigravity => theme.colors.antigravity,
     }
     .to_reference_paint()
 }

@@ -64,4 +64,21 @@ expression: report
         ],
         None,
     ),
+    (
+        "antigravity",
+        Some(
+            (
+                ".gemini/GEMINI.md",
+                "Be brief.",
+                true,
+                [
+                    "deploy -> data/extensions/skills/deploy",
+                    "review -> data/extensions/skills/review",
+                ],
+            ),
+        ),
+        [],
+        [],
+        None,
+    ),
 ]

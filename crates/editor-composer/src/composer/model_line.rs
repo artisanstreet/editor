@@ -82,7 +82,7 @@ fn codex_lineup(models: &[Model]) -> Vec<usize> {
 #[must_use]
 pub fn visible_models(engine: EngineId, models: &[Model], show_all: bool) -> Vec<usize> {
     let lineup = match (show_all, engine) {
-        (true, _) | (false, EngineId::OpenCode) => Vec::new(),
+        (true, _) | (false, EngineId::OpenCode | EngineId::Antigravity) => Vec::new(),
         (false, EngineId::Claude) => claude_lineup(models),
         (false, EngineId::Codex) => codex_lineup(models),
     };
@@ -94,7 +94,7 @@ pub fn visible_models(engine: EngineId, models: &[Model], show_all: bool) -> Vec
             let recognized = match engine {
                 EngineId::Claude => claude_model(&model.id).is_some(),
                 EngineId::Codex => codex_model(&model.id).is_some(),
-                EngineId::OpenCode => false,
+                EngineId::OpenCode | EngineId::Antigravity => false,
             };
             (!recognized).then_some(index)
         }));

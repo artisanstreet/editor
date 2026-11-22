@@ -282,14 +282,14 @@ fn files_output() -> Value {
 fn harnesses_output() -> Value {
     object(
         &["harnesses"],
-        json!({"harnesses":{"type":"array","items":object(&["harness","installation","sign_in","default_model","discovery","model_count"], json!({"harness":{"enum":["claude","codex","opencode"]},"installation":object(&["state"], json!({"state":{"type":"string"}})),"sign_in":object(&["state"], json!({"state":{"type":"string"}})),"default_model":nullable("string"),"discovery":object(&["state"], json!({"state":{"type":"string"}})),"model_count":{"type":"integer","minimum":0}}))}}),
+        json!({"harnesses":{"type":"array","items":object(&["harness","installation","sign_in","default_model","discovery","model_count"], json!({"harness":{"enum":harnesses()},"installation":object(&["state"], json!({"state":{"type":"string"}})),"sign_in":object(&["state"], json!({"state":{"type":"string"}})),"default_model":nullable("string"),"discovery":object(&["state"], json!({"state":{"type":"string"}})),"model_count":{"type":"integer","minimum":0}}))}}),
     )
 }
 
 fn models_output() -> Value {
     object(
         &["harness", "discovery", "models", "next_offset"],
-        json!({"harness":{"enum":["claude","codex","opencode"]},"discovery":object(&["state"], json!({"state":{"type":"string"}})),"models":{"type":"array","items":object(&["id","name"], json!({"id":{"type":"string"},"name":{"type":"string"}}))},"next_offset":nullable("integer")}),
+        json!({"harness":{"enum":harnesses()},"discovery":object(&["state"], json!({"state":{"type":"string"}})),"models":{"type":"array","items":object(&["id","name"], json!({"id":{"type":"string"},"name":{"type":"string"}}))},"next_offset":nullable("integer")}),
     )
 }
 
@@ -420,7 +420,7 @@ pub(crate) fn tools() -> Vec<Tool> {
         tool(
             "list_models",
             "Find models and their supported configuration on one harness. Returns exact effort, variant, speed and context choices for spawn_agent. Defaults to a compact page; filter by query or model ID.",
-            || json!({"harness":{"type":"string","enum":["claude","codex","opencode"]},"query":{"type":"string"},"model":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}}),
+            || json!({"harness":{"type":"string","enum":harnesses()},"query":{"type":"string"},"model":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":100}}),
             &["harness"],
             models_output,
             true,
@@ -1008,3 +1008,7 @@ async fn relevant_context(
 #[cfg(test)]
 #[path = "../tests/mcp/awareness.rs"]
 mod tests;
+
+fn harnesses() -> Vec<&'static str> {
+    EngineId::ALL.iter().map(|engine| engine.as_str()).collect()
+}

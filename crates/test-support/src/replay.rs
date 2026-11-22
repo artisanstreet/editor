@@ -10,6 +10,7 @@ const fn version(engine: EngineId) -> &'static str {
     match engine {
         EngineId::OpenCode => "2.1.0",
         EngineId::Claude | EngineId::Codex => "1.0.0",
+        EngineId::Antigravity => "1.5.13",
     }
 }
 
