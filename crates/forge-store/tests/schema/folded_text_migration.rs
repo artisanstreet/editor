@@ -26,14 +26,12 @@ fn messages_stored_before_folding_are_found_regardless_of_unicode_case() {
         rusqlite::params!["t", json!({"title": "Old", "project_id": "p"}).to_string()],
     )
     .expect("insert the thread");
-    for (position, (id, text)) in [
+    let messages = [
         ("butter", "Brød og SMØR til frokost"),
         ("street", "Die Straße ist lang"),
         ("cafe", "Kaffe på CAFE\u{301}EN"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    ];
+    for (position, (id, text)) in messages.into_iter().enumerate() {
         let body = json!({"id": id, "thread_id": "t", "position": position, "seq": position, "run_id": null, "parent_id": null, "status": "done", "created_at": 1, "updated_at": 1, "kind": {"type": "assistant_message", "text": text, "phase": "final"}});
         conn.execute(
             include_str!("insert_typed_item.sql"),
@@ -47,10 +45,23 @@ fn messages_stored_before_folding_are_found_regardless_of_unicode_case() {
     migrate(&mut conn, &Upgrade::of(&crate::Environment::system()))
         .expect("migrate to today's schema");
     crate::recall::prepare_index(&mut conn).expect("start rebuilding the recall index");
-    while !matches!(
-        crate::recall::build::build_batch(&conn).expect("index a batch"),
-        crate::recall::build::Batch::Finished { .. }
-    ) {}
+    let pacing = crate::recall::Pacing::system();
+    let finished = (0..=messages.len()).find_map(|_| {
+        match crate::recall::build::build_batch(&conn, &mut pacing.budget(Duration::ZERO))
+            .expect("index a batch")
+        {
+            crate::recall::build::Batch::Indexed { .. } => None,
+            crate::recall::build::Batch::Finished { .. } => Some(()),
+            unexpected @ (crate::recall::build::Batch::AlreadyBuilt
+            | crate::recall::build::Batch::Stale) => {
+                panic!("the rebuild stopped early: {unexpected:?}")
+            }
+        }
+    });
+    assert!(
+        finished.is_some(),
+        "the rebuild finishes within one step per message"
+    );
 
     assert_eq!(
         found(&conn, "smør"),
