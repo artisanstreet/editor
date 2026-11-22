@@ -214,11 +214,46 @@ impl Drop for Attachment {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum LoadAttachmentError {
+    #[error("the image read task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error(transparent)]
+    Read(ReadImageError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ConvertAttachmentError {
+    #[error("the image conversion queue closed")]
+    Queue(#[source] tokio::sync::AcquireError),
+    #[error("the image conversion task stopped")]
+    Task(#[source] tokio::task::JoinError),
+    #[error(transparent)]
+    Encode(super::encode::EncodeError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum UploadAttachmentError {
+    #[error("Upload failed")]
+    Put(#[source] editor_core::client::CallError),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum QuickPreviewError {
+    #[error("decode the quick preview pixels")]
+    Decode(#[source] aqua::images::MediaError),
+    #[error("insert the quick preview image")]
+    Insert(#[source] aqua::images::ImageAssetError),
+}
+
 enum Completion {
-    Read(u64, Result<(Vec<u8>, Option<image::RgbaImage>), String>),
-    Converted(u64, Result<Vec<u8>, String>),
-    Uploaded(u64, Result<BlobHash, String>),
-    Restored(u64, Result<Vec<u8>, String>),
+    Read(
+        u64,
+        Result<(Vec<u8>, Option<image::RgbaImage>), LoadAttachmentError>,
+    ),
+    Converted(u64, Result<Vec<u8>, ConvertAttachmentError>),
+    Uploaded(u64, Result<BlobHash, UploadAttachmentError>),
+    Restored(u64, Result<Vec<u8>, editor_core::client::CallError>),
 }
 
 #[derive(Debug)]
@@ -301,8 +336,8 @@ impl Attachments {
                 })
             })
             .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result.map_err(|error| diagnostics::chain(&error)));
+            .map_err(LoadAttachmentError::Task)
+            .and_then(|result| result.map_err(LoadAttachmentError::Read));
             sender.offer(Completion::Read(key, result)).await;
         });
         if let Some(item) = self.items.last_mut() {
@@ -339,10 +374,7 @@ impl Attachments {
         let client = self.client.clone();
         let sender = self.delivery.sender();
         runtime().spawn(async move {
-            let result = client
-                .blob(&hash)
-                .await
-                .map_err(|error| diagnostics::chain(&error));
+            let result = client.blob(&hash).await;
             sender.offer(Completion::Restored(key, result)).await;
         });
     }
@@ -428,7 +460,7 @@ impl Attachments {
                     Err(error) => {
                         if let Some(item) = self.items.iter_mut().find(|item| item.key == key) {
                             item.shown = true;
-                            fail(item, error);
+                            fail(item, &error);
                         }
                     }
                     Ok((bytes, placeholder)) => {
@@ -453,14 +485,14 @@ impl Attachments {
                             let (width, height) = image.dimensions();
                             let inserted =
                                 aqua::images::DecodedImage::from_rgba(width, height, image.into_raw())
-                                    .map_err(|error| error.to_string())
+                                    .map_err(QuickPreviewError::Decode)
                                     .and_then(|image| {
-                                        assets.insert(image).map_err(|error| error.to_string())
+                                        assets.insert(image).map_err(QuickPreviewError::Insert)
                                     });
                             match inserted {
                                 Ok(handle) => Some(handle),
                                 Err(error) => {
-                                    tracing::debug!(key, %error, "couldn't show the attachment's quick preview");
+                                    tracing::debug!(key, error = %diagnostics::chain(&error), "couldn't show the attachment's quick preview");
                                     None
                                 }
                             }
@@ -481,11 +513,9 @@ impl Attachments {
                                     super::encode::to_webp(&bytes)
                                 })
                                 .await
-                                .map_err(|error| error.to_string())
-                                .and_then(|result| {
-                                    result.map_err(|error| diagnostics::chain(&error))
-                                }),
-                                Err(error) => Err(error.to_string()),
+                                .map_err(ConvertAttachmentError::Task)
+                                .and_then(|result| result.map_err(ConvertAttachmentError::Encode)),
+                                Err(error) => Err(ConvertAttachmentError::Queue(error)),
                             };
                             sender.offer(Completion::Converted(key, result)).await;
                         });
@@ -501,11 +531,11 @@ impl Attachments {
                                     item.encoded = Some(bytes);
                                 }
                                 Err(error) => {
-                                    fail(item, error.to_string());
+                                    fail(item, &error);
                                 }
                             },
                             Err(error) => {
-                                fail(item, error);
+                                fail(item, &error);
                             }
                         }
                     }
@@ -519,7 +549,7 @@ impl Attachments {
                                 item.revealed = Some(Instant::now());
                             }
                             Err(error) => {
-                                fail(item, format!("Upload failed: {error}"));
+                                fail(item, &error);
                             }
                         }
                     }
@@ -529,9 +559,11 @@ impl Attachments {
                         match result {
                             Ok(bytes) => match assets.decode(bytes) {
                                 Ok(preview) => item.pending_preview = Some(preview),
-                                Err(error) => item.preview_error = Some(error.to_string()),
+                                Err(error) => {
+                                    item.preview_error = Some(diagnostics::chain(&error));
+                                }
                             },
-                            Err(error) => item.preview_error = Some(error),
+                            Err(error) => item.preview_error = Some(diagnostics::chain(&error)),
                         }
                     }
                 }
@@ -559,7 +591,7 @@ impl Attachments {
                                 .put_blob(bytes)
                                 .await
                                 .map(|blob| blob.hash)
-                                .map_err(|error| diagnostics::chain(&error));
+                                .map_err(UploadAttachmentError::Put);
                             sender.offer(Completion::Uploaded(key, result)).await;
                         });
                         item.task = Some(task.abort_handle());
@@ -590,7 +622,7 @@ impl Attachments {
 
 fn abandon_preview(item: &mut Attachment, reason: String) {
     if matches!(item.state, State::Encoding) {
-        fail(item, reason);
+        settle_failed(item, reason);
     } else {
         item.preview_error = Some(reason);
     }
@@ -598,7 +630,11 @@ fn abandon_preview(item: &mut Attachment, reason: String) {
     item.encoded = None;
 }
 
-fn fail(item: &mut Attachment, reason: String) {
+fn fail(item: &mut Attachment, error: &dyn std::error::Error) {
+    settle_failed(item, diagnostics::chain(error));
+}
+
+fn settle_failed(item: &mut Attachment, reason: String) {
     tracing::warn!(key = item.key, name = %item.name, %reason, "pasted image failed");
     item.state.accept(&Input::Failed(reason));
 }
