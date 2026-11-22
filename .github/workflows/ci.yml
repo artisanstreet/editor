@@ -227,10 +227,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', '.cargo/config.toml') }}-${{ github.sha }}
+          key: cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ env.HAWK_TOOLCHAIN }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', '.cargo/config.toml') }}-${{ github.sha }}
           restore-keys: |
-            cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', '.cargo/config.toml') }}-
-            cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ env.HAWK_TOOLCHAIN }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'flake.lock', '.cargo/config.toml') }}-
+            cargo-${{ github.job }}-${{ env.HAWK_VERSION }}-${{ env.HAWK_TOOLCHAIN }}-${{ runner.os }}-${{ runner.arch }}-
+      - name: Refuse a stale lockfile
+        run: |
+          nix develop .#cargo-linux --command bash -c "PATH=\"\$HOME/.cargo/bin:\$PATH\" cargo +$HAWK_TOOLCHAIN metadata --locked --format-version 1 > /dev/null"
       - name: Unnecessary public items on Linux
         run: |
           nix develop .#cargo-linux --command bash -c "PATH=\"\$HOME/.cargo/bin:\$PATH\" cargo +$HAWK_TOOLCHAIN hawk check \
