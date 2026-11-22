@@ -1,6 +1,6 @@
 use super::Engines;
 use crate::{Customisation, Launch};
-use artisan_api::{EngineId, SignInState, UsageLimits};
+use artisan_api::{EngineId, McpServer, SignInState, UsageLimits};
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -116,8 +116,9 @@ impl Engines {
         &self,
         engine: EngineId,
         customisation: &Customisation,
+        offered: impl FnOnce(&[McpServer]) -> Vec<McpServer>,
     ) -> Result<Launch, crate::MaterializeError> {
-        crate::materialize(engine, &self.home(engine), customisation)
+        crate::materialize(engine, &self.home(engine), customisation, offered)
     }
 
     fn follow_sign_in(&self, engine: EngineId) {

@@ -139,6 +139,7 @@ pub(crate) fn materialize(
     engine: EngineId,
     home: &Path,
     c: &Customisation,
+    offered: impl FnOnce(&[McpServer]) -> Vec<McpServer>,
 ) -> Result<Launch, MaterializeError> {
     if let Some(paths) = paths(engine, home) {
         if let Some(prompt) = &c.prompt {
@@ -165,7 +166,7 @@ pub(crate) fn materialize(
             source,
         })?;
     }
-    launch(engine, home, &c.mcp_servers)
+    launch(engine, home, &offered(&c.mcp_servers))
         .map_err(|source| MaterializeError::Launch { engine, source })
 }
 

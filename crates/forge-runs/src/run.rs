@@ -1055,24 +1055,28 @@ pub(crate) async fn prepare(
             thread: thread.id.clone(),
             source: Box::new(source),
         })?;
-    let mut customisation =
+    let customisation =
         hub.customisation()
             .await
             .map_err(|source| PrepareError::Customisation {
                 engine,
                 source: Box::new(source),
             })?;
-    customisation.mcp_servers = hub
+    let checks = hub
         .mcp()
         .reachability()
-        .answering(std::mem::take(&mut customisation.mcp_servers), &thread.id)
+        .join_first_checks(&customisation.mcp_servers, &thread.id)
         .await;
     let owner = hub.clone();
+    let checked_for = thread.id.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
         let _homes = owner.extensions().homes_lock()?;
+        let reachability = owner.mcp().reachability();
         owner
             .engines()
-            .materialize(engine, &customisation)
+            .materialize(engine, &customisation, |servers| {
+                reachability.answering(servers, &checks, &checked_for)
+            })
             .map_err(|source| PrepareError::Materialize {
                 engine,
                 source: Box::new(source),

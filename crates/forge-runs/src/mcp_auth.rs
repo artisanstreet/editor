@@ -278,25 +278,12 @@ impl Mcp {
         }
     }
 
-    pub(crate) fn reachability(&self) -> &crate::mcp_reach::Reachability {
+    pub(crate) fn reachability(&self) -> &Arc<crate::mcp_reach::Reachability> {
         &self.reachability
     }
 
-    pub fn warm_servers(&self) {
-        let (store, reachability) = (self.store.clone(), Arc::clone(&self.reachability));
-        drop(tokio::spawn(async move {
-            match read_mcp_servers(&store).await {
-                Ok(servers) => reachability.warm(&servers),
-                Err(error) => tracing::warn!(
-                    error = diagnostics::chain(&error),
-                    "read the MCP servers to check they answer"
-                ),
-            }
-        }));
-    }
-
     pub fn watch_server_changes(&self) -> impl Future<Output = ()> + Send + 'static {
-        Arc::clone(&self.reachability).watch_config(&self.store)
+        Arc::clone(&self.reachability).watch(crate::mcp_reach::StoredServers::new(&self.store))
     }
 
     fn store(&self) -> &Store {
