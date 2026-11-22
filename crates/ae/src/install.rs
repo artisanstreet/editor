@@ -2239,18 +2239,15 @@ fn leaves_orphans(chosen: &[App], present: &[App]) -> bool {
             .any(|app| *app != App::Ae && !chosen.contains(app))
 }
 
-fn recover_before_uninstalling() {
+pub(crate) fn recover_before(going_on: &str) {
     if let Err(error) = recover_interrupted() {
-        ui::warning(format!(
-            "{}; uninstalling anyway",
-            diagnostics::chain(&error)
-        ));
+        ui::warning(format!("{}; {going_on}", diagnostics::chain(&error)));
     }
 }
 
 pub(crate) fn uninstall(apps: &[App], purge: bool, yes: bool) -> Result<(), UninstallError> {
     ui::intro("Artisan uninstall");
-    recover_before_uninstalling();
+    recover_before("uninstalling anyway");
     let mut present = Vec::new();
     let mut with_data = Vec::new();
     let mut hints = Vec::new();

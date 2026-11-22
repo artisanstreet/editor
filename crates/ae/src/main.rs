@@ -211,6 +211,8 @@ enum AeError {
     #[error(transparent)]
     ClaudeAiIntoWsl(#[from] engine::IntoWslError),
     #[error(transparent)]
+    Recover(#[from] install::RecoverError),
+    #[error(transparent)]
     Install(#[from] install::InstallError),
     #[error(transparent)]
     Update(#[from] install::UpdateError),
@@ -282,6 +284,9 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, AeError> {
         }
         return Ok(wsl::forward(&distro)?);
     }
+    if forge_command {
+        install::recover_interrupted()?;
+    }
     let ran: Result<(), AeError> = match cli.command {
         Command::Install(args) => Ok(install::install(&args)?),
         Command::Update { yes } => Ok(install::update(yes)?),
@@ -291,6 +296,7 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, AeError> {
             yes,
         } => Ok(install::uninstall(&apps(chosen), purge, yes)?),
         Command::Status { json } => {
+            install::recover_before("showing the status anyway");
             status::status(json);
             Ok(())
         }

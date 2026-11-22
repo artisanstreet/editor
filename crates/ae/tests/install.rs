@@ -197,7 +197,7 @@ mod tests {
             }
         }
 
-        fn start_released(&self) {
+        fn start_installed(&self) {
             let data = self.installed.with_file_name("data");
             let mut command = Command::new("sh");
             command
@@ -208,16 +208,16 @@ mod tests {
                 .arg(&self.installed)
                 .arg(data.join("forge.log"));
             isolate(&mut command, self.root.path());
-            let output = command.output().expect("start the released Forge");
+            let output = command.output().expect("start the installed Forge");
             let pid: u32 = String::from_utf8_lossy(&output.stdout)
                 .trim()
                 .parse()
-                .expect("the shell names the released Forge's process");
+                .expect("the shell names the installed Forge's process");
             let deadline = std::time::Instant::now() + test_support::wait::LIVENESS;
             while !self.listening() {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "the released Forge never listened"
+                    "the installed Forge never listened"
                 );
             }
             std::fs::write(data.join("forge.pid"), pid.to_string())
@@ -361,7 +361,7 @@ mod tests {
             .read_to_end(&mut released)
             .expect("unpack the released database");
         std::fs::write(&database, released).expect("give the released Forge its database");
-        sandbox.start_released();
+        sandbox.start_installed();
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");
         test_support::executable::install(Path::new(env!("CARGO_BIN_EXE_ae")), &stage.join("ae"));
@@ -491,7 +491,7 @@ mod tests {
             .read_to_end(&mut released)
             .expect("unpack the released database");
         std::fs::write(&database, released).expect("give the released Forge its database");
-        sandbox.start_released();
+        sandbox.start_installed();
         std::fs::write(&database, "not a database").expect("damage the database file");
         let stage = sandbox.root.path().join("stage").join(std::env::consts::OS);
         std::fs::create_dir_all(&stage).expect("create the stage");
@@ -629,14 +629,10 @@ mod tests {
         ])
     }
 
-    #[test]
-    fn a_first_update_cut_short_after_the_new_forge_upgraded_the_database_is_rolled_back_by_the_next_ae()
-     {
+    fn cut_short_first_update(sandbox: &Sandbox) -> PathBuf {
         use std::io::Read as _;
-        let sandbox = Sandbox::released();
         let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
-        let data = forge.join("data");
-        let database = data.join("forge.sqlite3");
+        let database = forge.join("data").join("forge.sqlite3");
         let mut released = Vec::new();
         flate2::read::GzDecoder::new(RELEASED_DATABASE)
             .read_to_end(&mut released)
@@ -652,12 +648,48 @@ mod tests {
         std::fs::rename(&sandbox.installed, forge.join(".old-0-forge"))
             .expect("the cut-short install had moved the released Forge aside");
         test_support::executable::install(&forge_binary(), &sandbox.installed);
+        database
+    }
+
+    #[test]
+    fn starting_forge_after_a_first_update_was_cut_short_puts_the_released_forge_back_first() {
+        let sandbox = Sandbox::released();
+        let database = cut_short_first_update(&sandbox);
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+
         let started = sandbox.ae(&["forge", "start"]);
+
+        let said = said(&started);
+        assert!(started.status.success(), "{said}");
         assert!(
-            started.status.success(),
-            "the new Forge starts: {}",
-            said(&started)
+            said.contains("Put back the Forge files an interrupted install left half replaced"),
+            "{said}"
         );
+        assert_eq!(
+            std::fs::read(&sandbox.installed).expect("read the installed Forge"),
+            std::fs::read(released_forge()).expect("read the released Forge"),
+            "the released Forge binary is back: {said}"
+        );
+        assert_eq!(
+            schema_of(&database),
+            RELEASED_SCHEMA,
+            "the new Forge never upgraded the released database: {said}"
+        );
+        assert!(!forge.join(".install-journal").exists(), "{said}");
+        assert!(
+            sandbox.listening(),
+            "the released Forge serves again: {said}"
+        );
+    }
+
+    #[test]
+    fn a_first_update_cut_short_after_the_new_forge_upgraded_the_database_is_rolled_back_by_the_next_ae()
+     {
+        let sandbox = Sandbox::released();
+        let database = cut_short_first_update(&sandbox);
+        let forge = App::Forge.dir_under(&artisan_street(sandbox.root.path()));
+        let data = forge.join("data");
+        sandbox.start_installed();
         assert_eq!(
             schema_of(&database),
             forge_store::Store::schema_version(),
