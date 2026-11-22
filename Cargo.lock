@@ -1690,10 +1690,12 @@ version = "0.0.0"
 dependencies = [
  "cpal",
  "crossbeam-channel",
+ "diagnostics",
  "futures",
  "pulseaudio",
  "rodio",
  "test-support",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

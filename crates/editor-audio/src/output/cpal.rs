@@ -3,21 +3,33 @@ use std::sync::mpsc::Receiver;
 
 use ::cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
 
-use super::{Command, Format, control, error_chain};
+use super::{Command, Format, control};
 use crate::state::Shared;
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RunError {
+    #[error("No audio output: no output device found")]
+    NoDevice,
+    #[error("No audio output")]
+    Config(#[source] ::cpal::Error),
+    #[error("No audio output: unsupported PCM sample format {format:?}")]
+    SampleFormat { format: ::cpal::SampleFormat },
+    #[error("No audio output")]
+    Build(#[source] ::cpal::Error),
+    #[error("Audio output stopped")]
+    Stopped(#[source] ::cpal::Error),
+}
 
 pub(super) fn run(
     shared: &Arc<Shared>,
     generation: u64,
     format: &Format,
     commands: &Receiver<Command>,
-) -> Result<(), String> {
+) -> Result<(), RunError> {
     let device = ::cpal::default_host()
         .default_output_device()
-        .ok_or_else(|| "No audio output: no output device found".to_owned())?;
-    let default = device
-        .default_output_config()
-        .map_err(|error| format!("No audio output: {}", error_chain(&error)))?;
+        .ok_or(RunError::NoDevice)?;
+    let default = device.default_output_config().map_err(RunError::Config)?;
     let config = default.config();
     macro_rules! stream {
         ($sample:ty) => {
@@ -41,13 +53,11 @@ pub(super) fn run(
         | ::cpal::SampleFormat::DsdU16
         | ::cpal::SampleFormat::DsdU32
         | _) => {
-            return Err(format!(
-                "No audio output: unsupported PCM sample format {other:?}"
-            ));
+            return Err(RunError::SampleFormat { format: other });
         }
     };
 
-    let stopped = |error: ::cpal::Error| format!("Audio output stopped: {}", error_chain(&error));
+    let stopped = RunError::Stopped;
     control(
         shared,
         generation,
@@ -70,7 +80,7 @@ fn create_stream<T: ::cpal::SizedSample + ::cpal::FromSample<f32>>(
     shared: &Arc<Shared>,
     generation: u64,
     track_rate: u32,
-) -> Result<::cpal::Stream, String> {
+) -> Result<::cpal::Stream, RunError> {
     let out_channels = usize::from(config.channels);
     let step = f64::from(track_rate) / f64::from(config.sample_rate.max(1));
     let callback_shared = Arc::clone(shared);
@@ -90,12 +100,11 @@ fn create_stream<T: ::cpal::SizedSample + ::cpal::FromSample<f32>>(
                 );
             },
             move |error| {
-                error_shared.lock().fail(
-                    generation,
-                    format!("Audio output stopped: {}", error_chain(&error)),
-                );
+                error_shared
+                    .lock()
+                    .fail(generation, &RunError::Stopped(error));
             },
             None,
         )
-        .map_err(|error| format!("No audio output: {}", error_chain(&error)))
+        .map_err(RunError::Build)
 }

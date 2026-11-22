@@ -1,4 +1,4 @@
-use crate::decode::StreamDecoder;
+use crate::decode::{SeekAudioError, StreamDecoder};
 use crate::output::Output;
 use crate::state::Shared;
 use crossbeam_channel::{Receiver, Sender, bounded, select};
@@ -35,19 +35,23 @@ impl StreamState {
         }
     }
 }
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum StartStreamError {
+    #[error("Audio contains no samples")]
+    Empty,
+}
+
 const QUEUE_CHUNKS: usize = 8;
 
 pub(crate) fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
     let first = match decoder.chunk() {
         Ok(samples) if !samples.is_empty() => decoder.audio(samples),
         Ok(_) => {
-            shared
-                .lock()
-                .fail(generation, "Audio contains no samples".to_owned());
+            shared.lock().fail(generation, &StartStreamError::Empty);
             return;
         }
         Err(error) => {
-            shared.lock().fail(generation, error);
+            shared.lock().fail(generation, &error);
             return;
         }
     };
@@ -62,7 +66,7 @@ pub(crate) fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDec
         match Output::open(Arc::clone(shared), generation, format) {
             Ok(output) => inner.attach(output),
             Err(error) => {
-                inner.fail(generation, error);
+                inner.fail(generation, &error);
                 return;
             }
         }
@@ -92,7 +96,7 @@ fn produce(
                 }
                 Ok(None) => continue,
                 Err(error) => {
-                    shared.lock().fail(generation, error);
+                    shared.lock().fail(generation, &error);
                     return;
                 }
             }
@@ -102,7 +106,7 @@ fn produce(
                 Ok(Some(next)) => epoch = next,
                 Ok(None) => {}
                 Err(error) => {
-                    shared.lock().fail(generation, error);
+                    shared.lock().fail(generation, &error);
                     return;
                 }
             }
@@ -113,7 +117,7 @@ fn produce(
         let samples = match decoder.chunk() {
             Ok(samples) => samples,
             Err(error) => {
-                shared.lock().fail(generation, error);
+                shared.lock().fail(generation, &error);
                 return;
             }
         };
@@ -130,7 +134,7 @@ fn produce(
                 match apply_seek(shared, generation, decoder) {
                     Ok(Some(next)) => { epoch = next; ended = false; }
                     Ok(None) => {}
-                    Err(error) => { shared.lock().fail(generation, error); return; }
+                    Err(error) => { shared.lock().fail(generation, &error); return; }
                 }
             }
         }
@@ -140,7 +144,7 @@ fn apply_seek(
     shared: &Shared,
     generation: u64,
     decoder: &mut StreamDecoder,
-) -> Result<Option<u64>, String> {
+) -> Result<Option<u64>, SeekAudioError> {
     let Some((epoch, position)) = shared.lock().take_seek(generation) else {
         return Ok(None);
     };

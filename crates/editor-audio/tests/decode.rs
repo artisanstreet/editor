@@ -52,7 +52,11 @@ fn decodes_the_same_audio_from_memory() {
     assert_eq!(audio.frames(), 800);
     let error = decode_bytes(Path::new("clip.wav"), b"not audio".as_slice().into())
         .expect_err("text is not audio");
-    assert!(!error.is_empty(), "the failure explains itself");
+    assert!(
+        matches!(error, OpenAudioError::Unsupported),
+        "{}",
+        diagnostics::chain(&error)
+    );
 }
 
 #[test]
@@ -70,7 +74,7 @@ fn rejects_a_non_audio_file() {
     let path = write_wav("notes.txt", 1, 8000, &[]);
     std::fs::write(&path, "just some notes, not audio").expect("write");
     assert_eq!(
-        decode(&path).expect_err("fails"),
+        diagnostics::chain(&decode(&path).expect_err("fails")),
         "Unsupported audio format"
     );
 }
@@ -78,25 +82,30 @@ fn rejects_a_non_audio_file() {
 #[test]
 fn missing_files_name_the_file() {
     let error = decode(Path::new("/nonexistent/song.mp3")).expect_err("fails");
-    assert!(error.starts_with("Couldn't read song.mp3: "), "{error}");
+    let message = diagnostics::chain(&error);
+    assert!(
+        matches!(&error, OpenAudioError::Read { path, .. } if path == Path::new("/nonexistent/song.mp3")),
+        "{message}"
+    );
+    assert!(message.starts_with("Couldn't read song.mp3: "), "{message}");
 }
 
-fn collect(mut decoder: StreamDecoder) -> Result<Audio, String> {
+fn collect(mut decoder: StreamDecoder) -> Audio {
     let mut samples = Vec::new();
     loop {
-        let chunk = decoder.chunk()?;
+        let chunk = decoder.chunk().expect("the track keeps its layout");
         if chunk.is_empty() {
             break;
         }
         samples.extend(chunk);
     }
-    Ok(decoder.audio(samples))
+    decoder.audio(samples)
 }
-fn decode(path: &Path) -> Result<Audio, String> {
-    collect(StreamDecoder::open(path)?)
+fn decode(path: &Path) -> Result<Audio, OpenAudioError> {
+    StreamDecoder::open(path).map(collect)
 }
-fn decode_bytes(_: &Path, bytes: Arc<[u8]>) -> Result<Audio, String> {
-    collect(StreamDecoder::bytes(bytes)?)
+fn decode_bytes(_: &Path, bytes: Arc<[u8]>) -> Result<Audio, OpenAudioError> {
+    StreamDecoder::bytes(bytes).map(collect)
 }
 
 mod stream_budget_tests {

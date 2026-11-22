@@ -34,6 +34,16 @@ enum Command {
     Flush,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OpenOutputError {
+    #[error("Couldn't start the audio output")]
+    Spawn {
+        generation: u64,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 pub(crate) struct Output {
     commands: Sender<Command>,
 }
@@ -43,16 +53,16 @@ impl Output {
         shared: Arc<Shared>,
         generation: u64,
         format: Format,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, OpenOutputError> {
         let (commands, receiver) = mpsc::channel();
         thread::Builder::new()
             .name("artisan-audio-output".to_owned())
             .spawn(move || {
-                if let Err(message) = platform::run(&shared, generation, &format, &receiver) {
-                    shared.lock().fail(generation, message);
+                if let Err(error) = platform::run(&shared, generation, &format, &receiver) {
+                    shared.lock().fail(generation, &error);
                 }
             })
-            .map_err(|error| format!("Couldn't start the audio output: {error}"))?;
+            .map_err(|source| OpenOutputError::Spawn { generation, source })?;
         Ok(Self { commands })
     }
 
@@ -71,14 +81,14 @@ impl Output {
     }
 }
 
-fn control(
+fn control<E>(
     shared: &Shared,
     generation: u64,
     commands: &Receiver<Command>,
     mut running: bool,
-    mut set_running: impl FnMut(bool) -> Result<(), String>,
-    mut flush: impl FnMut() -> Result<(), String>,
-) -> Result<(), String> {
+    mut set_running: impl FnMut(bool) -> Result<(), E>,
+    mut flush: impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
     loop {
         let Some(wanted) = shared.lock().wants_running(generation) else {
             return Ok(());
@@ -93,15 +103,4 @@ fn control(
             Err(_) => return Ok(()),
         }
     }
-}
-
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
 }

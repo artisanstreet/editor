@@ -2,7 +2,7 @@ use rodio::{Decoder, Source};
 use std::collections::VecDeque;
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +41,43 @@ pub(crate) fn display_name(path: &Path) -> String {
         .into_owned()
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OpenAudioError {
+    #[error("Couldn't read {}", display_name(path))]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Unsupported audio format")]
+    Unsupported,
+    #[error("Couldn't decode audio")]
+    Decode(#[source] rodio::decoder::DecoderError),
+    #[error("Audio has an unsupported channel layout or sample rate")]
+    Layout { channels: usize, rate: u32 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SeekAudioError {
+    #[error("Couldn't seek audio")]
+    Seek {
+        position: Duration,
+        #[source]
+        source: rodio::source::SeekError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ChunkError {
+    #[error("Audio channel layout or sample rate changes within the track")]
+    LayoutChanged {
+        channels: usize,
+        rate: u32,
+        now_channels: usize,
+        now_rate: u32,
+    },
+}
+
 pub(crate) struct StreamDecoder {
     source: Box<dyn Source + Send>,
     channels: usize,
@@ -49,19 +86,24 @@ pub(crate) struct StreamDecoder {
     input_channels: usize,
 }
 impl StreamDecoder {
-    pub(crate) fn open(path: &Path) -> Result<Self, String> {
-        let name = display_name(path);
-        let file = File::open(path).map_err(|error| format!("Couldn't read {name}: {error}"))?;
-        Self::new(Decoder::try_from(file).map_err(describe)?)
+    pub(crate) fn open(path: &Path) -> Result<Self, OpenAudioError> {
+        let file = File::open(path).map_err(|source| OpenAudioError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::new(Decoder::try_from(file).map_err(undecodable)?)
     }
-    pub(crate) fn bytes(bytes: Arc<[u8]>) -> Result<Self, String> {
-        Self::new(Decoder::try_from(std::io::Cursor::new(bytes)).map_err(describe)?)
+    pub(crate) fn bytes(bytes: Arc<[u8]>) -> Result<Self, OpenAudioError> {
+        Self::new(Decoder::try_from(std::io::Cursor::new(bytes)).map_err(undecodable)?)
     }
-    fn new(source: impl Source + Send + 'static) -> Result<Self, String> {
+    fn new(source: impl Source + Send + 'static) -> Result<Self, OpenAudioError> {
         let input_channels = usize::from(source.channels());
         let rate = source.sample_rate();
         if input_channels == 0 || input_channels > 32 || rate == 0 {
-            return Err("Audio has an unsupported channel layout or sample rate".to_owned());
+            return Err(OpenAudioError::Layout {
+                channels: input_channels,
+                rate,
+            });
         }
         let duration = source.total_duration();
         Ok(Self {
@@ -72,12 +114,12 @@ impl StreamDecoder {
             input_channels,
         })
     }
-    pub(crate) fn seek(&mut self, position: Duration) -> Result<(), String> {
+    pub(crate) fn seek(&mut self, position: Duration) -> Result<(), SeekAudioError> {
         self.source
             .try_seek(position)
-            .map_err(|error| format!("Couldn't seek audio: {error}"))
+            .map_err(|source| SeekAudioError::Seek { position, source })
     }
-    pub(crate) fn chunk(&mut self) -> Result<Vec<f32>, String> {
+    pub(crate) fn chunk(&mut self) -> Result<Vec<f32>, ChunkError> {
         let input: Vec<_> = self
             .source
             .by_ref()
@@ -86,7 +128,12 @@ impl StreamDecoder {
         if usize::from(self.source.channels()) != self.input_channels
             || self.source.sample_rate() != self.rate
         {
-            return Err("Audio channel layout or sample rate changes within the track".to_owned());
+            return Err(ChunkError::LayoutChanged {
+                channels: self.input_channels,
+                rate: self.rate,
+                now_channels: usize::from(self.source.channels()),
+                now_rate: self.source.sample_rate(),
+            });
         }
         let mut samples = Vec::with_capacity(CHUNK_FRAMES * self.channels);
         fold_to_stereo(&input, self.input_channels, &mut samples);
@@ -100,16 +147,14 @@ impl StreamDecoder {
         }
     }
 }
-fn describe(error: rodio::decoder::DecoderError) -> String {
+fn undecodable(error: rodio::decoder::DecoderError) -> OpenAudioError {
     match error {
         rodio::decoder::DecoderError::UnrecognizedFormat
-        | rodio::decoder::DecoderError::NoStreams => "Unsupported audio format".to_owned(),
+        | rodio::decoder::DecoderError::NoStreams => OpenAudioError::Unsupported,
         error @ (rodio::decoder::DecoderError::IoError(_)
         | rodio::decoder::DecoderError::DecodeError(_)
         | rodio::decoder::DecoderError::LimitError(_)
-        | rodio::decoder::DecoderError::ResetRequired) => {
-            format!("Couldn't decode audio: {error}")
-        }
+        | rodio::decoder::DecoderError::ResetRequired) => OpenAudioError::Decode(error),
     }
 }
 

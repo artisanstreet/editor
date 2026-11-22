@@ -14,8 +14,50 @@ use pulseaudio::protocol::{
 };
 use pulseaudio::{AsPlaybackSource as _, Client};
 
-use super::{Command, Format, control, error_chain};
+use super::{Command, Format, control};
 use crate::state::Shared;
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RunError {
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
+    #[error("No audio output: {channels} channels")]
+    Channels {
+        channels: usize,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
+    #[error("No audio output: PulseAudio refused the stream")]
+    Stream(#[source] pulseaudio::ClientError),
+    #[error("Audio output stopped")]
+    Stopped(#[source] pulseaudio::ClientError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ConnectError {
+    #[error("No audio output: PulseAudio is not running")]
+    NotRunning,
+    #[error("No audio output: couldn't connect to PulseAudio at {}", socket.display())]
+    Socket {
+        socket: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("No audio output: PulseAudio refused the connection")]
+    Refused(#[source] pulseaudio::ClientError),
+    #[error("No audio output: PulseAudio refused the connection (no auth cookie found)")]
+    NoCookie(#[source] pulseaudio::ClientError),
+    #[error(
+        "No audio output: PulseAudio refused the connection without the auth cookie at {}",
+        cookie.display()
+    )]
+    UnreadableCookie {
+        cookie: PathBuf,
+        #[source]
+        source: std::io::Error,
+        refused: pulseaudio::ClientError,
+    },
+}
 
 const SAMPLE_BYTES: usize = 4;
 
@@ -26,10 +68,12 @@ pub(super) fn run(
     generation: u64,
     format: &Format,
     commands: &Receiver<Command>,
-) -> Result<(), String> {
+) -> Result<(), RunError> {
     let client = connect()?;
-    let channels = u8::try_from(format.channels)
-        .map_err(|_too_many| format!("No audio output: {} channels", format.channels))?;
+    let channels = u8::try_from(format.channels).map_err(|source| RunError::Channels {
+        channels: format.channels,
+        source,
+    })?;
     let frame_bytes = format.channels * SAMPLE_BYTES;
     let target = format.rate.saturating_mul(u32::from(channels) * 4) / BUFFER_DIVISOR;
     let mut params = PlaybackStreamParams {
@@ -87,15 +131,9 @@ pub(super) fn run(
         }
     };
     let stream = block_on(client.create_playback_stream(params, source.as_playback_source()))
-        .map_err(|error| {
-            format!(
-                "No audio output: PulseAudio refused the stream ({})",
-                error_chain(&error)
-            )
-        })?;
+        .map_err(RunError::Stream)?;
 
-    let stopped =
-        |error: pulseaudio::ClientError| format!("Audio output stopped: {}", error_chain(&error));
+    let stopped = RunError::Stopped;
     let result = control(
         shared,
         generation,
@@ -121,15 +159,10 @@ enum Cookie {
     Unreadable(PathBuf, std::io::Error),
 }
 
-fn connect() -> Result<Client, String> {
-    let socket =
-        server_socket().ok_or_else(|| "No audio output: PulseAudio is not running".to_owned())?;
-    let connection = UnixStream::connect(&socket).map_err(|error| {
-        format!(
-            "No audio output: couldn't connect to PulseAudio at {} ({error})",
-            socket.display()
-        )
-    })?;
+fn connect() -> Result<Client, ConnectError> {
+    let socket = server_socket().ok_or(ConnectError::NotRunning)?;
+    let connection =
+        UnixStream::connect(&socket).map_err(|source| ConnectError::Socket { socket, source })?;
     let cookie = pulseaudio::cookie_path_from_env().map_or(Cookie::Missing, |path| {
         match std::fs::read(&path) {
             Ok(bytes) => Cookie::Read(bytes),
@@ -137,28 +170,21 @@ fn connect() -> Result<Client, String> {
             Err(error) => Cookie::Unreadable(path, error),
         }
     });
-    let (bytes, unauthenticated) = match cookie {
-        Cookie::Read(bytes) => (Some(bytes), None),
-        Cookie::Missing => (None, Some("no auth cookie found".to_owned())),
-        Cookie::Unreadable(path, error) => (
-            None,
-            Some(format!(
-                "couldn't read the auth cookie at {}: {error}",
-                path.display()
-            )),
-        ),
-    };
-    Client::new_unix(c"Artisan Editor", connection, bytes).map_err(|error| {
-        unauthenticated.map_or_else(
-            || {
-                format!(
-                    "No audio output: PulseAudio refused the connection ({})",
-                    error_chain(&error)
-                )
-            },
-            |reason| format!("No audio output: PulseAudio refused the connection ({reason})"),
-        )
-    })
+    match cookie {
+        Cookie::Read(bytes) => Client::new_unix(c"Artisan Editor", connection, Some(bytes))
+            .map_err(ConnectError::Refused),
+        Cookie::Missing => Client::new_unix(c"Artisan Editor", connection, None::<Vec<u8>>)
+            .map_err(ConnectError::NoCookie),
+        Cookie::Unreadable(cookie, source) => {
+            Client::new_unix(c"Artisan Editor", connection, None::<Vec<u8>>).map_err(|refused| {
+                ConnectError::UnreadableCookie {
+                    cookie,
+                    source,
+                    refused,
+                }
+            })
+        }
+    }
 }
 
 fn server_socket() -> Option<PathBuf> {

@@ -11,14 +11,14 @@ autotests = false
 doctest = false
 
 [dependencies]
-rodio.workspace = true
 crossbeam-channel.workspace = true
+diagnostics.workspace = true
+rodio.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 test-support.workspace = true
 
-# Linux and the BSDs talk to PulseAudio (or PipeWire's pulse server) natively,
-# so no ALSA headers or system libraries are needed to build.
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 futures.workspace = true
 pulseaudio.workspace = true

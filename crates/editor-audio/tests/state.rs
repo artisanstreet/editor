@@ -15,7 +15,7 @@ fn playing() -> Inner {
     let mut inner = Inner::default();
     let generation = inner.begin(PathBuf::from("song.wav"));
     assert_eq!(inner.snapshot().state, PlaybackState::Loading);
-    assert!(inner.loaded(generation, Ok(second())).is_some());
+    assert!(inner.loaded(generation, second()).is_some());
     inner
 }
 
@@ -33,9 +33,9 @@ fn a_newer_play_wins_over_a_slower_decode() {
     let mut inner = Inner::default();
     let first = inner.begin(PathBuf::from("slow.flac"));
     let second_generation = inner.begin(PathBuf::from("fast.wav"));
-    assert!(inner.loaded(second_generation, Ok(second())).is_some());
-    assert!(inner.loaded(first, Err("late".to_owned())).is_none());
-    inner.fail(first, "late".to_owned());
+    assert!(inner.loaded(second_generation, second()).is_some());
+    assert!(inner.loaded(first, second()).is_none());
+    inner.fail(first, &crate::decode::OpenAudioError::Unsupported);
     let snapshot = inner.snapshot();
     assert_eq!(snapshot.track, Some(PathBuf::from("fast.wav")));
     assert_eq!(snapshot.state, PlaybackState::Playing);
@@ -45,11 +45,7 @@ fn a_newer_play_wins_over_a_slower_decode() {
 fn a_failed_decode_reports_its_message() {
     let mut inner = Inner::default();
     let generation = inner.begin(PathBuf::from("notes.txt"));
-    assert!(
-        inner
-            .loaded(generation, Err("Unsupported audio format".to_owned()))
-            .is_none()
-    );
+    inner.fail(generation, &crate::decode::OpenAudioError::Unsupported);
     assert_eq!(
         inner.snapshot().state,
         PlaybackState::Failed("Unsupported audio format".to_owned())
@@ -116,7 +112,7 @@ fn stale_output_reads_silence() {
     let mut inner = playing();
     let stale = inner.generation;
     let generation = inner.begin(PathBuf::from("next.wav"));
-    assert!(inner.loaded(generation, Ok(second())).is_some());
+    assert!(inner.loaded(generation, second()).is_some());
     let mut out = [1.0; 4];
     inner.fill(stale, &mut out, 2, 1.0, &mut 0.0);
     assert_eq!(out, [0.0; 4]);

@@ -59,27 +59,19 @@ impl Inner {
         self.generation
     }
 
-    fn loaded(&mut self, generation: u64, decoded: Result<Audio, String>) -> Option<Format> {
+    fn loaded(&mut self, generation: u64, audio: Audio) -> Option<Format> {
         if generation != self.generation {
             return None;
         }
-        match decoded {
-            Ok(audio) => {
-                let format = Format {
-                    channels: audio.channels,
-                    rate: audio.rate,
-                    title: self.track.as_deref().map(crate::decode::display_name),
-                };
-                self.audio = Some(audio);
-                self.cursor = 0;
-                self.state = PlaybackState::Playing;
-                Some(format)
-            }
-            Err(message) => {
-                self.state = PlaybackState::Failed(message);
-                None
-            }
-        }
+        let format = Format {
+            channels: audio.channels,
+            rate: audio.rate,
+            title: self.track.as_deref().map(crate::decode::display_name),
+        };
+        self.audio = Some(audio);
+        self.cursor = 0;
+        self.state = PlaybackState::Playing;
+        Some(format)
     }
 
     pub(crate) fn stream_ready(
@@ -88,7 +80,7 @@ impl Inner {
         first: Audio,
         stream: StreamState,
     ) -> Option<Format> {
-        let format = self.loaded(generation, Ok(first))?;
+        let format = self.loaded(generation, first)?;
         self.stream = Some(stream);
         Some(format)
     }
@@ -104,11 +96,11 @@ impl Inner {
         self.output = Some(output);
     }
 
-    pub(crate) fn fail(&mut self, generation: u64, message: String) {
+    pub(crate) fn fail(&mut self, generation: u64, error: &dyn std::error::Error) {
         if generation != self.generation || self.state == PlaybackState::Idle {
             return;
         }
-        self.state = PlaybackState::Failed(message);
+        self.state = PlaybackState::Failed(diagnostics::chain(error));
         self.audio = None;
         self.stream = None;
         self.reset_phase = false;

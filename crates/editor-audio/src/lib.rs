@@ -12,6 +12,16 @@ use std::time::Duration;
 
 use state::Shared;
 
+#[derive(Debug, thiserror::Error)]
+enum StartDecoderError {
+    #[error("Couldn't start the audio decoder")]
+    Spawn {
+        track: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 #[derive(Clone)]
 pub struct Player {
     owner: Arc<Owner>,
@@ -59,22 +69,21 @@ impl Player {
     fn start(
         &self,
         track: PathBuf,
-        decode: impl FnOnce() -> Result<decode::StreamDecoder, String> + Send + 'static,
+        decode: impl FnOnce() -> Result<decode::StreamDecoder, decode::OpenAudioError> + Send + 'static,
     ) {
         let shared = Arc::clone(&self.owner.shared);
-        let generation = shared.lock().begin(track);
+        let generation = shared.lock().begin(track.clone());
         let decoder_shared = Arc::clone(&shared);
         let spawned = thread::Builder::new()
             .name("artisan-audio-decode".to_owned())
             .spawn(move || match decode() {
                 Ok(decoder) => stream::play(&decoder_shared, generation, decoder),
-                Err(error) => decoder_shared.lock().fail(generation, error),
+                Err(error) => decoder_shared.lock().fail(generation, &error),
             });
-        if let Err(error) = spawned {
-            shared.lock().fail(
-                generation,
-                format!("Couldn't start the audio decoder: {error}"),
-            );
+        if let Err(source) = spawned {
+            shared
+                .lock()
+                .fail(generation, &StartDecoderError::Spawn { track, source });
         }
     }
 
