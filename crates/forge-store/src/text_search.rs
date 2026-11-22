@@ -52,7 +52,7 @@ fn snippet(text: &str, start: usize, end: usize) -> (String, (u32, u32)) {
 }
 
 fn indexed_phrase(wanted: &str) -> Option<String> {
-    (wanted.chars().count() >= TRIGRAM_CHARS)
+    (wanted.chars().count() >= TRIGRAM_CHARS && !wanted.contains('\0'))
         .then(|| format!("folded : \"{}\"", wanted.replace('"', "\"\"")))
 }
 

@@ -310,3 +310,25 @@ async fn a_failed_search_keeps_the_query_out_of_its_error() {
     );
     assert!(logged.contains("16-character"), "{logged}");
 }
+
+#[tokio::test]
+async fn a_query_with_a_nul_character_searches_instead_of_failing() {
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).unwrap();
+    let home = thread(&store, "Binary output", None).await;
+    store
+        .upsert_item(said(&home, "the dump read abc\0def here", Phase::Final))
+        .await
+        .unwrap();
+    let search = |query: &str| {
+        store.text_search(TextSearchQuery {
+            query: query.into(),
+            limit: None,
+        })
+    };
+
+    let found = search("abc\0def").await.unwrap();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].thread_id, home);
+    assert!(search("zzz\0zzz").await.unwrap().is_empty());
+}
