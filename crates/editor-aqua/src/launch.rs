@@ -73,12 +73,13 @@ pub enum LaunchError {
     #[error("run the Editor: {message}")]
     Run { message: String },
     #[error(
-        "could not finish saving drafts: {failed} failed, {timed_out} timed out, {kept_locally} kept on this device"
+        "could not finish saving drafts: {failed} failed, {timed_out} timed out, {kept_locally} kept on this device, {lost} lost"
     )]
     Drafts {
         failed: usize,
         timed_out: usize,
         kept_locally: usize,
+        lost: usize,
     },
     #[error("could not finish saving settings: {failed} saves failed, {timed_out} timed out")]
     Settings { failed: usize, timed_out: usize },
@@ -368,7 +369,8 @@ fn run(qualifying: bool) -> Result<(), LaunchError> {
             failed,
             timed_out,
             kept_locally,
-        } if kept_locally == failed + timed_out => {
+            lost: 0,
+        } => {
             tracing::warn!(
                 failed,
                 timed_out,
@@ -381,17 +383,20 @@ fn run(qualifying: bool) -> Result<(), LaunchError> {
             failed,
             timed_out,
             kept_locally,
+            lost,
         } => {
             tracing::error!(
                 failed,
                 timed_out,
                 kept_locally,
+                lost,
                 "Editor closed before all drafts could be saved or kept on this device"
             );
             Err(LaunchError::Drafts {
                 failed,
                 timed_out,
                 kept_locally,
+                lost,
             })
         }
     };

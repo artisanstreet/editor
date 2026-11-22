@@ -323,6 +323,7 @@ pub enum ShutdownOutcome {
         failed: usize,
         timed_out: usize,
         kept_locally: usize,
+        lost: usize,
     },
 }
 
@@ -343,7 +344,8 @@ fn pending_shutdown() -> MutexGuard<'static, Vec<DraftHandle>> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Unsaved {
     Retired,
-    Counted,
+    InForge,
+    NotInForge,
 }
 
 pub async fn drain_pending(limits: ShutdownLimits) -> ShutdownOutcome {
@@ -352,6 +354,7 @@ pub async fn drain_pending(limits: ShutdownLimits) -> ShutdownOutcome {
     let mut failed = 0;
     let mut timed_out = 0;
     let mut kept_locally = 0;
+    let mut lost = 0;
     let mut keeping = Vec::new();
     for session in sessions {
         if session.0.cancelled.is_cancelled() {
@@ -359,6 +362,7 @@ pub async fn drain_pending(limits: ShutdownLimits) -> ShutdownOutcome {
             continue;
         }
         let mut changed = session.subscribe();
+        let mut unsaved = Unsaved::InForge;
         loop {
             let (pending, stuck) = session.read(|state| (state.pending(), state.stuck()));
             if !pending {
@@ -366,6 +370,7 @@ pub async fn drain_pending(limits: ShutdownLimits) -> ShutdownOutcome {
             }
             if stuck {
                 failed += 1;
+                unsaved = Unsaved::NotInForge;
                 break;
             }
             if tokio::time::timeout_at(deadline, changed.changed())
@@ -381,21 +386,51 @@ pub async fn drain_pending(limits: ShutdownLimits) -> ShutdownOutcome {
                     } => {
                         failed += failures;
                         timed_out += timeouts;
+                        unsaved = Unsaved::NotInForge;
                     }
                 }
                 break;
             }
         }
-        keeping.push((Unsaved::Counted, session.settle_on_device()));
+        keeping.push((unsaved, session.settle_on_device()));
     }
     let deadline = tokio::time::Instant::now() + limits.device;
     for (unsaved, kept) in keeping {
-        match (tokio::time::timeout_at(deadline, kept).await, unsaved) {
-            (Ok(Ok(Ok(true))), _) => kept_locally += 1,
-            (Ok(Ok(Ok(false))), _) | (Ok(Ok(Err(_))) | Err(_), Unsaved::Counted) => {}
-            (Ok(Ok(Err(_))), Unsaved::Retired) => failed += 1,
-            (Err(_), Unsaved::Retired) => timed_out += 1,
-            (Ok(Err(stopped)), _) => std::panic::resume_unwind(stopped.into_panic()),
+        let device = match tokio::time::timeout_at(deadline, kept).await {
+            Ok(Ok(device)) => Some(device),
+            Ok(Err(stopped)) => std::panic::resume_unwind(stopped.into_panic()),
+            Err(_elapsed) => None,
+        };
+        match (device, unsaved) {
+            (Some(Ok(true)), Unsaved::Retired | Unsaved::NotInForge) => kept_locally += 1,
+            (Some(Ok(true | false)), Unsaved::InForge)
+            | (Some(Ok(false)), Unsaved::Retired | Unsaved::NotInForge) => {}
+            (Some(Err(error)), Unsaved::InForge) => {
+                tracing::error!(
+                    error = %::diagnostics::chain(&error),
+                    "a draft Forge saved couldn't be settled on this device at shutdown"
+                );
+            }
+            (None, Unsaved::InForge) => {
+                tracing::error!(
+                    "a draft Forge saved wasn't settled on this device before shutdown"
+                );
+            }
+            (Some(Err(error)), unsaved @ (Unsaved::Retired | Unsaved::NotInForge)) => {
+                tracing::error!(
+                    error = %::diagnostics::chain(&error),
+                    "an unsent draft Forge doesn't have couldn't be kept on this device at shutdown, so it is lost"
+                );
+                lost += 1;
+                failed += usize::from(unsaved == Unsaved::Retired);
+            }
+            (None, unsaved @ (Unsaved::Retired | Unsaved::NotInForge)) => {
+                tracing::error!(
+                    "an unsent draft Forge doesn't have wasn't kept on this device before shutdown, so it is lost"
+                );
+                lost += 1;
+                timed_out += usize::from(unsaved == Unsaved::Retired);
+            }
         }
     }
     match (failed, timed_out) {
@@ -404,6 +439,7 @@ pub async fn drain_pending(limits: ShutdownLimits) -> ShutdownOutcome {
             failed,
             timed_out,
             kept_locally,
+            lost,
         },
     }
 }
@@ -887,6 +923,7 @@ impl DraftHandle {
                 failed: 1,
                 timed_out: 0,
                 kept_locally: 0,
+                lost: 0,
             },
             (true, false) => {
                 self.0.cancelled.cancel();
@@ -894,6 +931,7 @@ impl DraftHandle {
                     failed: 0,
                     timed_out: 1,
                     kept_locally: 0,
+                    lost: 0,
                 }
             }
         })

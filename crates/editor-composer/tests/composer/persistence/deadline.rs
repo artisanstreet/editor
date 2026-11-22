@@ -81,6 +81,7 @@ fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
             failed: 1,
             timed_out: 0,
             kept_locally: 0,
+            lost: 0,
         }
     );
     assert!(!handle.0.cancelled.is_cancelled());
@@ -95,6 +96,7 @@ fn unacknowledged_write_at_deadline_is_cancelled_and_counted_once() {
             failed: 0,
             timed_out: 1,
             kept_locally: 0,
+            lost: 0,
         }
     );
     assert!(handle.0.cancelled.is_cancelled());

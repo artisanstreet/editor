@@ -567,7 +567,61 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
                 failed: 0,
                 timed_out: 1,
                 kept_locally: 1,
+                lost: 0,
             }
+        );
+        let mut bytes = [0; 1024];
+        loop {
+            match socket.read(&mut bytes).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    });
+}
+
+#[test]
+fn process_exit_reports_a_draft_neither_forge_nor_this_device_kept_as_lost() {
+    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
+
+    if !child_process(
+        "persistence::process_exit_reports_a_draft_neither_forge_nor_this_device_kept_as_lost",
+    ) {
+        return;
+    }
+    let (_directory, core, config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let (spool, mut sessions) = crate::draft_sessions();
+        let lease = sessions
+            .open(
+                config.id.clone(),
+                core.host(&config.id).unwrap().instance(),
+                "new".into(),
+                client,
+            )
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        type_into(&lease, typed("server never acknowledges"));
+        std::fs::write(spool.path().join("drafts"), b"not a folder").unwrap();
+        drop(lease);
+        drop(sessions);
+        let (mut socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+
+        assert_eq!(
+            drain_pending(ShutdownLimits {
+                forge: Duration::ZERO,
+                device: Duration::from_secs(5),
+            })
+            .await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 0,
+                lost: 1,
+            },
+            "a draft Forge never saved and this device couldn't keep is reported lost"
         );
         let mut bytes = [0; 1024];
         loop {
@@ -622,6 +676,7 @@ fn process_exit_reports_a_rejected_draft_write() {
                 failed: 1,
                 timed_out: 0,
                 kept_locally: 1,
+                lost: 0,
             }
         );
     });
@@ -665,6 +720,7 @@ fn closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it() {
                 failed: 0,
                 timed_out: 1,
                 kept_locally: 1,
+                lost: 0,
             }
         );
         drop(socket);
@@ -814,6 +870,7 @@ fn a_draft_kept_on_this_device_shows_while_forge_is_still_unreachable() {
                 failed: 0,
                 timed_out: 1,
                 kept_locally: 1,
+                lost: 0,
             }
         );
         drop(socket);
@@ -879,11 +936,21 @@ async fn draft_or_blob_request(
     }
 }
 
+const fn kept_on_this_device_at_the_deadline() -> editor_aqua::composer::persistence::ShutdownOutcome
+{
+    editor_aqua::composer::persistence::ShutdownOutcome::Incomplete {
+        failed: 0,
+        timed_out: 1,
+        kept_locally: 1,
+        lost: 0,
+    }
+}
+
 #[test]
 fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text() {
     use editor_aqua::composer::controller::{Composer, ComposerTarget};
     use editor_aqua::composer::draft_session::DraftSession;
-    use editor_aqua::composer::persistence::{ShutdownLimits, ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::persistence::{ShutdownLimits, drain_pending};
     use editor_aqua::composer::spool::DraftSpool;
 
     if !child_process(
@@ -937,11 +1004,7 @@ fn a_kept_image_that_uploads_before_the_composer_shows_its_draft_keeps_the_text(
                 device: Duration::from_secs(5),
             })
             .await,
-            ShutdownOutcome::Incomplete {
-                failed: 0,
-                timed_out: 1,
-                kept_locally: 1,
-            }
+            kept_on_this_device_at_the_deadline()
         );
         drop(held);
 
@@ -1043,6 +1106,7 @@ fn a_dropped_image_whose_file_is_gone_by_closing_is_kept_with_the_draft() {
                 failed: 0,
                 timed_out: 1,
                 kept_locally: 1,
+                lost: 0,
             },
             "the draft is kept although the dropped file is gone"
         );
@@ -1243,6 +1307,7 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
                 failed: 0,
                 timed_out: 1,
                 kept_locally: 1,
+                lost: 0,
             }
         );
         drop(unanswered);
@@ -1335,6 +1400,7 @@ fn typing_offline_after_a_saved_edit_does_not_ask_which_draft_to_keep() {
                 failed: 0,
                 timed_out: 1,
                 kept_locally: 1,
+                lost: 0,
             }
         );
         drop(offline);
@@ -1476,6 +1542,7 @@ fn closing_while_an_image_uploads_keeps_the_image_on_this_device_until_forge_tak
                 failed: 0,
                 timed_out: 1,
                 kept_locally: 1,
+                lost: 0,
             }
         );
         drop(socket);
@@ -1944,6 +2011,7 @@ async fn close_while_sending(
             failed: 0,
             timed_out: 1,
             kept_locally: 1,
+            lost: 0,
         }
     );
     drop(unanswered);
@@ -2558,6 +2626,7 @@ fn a_send_that_failed_unseen_before_closing_comes_back_on_reopening_with_its_ide
                 failed: 1,
                 timed_out: 0,
                 kept_locally: 1,
+                lost: 0,
             }
         );
 
