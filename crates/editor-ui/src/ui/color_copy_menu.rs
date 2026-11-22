@@ -12,7 +12,7 @@ use editor_assets::AssetId;
 use super::{
     asset::source_asset_glyph,
     kit::{Divider, IconSize, Row, RowItem, Surface},
-    popover::{AnimatedPickerHost, Popover},
+    popover::{AnimatedPickerHost, Popover, PopoverError},
     rich::actions::{CopyKind, ShowCopyMenu},
     theme::ArtisanTheme,
 };
@@ -158,7 +158,7 @@ impl ColorCopyMenuHost {
         reduced_motion: bool,
         now: f64,
         effect: impl Fn(ColorCopyEffect) + 'static,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, PopoverError> {
         if menu.entries.is_empty() {
             return Ok(None);
         }
@@ -205,14 +205,18 @@ impl ColorCopyMenuHost {
         self.panel.alive.set(false);
     }
 
-    pub fn sync(&mut self, app: &mut aqua::UiApp) -> Result<(), String> {
+    pub fn sync(&mut self, app: &mut aqua::UiApp) -> Result<(), PopoverError> {
         if self.panel.pending_close.replace(false) && self.is_open(app) {
             self.popup.begin_close(app, self.now)?;
         }
         Ok(())
     }
 
-    pub fn intercept(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> Result<bool, String> {
+    pub fn intercept(
+        &mut self,
+        app: &mut aqua::UiApp,
+        event: &InputEvent,
+    ) -> Result<bool, PopoverError> {
         if self.popup.is_closing() || app.host().service().topmost() != Some(self.overlay) {
             return Ok(false);
         }
@@ -261,7 +265,7 @@ impl ColorCopyMenuHost {
         &mut self,
         app: &mut aqua::UiApp,
         event: &InputEvent,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PopoverError> {
         if self.intercept(app, event)? {
             return Ok(true);
         }
@@ -273,7 +277,7 @@ impl ColorCopyMenuHost {
         Ok(handled)
     }
 
-    pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<bool, String> {
+    pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<bool, PopoverError> {
         self.now = now;
         self.sync(app)?;
         if self.popup.is_open(app) {

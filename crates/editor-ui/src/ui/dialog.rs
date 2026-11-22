@@ -199,12 +199,24 @@ impl std::fmt::Debug for DialogHost {
 
 type DialogRebuild = Rc<dyn Fn(Element, Size) -> Element>;
 
+#[derive(Debug, thiserror::Error)]
+pub enum DialogError {
+    #[error("open the dialog")]
+    Open(#[source] aqua_runtime::PopupError),
+    #[error("refresh the dialog {overlay:?}")]
+    Refresh {
+        overlay: aqua_ui::overlay::OverlayId,
+        #[source]
+        source: aqua_runtime::PopupError,
+    },
+}
+
 impl DialogHost {
     pub fn open(
         app: &mut aqua::UiApp,
         owner: aqua_core::NodeId,
         mut dialog: Dialog,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, DialogError> {
         use aqua_ui::overlay::{CloseReason, DismissPolicy};
         let viewport = app.viewport();
         let theme = Rc::new(std::cell::Cell::new(dialog.theme));
@@ -260,7 +272,7 @@ impl DialogHost {
         }));
         let overlay = app
             .open_popup(owner, root, options)
-            .map_err(|error| error.to_string())?;
+            .map_err(DialogError::Open)?;
         Ok(Self {
             overlay,
             pending,
@@ -278,10 +290,17 @@ impl DialogHost {
         self.theme.set(theme);
     }
 
-    pub fn refresh_content(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
+    pub fn refresh_content(
+        &self,
+        app: &mut aqua::UiApp,
+        content: Element,
+    ) -> Result<(), DialogError> {
         let viewport = app.viewport();
         app.refresh_popup(self.overlay, (self.rebuild)(content, viewport))
-            .map_err(|error| error.to_string())
+            .map_err(|source| DialogError::Refresh {
+                overlay: self.overlay,
+                source,
+            })
     }
 
     pub fn dispose(self, app: &mut aqua::UiApp) {

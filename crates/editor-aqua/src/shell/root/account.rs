@@ -162,7 +162,7 @@ impl RootViews {
                 ));
             }),
         ) {
-            tracing::warn!(%error, "could not open the account menu");
+            tracing::warn!(error = %diagnostics::chain(&error), "could not open the account menu");
         }
         match self
             .sidebar_views
@@ -171,7 +171,9 @@ impl RootViews {
         {
             Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
             Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "could not animate the account menu"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not animate the account menu");
+            }
         }
     }
 }

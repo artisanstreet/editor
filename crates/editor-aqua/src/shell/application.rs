@@ -256,7 +256,7 @@ impl<V: SectionViews> ShellApplication<V> {
         {
             if popup.is_open(self.ui.ui()) {
                 if let Err(error) = popup.advance(self.ui.ui_mut(), ctx.now().as_secs_f64()) {
-                    tracing::warn!(%error, "could not animate settings popup");
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not animate settings popup");
                 }
                 if popup.is_animating(self.ui.ui()) {
                     ctx.request_frame(id, FrameReason::ANIMATION);
@@ -270,7 +270,7 @@ impl<V: SectionViews> ShellApplication<V> {
             .and_then(|workspace| workspace.composer.as_mut())
         {
             if let Err(error) = owner.advance_popups(self.ui.ui_mut(), ctx.now().as_secs_f64()) {
-                tracing::warn!(%error, "could not advance composer popup");
+                tracing::warn!(error = %diagnostics::chain(&error), "could not advance composer popup");
             }
             owner.advance_note_ticker(self.ui.ui_mut(), ctx.now().as_secs_f64());
             owner.advance_primary(self.ui.ui_mut(), self.shell.core.clock().now());
@@ -1009,7 +1009,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                             content,
                             ctx.now().as_secs_f64(),
                         ) {
-                            tracing::warn!(%error, "could not refresh composer model popup");
+                            tracing::warn!(error = %diagnostics::chain(&error), "could not refresh composer model popup");
                         }
                     }
                     Err(error) => {
@@ -1185,7 +1185,9 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                     return;
                 }
                 Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "could not dismiss settings popup"),
+                Err(error) => {
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not dismiss settings popup");
+                }
             }
         }
         let dismissed = {
@@ -1198,7 +1200,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                     match owner.dismiss_popups_for_event(self.ui.ui_mut(), event) {
                         Ok(consumed) => consumed,
                         Err(error) => {
-                            tracing::warn!(%error, "could not dismiss composer popup");
+                            tracing::warn!(error = %diagnostics::chain(&error), "could not dismiss composer popup");
                             false
                         }
                     }
@@ -1371,13 +1373,13 @@ fn sync_popup(
         if let Some(popup) = slot.as_mut().filter(|popup| !popup.is_closing())
             && let Err(error) = popup.begin_close(ui, now)
         {
-            tracing::warn!(%error, "could not close settings popup");
+            tracing::warn!(error = %diagnostics::chain(&error), "could not close settings popup");
         }
         return;
     };
     if let Some(popup) = slot.as_mut() {
         if let Err(error) = popup.refresh_content(ui, element) {
-            tracing::warn!(%error, "could not refresh settings popup");
+            tracing::warn!(error = %diagnostics::chain(&error), "could not refresh settings popup");
         }
         return;
     }
@@ -1391,7 +1393,9 @@ fn sync_popup(
     }
     match crate::ui::popover::AnimatedPickerHost::open_options(ui, owner, element, options, now) {
         Ok(popup) => *slot = Some(popup),
-        Err(error) => tracing::warn!(%error, "could not open settings popup"),
+        Err(error) => {
+            tracing::warn!(error = %diagnostics::chain(&error), "could not open settings popup");
+        }
     }
 }
 

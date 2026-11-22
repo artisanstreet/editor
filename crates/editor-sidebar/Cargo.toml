@@ -16,6 +16,7 @@ test-support = ["editor-ui/test-support"]
 aqua = { workspace = true }
 aqua-core = { workspace = true }
 aqua-text = { workspace = true }
+aqua-runtime = { workspace = true }
 aqua-ui = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }
 artisan-mentions.workspace = true

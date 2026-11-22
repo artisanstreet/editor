@@ -125,7 +125,7 @@ impl RootViews {
                 true
             }
             Err(error) => {
-                tracing::warn!(%error, "could not open the selection menu");
+                tracing::warn!(error = %diagnostics::chain(&error), "could not open the selection menu");
                 false
             }
         }

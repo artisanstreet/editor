@@ -41,7 +41,9 @@ impl RootViews {
                 return Some(true);
             }
             Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "could not dismiss the account menu"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not dismiss the account menu");
+            }
         }
         let dismissal = {
             let _tm = crate::shell::application::Tm::new("pre.overlays");
@@ -52,7 +54,9 @@ impl RootViews {
         match dismissal {
             Ok(true) => return Some(true),
             Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "could not dismiss sidebar overlay"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not dismiss sidebar overlay");
+            }
         }
         let intercepted = self
             .menus
@@ -62,7 +66,9 @@ impl RootViews {
         match intercepted {
             Ok(true) => return Some(true),
             Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "could not close color copy menu"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not close color copy menu");
+            }
         }
         if let InputEvent::KeyDown(event) = input
             && self.dialogs.palette_dialog.is_none()

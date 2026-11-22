@@ -10,9 +10,41 @@ use super::{
 };
 use editor_core::{Core, HostId, HostInstance};
 use editor_ui::{
-    dialog::DialogHost, popover::AnimatedPickerHost, text::mount::EditorController,
+    dialog::{DialogError, DialogHost},
+    popover::{AnimatedPickerHost, PopoverError},
+    text::mount::EditorController,
     theme::ArtisanTheme,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncOverlaysError {
+    #[error("sync the thread menu for {thread}")]
+    Menu {
+        thread: ThreadId,
+        #[source]
+        source: PopoverError,
+    },
+    #[error("retire the thread menu for {thread}")]
+    RetireMenu {
+        thread: ThreadId,
+        #[source]
+        source: PopoverError,
+    },
+    #[error("open the rename dialog for {thread}")]
+    Rename {
+        thread: ThreadId,
+        #[source]
+        source: DialogError,
+    },
+    #[error("refresh the project picker {overlay:?}")]
+    RefreshPicker {
+        overlay: OverlayId,
+        #[source]
+        source: aqua_runtime::PopupError,
+    },
+    #[error("open the project picker")]
+    OpenPicker(#[source] aqua_runtime::PopupError),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Identity {
@@ -120,7 +152,7 @@ impl SidebarOverlays {
         theme: &ArtisanTheme,
         now: f64,
         emit: &Rc<dyn Fn(ViewAction)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SyncOverlaysError> {
         if let Some(rename) = &self.rename {
             rename.dialog.sync(app);
         }
@@ -138,7 +170,12 @@ impl SidebarOverlays {
         }) && let Some(mut menu) = self.menu.take()
             && menu.popup.is_open(app)
         {
-            menu.popup.begin_close(app, now)?;
+            menu.popup
+                .begin_close(app, now)
+                .map_err(|source| SyncOverlaysError::RetireMenu {
+                    thread: menu.identity.thread.clone(),
+                    source,
+                })?;
             self.retiring.push(menu.popup);
         }
         if let Some(identity) = menu_identity {
@@ -146,16 +183,29 @@ impl SidebarOverlays {
                 view::thread_menu(sidebar, core, theme, app.viewport(), &Rc::clone(emit))
             {
                 if let Some(menu) = &mut self.menu {
-                    menu.popup.refresh_content(app, element)?;
+                    menu.popup.refresh_content(app, element).map_err(|source| {
+                        SyncOverlaysError::Menu {
+                            thread: identity.thread.clone(),
+                            source,
+                        }
+                    })?;
                 } else {
-                    let popup =
-                        AnimatedPickerHost::open_options(app, owner, element, options, now)?;
+                    let popup = AnimatedPickerHost::open_options(app, owner, element, options, now)
+                        .map_err(|source| SyncOverlaysError::Menu {
+                            thread: identity.thread.clone(),
+                            source,
+                        })?;
                     self.menu = Some(Menu { identity, popup });
                 }
             } else if let Some(mut menu) = self.menu.take()
                 && menu.popup.is_open(app)
             {
-                menu.popup.begin_close(app, now)?;
+                menu.popup.begin_close(app, now).map_err(|source| {
+                    SyncOverlaysError::RetireMenu {
+                        thread: menu.identity.thread.clone(),
+                        source,
+                    }
+                })?;
                 self.retiring.push(menu.popup);
             }
         }
@@ -179,7 +229,12 @@ impl SidebarOverlays {
             && let Some(dialog) =
                 view::rename_dialog(sidebar, core, theme, &editor, Rc::clone(emit))
         {
-            let dialog = DialogHost::open(app, owner, dialog)?;
+            let dialog = DialogHost::open(app, owner, dialog).map_err(|source| {
+                SyncOverlaysError::Rename {
+                    thread: identity.thread.clone(),
+                    source,
+                }
+            })?;
             let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("sidebar-rename-input"));
             if let Some(node) = app.tree().nodes_with_key(key).into_iter().next() {
                 app.tree_mut().set_focused(Some(node));
@@ -213,15 +268,19 @@ impl SidebarOverlays {
                 Rc::clone(emit),
             );
             if let Some(picker) = &mut self.picker {
-                app.refresh_popup(picker.overlay, root)
-                    .map_err(|error| error.to_string())?;
+                app.refresh_popup(picker.overlay, root).map_err(|source| {
+                    SyncOverlaysError::RefreshPicker {
+                        overlay: picker.overlay,
+                        source,
+                    }
+                })?;
                 picker.creating = creating;
             } else {
                 let mut options = editor_ui::dialog::popup_options();
                 options.dismiss = aqua_ui::overlay::DismissPolicy::MANUAL;
                 let overlay = app
                     .open_popup(owner, root, options)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(SyncOverlaysError::OpenPicker)?;
                 self.picker = Some(Picker {
                     identity,
                     overlay,
@@ -241,7 +300,7 @@ impl SidebarOverlays {
         &mut self,
         app: &mut aqua::UiApp,
         event: &aqua_core::InputEvent,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PopoverError> {
         if let Some(picker) = &self.picker
             && app.host().service().topmost() == Some(picker.overlay)
             && matches!(event, aqua_core::InputEvent::KeyDown(key) if key.key == aqua_core::Key::Named(aqua_core::NamedKey::Escape))
@@ -257,7 +316,7 @@ impl SidebarOverlays {
         }
     }
 
-    pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<bool, String> {
+    pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<bool, PopoverError> {
         let mut animating = false;
         for popup in self
             .retiring

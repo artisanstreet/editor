@@ -272,7 +272,9 @@ impl ActionFailureDialog {
         .on_dismiss(move |_| dismiss.borrow_mut().push_back(Event::Dismiss));
         match DialogHost::open(ui, owner, dialog) {
             Ok(host) => self.shown = Some(Shown { host, failure }),
-            Err(error) => tracing::warn!(%error, "could not show the action failure"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not show the action failure");
+            }
         }
     }
 }

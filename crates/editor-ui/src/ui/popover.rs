@@ -8,6 +8,26 @@ use std::rc::Rc;
 
 const VIEWPORT_MARGIN: f32 = 16.0;
 
+#[derive(Debug, thiserror::Error)]
+pub enum PopoverError {
+    #[error("open the picker popup")]
+    Open(#[source] aqua_runtime::PopupError),
+    #[error("refresh the picker popup {overlay:?}")]
+    Refresh {
+        overlay: aqua_ui::overlay::OverlayId,
+        #[source]
+        source: aqua_runtime::PopupError,
+    },
+    #[error("picker popup {overlay:?} is closed")]
+    Closed {
+        overlay: aqua_ui::overlay::OverlayId,
+    },
+    #[error("picker popup {overlay:?} has no content factory")]
+    NoFactory {
+        overlay: aqua_ui::overlay::OverlayId,
+    },
+}
+
 struct PopoverPanel {
     id: Key,
     theme: ArtisanTheme,
@@ -150,7 +170,7 @@ impl PickerPopupHost {
         focus: aqua_ui::popup::PopupFocus,
         dismiss: aqua_ui::overlay::DismissPolicy,
         on_close: impl Fn(aqua_ui::overlay::CloseReason) + 'static,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PopoverError> {
         let mut options = aqua_ui::popup::PopupOptions::menu();
         options.focus = focus;
         options.dismiss = dismiss;
@@ -161,13 +181,16 @@ impl PickerPopupHost {
         options.on_close = Some(Rc::new(on_close));
         let overlay = app
             .open_popup_measured(owner, content, options)
-            .map_err(|error| error.to_string())?;
+            .map_err(PopoverError::Open)?;
         Ok(Self { overlay })
     }
 
-    fn refresh(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
+    fn refresh(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), PopoverError> {
         app.refresh_popup(self.overlay, content)
-            .map_err(|error| error.to_string())
+            .map_err(|source| PopoverError::Refresh {
+                overlay: self.overlay,
+                source,
+            })
     }
 
     fn close(&self, app: &mut aqua::UiApp) {
@@ -241,7 +264,7 @@ impl AnimatedPickerHost {
         close_duration: std::time::Duration,
         now: f64,
         on_close: impl Fn(aqua_ui::overlay::CloseReason) + 'static,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PopoverError> {
         let factory: Rc<dyn Fn() -> Element> = Rc::new(factory);
         let content = factory();
         let mut host = Self::open_content(
@@ -275,7 +298,7 @@ impl AnimatedPickerHost {
         close_duration: std::time::Duration,
         now: f64,
         on_close: impl Fn(aqua_ui::overlay::CloseReason) + 'static,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PopoverError> {
         let popup = PickerPopupHost::open_above(
             app,
             owner,
@@ -309,7 +332,7 @@ impl AnimatedPickerHost {
         content: Element,
         mut options: aqua_ui::popup::PopupOptions,
         now: f64,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, PopoverError> {
         let origin = match options.placement.preferred {
             aqua_ui::overlay::Side::Above => aqua_core::Point::new(0.0, 1.0),
             aqua_ui::overlay::Side::Before => aqua_core::Point::new(1.0, 0.0),
@@ -320,7 +343,7 @@ impl AnimatedPickerHost {
         options.dismiss = aqua_ui::overlay::DismissPolicy::MANUAL;
         let overlay = app
             .open_popup_measured(owner, content, options)
-            .map_err(|error| error.to_string())?;
+            .map_err(PopoverError::Open)?;
         let mut motion = super::picker_motion::MenuMotion::default();
         motion.begin_open();
         let mut host = Self {
@@ -344,14 +367,14 @@ impl AnimatedPickerHost {
         self.popup.close(app);
     }
 
-    pub fn begin_close(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), String> {
+    pub fn begin_close(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), PopoverError> {
         if self.motion.phase() != super::picker_motion::MenuPhase::Closing {
             self.motion.begin_close();
         }
         self.advance(app, now)
     }
 
-    pub fn begin_open(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), String> {
+    pub fn begin_open(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), PopoverError> {
         self.motion.begin_open();
         self.advance(app, now)
     }
@@ -360,7 +383,7 @@ impl AnimatedPickerHost {
         self.motion.phase() == super::picker_motion::MenuPhase::Closing
     }
 
-    pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), String> {
+    pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), PopoverError> {
         use super::picker_motion::MenuPhase;
         self.now = now;
         let Some((_, _, _, _, generation)) = self.motion.transition() else {
@@ -434,16 +457,17 @@ impl AnimatedPickerHost {
         (opacity, transform)
     }
 
-    fn apply_frame(&self, app: &mut aqua::UiApp) -> Result<(), String> {
+    fn apply_frame(&self, app: &mut aqua::UiApp) -> Result<(), PopoverError> {
         let root = app
             .host()
             .popup_root(self.popup.overlay)
-            .ok_or_else(|| "picker popup is closed".to_owned())?;
+            .ok_or(PopoverError::Closed {
+                overlay: self.popup.overlay,
+            })?;
         let mut paint = {
-            let node = app
-                .tree()
-                .get(root)
-                .ok_or_else(|| "picker popup is closed".to_owned())?;
+            let node = app.tree().get(root).ok_or(PopoverError::Closed {
+                overlay: self.popup.overlay,
+            })?;
             match &node.kind {
                 aqua_ui::tree::NodeKind::Box(content) => content.paint().clone(),
                 aqua_ui::tree::NodeKind::Text(_)
@@ -460,16 +484,19 @@ impl AnimatedPickerHost {
         Ok(())
     }
 
-    pub fn refresh(&self, app: &mut aqua::UiApp) -> Result<(), String> {
-        let factory = self
-            .factory
-            .as_ref()
-            .ok_or_else(|| "picker popup has no content factory".to_owned())?;
+    pub fn refresh(&self, app: &mut aqua::UiApp) -> Result<(), PopoverError> {
+        let factory = self.factory.as_ref().ok_or(PopoverError::NoFactory {
+            overlay: self.popup.overlay,
+        })?;
         let content = factory();
         self.refresh_content(app, content)
     }
 
-    pub fn refresh_content(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {
+    pub fn refresh_content(
+        &self,
+        app: &mut aqua::UiApp,
+        content: Element,
+    ) -> Result<(), PopoverError> {
         let (opacity, transform) = self.frame_values(app);
         self.popup.refresh(
             app,
@@ -481,7 +508,7 @@ impl AnimatedPickerHost {
         &mut self,
         app: &mut aqua::UiApp,
         event: &aqua_core::InputEvent,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PopoverError> {
         if app.host().service().topmost() != Some(self.popup.overlay) {
             return Ok(false);
         }

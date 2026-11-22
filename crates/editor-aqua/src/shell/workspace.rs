@@ -585,7 +585,9 @@ impl Workspace {
         for tooltip in &mut self.retiring_tooltips {
             match tooltip.sync(ui) {
                 Ok(moving) => changed |= moving,
-                Err(error) => tracing::warn!(%error, "could not animate closing tooltip"),
+                Err(error) => {
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not animate closing tooltip");
+                }
             }
         }
         self.retiring_tooltips.retain(|tooltip| tooltip.is_open(ui));
@@ -608,7 +610,7 @@ impl Workspace {
                 && tooltip.is_open(ui)
             {
                 if let Err(error) = tooltip.begin_close(ui) {
-                    tracing::warn!(%error, "could not close composer tooltip");
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not close composer tooltip");
                 }
                 self.retiring_tooltips.push(tooltip);
             }
@@ -629,13 +631,17 @@ impl Workspace {
                         self.composer_tooltip = Some((content, node, host));
                         changed = true;
                     }
-                    Err(error) => tracing::warn!(%error, "could not open composer tooltip"),
+                    Err(error) => {
+                        tracing::warn!(error = %diagnostics::chain(&error), "could not open composer tooltip");
+                    }
                 }
             }
         } else if let Some((_, _, host)) = &mut self.composer_tooltip {
             match host.sync(ui) {
                 Ok(updated) => changed |= updated,
-                Err(error) => tracing::warn!(%error, "could not synchronize composer tooltip"),
+                Err(error) => {
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not synchronize composer tooltip");
+                }
             }
         }
         changed
@@ -763,7 +769,7 @@ impl Workspace {
                 if owner.popup_is_open(kind, ui)
                     && let Err(error) = owner.close_popup(ui, kind, now)
                 {
-                    tracing::warn!(%error, "could not close composer popup");
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not close composer popup");
                 }
                 continue;
             }
@@ -813,10 +819,9 @@ impl Workspace {
                 }
             };
             let Some(content) = content else { continue };
-            let anchor = keyed_node(ui, anchor_key.into());
             let result = if owner.popup_is_open(kind, ui) {
                 owner.refresh_popup_content(kind, ui, content, now)
-            } else if let Some(anchor) = anchor {
+            } else if let Some(anchor) = keyed_node(ui, anchor_key.into()) {
                 owner.open_popup_content(ui, anchor, kind, content, now)
             } else {
                 continue;
@@ -824,7 +829,9 @@ impl Workspace {
             match result {
                 Ok(()) if kind == PopupKind::Mentions => owner.mention_revealed(),
                 Ok(()) => {}
-                Err(error) => tracing::warn!(%error, "could not synchronize composer popup"),
+                Err(error) => {
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not synchronize composer popup");
+                }
             }
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
@@ -887,7 +894,7 @@ impl Workspace {
             if dialog.is_open(ui) {
                 dialog.set_theme(*theme);
                 if let Err(error) = dialog.refresh_content(ui, content) {
-                    tracing::warn!(%error, "could not refresh terminal dialog");
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not refresh terminal dialog");
                 }
                 return;
             }
@@ -909,7 +916,9 @@ impl Workspace {
         .on_dismiss(move |_| dismissed.set(true));
         match crate::ui::dialog::DialogHost::open(ui, owner, dialog) {
             Ok(dialog) => self.terminal_dialog = Some(dialog),
-            Err(error) => tracing::warn!(%error, "could not open terminal dialog"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not open terminal dialog");
+            }
         }
     }
 

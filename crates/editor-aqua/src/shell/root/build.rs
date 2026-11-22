@@ -509,7 +509,7 @@ impl RootViews {
                 if dialog.is_open(ui) {
                     dialog.set_theme(shell.preferences.theme());
                     if let Err(error) = dialog.refresh_content(ui, panel) {
-                        tracing::warn!(%error, "could not refresh settings dialog");
+                        tracing::warn!(error = %diagnostics::chain(&error), "could not refresh settings dialog");
                     }
                     return;
                 }
@@ -531,7 +531,9 @@ impl RootViews {
             .on_dismiss(move |_| dismissed.set(true));
             match crate::ui::dialog::DialogHost::open(ui, owner, dialog) {
                 Ok(dialog) => self.dialogs.settings = Some(dialog),
-                Err(error) => tracing::warn!(%error, "could not open settings dialog"),
+                Err(error) => {
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not open settings dialog");
+                }
             }
         })();
         self.mount_palette(shell, ui);

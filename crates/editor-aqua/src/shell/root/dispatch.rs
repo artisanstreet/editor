@@ -221,7 +221,9 @@ impl RootViews {
                                 self.menus.color_scope = menu.as_ref().map(|_| scope);
                                 self.menus.color_menu = menu;
                             }
-                            Err(error) => tracing::warn!(%error, "could not open color copy menu"),
+                            Err(error) => {
+                                tracing::warn!(error = %diagnostics::chain(&error), "could not open color copy menu");
+                            }
                         }
                     }
                 }

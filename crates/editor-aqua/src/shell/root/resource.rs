@@ -86,7 +86,7 @@ impl RootViews {
             if dialog.is_open(ui) {
                 dialog.set_theme(shell.preferences.theme());
                 if let Err(error) = dialog.refresh_content(ui, content) {
-                    tracing::warn!(%error, "could not refresh resource preview");
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not refresh resource preview");
                 }
                 return;
             }
@@ -116,7 +116,9 @@ impl RootViews {
         });
         match crate::ui::dialog::DialogHost::open(ui, owner, dialog) {
             Ok(dialog) => self.dialogs.resource_dialog = Some(dialog),
-            Err(error) => tracing::warn!(%error, "could not open resource preview"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not open resource preview");
+            }
         }
     }
 }

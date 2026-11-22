@@ -138,7 +138,7 @@ impl ComposerOwner {
         kind: PopupKind,
         initial: Element,
         now: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), editor_ui::popover::PopoverError> {
         use aqua_ui::popup::PopupFocus;
         use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
         if self.popup_is_open(kind, app) {
@@ -210,7 +210,7 @@ impl ComposerOwner {
         app: &mut aqua::UiApp,
         content: Element,
         now: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), editor_ui::popover::PopoverError> {
         match kind {
             PopupKind::Model => self
                 .model_popup
@@ -250,7 +250,7 @@ impl ComposerOwner {
         app: &mut aqua::UiApp,
         kind: PopupKind,
         now: f64,
-    ) -> Result<(), String> {
+    ) -> Result<(), editor_ui::popover::PopoverError> {
         match kind {
             PopupKind::Model => {
                 if let Some(popup) = &mut self.model_popup {
@@ -271,7 +271,11 @@ impl ComposerOwner {
         Ok(())
     }
 
-    pub fn advance_popups(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), String> {
+    pub fn advance_popups(
+        &mut self,
+        app: &mut aqua::UiApp,
+        now: f64,
+    ) -> Result<(), editor_ui::popover::PopoverError> {
         for popup in [
             &mut self.model_popup,
             &mut self.mention_popup,
@@ -290,7 +294,7 @@ impl ComposerOwner {
         &mut self,
         app: &mut aqua::UiApp,
         event: &aqua_core::InputEvent,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, editor_ui::popover::PopoverError> {
         for (popup, close) in [
             (&mut self.model_popup, ComposerAction::ClosePicker),
             (&mut self.mention_popup, ComposerAction::DismissMentions),

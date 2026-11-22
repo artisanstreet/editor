@@ -53,6 +53,18 @@ fn placement(plan: TooltipPlan) -> Placement {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum TooltipError {
+    #[error("tooltip owner {owner:?} is not laid out")]
+    Unplaced { owner: NodeId },
+    #[error("tooltip {overlay:?} could not be positioned")]
+    Unpositioned {
+        overlay: aqua_ui::overlay::OverlayId,
+    },
+    #[error("animate the tooltip popup")]
+    Popup(#[from] super::popover::PopoverError),
+}
+
 pub struct TooltipHost {
     popup: super::popover::AnimatedPickerHost,
     started: std::time::Instant,
@@ -74,11 +86,11 @@ impl TooltipHost {
         owner: NodeId,
         requested: TooltipPlacement,
         surface: impl Fn(f32, bool) -> Element + 'static,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TooltipError> {
         let anchor = app
             .tree()
             .visual_rect(owner)
-            .ok_or_else(|| "tooltip owner is not laid out".to_owned())?;
+            .ok_or(TooltipError::Unplaced { owner })?;
         let plan = tooltip_plan(anchor, app.viewport(), requested);
         let surface: Rc<dyn Fn(f32, bool) -> Element> = Rc::new(surface);
         let mut options = PopupOptions::tooltip();
@@ -94,7 +106,7 @@ impl TooltipHost {
         let overlay = popup.overlay();
         if plan.fixed && app.set_popup_uncontained(overlay, true).is_none() {
             app.close_popup(overlay);
-            return Err("tooltip could not be positioned".to_owned());
+            return Err(TooltipError::Unpositioned { overlay });
         }
         Ok(Self {
             popup,
@@ -106,7 +118,7 @@ impl TooltipHost {
         })
     }
 
-    pub fn sync(&mut self, app: &mut aqua::UiApp) -> Result<bool, String> {
+    pub fn sync(&mut self, app: &mut aqua::UiApp) -> Result<bool, TooltipError> {
         if !self.popup.is_open(app) {
             return Ok(false);
         }
@@ -122,18 +134,19 @@ impl TooltipHost {
         let anchor = app
             .tree()
             .visual_rect(self.owner)
-            .ok_or_else(|| "tooltip owner is not laid out".to_owned())?;
+            .ok_or(TooltipError::Unplaced { owner: self.owner })?;
         let next = tooltip_plan(anchor, app.viewport(), self.placement);
         if next == self.plan {
             return Ok(moving);
         }
         self.popup
             .refresh_content(app, (self.surface)(next.width, next.fixed))?;
-        app.set_popup_placement(self.popup.overlay(), placement(next))
-            .ok_or_else(|| "tooltip could not be positioned".to_owned())?;
+        let overlay = self.popup.overlay();
+        app.set_popup_placement(overlay, placement(next))
+            .ok_or(TooltipError::Unpositioned { overlay })?;
         if next.fixed != self.plan.fixed {
-            app.set_popup_uncontained(self.popup.overlay(), next.fixed)
-                .ok_or_else(|| "tooltip could not be positioned".to_owned())?;
+            app.set_popup_uncontained(overlay, next.fixed)
+                .ok_or(TooltipError::Unpositioned { overlay })?;
         }
         self.plan = next;
         Ok(true)
@@ -147,8 +160,9 @@ impl TooltipHost {
         self.popup.dispose(app);
     }
 
-    pub fn begin_close(&mut self, app: &mut aqua::UiApp) -> Result<(), String> {
-        self.popup
-            .begin_close(app, self.started.elapsed().as_secs_f64())
+    pub fn begin_close(&mut self, app: &mut aqua::UiApp) -> Result<(), TooltipError> {
+        Ok(self
+            .popup
+            .begin_close(app, self.started.elapsed().as_secs_f64())?)
     }
 }

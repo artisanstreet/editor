@@ -122,12 +122,14 @@ impl RootViews {
             now,
             &workspace.sidebar_emit(false),
         ) {
-            tracing::warn!(%error, "could not synchronize sidebar overlays");
+            tracing::warn!(error = %diagnostics::chain(&error), "could not synchronize sidebar overlays");
         }
         match self.sidebar_views.sidebar_overlays.advance(ui, now) {
             Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
             Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "could not advance sidebar overlays"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not advance sidebar overlays");
+            }
         }
         if let Some(editor) = self.sidebar_views.sidebar_overlays.rename_editor()
             && let Some(key) = editor.text_key()

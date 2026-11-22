@@ -19,6 +19,7 @@ aqua-text = { workspace = true }
 aqua-fonts-system = { workspace = true }
 aqua-ui = { workspace = true }
 aqua-reactive = { workspace = true }
+aqua-runtime = { workspace = true }
 aqua-media = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }
 artisan-mentions.workspace = true

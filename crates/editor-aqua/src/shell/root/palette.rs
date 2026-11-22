@@ -49,7 +49,7 @@ impl RootViews {
             if dialog.is_open(ui) {
                 dialog.set_theme(shell.preferences.theme());
                 if let Err(error) = dialog.refresh_content(ui, content) {
-                    tracing::warn!(%error, "could not refresh command palette");
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not refresh command palette");
                 }
                 return;
             }
@@ -87,7 +87,9 @@ impl RootViews {
                     view.focus_query(ui);
                 }
             }
-            Err(error) => tracing::warn!(%error, "could not open command palette"),
+            Err(error) => {
+                tracing::warn!(error = %diagnostics::chain(&error), "could not open command palette");
+            }
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::ui::chrome::account::{MENU_GAP, TRIGGER};
-use crate::ui::popover::{AnimatedPickerHost, PickerEntrance};
+use crate::ui::popover::{AnimatedPickerHost, PickerEntrance, PopoverError};
 use aqua::UiApp;
 use aqua_ui::element::Element;
 use std::{rc::Rc, time::Duration};
@@ -26,7 +26,7 @@ impl Popup {
         content: impl FnOnce() -> Element,
         now: f64,
         dismissed: Rc<dyn Fn()>,
-    ) -> Result<(), String> {
+    ) -> Result<(), PopoverError> {
         if self.host.as_ref().is_some_and(|host| !host.is_open(ui)) {
             self.host = None;
         }
@@ -62,7 +62,7 @@ impl Popup {
         Ok(())
     }
 
-    pub(crate) fn advance(&mut self, ui: &mut UiApp, now: f64) -> Result<bool, String> {
+    pub(crate) fn advance(&mut self, ui: &mut UiApp, now: f64) -> Result<bool, PopoverError> {
         let Some(host) = &mut self.host else {
             return Ok(false);
         };
@@ -78,7 +78,7 @@ impl Popup {
         &mut self,
         ui: &mut UiApp,
         input: &aqua_core::InputEvent,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PopoverError> {
         match &mut self.host {
             Some(host) if !host.is_closing() => host.request_dismissal(ui, input),
             _ => Ok(false),

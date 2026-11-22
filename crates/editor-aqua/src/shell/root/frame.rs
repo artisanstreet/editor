@@ -92,7 +92,9 @@ impl RootViews {
             match menu.advance(ui, ctx.now().as_secs_f64()) {
                 Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
                 Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "could not advance color copy menu"),
+                Err(error) => {
+                    tracing::warn!(error = %diagnostics::chain(&error), "could not advance color copy menu");
+                }
             }
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
