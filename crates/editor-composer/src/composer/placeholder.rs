@@ -104,5 +104,7 @@ const VOCABULARY: [&str; 100] = [
 #[must_use]
 pub(crate) fn phrase(generation: u64) -> &'static str {
     let len = VOCABULARY.len() as u64;
-    VOCABULARY[usize::try_from(generation % len).unwrap_or_default()]
+    let index = usize::try_from(generation % len)
+        .expect("invariant: an index below the vocabulary's length fits a usize");
+    VOCABULARY[index]
 }
