@@ -510,7 +510,14 @@ fn ctrl_alt_b_swaps_the_overview_for_the_full_inspector() {
 }
 
 #[test]
-fn the_overview_only_shows_when_its_full_width_fits() {
+fn the_overview_shows_as_soon_as_the_chat_keeps_its_full_reading_column() {
+    struct Measured {
+        overview: bool,
+        thread: f32,
+        transcript: f32,
+        composer: f32,
+    }
+    let full_chat = editor_aqua::conversation::view::FULL_CHAT_WIDTH;
     let mut opened = ThreadShell::open("fit-host", "fit-thread", Motion::Reduced);
     let window = wide(&mut opened, 1800.0);
     let ThreadShell {
@@ -521,22 +528,77 @@ fn the_overview_only_shows_when_its_full_width_fits() {
     let mut root = RootViews::default();
     let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
     resources.ui.mount(|_| element).unwrap();
-    for step in 0..50_u16 {
-        let width = 10.0_f32.mul_add(f32::from(step), 1300.0);
+    resources.ui.layout().unwrap();
+    let full_composer = keyed(&resources.ui, "composer").unwrap().w;
+    let transcript_inset = keyed(&resources.ui, "thread-under-sky").unwrap().w
+        - keyed(
+            &resources.ui,
+            editor_aqua::conversation::view::TRANSCRIPT_FRAME,
+        )
+        .unwrap()
+        .w;
+    let mut measure = |width: f32| {
         let mut resized = window.clone();
         resized.inner_size.width = f64::from(width);
         resources.ui.set_viewport(width, 700.0, 1.0);
         rebuild(&mut root, &mut shell, &mut resources.ui, &resized);
-        let Some(overview) = keyed(&resources.ui, "artisan-thread-overview") else {
-            continue;
-        };
-        let thread = keyed(&resources.ui, "thread-under-sky").unwrap();
-        assert!(
-            thread.w >= editor_aqua::shell::layout::CHAT_MIN_WIDTH,
-            "at {width}px the overview ({}px) squeezes the thread to {}px",
-            overview.w,
-            thread.w
+        let width_of = |key: &str| keyed(&resources.ui, key).unwrap().w;
+        Measured {
+            overview: keyed(&resources.ui, "artisan-thread-overview").is_some(),
+            thread: width_of("thread-under-sky"),
+            transcript: width_of(editor_aqua::conversation::view::TRANSCRIPT_FRAME),
+            composer: width_of("composer"),
+        }
+    };
+    let coarse = (0..50_u16).map(|step| 10.0_f32.mul_add(f32::from(step), 1300.0));
+    let mut hidden_at = None;
+    let mut shown_at = None;
+    for width in coarse {
+        let measured = measure(width);
+        match (measured.overview, shown_at) {
+            (false, None) => hidden_at = Some(width),
+            (true, None) => shown_at = Some(width),
+            (true, Some(_)) => {}
+            (false, Some(shown)) => {
+                panic!("the overview hid again at {width}px after showing at {shown}px")
+            }
+        }
+    }
+    let (hidden, shown) = hidden_at.zip(shown_at).expect(
+        "the overview is hidden at 1300px and shows by 1790px, so the sweep crosses the fit threshold",
+    );
+    let threshold = (1..=10_u16)
+        .map(|offset| hidden + f32::from(offset))
+        .find(|&width| width >= shown || measure(width).overview)
+        .expect("invariant: the overview shows at the coarse width");
+    for (width, expect_overview) in [(threshold - 1.0, false), (threshold, true)] {
+        let measured = measure(width);
+        assert_eq!(
+            measured.overview, expect_overview,
+            "at {width}px the overview should be shown: {expect_overview}"
         );
+        assert!(
+            measured.thread >= full_chat,
+            "at {width}px the chat is {}px, under the {full_chat}px it needs",
+            measured.thread
+        );
+        assert!(
+            measured.transcript >= full_chat - transcript_inset - 0.5,
+            "at {width}px the transcript is {}px, narrower than the {full_chat}px chat less its {transcript_inset}px edge",
+            measured.transcript
+        );
+        assert!(
+            measured.composer >= full_composer - 0.5,
+            "at {width}px the composer narrows from {full_composer}px to {}px",
+            measured.composer
+        );
+        if expect_overview {
+            assert!(
+                measured.thread < full_chat + 1.0,
+                "the overview first showed at {width}px with {}px of chat, more than the {full_chat}px it needs",
+                measured.thread
+            );
+        }
     }
 }
 
