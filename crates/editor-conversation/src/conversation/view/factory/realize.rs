@@ -532,7 +532,7 @@ impl RowFactory {
         })
     }
 
-    fn attachments_row(
+    pub(super) fn attachments_row(
         &self,
         cx: &RowContext<'_>,
         id: &ItemId,
@@ -1063,3 +1063,7 @@ fn has_empty_inline_text(row: &RealizedRow, id: &ItemId, slot: Slot) -> bool {
         .get(id)
         .is_some_and(|item| slot.inline_text(item).is_some_and(str::is_empty))
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/conversation/view/factory/harness.rs"]
+pub(super) mod harness;
