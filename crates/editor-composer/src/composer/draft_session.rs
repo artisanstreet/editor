@@ -20,6 +20,17 @@ pub struct Submission {
 }
 
 impl Submission {
+    fn retrying(mut self, failed: &Self) -> Self {
+        if let (Some(created), Some(failed_create)) = (&mut self.create, &failed.create)
+            && created.project_id == failed_create.project_id
+        {
+            created.id = failed_create.id.clone();
+            self.thread = failed.thread.clone();
+            self.message.config = Some(created.config.clone());
+        }
+        self
+    }
+
     fn resends(&self, other: &Self) -> bool {
         let same_thread = match (&self.create, &other.create) {
             (None, None) => self.thread == other.thread,
@@ -35,7 +46,14 @@ impl Submission {
         same_thread
             && self.message.text == other.message.text
             && self.message.images == other.message.images
-            && self.message.config == other.message.config
+            && self.message_config() == other.message_config()
+    }
+
+    fn message_config(&self) -> Option<&artisan_api::EngineConfig> {
+        self.message
+            .config
+            .as_ref()
+            .or_else(|| self.create.as_ref().map(|create| &create.config))
     }
 }
 
@@ -1273,6 +1291,29 @@ impl DraftSession {
         }
     }
 
+    #[must_use]
+    pub(crate) fn in_flight_message(&self) -> Option<(ThreadId, ItemId)> {
+        self.draft()?.in_flight().map(|outgoing| {
+            (
+                outgoing.request.thread.clone(),
+                outgoing.request.message.id.clone(),
+            )
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn outgoing_submission(&self) -> Option<&Submission> {
+        self.draft()?.outgoing().map(|outgoing| &outgoing.request)
+    }
+
+    #[must_use]
+    pub(crate) fn creating(&self) -> Option<&ThreadId> {
+        self.draft()?
+            .outgoing()
+            .filter(|outgoing| outgoing.request.create.is_some())
+            .map(|outgoing| &outgoing.request.thread)
+    }
+
     pub fn send_failed(&self) -> bool {
         self.draft().is_some_and(Draft::released)
     }
@@ -1329,7 +1370,8 @@ impl DraftSession {
         }
         let request = match std::mem::replace(&mut draft.send, Send::Idle) {
             Send::Outgoing(failed) if failed.request.resends(&submission) => failed.request,
-            Send::Outgoing(_) | Send::Idle | Send::Accepted(_) => submission,
+            Send::Outgoing(failed) => submission.retrying(&failed.request),
+            Send::Idle | Send::Accepted(_) => submission,
         };
         draft.send = Send::Outgoing(Box::new(Outgoing {
             request,

@@ -35,6 +35,7 @@ fn pending_write() -> (DraftHandle, DraftBody, tempfile::TempDir) {
             timer: None,
             version: 0,
             forgetting: false,
+            outgoing: Outgoing::default(),
         }),
         changed,
         cancelled: CancellationToken::new(),

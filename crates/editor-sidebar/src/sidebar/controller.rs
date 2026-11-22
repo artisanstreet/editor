@@ -1,12 +1,13 @@
 use std::num::NonZeroUsize;
 
-use artisan_api::{DirListing, Project, ProjectId, ThreadId, Timestamp, UpdateThread};
+use artisan_api::{DirListing, Project, ProjectId, ThreadId, Timestamp};
 
 use editor_core::client::CallError;
 use editor_core::delivery::Delivery;
 use editor_core::host::ThreadPageDirection;
 use editor_core::{
-    CompletionKey, CompletionScope, CompletionSlot, Core, HostId, HostInstance, Screen,
+    CompletionKey, CompletionScope, CompletionSlot, Core, EditThreadError, HostId, HostInstance,
+    Screen, ThreadEdit,
 };
 
 use super::geometry::{
@@ -19,50 +20,10 @@ use super::row::rename_value;
 const MIN_TEXT_QUERY: usize = 3;
 const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
 
-#[derive(Debug, thiserror::Error)]
-pub enum ThreadActionError {
-    #[error("settle thread {thread}")]
-    Settle {
-        thread: ThreadId,
-        #[source]
-        source: CallError,
-    },
-    #[error("mark thread {thread} unread")]
-    MarkUnread {
-        thread: ThreadId,
-        #[source]
-        source: CallError,
-    },
-    #[error("archive thread {thread}")]
-    Archive {
-        thread: ThreadId,
-        #[source]
-        source: CallError,
-    },
-    #[error("rename thread {thread}")]
-    Rename {
-        thread: ThreadId,
-        #[source]
-        source: CallError,
-    },
-}
-
-impl ThreadActionError {
-    fn problem(&self) -> editor_core::Problem {
-        let (headline, source) = match self {
-            Self::Settle { source, .. } => ("Couldn't mark this thread as read.", source),
-            Self::MarkUnread { source, .. } => ("Couldn't mark this thread as unread.", source),
-            Self::Archive { source, .. } => ("Couldn't archive this thread.", source),
-            Self::Rename { source, .. } => ("Couldn't rename this thread.", source),
-        };
-        editor_core::Problem::caused_by(format!("{headline} {}", source.fault().sentence()), self)
-    }
-}
-
 enum Completion {
     Action {
         key: CompletionKey,
-        result: Result<(), ThreadActionError>,
+        error: EditThreadError,
     },
     Browse {
         host: HostId,
@@ -446,10 +407,7 @@ impl Sidebar {
         let mut accepted = false;
         for completion in self.completions.drain() {
             match completion {
-                Completion::Action {
-                    key,
-                    result: Err(error),
-                } if self.actions.accepts(core, &key) => {
+                Completion::Action { key, error } if self.actions.accepts(core, &key) => {
                     accepted = true;
                     let host = key.host();
                     tracing::error!(%host, error = %diagnostics::chain(&error), "a thread action failed");
@@ -560,94 +518,50 @@ impl Sidebar {
         core.navigate(Screen::NewThread { host, project });
     }
 
-    fn call<F, Fut>(&self, core: &Core, operation: F)
-    where
-        F: FnOnce(editor_core::ForgeClient) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<(), ThreadActionError>> + Send + 'static,
-    {
+    fn edit(&self, core: &mut Core, thread: &ThreadId, edit: ThreadEdit) {
         let Some(host) = self
             .host
             .as_ref()
             .zip(self.host_instance)
-            .and_then(|(id, instance)| core.host_if_instance(id, instance))
+            .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
         else {
             return;
         };
         let key = self.actions.key(&host.id, host.instance());
-        let client = host.client.clone();
         let sender = self.completions.sender();
-        editor_core::runtime::runtime().spawn(async move {
-            let result = operation(client).await;
-            sender.offer(Completion::Action { key, result }).await;
-        });
+        host.edit_thread(
+            thread,
+            edit,
+            Box::new(move |result| {
+                Box::pin(async move {
+                    if let Err(error) = result {
+                        sender.offer(Completion::Action { key, error }).await;
+                    }
+                })
+            }),
+        );
     }
 
-    pub fn settle(&self, core: &Core, thread: ThreadId) {
-        let Some(activity) = self
-            .host
-            .as_ref()
-            .zip(self.host_instance)
-            .and_then(|(id, instance)| core.host_if_instance(id, instance))
-            .and_then(|host| host.threads.get(&thread))
-            .map(|thread| thread.activity_seq)
-        else {
-            return;
-        };
-        self.call(core, move |client| async move {
-            client
-                .settle_thread(&thread, activity)
-                .await
-                .map(drop)
-                .map_err(|source| ThreadActionError::Settle { thread, source })
-        });
+    pub fn settle(&self, core: &mut Core, thread: &ThreadId, observed_seq: artisan_api::Seq) {
+        self.edit(core, thread, ThreadEdit::Settle { observed_seq });
     }
 
-    pub(crate) fn mark_unread(&self, core: &Core, thread: ThreadId) {
-        self.call(core, move |client| async move {
-            client
-                .mark_unread(&thread)
-                .await
-                .map(drop)
-                .map_err(|source| ThreadActionError::MarkUnread { thread, source })
-        });
+    pub(crate) fn mark_unread(&self, core: &mut Core, thread: &ThreadId) {
+        self.edit(core, thread, ThreadEdit::MarkUnread);
     }
 
-    pub(crate) fn archive(&self, core: &Core, thread: ThreadId) {
-        self.call(core, move |client| async move {
-            client
-                .update_thread(
-                    &thread,
-                    &UpdateThread {
-                        archived: Some(true),
-                        ..UpdateThread::default()
-                    },
-                )
-                .await
-                .map(drop)
-                .map_err(|source| ThreadActionError::Archive { thread, source })
-        });
+    pub(crate) fn archive(&self, core: &mut Core, thread: &ThreadId) {
+        self.edit(core, thread, ThreadEdit::Archive);
     }
 
-    pub(crate) fn submit_rename(&mut self, core: &Core, text: &str) {
+    pub(crate) fn submit_rename(&mut self, core: &mut Core, text: &str) {
         let Some(thread) = self.rename.take() else {
             return;
         };
         let Some(title) = rename_value(text) else {
             return;
         };
-        self.call(core, move |client| async move {
-            client
-                .update_thread(
-                    &thread,
-                    &UpdateThread {
-                        title: Some(title),
-                        ..UpdateThread::default()
-                    },
-                )
-                .await
-                .map(drop)
-                .map_err(|source| ThreadActionError::Rename { thread, source })
-        });
+        self.edit(core, &thread, ThreadEdit::Rename(title));
     }
 
     fn slide_threads(&self, core: &mut Core, direction: PageDirection) {

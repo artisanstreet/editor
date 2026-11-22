@@ -198,9 +198,8 @@ fn sidebar_theme_changes_request_the_snapshot_sweep_in_both_sidebars() {
 }
 
 #[test]
-fn an_accepted_new_thread_only_takes_over_while_the_user_is_still_composing_it() {
+fn a_sent_new_thread_only_takes_over_while_the_user_is_still_composing_it() {
     use artisan_api::ThreadId;
-    use editor_aqua::composer::controller::ComposerTarget;
     use editor_aqua::core::SettingsPage;
     use editor_aqua::shell::workspace::Followed;
 
@@ -215,10 +214,6 @@ fn an_accepted_new_thread_only_takes_over_while_the_user_is_still_composing_it()
         host: config.id.clone(),
         project: None,
     };
-    let target = ComposerTarget::NewThread {
-        host: config.id.clone(),
-        project: None,
-    };
     let sent = ThreadId::from("sent-thread");
     let opened = Screen::Thread {
         host: config.id.clone(),
@@ -227,7 +222,7 @@ fn an_accepted_new_thread_only_takes_over_while_the_user_is_still_composing_it()
 
     core.navigate(composing.clone());
     assert_eq!(
-        Workspace::follow_accepted(&mut core, &target, &sent),
+        Workspace::follow_sent(&mut core, &config.id, &sent, &[]),
         Followed::Navigated
     );
     assert_eq!(core.screen(), &opened);
@@ -235,7 +230,7 @@ fn an_accepted_new_thread_only_takes_over_while_the_user_is_still_composing_it()
     core.navigate(composing.clone());
     core.navigate(Screen::Settings(SettingsPage::General));
     assert_eq!(
-        Workspace::follow_accepted(&mut core, &target, &sent),
+        Workspace::follow_sent(&mut core, &config.id, &sent, &[]),
         Followed::BehindSettings
     );
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::General));
@@ -245,8 +240,29 @@ fn an_accepted_new_thread_only_takes_over_while_the_user_is_still_composing_it()
     core.navigate(composing);
     core.navigate(Screen::Marketplace);
     assert_eq!(
-        Workspace::follow_accepted(&mut core, &target, &sent),
+        Workspace::follow_sent(&mut core, &config.id, &sent, &[]),
         Followed::Stayed
     );
     assert_eq!(core.screen(), &Screen::Marketplace);
+    let failed = ThreadId::from("failed-thread");
+    core.navigate(Screen::Thread {
+        host: config.id.clone(),
+        thread: failed.clone(),
+    });
+    assert_eq!(
+        Workspace::follow_sent(&mut core, &config.id, &sent, std::slice::from_ref(&failed)),
+        Followed::Navigated,
+        "a retry under a new thread id moves off the failed thread it replaces"
+    );
+    assert_eq!(core.screen(), &opened);
+    let other = Screen::Thread {
+        host: config.id.clone(),
+        thread: ThreadId::from("unrelated"),
+    };
+    core.navigate(other.clone());
+    assert_eq!(
+        Workspace::follow_sent(&mut core, &config.id, &sent, std::slice::from_ref(&failed)),
+        Followed::Stayed
+    );
+    assert_eq!(core.screen(), &other);
 }

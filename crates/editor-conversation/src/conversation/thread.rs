@@ -4,7 +4,7 @@ use artisan_api::{
     Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, Status, ThreadId, WorkSpan,
 };
 use editor_core::ResidentBytes as _;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 pub(crate) const PAGE: u32 = 100;
@@ -100,6 +100,7 @@ pub struct ThreadView {
     pub items: Shared<BTreeMap<Seq, Arc<Item>>>,
     pub(crate) work: Shared<BTreeMap<Seq, WorkSpan>>,
     positions: Shared<HashMap<ItemId, Seq>>,
+    local: Shared<BTreeMap<Seq, Arc<Item>>>,
     resident_bytes: usize,
     pub(crate) live: Shared<HashMap<LiveTarget, LiveText>>,
     pub viewport: Viewport,
@@ -107,6 +108,7 @@ pub struct ThreadView {
     pub(crate) answers: Shared<HashMap<ItemId, ItemAnswer>>,
     pub(crate) work_open: Shared<HashMap<RunId, bool>>,
     pub runs: Shared<HashMap<RunId, Run>>,
+    streamed_while_loading: Shared<HashSet<ItemId>>,
 }
 
 impl ThreadView {
@@ -117,6 +119,7 @@ impl ThreadView {
             items: Shared::default(),
             work: Shared::default(),
             positions: Shared::default(),
+            local: Shared::default(),
             resident_bytes: 0,
             live: Shared::default(),
             viewport: Viewport::default(),
@@ -124,6 +127,7 @@ impl ThreadView {
             answers: Shared::default(),
             work_open: Shared::default(),
             runs: Shared::default(),
+            streamed_while_loading: Shared::default(),
         };
         let effects = view.handle(&Input::Open);
         (view, effects)
@@ -139,12 +143,14 @@ impl ThreadView {
         self.items = Shared::default();
         self.work = Shared::default();
         self.positions = Shared::default();
+        self.local = Shared::default();
         self.resident_bytes = 0;
         self.live = Shared::default();
         self.ui = Shared::default();
         self.answers = Shared::default();
         self.work_open = Shared::default();
         self.runs = Shared::default();
+        self.streamed_while_loading = Shared::default();
         self.handle(&Input::Open)
     }
 
@@ -270,8 +276,31 @@ impl ThreadView {
     }
 
     pub(crate) fn shown(&self) -> impl DoubleEndedIterator<Item = &Item> {
-        let end = self.window().gap.unwrap_or(Seq::MAX);
-        self.items.range(..=end).map(|(_, item)| item.as_ref())
+        let gap = self.window().gap;
+        let end = gap.unwrap_or(Seq::MAX);
+        let local = gap
+            .is_none()
+            .then(|| self.local.values())
+            .into_iter()
+            .flatten();
+        self.items
+            .range(..=end)
+            .map(|(_, item)| item.as_ref())
+            .chain(local.map(Arc::as_ref))
+    }
+
+    pub(crate) fn sync_local<'a>(&mut self, pending: impl Iterator<Item = &'a Arc<Item>>) {
+        let local: BTreeMap<Seq, Arc<Item>> = pending
+            .filter(|item| item.thread_id == self.thread && !self.positions.contains_key(&item.id))
+            .map(|item| (item.position, Arc::clone(item)))
+            .collect();
+        if *self.local != local {
+            self.local = Shared::new(local);
+        }
+    }
+
+    fn local_item(&self, id: &ItemId) -> Option<&Arc<Item>> {
+        self.local.values().find(|item| &item.id == id)
     }
 
     pub(crate) fn shown_work(&self) -> impl DoubleEndedIterator<Item = &WorkSpan> {
@@ -292,6 +321,7 @@ impl ThreadView {
             .get(id)
             .and_then(|position| self.items.get(position))
             .or_else(|| self.context.get(id))
+            .or_else(|| self.local_item(id))
             .map(Arc::as_ref)
     }
 
@@ -300,11 +330,15 @@ impl ThreadView {
             .get(id)
             .and_then(|position| self.items.get(position))
             .or_else(|| self.context.get(id))
+            .or_else(|| self.local_item(id))
             .cloned()
     }
 
     pub(crate) fn position_of(&self, id: &ItemId) -> Option<Seq> {
-        self.positions.get(id).copied()
+        self.positions
+            .get(id)
+            .copied()
+            .or_else(|| self.local_item(id).map(|item| item.position))
     }
 
     fn upsert(&mut self, item: Arc<Item>) -> bool {
@@ -358,6 +392,9 @@ impl ThreadView {
         let id = item.id.clone();
         if !self.upsert(item) {
             return false;
+        }
+        if self.viewport.requested.is_some() {
+            self.streamed_while_loading.make_mut().insert(id.clone());
         }
         if let Some(at) = arrived {
             self.ui.make_mut().entry(id).or_default().arrived = Some(at);
@@ -421,16 +458,9 @@ impl ThreadView {
             self.positions.retain(|_, position| kept(*position));
             self.resident_bytes = self.items.values().map(|item| item.resident_bytes()).sum();
         }
+        let streamed = std::mem::take(&mut self.streamed_while_loading);
         if matches!(fetch, Fetch::Tail | Fetch::At { .. }) {
-            let kept = |position: Seq| {
-                matches!(fetch, Fetch::Tail) && last.is_some_and(|last| position > last)
-            };
-            self.items.retain(|position, _| kept(*position));
-            self.work
-                .retain(|_, span| kept(span.first) && kept(span.last));
-            self.positions.retain(|_, position| kept(*position));
-            self.resident_bytes = self.items.values().map(|item| item.resident_bytes()).sum();
-            self.ui.retain(|id, _| self.positions.contains_key(id));
+            self.replace_window(fetch, last, &streamed);
         }
         for span in page.work {
             self.work.make_mut().insert(span.first, span);
@@ -494,7 +524,23 @@ impl ThreadView {
         true
     }
 
+    fn replace_window(&mut self, fetch: Fetch, last: Option<Seq>, streamed: &HashSet<ItemId>) {
+        let tail = matches!(fetch, Fetch::Tail);
+        let kept = |position: Seq| tail && last.is_some_and(|last| position > last);
+        let survives =
+            |id: &ItemId, position: Seq| kept(position) || (tail && streamed.contains(id));
+        self.items
+            .retain(|position, item| survives(&item.id, *position));
+        self.work
+            .retain(|_, span| kept(span.first) && kept(span.last));
+        self.positions
+            .retain(|id, position| survives(id, *position));
+        self.resident_bytes = self.items.values().map(|item| item.resident_bytes()).sum();
+        self.ui.retain(|id, _| self.positions.contains_key(id));
+    }
+
     pub(crate) fn page_failed(&mut self) -> Vec<Effect> {
+        self.streamed_while_loading = Shared::default();
         self.handle(&Input::LoadFailed)
     }
 
@@ -587,7 +633,7 @@ impl ThreadView {
         if newer && let Some(last) = last_item.into_iter().chain(last_span).max() {
             self.handle(&Input::EvictedNewer { last });
         }
-        let runs: std::collections::HashSet<_> = self
+        let runs: HashSet<_> = self
             .items
             .values()
             .filter_map(|item| item.run_id.as_ref())

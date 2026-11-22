@@ -10,7 +10,10 @@ use super::{
 use artisan_api::{
     BlobHash, CreateThread, EngineConfig, ItemId, ProjectId, SendMessage, SignInState, ThreadId,
 };
-use editor_core::{Core, HostData, HostId, HostInstance, delivery::Delivery, runtime::runtime};
+use editor_core::{
+    Core, HostData, HostId, HostInstance, LocalSend, NewThread, delivery::Delivery,
+    runtime::runtime,
+};
 use editor_ui::text::editor::{Editor, ListKey, Mode};
 use std::{cell::RefCell, num::NonZeroUsize, path::PathBuf, rc::Rc};
 
@@ -46,7 +49,12 @@ struct TurnCompletion {
     generation: u64,
     thread: ThreadId,
     action: TurnAction,
-    error: Option<editor_core::client::CallError>,
+    error: Option<TurnFailure>,
+}
+
+enum TurnFailure {
+    Call(editor_core::client::CallError),
+    Edit(editor_core::EditThreadError),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -353,7 +361,7 @@ impl Composer {
                 TurnCall::Continue => client.continue_turn(&thread).await,
                 TurnCall::ClearGoal => client.clear_goal(&thread).await,
             };
-            let error = result.err();
+            let error = result.err().map(TurnFailure::Call);
             delivery
                 .offer(TurnCompletion {
                     instance,
@@ -367,41 +375,43 @@ impl Composer {
         matches!(call, TurnCall::Stop).then_some(issued)
     }
 
-    pub(crate) fn apply_permissions(&self, host: &HostData, permissions: artisan_api::Permissions) {
+    pub(crate) fn apply_permissions(
+        &self,
+        host: &mut HostData,
+        permissions: artisan_api::Permissions,
+    ) {
         let ComposerTarget::Thread { thread, .. } = &self.target else {
             return;
         };
-        if !self.matches_host(host) {
+        if !self.matches_host(host)
+            || host
+                .threads
+                .get(thread)
+                .is_none_or(|known| known.config.permissions == permissions)
+        {
             return;
         }
-        let Some(mut config) = host.threads.get(thread).map(|thread| thread.config.clone()) else {
-            return;
-        };
-        if config.permissions == permissions {
-            return;
-        }
-        config.permissions = permissions;
-        let client = host.client.clone();
-        let thread = thread.clone();
         let instance = host.instance();
         let generation = self.target_generation;
         let delivery = self.turn_completions.sender();
-        runtime().spawn(async move {
-            let update = artisan_api::UpdateThread {
-                config: Some(config),
-                ..Default::default()
-            };
-            let error = client.update_thread(&thread, &update).await.err();
-            delivery
-                .offer(TurnCompletion {
-                    instance,
-                    generation,
-                    thread,
-                    action: TurnAction::Permissions,
-                    error,
+        let completed = thread.clone();
+        host.edit_thread(
+            thread,
+            editor_core::ThreadEdit::Permissions(permissions),
+            Box::new(move |result| {
+                Box::pin(async move {
+                    delivery
+                        .offer(TurnCompletion {
+                            instance,
+                            generation,
+                            thread: completed,
+                            action: TurnAction::Permissions,
+                            error: result.err().map(TurnFailure::Edit),
+                        })
+                        .await;
                 })
-                .await;
-        });
+            }),
+        );
     }
 
     pub(crate) fn drain_turn_actions(&mut self, core: &Core) -> bool {
@@ -421,14 +431,41 @@ impl Composer {
                 TurnAction::Continue => self.continuing = false,
                 TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
             }
-            if let Some(error) = &completion.error
-                && let Some(problem) = turn_problem(completion.action, error)
-            {
-                tracing::warn!(thread = %completion.thread, action = ?completion.action, error = %diagnostics::chain(error), "turn action failed");
-                self.notice = Some(problem);
+            match &completion.error {
+                Some(TurnFailure::Call(error)) => {
+                    if let Some(problem) = turn_problem(completion.action, error) {
+                        tracing::warn!(thread = %completion.thread, action = ?completion.action, error = %diagnostics::chain(error), "turn action failed");
+                        self.notice = Some(problem);
+                    }
+                }
+                Some(TurnFailure::Edit(error)) => {
+                    tracing::warn!(thread = %completion.thread, action = ?completion.action, error = %diagnostics::chain(error), "turn action failed");
+                    self.notice = Some(error.problem());
+                    if let editor_core::ThreadEdit::Permissions(refused) = error.edit() {
+                        self.restore_permissions(core, &completion.thread, *refused);
+                    }
+                }
+                None => {}
             }
         }
         before != (self.cancelling, self.continuing, self.notice.clone())
+    }
+
+    fn restore_permissions(
+        &mut self,
+        core: &Core,
+        thread: &ThreadId,
+        refused: artisan_api::Permissions,
+    ) {
+        let shown = core
+            .host(self.target.host())
+            .and_then(|host| host.threads.get(thread))
+            .map(|known| known.config.permissions);
+        if let (Some(config), Some(shown)) = (&mut self.config, shown)
+            && config.permissions == refused
+        {
+            config.permissions = shown;
+        }
     }
 
     pub(crate) fn draft_editable(&self) -> bool {
@@ -751,7 +788,9 @@ impl Composer {
         self.settle_refusal(core);
         for event in &events {
             match event {
-                SessionEvent::Accepted { .. } | SessionEvent::Changed => {}
+                SessionEvent::Accepted { .. }
+                | SessionEvent::HandedBack { .. }
+                | SessionEvent::Changed => {}
                 SessionEvent::ImageAdopted(hash) => {
                     if self.restore_revision != Some(self.edit_revision)
                         && let Some(attachments) = &mut self.attachments
@@ -1100,13 +1139,15 @@ impl Composer {
         Ok((images, config))
     }
 
-    pub fn send(&mut self, host: &HostData) -> Result<(), SendRefusal> {
+    pub fn send(&mut self, host: &HostData) -> Result<LocalSend, SendRefusal> {
         let (images, config) = self.readiness(host)?;
         self.refused = None;
-        let (create, thread_config, thread) = match &self.target {
+        let (create, thread_config, settling, thread) = match &self.target {
             ComposerTarget::Thread { thread, .. } => (
                 None,
-                host.threads.get(thread).map(|thread| thread.config.clone()),
+                host.confirmed_thread(thread)
+                    .map(|thread| thread.config.clone()),
+                host.permissions_changing(thread),
                 thread.clone(),
             ),
             ComposerTarget::NewThread { .. } => {
@@ -1122,6 +1163,7 @@ impl Composer {
                         spawned_by: None,
                     }),
                     Some(config.clone()),
+                    false,
                     thread,
                 )
             }
@@ -1130,21 +1172,48 @@ impl Composer {
             id: ItemId::new(),
             text: file_links(self.editor.borrow().text().trim(), &self.files),
             images,
-            config: (thread_config.as_ref() != Some(&config)).then_some(config),
+            config: (settling || thread_config.as_ref() != Some(&config)).then_some(config),
             draft: None,
         };
         self.save();
-        self.session
-            .as_ref()
-            .ok_or(SendRefusal::NoDraft)?
-            .submit(Submission {
+        let session = self.session.as_ref().ok_or(SendRefusal::NoDraft)?;
+        let gate = host.post_gate(&thread);
+        let receipt = host.send_receipt();
+        let attempt = receipt.attempt();
+        let accepted = session.submit(
+            Submission {
                 message,
                 create,
                 thread,
-            })?;
+            },
+            gate,
+            Some(receipt),
+        )?;
+        let sent = local_send(&accepted, attempt);
         self.clear_input();
         self.cleared = Some(std::time::Instant::now());
-        Ok(())
+        Ok(sent)
+    }
+
+    #[must_use]
+    pub fn creating(&self) -> Option<ThreadId> {
+        self.session
+            .as_ref()?
+            .read(|state| state.creating().cloned())
+    }
+}
+
+fn local_send(submission: &Submission, attempt: editor_core::SendAttempt) -> LocalSend {
+    LocalSend {
+        attempt,
+        thread: submission.thread.clone(),
+        message: submission.message.id.clone(),
+        text: submission.message.text.clone(),
+        images: submission.message.images.clone(),
+        create: submission.create.as_ref().map(|create| NewThread {
+            project: create.project_id.clone(),
+            config: create.config.clone(),
+        }),
     }
 }
 

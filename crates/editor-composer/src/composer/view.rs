@@ -660,6 +660,11 @@ struct AnswerCompletion {
 pub enum ComposerEffect {
     Stopping(editor_core::HostId, artisan_api::ThreadId),
     StopFailed(editor_core::HostId, artisan_api::ThreadId),
+    OpenSent {
+        host: editor_core::HostId,
+        thread: artisan_api::ThreadId,
+        replaced: Vec<artisan_api::ThreadId>,
+    },
     EditorChanged,
     FocusEditor,
     NewProject,

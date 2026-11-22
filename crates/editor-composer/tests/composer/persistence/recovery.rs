@@ -300,17 +300,21 @@ fn removing_the_pairing_keeps_a_fresh_draft_its_unanswered_message_and_unfinishe
     device.settle();
     type_into(&lease, "typed while Forge was away");
     lease
-        .submit(Submission {
-            message: artisan_api::SendMessage {
-                id: ItemId("unanswered".into()),
-                text: "typed while Forge was away".into(),
-                images: Vec::new(),
-                config: None,
-                draft: None,
+        .submit(
+            Submission {
+                message: artisan_api::SendMessage {
+                    id: ItemId("unanswered".into()),
+                    text: "typed while Forge was away".into(),
+                    images: Vec::new(),
+                    config: None,
+                    draft: None,
+                },
+                create: None,
+                thread: ThreadId("thread".into()),
             },
-            create: None,
-            thread: ThreadId("thread".into()),
-        })
+            None,
+            None,
+        )
         .unwrap();
     type_into(&lease, "typed after sending");
     let image = png();
@@ -355,17 +359,21 @@ fn a_send_that_fails_before_the_pairing_is_removed_keeps_the_text_typed_after_it
     device.settle();
     type_into(&lease, "typed while Forge was away");
     lease
-        .submit(Submission {
-            message: artisan_api::SendMessage {
-                id: ItemId("unanswered".into()),
-                text: "typed while Forge was away".into(),
-                images: Vec::new(),
-                config: None,
-                draft: None,
+        .submit(
+            Submission {
+                message: artisan_api::SendMessage {
+                    id: ItemId("unanswered".into()),
+                    text: "typed while Forge was away".into(),
+                    images: Vec::new(),
+                    config: None,
+                    draft: None,
+                },
+                create: None,
+                thread: ThreadId("thread".into()),
             },
-            create: None,
-            thread: ThreadId("thread".into()),
-        })
+            None,
+            None,
+        )
         .unwrap();
     type_into(&lease, "typed after sending");
     wait_until(&lease, || lease.read(|state| state.error().is_some()));
@@ -609,6 +617,7 @@ fn saved_by_forge(device: &Device) -> DraftHandle {
             timer: None,
             version: 0,
             forgetting: false,
+            outgoing: Outgoing::default(),
         }),
         changed,
         cancelled: CancellationToken::new(),
@@ -1365,6 +1374,7 @@ fn a_failed_message_from_a_set_aside_draft_no_device_slot_held_is_shown_kept_and
             timer: None,
             version: 0,
             forgetting: false,
+            outgoing: Outgoing::default(),
         }),
         changed,
         cancelled: CancellationToken::new(),
@@ -1506,7 +1516,9 @@ fn opening_and_retiring_a_draft_do_not_wait_for_the_device() {
             let mut sessions = DraftSessions::with_spool(spool);
             let lease = sessions.open(host, instance, "new".into(), client).unwrap();
             let recovering = lease.read(DraftSession::recovering);
-            let refused = lease.submit(sending("too early", "early", None));
+            let refused = lease
+                .submit(sending("too early", "early", None), None, None)
+                .map(drop);
             let typed = lease.read(|state| state.body().text.clone());
             type_into(&lease, "typed too early");
             sessions.retire();
@@ -1594,6 +1606,7 @@ fn with_a_set_aside_message(device: &Device, sessions: &DraftSessions) -> DraftH
             timer: None,
             version: 0,
             forgetting: false,
+            outgoing: Outgoing::default(),
         }),
         changed,
         cancelled: CancellationToken::new(),
@@ -1717,4 +1730,57 @@ fn a_draft_retired_while_another_editor_keeps_this_devices_drafts_says_so_and_is
         .unwrap()
         .expect("once the other Editor closed, trying again keeps the draft here");
     assert_eq!(kept.draft.body.text, "typed in the second window");
+}
+
+#[test]
+fn a_send_whose_composer_is_gone_still_settles_its_bubble() {
+    let mut device = Device::refusing();
+    let thread = ThreadId("thread".into());
+    let message = ItemId("refused".into());
+    let instance = device.core.host(&device.host).unwrap().instance();
+    let mut sessions = DraftSessions::with_spool(device.spool());
+    let lease = sessions
+        .open(
+            device.host.clone(),
+            instance,
+            "new".into(),
+            device.client.clone(),
+        )
+        .unwrap();
+    device.settle();
+    type_into(&lease, "refused at once");
+    let host = device.core.host_mut(&device.host).unwrap();
+    let receipt = host.send_receipt();
+    host.begin_send(editor_core::LocalSend {
+        attempt: receipt.attempt(),
+        thread: thread.clone(),
+        message: message.clone(),
+        text: "refused at once".into(),
+        images: Vec::new(),
+        create: None,
+    });
+    let accepted = lease
+        .submit(
+            sending("refused at once", "refused", None),
+            None,
+            Some(receipt),
+        )
+        .unwrap();
+    assert_eq!(
+        accepted.message.id, message,
+        "submit names the message it sent"
+    );
+    drop(lease);
+    drop(sessions);
+    let core = &mut device.core;
+    let host_id = device.host.clone();
+    test_support::wait::wait_until(
+        "the host to settle the send",
+        Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            core.host(&host_id)
+                .is_some_and(|host| host.local_messages(&thread).next().is_none())
+        },
+    );
 }

@@ -38,6 +38,7 @@ impl RootViews {
                 ComposerEffect::EditorChanged
                 | ComposerEffect::Stopping(..)
                 | ComposerEffect::StopFailed(..)
+                | ComposerEffect::OpenSent { .. }
                 | ComposerEffect::FocusEditor
                 | ComposerEffect::NewProject
                 | ComposerEffect::OpenQuestionSource(_)

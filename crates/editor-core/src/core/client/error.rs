@@ -247,7 +247,7 @@ impl ForgeFault {
     }
 
     #[must_use]
-    pub const fn sentence(self) -> &'static str {
+    pub(crate) const fn sentence(self) -> &'static str {
         match self {
             Self::Unrecognised => "Forge didn't recognise it.",
             Self::Unreachable => "Forge couldn't be reached.",

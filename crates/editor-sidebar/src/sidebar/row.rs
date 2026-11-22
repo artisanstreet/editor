@@ -11,7 +11,7 @@ const DRAG_PREVIEW_WIDTH: f32 = 260.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
-    Settle,
+    Settle { observed_seq: artisan_api::Seq },
     Rename,
     MarkUnread,
     Archive,
@@ -20,7 +20,9 @@ pub enum MenuAction {
 pub(crate) fn menu_actions(row: &RowData, thread: &Thread) -> Vec<MenuAction> {
     let mut actions = Vec::new();
     if row.settleable {
-        actions.push(MenuAction::Settle);
+        actions.push(MenuAction::Settle {
+            observed_seq: thread.activity_seq,
+        });
     }
     actions.push(MenuAction::Rename);
     if !thread.is_unread() && thread.activity_seq != 0 {

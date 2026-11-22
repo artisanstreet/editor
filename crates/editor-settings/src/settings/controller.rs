@@ -311,7 +311,7 @@ impl SettingsController {
         self.forge_code.borrow_mut().set_text("");
     }
 
-    pub(crate) fn unarchive(&mut self, core: &Core, thread: artisan_api::ThreadId) {
+    pub(crate) fn unarchive(&mut self, core: &mut Core, thread: artisan_api::ThreadId) {
         if core.active_host().map(editor_core::HostData::instance) != self.active_instance
             || core.active_host().map(|host| &host.id.0) != self.archive.host.as_ref()
         {
@@ -320,36 +320,31 @@ impl SettingsController {
         let Some(request) = self.archive.begin(thread) else {
             return;
         };
-        let Some(host) = core.host(&HostId(request.host.clone())) else {
+        let Some(host) = core.host_mut(&HostId(request.host.clone())) else {
             return;
         };
-        let client = host.client.clone();
         let instance = host.instance();
         let id = host.id.clone();
+        let thread = request.thread.clone();
         let sender = self.completion.sender();
-        self.tasks.retain(|task| !task.is_finished());
-        self.tasks.push(tokio_util::task::AbortOnDropHandle::new(
-            runtime::runtime().spawn(async move {
-                let update = artisan_api::UpdateThread {
-                    archived: Some(false),
-                    ..Default::default()
-                };
-                let result = client
-                    .update_thread(&request.thread, &update)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| {
-                        Problem::calling_forge("Couldn't restore the thread.", &error)
-                    });
-                sender
-                    .offer(HostCompletion {
-                        host: id,
-                        instance,
-                        result: Completion::Archive(request, result),
-                    })
-                    .await;
+        host.edit_thread(
+            &thread,
+            editor_core::ThreadEdit::Unarchive,
+            Box::new(move |result| {
+                Box::pin(async move {
+                    sender
+                        .offer(HostCompletion {
+                            host: id,
+                            instance,
+                            result: Completion::Archive(
+                                request,
+                                result.map_err(|error| error.problem()),
+                            ),
+                        })
+                        .await;
+                })
             }),
-        ));
+        );
     }
 
     pub fn set_host_setting_for(

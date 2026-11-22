@@ -993,3 +993,119 @@ fn a_message_sent_from_a_removed_draft_is_refused_instead_of_dropped() {
         Err(SendRefusal::NoDraft)
     );
 }
+
+fn creating(id: &str, thread: &str, text: &str) -> Submission {
+    Submission {
+        create: Some(CreateThread {
+            id: ThreadId::from(thread),
+            project_id: artisan_api::ProjectId::from("project"),
+            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Claude),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        }),
+        thread: ThreadId::from(thread),
+        ..submission(id, text)
+    }
+}
+
+#[test]
+fn an_edited_retry_of_a_failed_first_message_creates_the_same_thread() {
+    let mut state = loaded(1, &DraftBody::default());
+    type_in(&mut state, typed("first try"));
+    state
+        .submit(creating("first", "new-thread", "first try"))
+        .unwrap();
+    write(&mut state);
+    saved(&mut state, 2, &typed("first try"));
+    let first = post(&mut state);
+    state.posted(Err(not_sent(&first)), first.thread.clone());
+    type_in(&mut state, typed("second try"));
+    state
+        .submit(creating("second", "another-thread", "second try"))
+        .unwrap();
+    let retry = state
+        .outgoing_submission()
+        .expect("the edited message is outgoing");
+    assert_eq!(
+        retry.thread,
+        ThreadId::from("new-thread"),
+        "the edited retry keeps the thread the Editor already shows"
+    );
+    assert_eq!(
+        retry.create.as_ref().map(|create| &create.id),
+        Some(&ThreadId::from("new-thread"))
+    );
+    assert_eq!(
+        retry.message.id,
+        ItemId::from("second"),
+        "it is a new message"
+    );
+}
+
+#[test]
+fn an_edited_retry_under_the_same_thread_carries_the_newly_chosen_config() {
+    let mut state = loaded(1, &DraftBody::default());
+    type_in(&mut state, typed("first try"));
+    state
+        .submit(creating("first", "new-thread", "first try"))
+        .unwrap();
+    write(&mut state);
+    saved(&mut state, 2, &typed("first try"));
+    let first = post(&mut state);
+    state.posted(Err(not_sent(&first)), first.thread.clone());
+    type_in(&mut state, typed("second try"));
+    let mut retry = creating("second", "another-thread", "second try");
+    let mut codex = artisan_api::EngineConfig::new(artisan_api::EngineId::Codex);
+    codex.permissions = artisan_api::Permissions::Auto;
+    retry
+        .create
+        .as_mut()
+        .expect("the retry creates a thread")
+        .config = codex.clone();
+    state.submit(retry).unwrap();
+    assert_eq!(
+        state
+            .outgoing_submission()
+            .and_then(|submission| submission.message.config.clone()),
+        Some(codex),
+        "Forge already has the thread, so the message itself carries the new config"
+    );
+}
+
+#[test]
+fn resending_an_edited_retry_unchanged_reuses_its_message_so_forge_keeps_one_copy() {
+    let mut state = loaded(1, &DraftBody::default());
+    type_in(&mut state, typed("first try"));
+    state
+        .submit(creating("first", "new-thread", "first try"))
+        .unwrap();
+    write(&mut state);
+    saved(&mut state, 2, &typed("first try"));
+    let first = post(&mut state);
+    state.posted(Err(not_sent(&first)), first.thread.clone());
+    type_in(&mut state, typed("second try"));
+    let codex = artisan_api::EngineConfig::new(artisan_api::EngineId::Codex);
+    let edited = |id: &str| {
+        let mut retry = creating(id, "another-thread", "second try");
+        retry
+            .create
+            .as_mut()
+            .expect("the retry creates a thread")
+            .config = codex.clone();
+        retry
+    };
+    state.submit(edited("second")).unwrap();
+    write(&mut state);
+    saved(&mut state, 3, &typed("second try"));
+    let second = post(&mut state);
+    state.posted(Err(not_sent(&second)), second.thread.clone());
+    state.submit(edited("third")).unwrap();
+    assert_eq!(
+        state
+            .outgoing_submission()
+            .map(|submission| submission.message.id.clone()),
+        Some(second.message.id),
+        "the unchanged resend carries the message id Forge may already hold"
+    );
+}

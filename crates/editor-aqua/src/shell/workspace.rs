@@ -201,6 +201,7 @@ pub struct Workspace {
     notifications: Notifications,
     repository: crate::shell::repository::RepositoryContext,
     start_pending: bool,
+    composer_retarget: bool,
     repository_pending: bool,
 }
 
@@ -311,6 +312,7 @@ impl Workspace {
             notifications: Notifications::default(),
             repository: crate::shell::repository::RepositoryContext::default(),
             start_pending: true,
+            composer_retarget: false,
             repository_pending: true,
         };
         workspace.sidebar.error = failure;
@@ -502,6 +504,9 @@ impl Workspace {
                 | Screen::Marketplace
                 | Screen::Usage => self.start_pending = false,
             }
+        }
+        if std::mem::take(&mut self.composer_retarget) {
+            self.sync_composer(core, ui);
         }
         if self.repository_pending {
             self.repository_pending = false;
@@ -974,13 +979,27 @@ impl Workspace {
     }
 
     pub fn sync_composer(&mut self, core: &Core, ui: &mut aqua::UiApp) {
+        let creating = self.composer.as_ref().and_then(|owner| {
+            let composer = owner.controller.borrow();
+            match &composer.target {
+                crate::composer::controller::ComposerTarget::NewThread { host, .. } => composer
+                    .creating()
+                    .map(|thread| (host.clone(), thread, composer.target.clone())),
+                crate::composer::controller::ComposerTarget::Thread { .. } => None,
+            }
+        });
         let target = match core.workspace_screen() {
-            Screen::Thread { host, thread } => {
-                Some(crate::composer::controller::ComposerTarget::Thread {
+            Screen::Thread { host, thread } => match creating {
+                Some((creating_host, created, target))
+                    if &creating_host == host && &created == thread =>
+                {
+                    Some(target)
+                }
+                Some(_) | None => Some(crate::composer::controller::ComposerTarget::Thread {
                     host: host.clone(),
                     thread: thread.clone(),
-                })
-            }
+                }),
+            },
             Screen::NewThread { host, project } => {
                 Some(crate::composer::controller::ComposerTarget::NewThread {
                     host: host.clone(),
@@ -1086,6 +1105,15 @@ impl Workspace {
                 ComposerEffect::StopFailed(host, thread) => {
                     if let Some(host) = core.host_mut(&host) {
                         host.stop_failed(&thread);
+                    }
+                }
+                ComposerEffect::OpenSent {
+                    host,
+                    thread,
+                    replaced,
+                } => {
+                    if Self::follow_sent(core, &host, &thread, &replaced) == Followed::Navigated {
+                        self.sent_new_thread = Some(thread);
                     }
                 }
                 ComposerEffect::EditorChanged => self.composer_editor_dirty = true,
@@ -1646,19 +1674,20 @@ impl Workspace {
         self.theme_transition.take()
     }
 
-    pub fn follow_accepted(
+    pub fn follow_sent(
         core: &mut Core,
-        target: &crate::composer::controller::ComposerTarget,
+        host: &crate::core::HostId,
         thread: &artisan_api::ThreadId,
+        replaced: &[artisan_api::ThreadId],
     ) -> Followed {
-        let host = match target {
-            crate::composer::controller::ComposerTarget::Thread { .. } => return Followed::Stayed,
-            crate::composer::controller::ComposerTarget::NewThread { host, .. } => host,
+        let composing = match core.workspace_screen() {
+            Screen::NewThread { host: shown, .. } => shown == host,
+            Screen::Thread {
+                host: shown,
+                thread: open,
+            } => shown == host && replaced.contains(open),
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => false,
         };
-        let composing = matches!(
-            core.workspace_screen(),
-            Screen::NewThread { host: shown, .. } if shown == host
-        );
         let sent = Screen::Thread {
             host: host.clone(),
             thread: thread.clone(),
@@ -1697,7 +1726,8 @@ impl Workspace {
                         accepted = Some((target.clone(), thread));
                         self.composer_editor_dirty = true;
                     }
-                    crate::composer::persistence::SessionEvent::Changed
+                    crate::composer::persistence::SessionEvent::HandedBack { .. }
+                    | crate::composer::persistence::SessionEvent::Changed
                     | crate::composer::persistence::SessionEvent::ImageAdopted(_) => {
                         self.composer_editor_dirty = true;
                     }
@@ -1706,8 +1736,12 @@ impl Workspace {
             self.route_composer_effects(core, result.effects);
         }
         if let Some((target, thread)) = accepted {
-            if Self::follow_accepted(core, &target, &thread) == Followed::Navigated {
-                self.sent_new_thread = Some(thread.clone());
+            if matches!(
+                target,
+                crate::composer::controller::ComposerTarget::NewThread { .. }
+            ) {
+                self.composer_retarget = true;
+                core.wake();
             }
             if core.workspace_screen().thread() == Some(&thread) {
                 self.conversation

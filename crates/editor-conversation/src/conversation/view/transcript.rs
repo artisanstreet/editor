@@ -573,7 +573,7 @@ impl ObservedRead {
             .live
             .as_ref()
             .is_none_or(|live| live.complete(conversation, core));
-        crate::conversation::read::acknowledge(self.candidate, conversation, core, |row, item| {
+        crate::conversation::read::acknowledge(&self.candidate, conversation, core, |row, item| {
             prepared_snapshot(
                 row,
                 item,

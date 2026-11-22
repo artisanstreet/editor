@@ -10,7 +10,10 @@ use super::spool::{
     SpooledDraft, TakeSpooledDraftError, Turn,
 };
 use artisan_api::{BlobHash, ItemId, ThreadId, WriteDraft};
-use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
+use editor_core::{
+    Core, ForgeClient, HostId, HostInstance, PostGate, SendReceipt, SendSettlement,
+    runtime::runtime,
+};
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
@@ -25,6 +28,7 @@ use tracing::Instrument as _;
 pub enum SessionEvent {
     Changed,
     Accepted { thread: ThreadId, item: ItemId },
+    HandedBack { thread: ThreadId, item: ItemId },
     ImageAdopted(BlobHash),
 }
 
@@ -51,6 +55,13 @@ struct Shared {
     timer: Option<tokio::task::AbortHandle>,
     version: u64,
     forgetting: bool,
+    outgoing: Outgoing,
+}
+
+#[derive(Default)]
+struct Outgoing {
+    gate: Option<PostGate>,
+    receipt: Option<SendReceipt>,
 }
 
 struct Inner {
@@ -660,6 +671,7 @@ impl DraftSessions {
                 timer: None,
                 version: 0,
                 forgetting: false,
+                outgoing: Outgoing::default(),
             }),
             changed,
             cancelled: CancellationToken::new(),
@@ -1247,18 +1259,39 @@ impl DraftHandle {
         read(&self.0.shared().state)
     }
 
-    fn mutate(&self, update: impl FnOnce(&mut Shared)) {
-        self.publish(self.0.shared(), update);
+    fn mutate<T>(&self, update: impl FnOnce(&mut Shared) -> T) -> T {
+        self.publish(self.0.shared(), update)
     }
 
-    fn publish(&self, mut shared: MutexGuard<'_, Shared>, update: impl FnOnce(&mut Shared)) {
-        update(&mut shared);
+    fn publish<T>(
+        &self,
+        mut shared: MutexGuard<'_, Shared>,
+        update: impl FnOnce(&mut Shared) -> T,
+    ) -> T {
+        let sending = shared.state.in_flight_message();
+        let updated = update(&mut shared);
+        if let Some((thread, item)) = sending
+            && shared.state.in_flight_message().is_none()
+            && shared.state.send_failed()
+        {
+            if let Some(receipt) = shared.outgoing.receipt.take() {
+                let problem = shared
+                    .state
+                    .error()
+                    .unwrap_or_else(|| editor_core::Problem::new("Couldn't send the message."));
+                receipt.settle(SendSettlement::HandedBack(editor_core::HandBack::Failed(
+                    problem,
+                )));
+            }
+            shared.emit(&SessionEvent::HandedBack { thread, item });
+        }
         self.forget_recovered(&mut shared);
         shared.emit(&SessionEvent::Changed);
         shared.version = shared.version.wrapping_add(1);
         let version = shared.version;
         drop(shared);
         self.0.changed.send_replace(version);
+        updated
     }
 
     pub fn queue(&self, body: DraftBody, seen: u64, uploading: bool) {
@@ -1291,12 +1324,29 @@ impl DraftHandle {
         self.pump();
     }
 
-    pub fn submit(&self, submission: Submission) -> Result<(), SendRefusal> {
-        let mut submitted = Ok(());
-        self.mutate(|shared| submitted = shared.state.submit(submission));
-        submitted?;
+    pub fn submit(
+        &self,
+        submission: Submission,
+        gate: Option<PostGate>,
+        receipt: Option<SendReceipt>,
+    ) -> Result<Submission, SendRefusal> {
+        let submission = self.mutate(|shared| {
+            shared.state.submit(submission).map(|()| {
+                shared.outgoing.gate = gate;
+                let accepted = shared
+                    .state
+                    .outgoing_submission()
+                    .cloned()
+                    .expect("invariant: a message just submitted is the outgoing one");
+                shared.outgoing.receipt = receipt.map(|mut receipt| {
+                    receipt.bind();
+                    receipt
+                });
+                accepted
+            })
+        })?;
         self.flush();
-        Ok(())
+        Ok(submission)
     }
 
     pub fn retry(&self) {
@@ -1444,6 +1494,10 @@ impl DraftHandle {
                 }
             }
             Operation::Post(request) => {
+                let gate = session.0.shared().outgoing.gate.take();
+                if let Some(gate) = gate {
+                    gate.opened().await;
+                }
                 let span = tracing::info_span!(
                     "send_message",
                     thread = %request.thread,
@@ -1453,6 +1507,9 @@ impl DraftHandle {
                 let accepted = result.is_ok();
                 session.mutate(|shared| {
                     shared.state.posted(result, request.thread.clone());
+                    if accepted && let Some(receipt) = shared.outgoing.receipt.take() {
+                        receipt.settle(SendSettlement::Accepted);
+                    }
                     if accepted && !shared.state.removed() {
                         shared.emit(&SessionEvent::Accepted {
                             thread: request.thread,

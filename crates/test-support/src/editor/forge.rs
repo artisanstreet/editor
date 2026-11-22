@@ -270,6 +270,12 @@ impl StubForge {
         seq
     }
 
+    pub fn list_thread(&self, thread: artisan_api::Thread) {
+        let mut log = self.log();
+        log.state.threads.retain(|listed| listed.id != thread.id);
+        log.state.threads.push(thread);
+    }
+
     pub(crate) fn publish_barrier(&self) -> Seq {
         let seq = self.log().state.head + 1;
         self.publish(Event::Setting {

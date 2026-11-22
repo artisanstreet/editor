@@ -366,13 +366,13 @@ fn apply(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> bool {
             }
             sidebar.menu = None;
             match action {
-                MenuAction::Settle => sidebar.settle(core, thread),
+                MenuAction::Settle { observed_seq } => sidebar.settle(core, &thread, observed_seq),
                 MenuAction::Rename => {
                     sidebar.rename_generation = sidebar.rename_generation.wrapping_add(1);
                     sidebar.rename = Some(thread);
                 }
-                MenuAction::MarkUnread => sidebar.mark_unread(core, thread),
-                MenuAction::Archive => sidebar.archive(core, thread),
+                MenuAction::MarkUnread => sidebar.mark_unread(core, &thread),
+                MenuAction::Archive => sidebar.archive(core, &thread),
             }
         }
         ViewAction::SubmitRename(text) => sidebar.submit_rename(core, &text),
@@ -486,7 +486,7 @@ pub(crate) fn thread_menu(
             content = content.child(Divider::Rule.build(theme, Surface::Menu.padding_px()));
         }
         let (id, icon, label, hover) = match action {
-            MenuAction::Settle => (
+            MenuAction::Settle { .. } => (
                 "sidebar-menu-settle",
                 AssetId::TABLER_CIRCLE_CHECK,
                 "Settle Thread",
