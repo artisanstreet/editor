@@ -1,7 +1,7 @@
 use super::shared::Shared;
 use super::viewport::{Effect, Fetch, Input, Jump, State, Viewport};
 use artisan_api::{
-    Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, ThreadId, WorkSpan,
+    Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, Status, ThreadId, WorkSpan,
 };
 use editor_core::ResidentBytes as _;
 use std::collections::{BTreeMap, HashMap};
@@ -70,25 +70,16 @@ pub(crate) struct AnswerRequest(pub(crate) u64);
 pub(crate) enum ItemAnswer {
     Sending {
         request: AnswerRequest,
+        asked: Option<Seq>,
         _task: Arc<tokio_util::task::AbortOnDropHandle<()>>,
+    },
+    Answered {
+        at: Seq,
     },
     Failed(String),
 }
 
 impl ItemAnswer {
-    #[must_use]
-    pub(crate) fn state(&self) -> AnswerState {
-        match self {
-            Self::Sending { .. } => AnswerState::Sending,
-            Self::Failed(error) => AnswerState::Failed(error.clone()),
-        }
-    }
-
-    #[must_use]
-    pub(crate) const fn sending(&self) -> bool {
-        matches!(self, Self::Sending { .. })
-    }
-
     #[must_use]
     pub(crate) fn sent_by(&self, sent: AnswerRequest) -> bool {
         matches!(self, Self::Sending { request, .. } if *request == sent)
@@ -158,7 +149,84 @@ impl ThreadView {
     }
 
     pub(crate) fn abandon_answers(&mut self) {
-        self.answers.retain(|_, answer| !answer.sending());
+        self.drop_answers(|view, id, answer| match answer {
+            ItemAnswer::Sending { .. } => true,
+            ItemAnswer::Answered { at } => !view.awaits_answer_from(id, *at),
+            ItemAnswer::Failed(_) => false,
+        });
+    }
+
+    pub(crate) fn prune_answers(&mut self) {
+        self.drop_answers(|view, id, answer| match answer {
+            ItemAnswer::Answered { at } => !view.awaits_answer_from(id, *at),
+            ItemAnswer::Sending { .. } | ItemAnswer::Failed(_) => false,
+        });
+    }
+
+    fn drop_answers(&mut self, settled: impl Fn(&Self, &ItemId, &ItemAnswer) -> bool) {
+        let settled: Vec<ItemId> = self
+            .answers
+            .iter()
+            .filter(|(id, answer)| settled(self, id, answer))
+            .map(|(id, _)| id.clone())
+            .collect();
+        if !settled.is_empty() {
+            let answers = self.answers.make_mut();
+            for id in &settled {
+                answers.remove(id);
+            }
+        }
+    }
+
+    pub(crate) fn asked_seq(&self, id: &ItemId) -> Option<Seq> {
+        self.item(id)
+            .filter(|item| item.status == Status::AwaitingUser)
+            .map(|item| item.seq)
+    }
+
+    pub(crate) fn answered(&mut self, id: ItemId) {
+        let asked = match self.answers.get(&id) {
+            Some(ItemAnswer::Sending { asked, .. }) => *asked,
+            Some(ItemAnswer::Answered { .. } | ItemAnswer::Failed(_)) | None => None,
+        };
+        match asked.filter(|at| self.awaits_answer_from(&id, *at)) {
+            Some(at) => {
+                self.answers
+                    .make_mut()
+                    .insert(id, ItemAnswer::Answered { at });
+            }
+            None => {
+                self.answers.make_mut().remove(&id);
+            }
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn answer_state(&self, id: &ItemId) -> Option<AnswerState> {
+        match self.answers.get(id)? {
+            ItemAnswer::Sending { .. } => Some(AnswerState::Sending),
+            ItemAnswer::Answered { at } => self
+                .awaits_answer_from(id, *at)
+                .then_some(AnswerState::Sending),
+            ItemAnswer::Failed(error) => Some(AnswerState::Failed(error.clone())),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn answer_blocks(&self, id: &ItemId) -> bool {
+        self.answer_state(id).is_some_and(|state| state.sending())
+    }
+
+    fn awaits_answer_from(&self, id: &ItemId, at: Seq) -> bool {
+        self.item(id).is_some_and(|item| {
+            item.seq <= at
+                && item.status == Status::AwaitingUser
+                && item
+                    .run_id
+                    .as_ref()
+                    .and_then(|run| self.runs.get(run))
+                    .is_none_or(Run::is_live)
+        })
     }
 
     pub(crate) fn resume(&mut self) -> Vec<Effect> {

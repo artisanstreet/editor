@@ -1,3 +1,4 @@
+use crate::conversation::adapter::Action;
 use crate::conversation::controller::Conversation;
 use crate::conversation::presentation::{MarkdownOwners, PresentationScope};
 use crate::conversation::view::factory::{RowFactory, RowServiceParts, RowServices, WorkResources};
@@ -13,7 +14,7 @@ use editor_ui::theme::{ArtisanTheme, ThemeMode};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use test_support::editor::ui::{mount, painted_texts, ui_app};
+use test_support::editor::ui::{click, mount, painted_texts, ui_app};
 use test_support::wait::{LIVENESS, wait_until};
 
 pub(crate) struct Transcript {
@@ -25,6 +26,7 @@ pub(crate) struct Transcript {
     statuses: Rc<RefCell<StatusShimmers>>,
     motion: Rc<RefCell<RowMotion>>,
     next_source: Rc<Cell<u64>>,
+    dispatched: Rc<RefCell<Vec<Action>>>,
 }
 
 impl Transcript {
@@ -43,6 +45,7 @@ impl Transcript {
             statuses: Rc::new(RefCell::new(StatusShimmers::default())),
             motion: Rc::new(RefCell::new(RowMotion::default())),
             next_source: Rc::new(Cell::new(0)),
+            dispatched: Rc::default(),
         }
     }
 
@@ -65,6 +68,7 @@ impl Transcript {
         )
         .expect("the open thread's own host serves its rows");
         let next_source = Rc::clone(&self.next_source);
+        let dispatched = Rc::clone(&self.dispatched);
         let factory = Rc::new(
             RowFactory::new(
                 Vec::new(),
@@ -82,7 +86,7 @@ impl Transcript {
                 Rc::new(|_| {}),
                 Rc::new(|_| {}),
                 Rc::new(|_| {}),
-                Rc::new(|_| {}),
+                Rc::new(move |action| dispatched.borrow_mut().push(action)),
                 WorkResources {
                     motion: Rc::clone(&self.motion),
                     names: HashMap::new(),
@@ -128,6 +132,11 @@ impl Transcript {
                 .get(node)
                 .is_some_and(|record| record.debug_selector.as_deref() == Some(selector))
         })
+    }
+
+    pub(crate) fn click(&mut self, key: &str) -> Vec<Action> {
+        click(&mut self.app, key);
+        std::mem::take(&mut *self.dispatched.borrow_mut())
     }
 }
 
