@@ -187,6 +187,7 @@ pub struct Conversation {
     parked: super::parked::Shelf<ParkedKey, ParkedThread>,
     pending: Option<Pending>,
     pub(crate) reply_tail: Option<super::announce::ReplyTail>,
+    pub(crate) settle: super::announce::SettleWatch,
     clock: editor_core::Clock,
 }
 
@@ -272,6 +273,7 @@ impl Conversation {
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,
             reply_tail: None,
+            settle: super::announce::SettleWatch::Unwatched,
             clock: core.clock().clone(),
         }
     }
@@ -489,6 +491,7 @@ impl Conversation {
         self.generation = self.generation.wrapping_add(1);
         self.page_task = None;
         self.reply_tail = None;
+        self.settle = super::announce::SettleWatch::Unwatched;
         self.work_task = None;
         self.agent_task = None;
         self.abandon_answers();
@@ -742,10 +745,11 @@ impl Conversation {
 
     fn follow_reply_tail(&mut self, core: &Core) {
         let now = self.clock.timestamp();
+        self.settle = super::announce::observe_settle(&self.settle, self.view.as_ref(), now);
         let wanted = self
             .view
             .as_ref()
-            .and_then(|view| super::announce::finished_stored_reply(view, now));
+            .and_then(|view| super::announce::finished_stored_reply(view, &self.settle, now));
         let Some(reply) = wanted else {
             self.reply_tail = None;
             return;

@@ -1,7 +1,7 @@
 use super::*;
 use aqua_core::SemanticNode;
 use aqua_text::{SharedFonts, SharedRuns};
-use artisan_api::{Item, ItemsPage, RunId, Status};
+use artisan_api::{Event, Item, ItemsPage, RunId, Status};
 use test_support::editor::core::StubbedHost;
 use test_support::editor::forge::{HeldRequest, empty_state};
 use test_support::wait::{LIVENESS, wait_until};
@@ -188,7 +188,32 @@ fn long_stored_reply() -> String {
 
 const FINISHED_AT: Timestamp = 1_700_000_000_000;
 
-fn finished_reply_page(thread: &ThreadId, source: ContentRef) -> ItemsPage {
+fn reply_run(thread: &ThreadId, state: RunState) -> Run {
+    Run {
+        config: None,
+        id: RunId("long-run".into()),
+        thread_id: thread.clone(),
+        engine: artisan_api::EngineId::Claude,
+        model: None,
+        input_cutoff: 0,
+        state,
+        usage: artisan_api::Usage::default(),
+        session_id: None,
+        seq: 2,
+        started_at: FINISHED_AT,
+        continuation: None,
+    }
+}
+
+fn finished(ended_at: Timestamp) -> RunState {
+    RunState::Finished {
+        outcome: RunOutcome::Done,
+        error: None,
+        ended_at,
+    }
+}
+
+fn reply_page(thread: &ThreadId, source: ContentRef, state: RunState) -> ItemsPage {
     let run = RunId("long-run".into());
     let now = FINISHED_AT;
     ItemsPage {
@@ -197,7 +222,7 @@ fn finished_reply_page(thread: &ThreadId, source: ContentRef) -> ItemsPage {
             thread_id: thread.clone(),
             position: 1,
             seq: 1,
-            run_id: Some(run.clone()),
+            run_id: Some(run),
             parent_id: None,
             status: Status::Done,
             created_at: now,
@@ -207,24 +232,7 @@ fn finished_reply_page(thread: &ThreadId, source: ContentRef) -> ItemsPage {
                 phase: artisan_api::Phase::Final,
             },
         }],
-        runs: vec![Run {
-            config: None,
-            id: run,
-            thread_id: thread.clone(),
-            engine: artisan_api::EngineId::Claude,
-            model: None,
-            input_cutoff: 0,
-            state: RunState::Finished {
-                outcome: RunOutcome::Done,
-                error: None,
-                ended_at: now,
-            },
-            usage: artisan_api::Usage::default(),
-            session_id: None,
-            seq: 2,
-            started_at: now,
-            continuation: None,
-        }],
+        runs: vec![reply_run(thread, state)],
         more: false,
         work: Vec::new(),
     }
@@ -262,6 +270,7 @@ fn answer_like_forge(request: HeldRequest, text: &str) {
 
 struct FinishedReply {
     stub: StubbedHost,
+    clock: std::sync::Arc<test_support::clock::ManualClock>,
     conversation: Conversation,
     reply: String,
     source: ContentRef,
@@ -269,6 +278,10 @@ struct FinishedReply {
 
 impl FinishedReply {
     fn open(thread: &str) -> Self {
+        Self::finishing_at(thread, FINISHED_AT)
+    }
+
+    fn finishing_at(thread: &str, ended_at: Timestamp) -> Self {
         let reply = long_stored_reply();
         let source = ContentRef::from_text(&reply);
         assert!(
@@ -282,13 +295,31 @@ impl FinishedReply {
         let mut conversation = Conversation::new(&stub.core);
         conversation.open_thread(&mut stub.core, stub.host.clone(), thread.clone());
         stub.take("GET", &format!("/threads/{thread}/transcript"))
-            .respond(finished_reply_page(&thread, source.clone()));
+            .respond(reply_page(&thread, source.clone(), RunState::Running));
+        stub.forge.publish(Event::Run {
+            run: reply_run(&thread, RunState::Running),
+        });
+        wait_until("the running reply to land", LIVENESS, || {
+            stub.core
+                .drain_with(|core, event| conversation.core_event(core, &event, true));
+            conversation.drain(&mut stub.core);
+            conversation.settle == SettleWatch::Running
+        });
+        stub.forge.publish(Event::Run {
+            run: Run {
+                seq: 3,
+                ..reply_run(&thread, finished(ended_at))
+            },
+        });
         wait_until("the finished reply to land", LIVENESS, || {
+            stub.core
+                .drain_with(|core, event| conversation.core_event(core, &event, true));
             conversation.drain(&mut stub.core);
             conversation.reply_tail.is_some()
         });
         Self {
             stub,
+            clock,
             conversation,
             reply,
             source,
@@ -364,4 +395,60 @@ fn a_stored_reply_whose_forge_is_gone_announces_at_once_that_it_finished() {
         },
         "nothing is left waiting for an end that can no longer be read"
     );
+}
+
+#[test]
+fn a_finished_reply_is_announced_for_ten_seconds_of_editor_time_whatever_the_forge_clock_says() {
+    for (thread, skew) in [("forge-behind", -3_600_000), ("forge-ahead", 3_600_000)] {
+        let mut finished = FinishedReply::finishing_at(thread, FINISHED_AT + skew);
+        let request = finished.content_request();
+        answer_like_forge(request, &finished.reply);
+        assert_eq!(
+            finished.announcement_once_settled().text,
+            format!("{LAST_PARAGRAPH}\n\nReply finished"),
+            "{thread}"
+        );
+        finished
+            .clock
+            .advance(std::time::Duration::from_millis(10_001));
+        assert_eq!(
+            current(&finished.conversation),
+            Announcement {
+                text: String::new(),
+                busy: false,
+            },
+            "{thread}: the announcement is not replayed once ten seconds have passed here"
+        );
+    }
+}
+
+#[test]
+fn a_thread_opened_after_its_reply_finished_reads_nothing_out() {
+    let clock = test_support::clock::ManualClock::starting_at(FINISHED_AT);
+    let mut stub = StubbedHost::start_with_clock(empty_state(), axum::Router::new(), clock.clock());
+    let thread = ThreadId::from("finished-before-opening");
+    let source = ContentRef::from_text(&long_stored_reply());
+    stub.forge.publish(Event::Run {
+        run: reply_run(&thread, finished(FINISHED_AT)),
+    });
+    stub.apply_published();
+    let mut conversation = Conversation::new(&stub.core);
+    conversation.open_thread(&mut stub.core, stub.host.clone(), thread.clone());
+    stub.take("GET", &format!("/threads/{thread}/transcript"))
+        .respond(reply_page(&thread, source, finished(FINISHED_AT)));
+    wait_until("the finished reply to land", LIVENESS, || {
+        conversation.drain(&mut stub.core);
+        conversation
+            .view
+            .as_ref()
+            .is_some_and(|view| !view.runs.is_empty())
+    });
+    assert_eq!(
+        current(&conversation),
+        Announcement {
+            text: String::new(),
+            busy: false,
+        }
+    );
+    assert!(conversation.reply_tail.is_none());
 }

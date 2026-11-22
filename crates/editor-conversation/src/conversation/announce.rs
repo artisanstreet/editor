@@ -5,8 +5,8 @@ use aqua_core::{LiveRegion, Role};
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::Style;
 use artisan_api::{
-    ContentId, ContentRange, ContentRef, ItemId, ItemKind, LiveTarget, Run, RunOutcome, RunState,
-    TextContent, ThreadId, Timestamp,
+    ContentId, ContentRange, ContentRef, ItemId, ItemKind, LiveTarget, Run, RunId, RunOutcome,
+    RunState, TextContent, ThreadId, Timestamp,
 };
 use editor_core::client::RangeError;
 use tokio_util::task::AbortOnDropHandle;
@@ -230,14 +230,66 @@ fn latest_run(view: &ThreadView) -> Option<&Run> {
         .max_by_key(|run| (run.started_at, &run.id))
 }
 
-fn settled_long_ago(run: &Run, now: Timestamp) -> bool {
-    matches!(&run.state, RunState::Finished { ended_at, .. } if now - ended_at > SETTLED_RECENTLY_MS)
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SettleWatch {
+    #[default]
+    Unwatched,
+    Running,
+    Settled {
+        run: RunId,
+        at: Timestamp,
+    },
+    SettledUnseen {
+        run: RunId,
+    },
 }
 
 #[must_use]
-pub(crate) fn finished_stored_reply(view: &ThreadView, now: Timestamp) -> Option<StoredReply> {
+pub(crate) fn observe_settle(
+    previous: &SettleWatch,
+    view: Option<&ThreadView>,
+    now: Timestamp,
+) -> SettleWatch {
+    let Some(run) = view.and_then(latest_run) else {
+        return SettleWatch::Unwatched;
+    };
+    match (&run.state, previous) {
+        (RunState::Running, _) => SettleWatch::Running,
+        (RunState::Finished { .. }, SettleWatch::Settled { run: seen, .. })
+        | (RunState::Finished { .. }, SettleWatch::SettledUnseen { run: seen })
+            if *seen == run.id =>
+        {
+            previous.clone()
+        }
+        (RunState::Finished { .. }, SettleWatch::Unwatched) => SettleWatch::SettledUnseen {
+            run: run.id.clone(),
+        },
+        (
+            RunState::Finished { .. },
+            SettleWatch::Running | SettleWatch::Settled { .. } | SettleWatch::SettledUnseen { .. },
+        ) => SettleWatch::Settled {
+            run: run.id.clone(),
+            at: now,
+        },
+    }
+}
+
+fn quiet(run: &Run, watch: &SettleWatch, now: Timestamp) -> bool {
+    let recently_settled = matches!(
+        watch,
+        SettleWatch::Settled { run: seen, at } if *seen == run.id && now - at <= SETTLED_RECENTLY_MS
+    );
+    matches!(run.state, RunState::Finished { .. }) && !recently_settled
+}
+
+#[must_use]
+pub(crate) fn finished_stored_reply(
+    view: &ThreadView,
+    watch: &SettleWatch,
+    now: Timestamp,
+) -> Option<StoredReply> {
     let run = latest_run(view)?;
-    if settled_long_ago(run, now) {
+    if quiet(run, watch, now) {
         return None;
     }
     match (&run.state, reply_text(view, run)) {
@@ -263,7 +315,7 @@ fn turn(conversation: &Conversation, now: Timestamp) -> Turn {
     let Some(run) = latest_run(view) else {
         return Turn::Idle;
     };
-    if settled_long_ago(run, now) {
+    if quiet(run, &conversation.settle, now) {
         return Turn::Idle;
     }
     let engine = run.engine.display_name();
