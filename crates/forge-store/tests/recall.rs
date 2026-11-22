@@ -763,3 +763,31 @@ async fn a_recall_build_resumed_after_a_restart_finds_every_message_once_despite
         vec![rewritten]
     );
 }
+
+#[tokio::test]
+async fn a_grep_cursor_before_the_first_row_is_refused_and_never_wraps() {
+    let refused = "-9223372036854775808".parse::<forge_store::GrepCursor>();
+    assert!(
+        matches!(refused, Err(forge_store::GrepCursorError::Row { .. })),
+        "{refused:?}"
+    );
+
+    let dir = tempfile::tempdir().expect("create the test's temporary directory");
+    let store = Store::open(dir.path()).expect("open the store");
+    let home = thread(&store, EngineId::Claude, "Cursor").await;
+    store
+        .upsert_item(said(&home, "the needle is here"))
+        .await
+        .expect("store the message");
+    let page = store
+        .recall_grep(
+            RecallScope::default(),
+            GrepQuery {
+                cursor: Some(forge_store::GrepCursor::Before { row: i64::MIN }),
+                ..grep("needle", false, 5)
+            },
+        )
+        .await
+        .expect("grep before the first row");
+    assert!(page.matches.is_empty(), "{page:?}");
+}

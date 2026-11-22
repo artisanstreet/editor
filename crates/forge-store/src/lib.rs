@@ -76,9 +76,9 @@ pub use pairing::{
 pub use progress::Progress;
 pub use read::{MAX_SEARCH_BYTES, ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
-    GrepCursor, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery, PrepareIndexError,
-    RecallGrepError, RecallIndex, RecallKind, RecallScope, RecallSearchError, RecallTouchingError,
-    RetryPace, SearchCursor, SearchHit, SearchPage, Touch,
+    GrepCursor, GrepCursorError, GrepFailure, GrepField, GrepMatch, GrepPage, GrepQuery,
+    PrepareIndexError, RecallGrepError, RecallIndex, RecallKind, RecallScope, RecallSearchError,
+    RecallTouchingError, RetryPace, SearchCursor, SearchHit, SearchPage, Touch,
 };
 pub use resources::{
     CollectSnapshotsError, KeptAtViewError, MAX_RESOURCE_SNAPSHOT_BYTES, ResourceFailure,

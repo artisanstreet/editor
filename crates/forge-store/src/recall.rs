@@ -606,12 +606,14 @@ pub enum GrepCursorError {
         #[source]
         cause: std::num::ParseIntError,
     },
+    #[error("grep cursor {cursor:?} points before the first row")]
+    Row { cursor: String },
 }
 
 impl GrepCursor {
     const fn last_row(self) -> i64 {
         match self {
-            Self::Before { row } => row - 1,
+            Self::Before { row } => row.saturating_sub(1),
             Self::At { row, .. } => row,
         }
     }
@@ -660,6 +662,9 @@ impl std::str::FromStr for GrepCursor {
         let mut parts = cursor.split(':');
         let row = parts.next().ok_or_else(refused)?.parse().map_err(number)?;
         match (parts.next(), parts.next(), parts.next()) {
+            (None, None, None) if row == i64::MIN => Err(GrepCursorError::Row {
+                cursor: cursor.to_owned(),
+            }),
             (None, None, None) => Ok(Self::Before { row }),
             (Some(field), Some(line), None) => Ok(Self::At {
                 row,
