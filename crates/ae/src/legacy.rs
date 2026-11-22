@@ -23,6 +23,13 @@ pub(crate) enum MigrateError {
         #[source]
         source: io::Error,
     },
+    #[error("{} should name the earlier Forge's process, but holds {text:?}; stop that Forge and delete the file", path.display())]
+    PidFile {
+        path: PathBuf,
+        text: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
     #[error("stop the earlier Forge service")]
     StopService(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("stop the earlier programs")]
@@ -792,9 +799,14 @@ fn old_forge(pid_file: &Path) -> Result<Option<platform::Running>, MigrateError>
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(inspect(error)),
     };
-    let Ok(pid) = text.trim().parse::<u32>() else {
-        return Ok(None);
-    };
+    let pid = text
+        .trim()
+        .parse::<u32>()
+        .map_err(|source| MigrateError::PidFile {
+            path: pid_file.to_owned(),
+            text: text.clone(),
+            source,
+        })?;
     let written = std::fs::metadata(pid_file)
         .and_then(|metadata| metadata.modified())
         .map_err(inspect)?

@@ -276,6 +276,20 @@ fn installing_forge_alone_leaves_the_earlier_editor_installed() {
     }
 }
 
+#[test]
+fn a_pid_file_that_names_no_process_stops_the_move_instead_of_leaving_a_forge_running() {
+    let machine = Machine::new();
+    let pid_file = machine.old.forge_data[0].join("forge.pid");
+    write(&pid_file, "not a pid\n");
+
+    let moved = machine.run(&[App::Ae, App::Forge], &[]);
+
+    assert!(
+        matches!(&moved, Err(MigrateError::PidFile { path, .. }) if *path == pid_file),
+        "{moved:?}"
+    );
+}
+
 fn sleep_as(executable: &Path) -> Child {
     let sleep = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|dir| dir.join("sleep"))
