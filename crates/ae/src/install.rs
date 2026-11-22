@@ -26,7 +26,7 @@ use std::time::Duration;
 #[cfg(unix)]
 const SCHEMA_PROBE_DEADLINE: Duration = Duration::from_secs(30);
 const DATA_RELEASE_DEADLINE: Duration = Duration::from_secs(120);
-const INSTALL_LOCK: &str = ".install.lock";
+const LEGACY_INSTALL_LOCK: &str = ".install.lock";
 const ORIGIN_FILE: &str = "release-feed";
 
 #[derive(Debug, thiserror::Error)]
@@ -85,8 +85,8 @@ pub(crate) enum InstallError {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InstallLockError {
-    #[error("find the install folder")]
-    Root(#[source] RootError),
+    #[error("find the default install folder")]
+    Default(#[source] EnvPathError),
     #[error("create {}", path.display())]
     Create {
         path: PathBuf,
@@ -571,8 +571,8 @@ pub(crate) enum RemoveBrowserProfileError {
 pub(crate) enum ForgetRootError {
     #[error("find the install folder")]
     Root(#[source] RootError),
-    #[error("remove the install lock")]
-    Lock(#[source] RemoveError),
+    #[error("remove the install lock an earlier ae kept in the install folder")]
+    LegacyLock(#[source] RemoveError),
     #[error(transparent)]
     RemoveDir(#[from] RemoveDirError),
     #[error("forget the install folder")]
@@ -1027,13 +1027,25 @@ fn relocation(location: &Path) -> Result<Option<PathBuf>, InstallError> {
     Ok(Some(location))
 }
 
-fn install_lock() -> Result<std::fs::File, InstallLockError> {
-    let root = artisan_paths::root().map_err(InstallLockError::Root)?;
-    std::fs::create_dir_all(&root).map_err(|source| InstallLockError::Create {
-        path: root.clone(),
+fn install_lock_path(default_root: &Path) -> PathBuf {
+    let mut name = default_root
+        .file_name()
+        .expect("invariant: the default install folder has a name")
+        .to_owned();
+    name.push(".install.lock");
+    default_root.with_file_name(name)
+}
+
+fn install_lock() -> Result<Installing, InstallLockError> {
+    let path =
+        install_lock_path(&artisan_paths::default_root().map_err(InstallLockError::Default)?);
+    let parent = path
+        .parent()
+        .expect("invariant: the install lock sits beside the default install folder");
+    std::fs::create_dir_all(parent).map_err(|source| InstallLockError::Create {
+        path: parent.to_owned(),
         source,
     })?;
-    let path = root.join(INSTALL_LOCK);
     let lock = |source| InstallLockError::Lock {
         path: path.clone(),
         source,
@@ -1053,7 +1065,11 @@ fn install_lock() -> Result<std::fs::File, InstallLockError> {
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(lock(error)),
     }
-    Ok(file)
+    Ok(Installing { _lock: file })
+}
+
+struct Installing {
+    _lock: std::fs::File,
 }
 
 fn recover_interrupted() -> Result<(), RecoverError> {
@@ -2338,7 +2354,7 @@ fn remove_dir_if_empty(dir: &Path) -> Result<bool, RemoveDirError> {
 
 fn forget_empty_root() -> Result<(), ForgetRootError> {
     let root = artisan_paths::root().map_err(ForgetRootError::Root)?;
-    sys::remove(&root.join(INSTALL_LOCK)).map_err(ForgetRootError::Lock)?;
+    sys::remove(&root.join(LEGACY_INSTALL_LOCK)).map_err(ForgetRootError::LegacyLock)?;
     if remove_dir_if_empty(&root)? {
         artisan_paths::forget_root().map_err(ForgetRootError::Forget)?;
     }
@@ -2435,7 +2451,7 @@ fn remove_app(app: App, purge: bool) -> Result<bool, RemoveAppError> {
 struct SelfRemoval {
     ae: PathBuf,
     dir: PathBuf,
-    lock: PathBuf,
+    legacy_lock: PathBuf,
     root: PathBuf,
     pointer: PathBuf,
     default: PathBuf,
@@ -2452,11 +2468,11 @@ fn self_removal_script(waiting_for: u32, removal: &SelfRemoval) -> String {
          }}; \
          Remove-Item -LiteralPath {ae} -Force; \
          Remove-Empty {dir} | Out-Null; \
-         Remove-Item -LiteralPath {lock} -Force; \
+         Remove-Item -LiteralPath {legacy_lock} -Force; \
          if (Remove-Empty {root}) {{ Remove-Item -LiteralPath {pointer} -Force; Remove-Empty {default} | Out-Null }}",
         ae = sys::ps_quote(&removal.ae),
         dir = sys::ps_quote(&removal.dir),
-        lock = sys::ps_quote(&removal.lock),
+        legacy_lock = sys::ps_quote(&removal.legacy_lock),
         root = sys::ps_quote(&removal.root),
         pointer = sys::ps_quote(&removal.pointer),
         default = sys::ps_quote(&removal.default),
@@ -2465,11 +2481,10 @@ fn self_removal_script(waiting_for: u32, removal: &SelfRemoval) -> String {
 
 fn remove_self_later(ae: &Path, dir: &Path) -> Result<(), RemoveSelfLaterError> {
     let root = artisan_paths::root().map_err(RemoveSelfLaterError::Root)?;
-    let lock = root.join(INSTALL_LOCK);
     let removal = SelfRemoval {
         ae: ae.to_owned(),
         dir: dir.to_owned(),
-        lock,
+        legacy_lock: root.join(LEGACY_INSTALL_LOCK),
         root,
         pointer: artisan_paths::root_pointer().map_err(RemoveSelfLaterError::Default)?,
         default: artisan_paths::default_root().map_err(RemoveSelfLaterError::Default)?,

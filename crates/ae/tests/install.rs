@@ -85,7 +85,7 @@ mod tests {
             }
         }
 
-        fn ae(&self, args: &[&str]) -> Output {
+        fn command(&self, args: &[&str]) -> Command {
             let mut command = Command::new(env!("CARGO_BIN_EXE_ae"));
             command.args(args);
             isolate(&mut command, self.root.path());
@@ -97,9 +97,91 @@ mod tests {
                     "PATH",
                     std::env::join_paths(paths).expect("join the PATH entries"),
                 )
-                .env_remove("DBUS_SESSION_BUS_ADDRESS")
-                .output()
-                .expect("run ae")
+                .env_remove("DBUS_SESSION_BUS_ADDRESS");
+            command
+        }
+
+        fn ae(&self, args: &[&str]) -> Output {
+            self.command(args).output().expect("run ae")
+        }
+
+        fn install_lock(&self) -> std::fs::File {
+            let street = artisan_street(self.root.path());
+            let mut name = street
+                .file_name()
+                .expect("the install folder has a name")
+                .to_owned();
+            name.push(".install.lock");
+            let path = street.with_file_name(name);
+            std::fs::create_dir_all(path.parent().expect("the lock has a folder"))
+                .expect("create the lock's folder");
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path)
+                .expect("open the install lock")
+        }
+
+        fn ae_behind(
+            &self,
+            installing: std::fs::File,
+            args: &[&str],
+            meanwhile: impl FnOnce(),
+        ) -> (std::process::ExitStatus, String) {
+            use std::io::BufRead as _;
+            let mut child = self
+                .command(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("run ae");
+            let stderr = child.stderr.take().expect("ae's stderr is piped");
+            let (send, lines) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in std::io::BufReader::new(stderr)
+                    .lines()
+                    .map_while(Result::ok)
+                {
+                    if send.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+            let deadline = std::time::Instant::now() + test_support::wait::LIVENESS;
+            let mut said = String::new();
+            while !said.contains("Waiting for another installer to finish") {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let Ok(line) = lines.recv_timeout(left) else {
+                    drop(installing);
+                    child.wait().expect("wait for ae");
+                    panic!("ae never waited for the installer holding the lock: {said}");
+                };
+                said.push_str(&line);
+                said.push('\n');
+            }
+            meanwhile();
+            drop(installing);
+            let status = child.wait().expect("wait for ae");
+            reader.join().expect("read ae's output");
+            said.extend(lines.try_iter().map(|line| line + "\n"));
+            (status, said)
+        }
+
+        fn stage_forge(&self, forge: &Path) -> String {
+            let stage = self.root.path().join("stage").join(std::env::consts::OS);
+            std::fs::create_dir_all(&stage).expect("create the stage");
+            test_support::executable::install(
+                Path::new(env!("CARGO_BIN_EXE_ae")),
+                &stage.join("ae"),
+            );
+            test_support::executable::install(forge, &stage.join(App::Forge.binary_name()));
+            self.root
+                .path()
+                .join("stage")
+                .to_string_lossy()
+                .into_owned()
         }
 
         fn listening(&self) -> bool {
@@ -679,6 +761,29 @@ mod tests {
             String::from_utf8_lossy(&removed.stderr)
         );
         assert!(!sandbox.installed.exists(), "Forge was uninstalled");
+    }
+
+    #[test]
+    fn an_installer_waiting_since_before_an_uninstall_still_keeps_the_next_one_out() {
+        let sandbox = Sandbox::new();
+        let stage = sandbox.stage_forge(&forge_binary());
+        let waiting = sandbox.install_lock();
+
+        let removed = sandbox.ae(&["uninstall", "forge", "--yes"]);
+        assert!(removed.status.success(), "{}", said(&removed));
+        waiting
+            .lock()
+            .expect("the waiting installer gets the lock after the uninstall");
+        let (installed, told) = sandbox.ae_behind(
+            waiting,
+            &[
+                "install", "--editor", "none", "--forge", "here", "--yes", "--from", &stage,
+            ],
+            || {},
+        );
+
+        assert!(installed.success(), "{told}");
+        assert!(sandbox.installed.is_file(), "Forge is installed: {told}");
     }
 
     fn ae_only_stage(sandbox: &Sandbox) -> String {

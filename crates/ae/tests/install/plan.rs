@@ -150,12 +150,12 @@ fn ae_removes_itself_after_it_exits_even_from_folders_with_quotes_and_percent_si
     let removal = SelfRemoval {
         ae: dir.join("ae.exe"),
         dir: dir.clone(),
-        lock: root.join(INSTALL_LOCK),
+        legacy_lock: root.join(LEGACY_INSTALL_LOCK),
         root: root.clone(),
         pointer: base.join("root.txt"),
         default: default.clone(),
     };
-    for file in [&removal.ae, &removal.lock, &removal.pointer] {
+    for file in [&removal.ae, &removal.legacy_lock, &removal.pointer] {
         std::fs::write(file, "kept until ae exits").unwrap();
     }
     let mut exited = std::process::Command::new("cmd.exe")
@@ -182,12 +182,12 @@ fn ae_removing_itself_keeps_an_install_folder_that_still_holds_data() {
     let removal = SelfRemoval {
         ae: dir.join("ae.exe"),
         dir: dir.clone(),
-        lock: root.join(INSTALL_LOCK),
+        legacy_lock: root.join(LEGACY_INSTALL_LOCK),
         root: root.clone(),
         pointer: sandbox.path().join("root.txt"),
         default: root.clone(),
     };
-    for file in [&removal.ae, &removal.lock, &removal.pointer] {
+    for file in [&removal.ae, &removal.legacy_lock, &removal.pointer] {
         std::fs::write(file, "kept until ae exits").unwrap();
     }
     let mut exited = std::process::Command::new("cmd.exe")
@@ -199,7 +199,7 @@ fn ae_removing_itself_keeps_an_install_folder_that_still_holds_data() {
     sys::powershell(&self_removal_script(exited.id(), &removal)).unwrap();
 
     assert!(!removal.ae.exists());
-    assert!(!removal.lock.exists());
+    assert!(!removal.legacy_lock.exists());
     assert!(dir.join("data").exists(), "the kept data stays");
     assert!(removal.pointer.exists(), "a root still in use stays chosen");
 }
