@@ -41,6 +41,7 @@ impl Protocol {
     fn of(args: &[String]) -> Option<Self> {
         match args.first().map(String::as_str) {
             Some("app-server") if !args.iter().any(|arg| arg == "--stdio") => Some(Self::Stdio),
+            Some("acp") => Some(Self::Stdio),
             Some("serve") => Some(Self::Http),
             _ if args.iter().any(|arg| arg == "--replay-user-messages") => Some(Self::Stdio),
             _ => None,

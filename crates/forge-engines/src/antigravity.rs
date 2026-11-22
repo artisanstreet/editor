@@ -392,6 +392,7 @@ async fn drive(
         id: session.id.clone(),
     })
     .await;
+    let levels = thought_levels(&session.options);
     apply_mode(connection, &mut session, turn.config.permissions).await?;
     apply_option(
         connection,
@@ -400,13 +401,11 @@ async fn drive(
         turn.config.model.as_deref(),
     )
     .await?;
-    apply_option(
-        connection,
-        &mut session,
-        protocol::THOUGHT_LEVEL,
-        turn.config.effort.as_deref(),
-    )
-    .await?;
+    let effort = match current_thinking(&session.options, &levels) {
+        Thinking::Fixed(_) => None,
+        Thinking::Orchestrator | Thinking::Adjustable => turn.config.effort.as_deref(),
+    };
+    apply_option(connection, &mut session, protocol::THOUGHT_LEVEL, effort).await?;
     let mut configured = Vec::new();
     decoder.configured(&session.options, &mut configured);
     emit_all(io, configured).await;
@@ -690,9 +689,14 @@ pub(crate) enum ProbeError {
     Open(#[source] RunError),
 }
 
-pub(crate) struct Probed {
-    pub signed_in: bool,
+pub(crate) enum Probed {
+    SignedOut,
+    SignedIn(Lineup),
+}
+
+pub(crate) struct Lineup {
     pub listing: crate::catalog::Listing,
+    pub hidden: usize,
 }
 
 pub(crate) async fn probe(
@@ -730,15 +734,9 @@ pub(crate) async fn probe(
                     "Antigravity kept its probe session open"
                 );
             }
-            Ok(Probed {
-                signed_in: true,
-                listing: models(&opened),
-            })
+            Ok(Probed::SignedIn(models(&opened)))
         }
-        Err(failure) if failure.signed_out() => Ok(Probed {
-            signed_in: false,
-            listing: crate::catalog::Listing::default(),
-        }),
+        Err(failure) if failure.signed_out() => Ok(Probed::SignedOut),
         Err(failure) => Err(ProbeError::Open(failure)),
     };
     connection.end().await;
@@ -748,14 +746,10 @@ pub(crate) async fn probe(
 pub(crate) async fn sign_in(binary: &Path, home: &Path) -> SignInState {
     let command = crate::account::engine_command(artisan_api::EngineId::Antigravity, binary, home);
     match probe(command, home).await {
-        Ok(Probed {
-            signed_in: true, ..
-        }) => SignInState::SignedIn {
+        Ok(Probed::SignedIn(_)) => SignInState::SignedIn {
             account: account(home),
         },
-        Ok(Probed {
-            signed_in: false, ..
-        }) => SignInState::SignedOut,
+        Ok(Probed::SignedOut) => SignInState::SignedOut,
         Err(failure) => {
             let error = crate::rpc::told(&failure);
             tracing::warn!(home = %home.display(), error, "Antigravity sign-in check failed");
@@ -823,20 +817,12 @@ fn read_account(path: &Path) -> Result<Option<String>, AccountError> {
         .filter(|email| !email.trim().is_empty()))
 }
 
-fn models(opened: &Opened) -> crate::catalog::Listing {
+fn models(opened: &Opened) -> Lineup {
     let options = &opened.config_options;
-    let thinking = options
+    let thinking_option = options
         .iter()
         .find(|option| option.is(protocol::THOUGHT_LEVEL));
-    let levels: Vec<String> = thinking
-        .map(|option| {
-            option
-                .choices()
-                .into_iter()
-                .map(|choice| choice.value)
-                .collect()
-        })
-        .unwrap_or_default();
+    let levels = thought_levels(options);
     let listed: Vec<&str> = opened
         .models
         .iter()
@@ -844,32 +830,46 @@ fn models(opened: &Opened) -> crate::catalog::Listing {
         .map(|listed| listed.model_id.as_str())
         .collect();
     let Some(model) = options.iter().find(|option| option.is(protocol::MODEL)) else {
-        return crate::catalog::Listing::default();
+        return Lineup {
+            listing: crate::catalog::Listing::default(),
+            hidden: 0,
+        };
     };
     let current = model.current_value.as_deref();
-    let mut models: Vec<artisan_api::Model> = model
-        .choices()
+    let choices = model.choices();
+    let offered = choices.len();
+    let mut models: Vec<artisan_api::Model> = choices
         .into_iter()
-        .map(|choice| {
-            let prefix = format!("{}-", choice.value);
-            let efforts: Vec<String> = levels
-                .iter()
-                .filter(|level| {
-                    listed
+        .filter_map(|choice| {
+            let shown = choice.name.clone().unwrap_or_else(|| choice.value.clone());
+            let (name, efforts, default_effort) = match thinking(&choice.value, &levels) {
+                Thinking::Orchestrator => return None,
+                Thinking::Fixed(level) => (
+                    without_level(&shown).to_owned(),
+                    vec![level.to_owned()],
+                    Some(level.to_owned()),
+                ),
+                Thinking::Adjustable => {
+                    let prefix = format!("{}-", choice.value);
+                    let efforts: Vec<String> = levels
                         .iter()
-                        .any(|id| id.strip_prefix(&prefix) == Some(level.as_str()))
-                })
-                .cloned()
-                .collect();
-            let default_effort = if current == Some(choice.value.as_str()) {
-                thinking.and_then(|option| option.current_value.clone())
-            } else {
-                None
-            }
-            .filter(|effort| efforts.contains(effort));
+                        .filter(|level| {
+                            listed
+                                .iter()
+                                .any(|id| id.strip_prefix(&prefix) == Some(level.as_str()))
+                        })
+                        .cloned()
+                        .collect();
+                    let default_effort = (current == Some(choice.value.as_str()))
+                        .then(|| thinking_option.and_then(|option| option.current_value.clone()))
+                        .flatten()
+                        .filter(|effort| efforts.contains(effort));
+                    (shown, efforts, default_effort)
+                }
+            };
             let id = &choice.value;
-            artisan_api::Model {
-                name: choice.name.clone().unwrap_or_else(|| choice.value.clone()),
+            Some(artisan_api::Model {
+                name,
                 id: choice.value.clone(),
                 description: choice.description,
                 efforts,
@@ -878,15 +878,69 @@ fn models(opened: &Opened) -> crate::catalog::Listing {
                 lab: lab(id).map(str::to_owned),
                 section: Some(section(id).to_owned()),
                 ..artisan_api::Model::default()
-            }
+            })
         })
         .collect();
     models.sort_by_key(|model| model.section.as_deref() != Some(GEMINI_SECTION));
-    crate::catalog::Listing {
-        models,
-        default: model.current_value.clone(),
-        commands: None,
+    let hidden = offered - models.len();
+    Lineup {
+        listing: crate::catalog::Listing {
+            models,
+            default: model.current_value.clone(),
+            commands: None,
+        },
+        hidden,
     }
+}
+
+const ORCHESTRATOR_PREFIX: &str = "gemini-pro-orchestrator-";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Thinking<'a> {
+    Orchestrator,
+    Fixed(&'a str),
+    Adjustable,
+}
+
+fn thinking<'a>(id: &str, levels: &'a [String]) -> Thinking<'a> {
+    if id.starts_with(ORCHESTRATOR_PREFIX) {
+        return Thinking::Orchestrator;
+    }
+    levels
+        .iter()
+        .find(|level| {
+            id.strip_suffix(level.as_str())
+                .is_some_and(|model| model.ends_with('-'))
+        })
+        .map_or(Thinking::Adjustable, |level| Thinking::Fixed(level))
+}
+
+fn thought_levels(options: &[ConfigOption]) -> Vec<String> {
+    options
+        .iter()
+        .find(|option| option.is(protocol::THOUGHT_LEVEL))
+        .map(|option| {
+            option
+                .choices()
+                .into_iter()
+                .map(|choice| choice.value)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn current_thinking<'a>(options: &[ConfigOption], levels: &'a [String]) -> Thinking<'a> {
+    options
+        .iter()
+        .find(|option| option.is(protocol::MODEL))
+        .and_then(|option| option.current_value.as_deref())
+        .map_or(Thinking::Adjustable, |id| thinking(id, levels))
+}
+
+fn without_level(name: &str) -> &str {
+    name.strip_suffix(')')
+        .and_then(|name| name.rsplit_once(" ("))
+        .map_or(name, |(bare, _)| bare.trim_end())
 }
 
 const GEMINI_SECTION: &str = "Gemini";

@@ -210,24 +210,6 @@ target = "cfg(windows)"
 reason = "only the Linux-only Forge simulation test starts Forge in a simulated environment"
 
 [[override]]
-lint = "hawk::unnecessary_public"
-crate = "test_support"
-item = "executable"
-kind = "module"
-level = "expect"
-target = "cfg(windows)"
-reason = "only the Unix ae and engine-manager tests install executables from other crates"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "test_support"
-item = "executable::install"
-kind = "function"
-level = "expect"
-target = "cfg(windows)"
-reason = "only the Unix ae and engine-manager tests install executables from other crates"
-
-[[override]]
 lint = "hawk::unnecessary_restricted_visibility"
 crate = "forge_engines"
 item = "claudeai::session::FILE_LOCK"
