@@ -320,6 +320,9 @@ jobs:
       actions: write
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      LUNARG_SDK: 1.4.363.1
+      LUNARG_SDK_SHA256: a65c707cf0a32bf8c2ca6b9af1985b7af61dbadfc19b352dae51a323f3a547a6
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -334,6 +337,29 @@ jobs:
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519
         with:
           tool: cargo-nextest@0.9.152
+      - name: Restore the pinned LunarG SDK
+        id: lunarg
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/VulkanSDK/${{ env.LUNARG_SDK }}
+          key: lunarg-macos-${{ env.LUNARG_SDK }}
+      - name: Install the pinned LunarG SDK for Aqua's shader compiler
+        if: steps.lunarg.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL -o "$RUNNER_TEMP/vulkansdk.zip" "https://sdk.lunarg.com/sdk/download/$LUNARG_SDK/mac/vulkansdk-macos-$LUNARG_SDK.zip"
+          echo "$LUNARG_SDK_SHA256  $RUNNER_TEMP/vulkansdk.zip" | shasum -a 256 --check
+          unzip -q "$RUNNER_TEMP/vulkansdk.zip" -d "$RUNNER_TEMP/vulkansdk"
+          sudo "$RUNNER_TEMP/vulkansdk/vulkansdk-macOS-$LUNARG_SDK.app/Contents/MacOS/vulkansdk-macOS-$LUNARG_SDK" \
+            --root "$HOME/VulkanSDK/$LUNARG_SDK" --accept-licenses --default-answer --confirm-command install copy_only=1
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/VulkanSDK"
+      - name: Save the pinned LunarG SDK
+        if: steps.lunarg.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/VulkanSDK/${{ env.LUNARG_SDK }}
+          key: lunarg-macos-${{ env.LUNARG_SDK }}
+      - name: Point Aqua's shader build at the SDK's dxc
+        run: echo "AQUA_DXC_SPIRV=$HOME/VulkanSDK/$LUNARG_SDK/macOS/bin/dxc" >> "$GITHUB_ENV"
       - *restore-target-cargo
       - run: rustup show
       - name: Clippy
