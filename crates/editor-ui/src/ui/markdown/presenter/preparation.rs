@@ -1,9 +1,15 @@
-use super::super::{CodeFence, MarkdownEngine};
+use super::super::{CodeFence, MarkdownEngine, MessageMarks};
 use super::{MarkdownPresenter, PreparationProof, PresenterError, RetainedRich, fence_key};
 use crate::ui::rich::{self, RichFence};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MentionRevision {
+    Unchanged,
+    Remarked,
+}
 
 impl MarkdownPresenter {
     pub fn prepare(
@@ -18,11 +24,24 @@ impl MarkdownPresenter {
         &mut self,
         engine: &MarkdownEngine,
         source: &str,
+        vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
     ) -> Result<PreparationProof, PresenterError> {
-        let command = artisan_mentions::special_command(source)
-            .and_then(|range| source.get(range))
-            .map(str::to_owned);
-        self.prepare_with(engine, source, command)
+        let marks = MessageMarks::new(source, vocabulary);
+        self.prepare_with(engine, source, Some(marks))
+    }
+
+    pub fn revise_mentions(
+        &mut self,
+        vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
+    ) -> Result<MentionRevision, PresenterError> {
+        let (Some(marks), Some(projected)) = (self.marks.as_mut(), self.projected.as_ref()) else {
+            return Ok(MentionRevision::Unchanged);
+        };
+        if projected.mentions_differ(&self.source, vocabulary)? {
+            return Ok(MentionRevision::Remarked);
+        }
+        marks.adopt(vocabulary);
+        Ok(MentionRevision::Unchanged)
     }
 
     fn prepare_appended(
@@ -43,7 +62,7 @@ impl MarkdownPresenter {
         let (projected, kept) = previous.append(
             engine,
             &self.source,
-            self.command.as_deref(),
+            self.marks.as_ref(),
             &mut self.fence_tokens,
         )?;
         Ok(self.retain_prepared(projected, kept))
@@ -53,9 +72,9 @@ impl MarkdownPresenter {
         &mut self,
         engine: &MarkdownEngine,
         source: &str,
-        command: Option<String>,
+        marks: Option<MessageMarks>,
     ) -> Result<PreparationProof, PresenterError> {
-        if self.projected.is_some() && self.command == command {
+        if self.projected.is_some() && self.marks == marks {
             match source.strip_prefix(self.source.as_str()) {
                 Some("") => return Ok(PreparationProof(Arc::clone(&self.proof))),
                 Some(appended) => return self.prepare_appended(engine, appended),
@@ -68,12 +87,12 @@ impl MarkdownPresenter {
         let projected = super::super::projected::ProjectedDocument::new(
             engine,
             source,
-            command.as_deref(),
+            marks.as_ref(),
             &mut self.fence_tokens,
         )?;
         self.source.clear();
         self.source.push_str(source);
-        self.command = command;
+        self.marks = marks;
         Ok(self.retain_prepared(projected, 0))
     }
 

@@ -77,3 +77,29 @@ fn long_unmatched_tokens_and_duplicate_names_remain_bounded() {
     let text = format!("${} $short", "a.".repeat(100_000));
     assert_eq!(skill_mentions(&text, &["short", "short"]).len(), 1);
 }
+
+#[test]
+fn a_message_names_known_skills_and_threads_and_leaves_the_rest_plain() {
+    let vocabulary = MessageVocabulary::new(
+        &["review", "workflow"],
+        &["Orchestartor and GPT OSS (Medium)", "Fix $review flow"],
+    );
+    let text =
+        "Ask @Orchestartor and GPT OSS (Medium), then $review and $foo; see @Fix $review flow";
+    let mentions: Vec<_> = vocabulary
+        .mentions(text)
+        .into_iter()
+        .map(|mention| (mention.kind, text.get(mention.range)))
+        .collect();
+    assert_eq!(
+        mentions,
+        [
+            (
+                MentionKind::Thread,
+                Some("@Orchestartor and GPT OSS (Medium)")
+            ),
+            (MentionKind::Skill, Some("$review")),
+            (MentionKind::Thread, Some("@Fix $review flow")),
+        ]
+    );
+}

@@ -7,6 +7,8 @@ use editor_assets::AssetId;
 use super::editor::StyledToken;
 use crate::ui::theme::{Oklch, Opacity};
 
+pub(crate) const MENTION_GLYPH_CELL_PX: f32 = 20.0;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlyphToken {
     pub range: Range<usize>,
@@ -47,7 +49,7 @@ pub fn compile_tokens(
             && let Some(sigil) = slice(text, range.clone()).chars().next()
         {
             let sigil_end = start + sigil.len_utf8();
-            let cell = 20.0_f32.max(sigil_advance(sigil));
+            let cell = MENTION_GLYPH_CELL_PX.max(sigil_advance(sigil));
             let span = StyledSpan::new(slice(text, start..sigil_end), style.clone())
                 .gpui_source_color([0.0, 0.0, 0.0, 0.0])
                 .inline_cell(cell)?;

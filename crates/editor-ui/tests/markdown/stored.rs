@@ -46,6 +46,19 @@ type PreparedLeaf = (
     usize,
 );
 
+fn parts(
+    (leaf_context, table_continues, content, source, bytes): PreparedLeaf,
+) -> Box<PreparedParts> {
+    Box::new(PreparedParts {
+        context: leaf_context,
+        table_continues,
+        content,
+        mentions: LeafMentions::Plain,
+        source,
+        bytes,
+    })
+}
+
 fn cached_source(provider: ScopedSourceProvider) -> (StoredOwner, StoredSource) {
     let reference = ContentRef::from_text("abc");
     let metadata = ContentRef::from_text("{}");
@@ -70,6 +83,7 @@ fn prepared(
     let descriptor = owner.descriptor(source, ordinal).unwrap().clone();
     owner.leaves.push_back(LeafEntry {
         key: key.into(),
+        kind: LeafKind::Plain,
         source: source.clone(),
         descriptor,
         generation,
@@ -83,7 +97,8 @@ fn prepared(
             generation,
             _worker: None,
             _capacity: None,
-            result: Ok(result),
+            vocabulary: None,
+            result: Ok(parts(result)),
         }))
         .unwrap();
     owner.drain();
@@ -404,6 +419,7 @@ fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation(
     let descriptor = owner.descriptor(&source, 0).unwrap().clone();
     owner.leaves.push_back(LeafEntry {
         key: "leaf".into(),
+        kind: LeafKind::Plain,
         source: source.clone(),
         descriptor,
         generation: 9,
@@ -412,7 +428,7 @@ fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation(
         task: None,
     });
     let make_result = || {
-        Ok((
+        Ok(parts((
             artisan_markdown_index::LeafContext::default(),
             false,
             IndexedLeafContent::Block(super::super::Block::Html {
@@ -420,13 +436,14 @@ fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation(
             }),
             Arc::<str>::from("abc"),
             123,
-        ))
+        )))
     };
     runtime::runtime()
         .block_on(owner.delivery.sender().send(Completion::Prepared {
             key: "leaf".into(),
             generation: 8,
             result: make_result(),
+            vocabulary: None,
             _worker: None,
             _capacity: None,
         }))
@@ -438,6 +455,7 @@ fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation(
             key: "leaf".into(),
             generation: 9,
             result: make_result(),
+            vocabulary: None,
             _worker: None,
             _capacity: None,
         }))
@@ -526,6 +544,7 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
     );
     owner.leaves.push_back(LeafEntry {
         key: "empty".into(),
+        kind: LeafKind::Plain,
         source,
         descriptor,
         generation: 7,
@@ -822,4 +841,494 @@ fn stored_metadata_with_an_event_beyond_its_leaf_is_rejected_instead_of_aborting
             "{result:?}"
         );
     }
+}
+
+#[test]
+fn a_stored_message_leaf_marks_its_mentions_from_the_start_of_the_leaf() {
+    let filler = "Plain words that pad the message past the inline limit.\n\n".repeat(400);
+    let source = format!("{filler}$review the last part\n\n`$review` stays code");
+    assert!(source.len() > 16 * 1024);
+    let index = artisan_markdown_index::MarkdownIndex::build(&source).expect("index");
+    let titles: [&str; 0] = [];
+    let vocabulary = artisan_mentions::MessageVocabulary::new(&["review"], &titles);
+    let engine = MarkdownEngine::new().expect("markdown engine");
+    let last = index.leaves().len();
+    let marked = |ordinal: usize| {
+        let record = index.record(ordinal).expect("record");
+        let range = record.leaf.source_range();
+        let fetched = slice(&source, range.clone());
+        super::super::source_index::normalize_message_record(
+            &record,
+            range.start,
+            fetched,
+            &engine,
+            &mut super::super::NoFenceTokenMemo,
+            &vocabulary,
+        )
+        .expect("stored leaf")
+        .mentions
+        .len()
+    };
+    assert_eq!(marked(last - 2), 1);
+    assert_eq!(marked(last - 1), 0);
+}
+
+#[test]
+fn stored_metadata_closing_a_tag_it_never_opened_is_a_typed_error() {
+    let source = "[a](b) $review";
+    let index = artisan_markdown_index::MarkdownIndex::build(source).expect("index");
+    let mut record = serde_json::to_value(index.record(0).expect("record")).unwrap();
+    let events = record["leaf"]["events"].as_array_mut().expect("events");
+    let opened = events
+        .iter()
+        .position(|event| {
+            let text = event.to_string();
+            text.contains("Start") && text.contains("Link")
+        })
+        .expect("a link start");
+    events.remove(opened);
+    let record: artisan_markdown_index::LeafRecord = serde_json::from_value(record).unwrap();
+    let vocabulary = artisan_mentions::MessageVocabulary::new(&["review"], &[""; 0]);
+    let engine = MarkdownEngine::new().unwrap();
+    let result = super::super::source_index::normalize_message_record(
+        &record,
+        0,
+        source,
+        &engine,
+        &mut super::super::NoFenceTokenMemo,
+        &vocabulary,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(crate::ui::markdown::MarkdownIndexError::UnbalancedEvents { .. })
+        ),
+        "{:?}",
+        result.err()
+    );
+}
+
+struct MessageSource {
+    owner: StoredOwner,
+    source: StoredSource,
+    leaves: Vec<(String, String)>,
+}
+
+fn message_source(provider: ScopedSourceProvider, text: &str) -> MessageSource {
+    budgeted_source(provider, text, PREPARED_BYTES, PREPARED_BYTES / 8)
+}
+
+fn budgeted_source(
+    provider: ScopedSourceProvider,
+    text: &str,
+    budget: usize,
+    syntax_budget: usize,
+) -> MessageSource {
+    let index = artisan_markdown_index::MarkdownIndex::build(text).expect("index");
+    let mut metadata = String::new();
+    let mut descriptors = Vec::new();
+    let mut leaves = Vec::new();
+    for ordinal in 0..index.leaves().len() {
+        let record = index.record(ordinal).expect("record");
+        let json = serde_json::to_string(&record).unwrap();
+        let range = record.leaf.source_range();
+        descriptors.push(SourceLeafDescriptor {
+            ordinal: ordinal as u64,
+            source_start: range.start as u64,
+            source_end: range.end as u64,
+            metadata_start: metadata.len() as u64,
+            metadata_end: (metadata.len() + json.len()) as u64,
+        });
+        metadata.push_str(&json);
+        leaves.push((json, slice(text, range).to_owned()));
+    }
+    let reference = ContentRef::from_text(text);
+    let metadata = ContentRef::from_text(&metadata);
+    let page = SourceIndexRange {
+        index: SourceIndexHeader {
+            format: SourceIndexFormat::Markdown,
+            source: reference.clone(),
+            metadata,
+            version: artisan_api::SOURCE_INDEX_VERSION,
+            leaves: descriptors.len() as u64,
+        },
+        start: 0,
+        end: descriptors.len() as u64,
+        leaves: descriptors,
+    };
+    let mut owner = StoredOwner::with_budgets(budget, syntax_budget);
+    owner.remember_page(provider.clone(), Arc::new(page));
+    let StoredPreparation::Ready(source) =
+        owner.ensure("row", provider, reference, SourceIndexFormat::Markdown)
+    else {
+        panic!("expected cached page")
+    };
+    MessageSource {
+        owner,
+        source,
+        leaves,
+    }
+}
+
+impl MessageSource {
+    fn waiting(&mut self, ordinal: usize, vocabulary: &Arc<artisan_mentions::MessageVocabulary>) {
+        self.owner.revise_mentions(vocabulary);
+        let (metadata, source) = self.leaves[ordinal].clone();
+        let descriptor = self
+            .owner
+            .descriptor(&self.source, ordinal)
+            .unwrap()
+            .clone();
+        let permit = Arc::new(
+            Arc::clone(&self.owner.capacity)
+                .try_acquire_many_owned(
+                    u32::try_from(metadata.len() + source.len()).expect("budget fits u32"),
+                )
+                .unwrap(),
+        );
+        let generation = self.owner.next_generation();
+        self.owner.leaves.push_back(LeafEntry {
+            key: format!("leaf:{ordinal}"),
+            kind: LeafKind::Message,
+            source: self.source.clone(),
+            descriptor,
+            generation,
+            capacity: Some(permit),
+            phase: LeafPhase::WaitingWorker(PreparationInput::Fetched { metadata, source }),
+            task: None,
+        });
+    }
+
+    fn shown(
+        &mut self,
+        ordinal: usize,
+        vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
+    ) -> Option<Rc<StoredLeaf>> {
+        let source = self.source.clone();
+        match self
+            .owner
+            .message_leaf(&format!("leaf:{ordinal}"), &source, ordinal, vocabulary)
+        {
+            LeafPreparation::Ready(leaf) => Some(leaf),
+            LeafPreparation::Pending => None,
+            LeafPreparation::Failed(error) => panic!("leaf {ordinal} failed: {error}"),
+        }
+    }
+
+    fn drain_until(&mut self, what: &str, mut done: impl FnMut(&[StoredUpdate]) -> bool) {
+        let mut seen = Vec::new();
+        test_support::wait::wait_until(what, test_support::wait::LIVENESS, || {
+            seen.extend(self.owner.drain());
+            done(&seen)
+        });
+    }
+}
+
+fn chips(leaf: &StoredLeaf) -> usize {
+    fn count(spans: &[super::super::Span]) -> usize {
+        spans
+            .iter()
+            .map(|span| match span {
+                super::super::Span::MentionLead { .. } => 1,
+                super::super::Span::Emphasis(inner) | super::super::Span::Strong(inner) => {
+                    count(inner)
+                }
+                super::super::Span::Link { label, .. } => count(label),
+                super::super::Span::MentionTail { .. }
+                | super::super::Span::Text(_)
+                | super::super::Span::Html(_)
+                | super::super::Span::Code(_)
+                | super::super::Span::Command(_) => 0,
+            })
+            .sum()
+    }
+    match leaf.content() {
+        IndexedLeafContent::Block(super::super::Block::Paragraph { spans, .. }) => count(spans),
+        IndexedLeafContent::Block(_) => 0,
+        IndexedLeafContent::TableRow { cells, .. } => {
+            cells.iter().map(|cell| count(&cell.spans)).sum()
+        }
+    }
+}
+
+fn vocabulary(skills: &[&str]) -> Arc<artisan_mentions::MessageVocabulary> {
+    Arc::new(artisan_mentions::MessageVocabulary::new(skills, &[""; 0]))
+}
+
+fn remarked(updates: &[StoredUpdate], ordinal: usize) -> bool {
+    updates.iter().any(|update| {
+        *update
+            == StoredUpdate::Remarked {
+                key: format!("leaf:{ordinal}"),
+                ordinal,
+            }
+    })
+}
+
+#[test]
+fn a_vocabulary_change_keeps_showing_stored_leaves_until_the_chip_is_ready() {
+    let (_directory, _core, _config, provider) = owner_fixture();
+    let mut stored = message_source(provider, "run $review now\n\nnothing here");
+    let before = vocabulary(&[]);
+    stored.waiting(0, &before);
+    stored.waiting(1, &before);
+    stored.drain_until("both leaves to be prepared", |updates| {
+        updates
+            .iter()
+            .filter(|update| matches!(update, StoredUpdate::Leaf { .. }))
+            .count()
+            == 2
+    });
+    let old = stored.shown(0, &before).expect("ready leaf");
+    let other = stored.shown(1, &before).expect("ready leaf");
+    assert_eq!(chips(&old), 0);
+
+    let after = vocabulary(&["review"]);
+    stored.owner.revise_mentions(&after);
+    let shown = stored
+        .shown(0, &after)
+        .expect("still shown while it is marked again");
+    assert!(Rc::ptr_eq(&shown, &old));
+    assert!(Rc::ptr_eq(
+        &stored.shown(1, &after).expect("untouched leaf"),
+        &other
+    ));
+    drop(shown);
+
+    stored.drain_until("the mentioned leaf to be marked", |updates| {
+        remarked(updates, 0)
+    });
+    let marked = stored.shown(0, &after).expect("marked leaf");
+    assert_eq!(chips(&marked), 1);
+    assert_eq!(marked.proof().generation, old.proof().generation);
+    assert!(Rc::ptr_eq(
+        &stored.shown(1, &after).expect("untouched leaf"),
+        &other
+    ));
+}
+
+#[test]
+fn a_vocabulary_change_while_a_leaf_prepares_publishes_only_the_latest_marks() {
+    let (_directory, _core, _config, provider) = owner_fixture();
+    let mut stored = message_source(provider, "run $review now\n\nnothing here");
+    let before = vocabulary(&[]);
+    stored.waiting(0, &before);
+    stored.waiting(1, &before);
+    let generations: Vec<u64> = stored
+        .owner
+        .leaves
+        .iter()
+        .map(|entry| entry.generation)
+        .collect();
+    let after = vocabulary(&["review"]);
+    stored.owner.revise_mentions(&after);
+    stored.drain_until("both leaves to be prepared", |updates| {
+        updates
+            .iter()
+            .filter(|update| matches!(update, StoredUpdate::Leaf { .. }))
+            .count()
+            == 2
+    });
+    assert_eq!(
+        stored
+            .owner
+            .leaves
+            .iter()
+            .map(|entry| entry.generation)
+            .collect::<Vec<_>>(),
+        generations
+    );
+    assert_eq!(chips(&stored.shown(0, &after).expect("ready")), 1);
+
+    let (_second_directory, _second_core, _second_config, second) = owner_fixture();
+    let mut working = message_source(second, "run $review now");
+    working.waiting(0, &before);
+    working.owner.drain();
+    assert!(matches!(working.owner.leaves[0].phase, LeafPhase::Working));
+    working.owner.revise_mentions(&after);
+    let first = test_support::wait::wait_for(
+        "the leaf to be published",
+        test_support::wait::LIVENESS,
+        || {
+            working.owner.drain();
+            working.shown(0, &after)
+        },
+    );
+    assert_eq!(
+        chips(&first),
+        1,
+        "the obsolete unmarked leaf was never shown"
+    );
+}
+
+#[test]
+fn a_chip_added_then_removed_while_it_is_marked_never_appears() {
+    let (_directory, _core, _config, provider) = owner_fixture();
+    let mut stored = message_source(provider, "run $review now");
+    let before = vocabulary(&[]);
+    stored.waiting(0, &before);
+    stored.drain_until("the leaf to be prepared", |updates| !updates.is_empty());
+    let old = stored.shown(0, &before).expect("ready leaf");
+
+    stored.owner.revise_mentions(&vocabulary(&["review"]));
+    assert!(matches!(
+        stored.owner.leaves[0].phase,
+        LeafPhase::Remarking(_)
+    ));
+    let removed = vocabulary(&[]);
+    stored.owner.revise_mentions(&removed);
+    test_support::wait::wait_until(
+        "the obsolete marking to settle",
+        test_support::wait::LIVENESS,
+        || {
+            assert!(
+                !remarked(&stored.owner.drain(), 0),
+                "the obsolete chip was published"
+            );
+            matches!(stored.owner.leaves[0].phase, LeafPhase::Ready(_))
+        },
+    );
+    let shown = stored.shown(0, &removed).expect("still shown");
+    assert!(Rc::ptr_eq(&shown, &old));
+    assert_eq!(chips(&shown), 0);
+}
+
+fn used(stored: &MessageSource, budget: usize) -> usize {
+    budget - stored.owner.prepared_capacity.available_permits()
+}
+
+fn prepared_both(
+    provider: ScopedSourceProvider,
+    text: &str,
+    budget: usize,
+    before: &Arc<artisan_mentions::MessageVocabulary>,
+) -> (MessageSource, Rc<StoredLeaf>, Rc<StoredLeaf>) {
+    let mut stored = budgeted_source(provider, text, budget, PREPARED_BYTES / 8);
+    stored.waiting(0, before);
+    stored.waiting(1, before);
+    stored.drain_until("both leaves to be prepared", |updates| updates.len() == 2);
+    let first = stored.shown(0, before).expect("ready leaf");
+    let second = stored.shown(1, before).expect("ready leaf");
+    (stored, first, second)
+}
+
+fn phase_of<'a>(stored: &'a MessageSource, key: &str) -> &'a LeafPhase {
+    &stored
+        .owner
+        .leaves
+        .iter()
+        .find(|entry| entry.key == key)
+        .expect("the leaf is still owned")
+        .phase
+}
+
+const CHIPS: usize = 20;
+
+fn many_chips() -> String {
+    vec!["$review"; CHIPS].join(" ")
+}
+
+fn two_leaves() -> String {
+    format!("{}\n\n{}", many_chips(), "plain words ".repeat(1_000))
+}
+
+fn full_budget(before: &Arc<artisan_mentions::MessageVocabulary>) -> usize {
+    let (_directory, _core, _config, provider) = owner_fixture();
+    let (measured, _, _) = prepared_both(provider, &two_leaves(), PREPARED_BYTES, before);
+    used(&measured, PREPARED_BYTES)
+}
+
+#[test]
+fn a_chip_without_presentation_memory_keeps_the_shown_leaf_until_a_held_leaf_lets_go() {
+    let before = vocabulary(&[]);
+    let budget = full_budget(&before);
+    let (_directory, _core, _config, provider) = owner_fixture();
+    let (mut stored, old, held) = prepared_both(provider, &two_leaves(), budget, &before);
+    assert_eq!(used(&stored, budget), budget);
+
+    let after = vocabulary(&["review"]);
+    stored.owner.revise_mentions(&after);
+    test_support::wait::wait_until(
+        "the marking to wait for memory",
+        test_support::wait::LIVENESS,
+        || {
+            assert!(!remarked(&stored.owner.drain(), 0));
+            matches!(phase_of(&stored, "leaf:0"), LeafPhase::RemarkBlocked { .. })
+        },
+    );
+    let shown = stored
+        .shown(0, &after)
+        .expect("the shown leaf stays readable");
+    assert!(Rc::ptr_eq(&shown, &old));
+    drop(shown);
+
+    drop(held);
+    stored.drain_until(
+        "the leaf to be marked once the held leaf lets go",
+        |updates| remarked(updates, 0),
+    );
+    assert_eq!(chips(&stored.shown(0, &after).expect("marked leaf")), CHIPS);
+}
+
+#[test]
+fn a_blocked_chip_the_vocabulary_no_longer_needs_returns_to_the_shown_leaf() {
+    let before = vocabulary(&[]);
+    let budget = full_budget(&before);
+    let (_directory, _core, _config, provider) = owner_fixture();
+    let (mut stored, old, _held) = prepared_both(provider, &two_leaves(), budget, &before);
+    stored.owner.revise_mentions(&vocabulary(&["review"]));
+    test_support::wait::wait_until(
+        "the marking to wait for memory",
+        test_support::wait::LIVENESS,
+        || {
+            stored.owner.drain();
+            matches!(phase_of(&stored, "leaf:0"), LeafPhase::RemarkBlocked { .. })
+        },
+    );
+
+    stored.owner.revise_mentions(&vocabulary(&[]));
+    assert!(matches!(
+        phase_of(&stored, "leaf:0"),
+        LeafPhase::Ready(leaf) if Rc::ptr_eq(leaf, &old)
+    ));
+}
+
+#[test]
+fn a_failure_under_an_outdated_vocabulary_is_retried_with_the_current_one() {
+    let text = many_chips();
+    let text = text.as_str();
+    let chipped = vocabulary(&["review"]);
+    let plain = vocabulary(&[]);
+    let index = artisan_markdown_index::MarkdownIndex::build(text).expect("index");
+    let record = index.record(0).expect("record");
+    let engine = MarkdownEngine::new().unwrap();
+    let syntax = |vocabulary: &Arc<artisan_mentions::MessageVocabulary>| {
+        super::super::source_index::normalize_message_record(
+            &record,
+            0,
+            text,
+            &engine,
+            &mut super::super::NoFenceTokenMemo,
+            vocabulary,
+        )
+        .expect("leaf")
+        .content
+        .resident_bytes()
+    };
+    assert!(syntax(&chipped) > syntax(&plain));
+    let (_directory, _core, _config, provider) = owner_fixture();
+    let mut stored = budgeted_source(provider, text, PREPARED_BYTES, syntax(&plain));
+    stored.waiting(0, &chipped);
+    stored.owner.drain();
+    assert!(matches!(phase_of(&stored, "leaf:0"), LeafPhase::Working));
+    stored.owner.revise_mentions(&plain);
+    let leaf = test_support::wait::wait_for(
+        "the leaf to be prepared with the current vocabulary",
+        test_support::wait::LIVENESS,
+        || {
+            stored.owner.drain();
+            stored.shown(0, &plain)
+        },
+    );
+    assert_eq!(chips(&leaf), 0);
 }

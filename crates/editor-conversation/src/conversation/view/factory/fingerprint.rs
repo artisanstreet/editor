@@ -25,15 +25,25 @@ impl RowFactory {
         let (row, _) = layout.rows.get(index)?;
         let snapshot = rows.get(index)?;
         let body_version = match row.semantic() {
-            Row::Text { id, slot, .. } => {
+            Row::Text {
+                id, slot, block, ..
+            } => {
                 let key = BodyKey {
                     item: id.clone(),
                     slot: *slot,
                 };
-                if self.shape_counts.contains_key(&key) {
+                let version = if self.shape_counts.contains_key(&key) {
                     None
                 } else {
                     self.projection_versions.get(&key).copied()
+                };
+                let leaf = self
+                    .leaf_mention_epochs
+                    .get(&(key.clone(), *block))
+                    .copied();
+                match (self.mention_epochs.get(&key).copied(), leaf) {
+                    (None, None) => version,
+                    (body, leaf) => Some(remarked(version, body, leaf)),
                 }
             }
             Row::Work { .. } | Row::WorkHeader(_)
@@ -96,4 +106,13 @@ impl RowFactory {
                 .or_insert_with(|| Rc::from(text)),
         )
     }
+}
+
+fn remarked(version: Option<u64>, body: Option<u64>, leaf: Option<u64>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    version.hash(&mut hasher);
+    body.hash(&mut hasher);
+    leaf.hash(&mut hasher);
+    hasher.finish()
 }
