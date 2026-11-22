@@ -490,7 +490,7 @@ fn a_long_project_list_scrolls_to_the_projects_below_the_fold() {
         .unwrap();
     let last = mounted.app.tree().visual_rect(last).unwrap();
     assert!(
-        last.y + last.h <= bounds.y + bounds.h + 0.5,
-        "scrolling to the end shows the oldest project inside the list, it sits at {last:?} under a list at {bounds:?}"
+        last.y >= bounds.y - 0.5 && last.y + last.h <= bounds.y + bounds.h + 0.5,
+        "scrolling to the end shows the oldest project inside the list, it sits at {last:?} in a list at {bounds:?}"
     );
 }
