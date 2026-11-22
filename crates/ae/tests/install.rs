@@ -63,6 +63,12 @@ mod tests {
         }
 
         fn with_previous(previous: &Path, listen: Listen) -> Self {
+            let sandbox = Self::without_forge(listen);
+            test_support::executable::install(previous, &sandbox.installed);
+            sandbox
+        }
+
+        fn without_forge(listen: Listen) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("artisan-install-rollback ")
                 .tempdir()
@@ -71,7 +77,6 @@ mod tests {
             let data = app.join("data");
             std::fs::create_dir_all(&data).expect("create Forge's data folder");
             let installed = app.join(App::Forge.binary_name());
-            test_support::executable::install(previous, &installed);
             std::fs::write(
                 data.join("config.json"),
                 format!(r#"{{"listen": "{}"}}"#, listen.configured()),
@@ -849,6 +854,42 @@ mod tests {
         );
         assert!(!forge.join(".install-journal").exists(), "{told}");
         assert!(sandbox.listening(), "the updated Forge serves: {told}");
+    }
+
+    #[test]
+    fn a_first_forge_install_that_cannot_start_leaves_no_login_service_behind() {
+        let sandbox = Sandbox::without_forge(Listen::AnyPort);
+        script(
+            &sandbox.root.path().join("bin/systemctl"),
+            "#!/bin/sh\ncase \"$2\" in is-active) exit 3;; *) exit 0;; esac\n",
+        );
+        script(
+            &sandbox.root.path().join("bin/journalctl"),
+            "#!/bin/sh\nexit 0\n",
+        );
+        let stage = sandbox.stage_forge(&forge_binary());
+
+        let failed = sandbox.ae(&[
+            "install", "--editor", "none", "--forge", "here", "--yes", "--from", &stage,
+        ]);
+
+        let said = said(&failed);
+        assert!(
+            !failed.status.success(),
+            "Forge never becomes active: {said}"
+        );
+        assert!(
+            !sandbox.installed.exists(),
+            "Forge's files are gone again: {said}"
+        );
+        let unit = sandbox
+            .root
+            .path()
+            .join("config/systemd/user/artisan-forge.service");
+        assert!(
+            !unit.exists(),
+            "no unit starts the missing Forge at login: {said}"
+        );
     }
 
     fn ae_only_stage(sandbox: &Sandbox) -> String {

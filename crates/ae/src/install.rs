@@ -277,6 +277,18 @@ pub(crate) enum InstallAppError {
         failed: Box<Self>,
         outcome: PutBack,
     },
+    #[error("check whether {} is already installed", path.display())]
+    Existing {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{failed}; what this first install registered stays behind: {}", diagnostics::chain(.withdraw))]
+    Withdraw {
+        #[source]
+        failed: Box<Self>,
+        withdraw: WithdrawError,
+    },
     #[error("the new files are in place, but the next install would put the previous ones back")]
     Settle(#[source] JournalError),
     #[error("{failed}; the next install would also put the previous files back: {}", diagnostics::chain(.settle))]
@@ -285,6 +297,24 @@ pub(crate) enum InstallAppError {
         failed: Box<Self>,
         settle: JournalError,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WithdrawError {
+    #[error("remove the uninstall entry of {}", app.display_name())]
+    Unregister {
+        app: App,
+        #[source]
+        source: RunError,
+    },
+    #[error("stop Forge starting at login")]
+    Autostart(#[source] AutostartError),
+}
+
+#[derive(Clone, Copy)]
+enum Previous {
+    Installed,
+    Nothing,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1743,6 +1773,7 @@ fn put_in_place(
     }
     write_beside(incoming, ORIGIN_FILE, &origin.record())?;
     write_beside(incoming, "version", &format!("{version}\n"))?;
+    let previous = previous(&binary)?;
     let before = database.map_or(Before::Files, |database| Before::Forge {
         database: StoredBefore::of(database),
     });
@@ -1785,15 +1816,48 @@ fn put_in_place(
         }),
         Err(failed) => {
             progress.message("Putting the previous version back");
-            match replaced.undo() {
-                Ok(undone) => Err(put_back(failed, undone, progress)),
-                Err(failures) => Err(InstallAppError::PutBack {
+            let failed = match replaced.undo() {
+                Ok(undone) => put_back(failed, undone, progress),
+                Err(failures) => InstallAppError::PutBack {
                     failed: Box::new(failed),
                     outcome: PutBack::NotRestored(Box::new(failures)),
-                }),
-            }
+                },
+            };
+            Err(withdrawn(previous, app, failed))
         }
     }
+}
+
+fn previous(binary: &Path) -> Result<Previous, InstallAppError> {
+    match binary.symlink_metadata() {
+        Ok(_) => Ok(Previous::Installed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Previous::Nothing),
+        Err(source) => Err(InstallAppError::Existing {
+            path: binary.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn withdrawn(previous: Previous, app: App, failed: InstallAppError) -> InstallAppError {
+    match previous {
+        Previous::Installed => failed,
+        Previous::Nothing => match withdraw(app) {
+            Ok(()) => failed,
+            Err(withdraw) => InstallAppError::Withdraw {
+                failed: Box::new(failed),
+                withdraw,
+            },
+        },
+    }
+}
+
+fn withdraw(app: App) -> Result<(), WithdrawError> {
+    match app {
+        App::Forge => service::disable_autostart().map_err(WithdrawError::Autostart)?,
+        App::Ae | App::Editor => {}
+    }
+    platform::unregister_uninstall(app).map_err(|source| WithdrawError::Unregister { app, source })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
