@@ -242,3 +242,7 @@ impl RowFactory {
         Ok(row.element)
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/conversation/view/factory/requests.rs"]
+mod tests;

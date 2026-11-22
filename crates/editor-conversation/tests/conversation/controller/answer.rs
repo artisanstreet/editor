@@ -31,18 +31,13 @@ fn refused(conversation: &Conversation, id: &ItemId, request: AnswerRequest) -> 
 }
 
 fn answer_state(conversation: &Conversation, id: &ItemId) -> Option<AnswerState> {
-    conversation
-        .view
-        .as_ref()?
-        .answers
-        .get(id)
-        .map(ItemAnswer::state)
+    conversation.view.as_ref()?.answer_state(id)
 }
 
 fn in_flight(conversation: &Conversation, id: &ItemId) -> Option<AnswerRequest> {
     match conversation.view.as_ref()?.answers.get(id)? {
         ItemAnswer::Sending { request, .. } => Some(*request),
-        ItemAnswer::Failed(_) => None,
+        ItemAnswer::Answered { .. } | ItemAnswer::Failed(_) => None,
     }
 }
 
@@ -50,7 +45,7 @@ fn sending(conversation: &Conversation) -> usize {
     conversation.view.as_ref().map_or(0, |view| {
         view.answers
             .values()
-            .filter(|answer| answer.sending())
+            .filter(|answer| matches!(answer, ItemAnswer::Sending { .. }))
             .count()
     })
 }
@@ -143,5 +138,222 @@ fn an_answer_forge_refuses_shows_forge_reason_on_the_card() {
             .as_ref()
             .and_then(AnswerState::error),
         Some("Couldn't send the answer: This question was already answered differently.")
+    );
+}
+
+fn asked(status: artisan_api::Status, seq: Seq) -> Item {
+    Item {
+        status,
+        ..test_support::items::item(
+            "asked",
+            ThreadId("thread".into()),
+            seq,
+            test_support::items::read_tool("src/main.rs"),
+        )
+    }
+}
+
+fn answerable(conversation: &Conversation, id: &ItemId) -> bool {
+    let view = conversation.view.as_ref().expect("the thread is open");
+    view.item(id)
+        .is_some_and(|item| item.status == artisan_api::Status::AwaitingUser)
+        && !view.answer_blocks(id)
+}
+
+fn land_asked(conversation: &mut Conversation, core: &mut Core) -> ItemId {
+    enqueue(
+        conversation,
+        Completion::Page {
+            origin: origin(conversation),
+            fetch: Fetch::Tail,
+            asked: Instant::now(),
+            result: Ok(ItemsPage {
+                items: vec![asked(artisan_api::Status::AwaitingUser, 1)],
+                runs: Vec::new(),
+                more: false,
+                work: Vec::new(),
+            }),
+        },
+    );
+    conversation.drain(core);
+    let id = ItemId("asked".into());
+    assert!(
+        answerable(conversation, &id),
+        "the request waits for an answer"
+    );
+    id
+}
+
+fn reply(conversation: &mut Conversation, core: &mut Core, id: &ItemId) {
+    approve(conversation, core, id);
+    let request = in_flight(conversation, id).expect("the answer is in flight");
+    enqueue(
+        conversation,
+        Completion::Answer {
+            origin: origin(conversation),
+            item: id.clone(),
+            request,
+            result: Ok(()),
+        },
+    );
+    conversation.drain(core);
+}
+
+fn forge_item(conversation: &mut Conversation, core: &mut Core, item: Item) {
+    let host = conversation.open.as_ref().unwrap().0.clone();
+    conversation.core_event(
+        core,
+        &CoreEvent::Host {
+            host,
+            event: HostEvent::Item(Arc::new(item)),
+        },
+        false,
+    );
+}
+
+#[test]
+fn an_accepted_answer_stays_answered_until_forge_resolves_the_request() {
+    let (_directory, _listener, mut core, mut conversation) = fixture_at(Clock::system());
+    let id = land_asked(&mut conversation, &mut core);
+
+    reply(&mut conversation, &mut core, &id);
+    assert!(
+        !answerable(&conversation, &id),
+        "Forge accepted the answer, so the card must not offer it again before the item updates"
+    );
+    approve(&mut conversation, &core, &id);
+    assert_eq!(
+        in_flight(&conversation, &id),
+        None,
+        "an accepted answer is not sent twice"
+    );
+
+    forge_item(
+        &mut conversation,
+        &mut core,
+        asked(artisan_api::Status::Done, 2),
+    );
+    assert_eq!(
+        conversation
+            .view
+            .as_ref()
+            .and_then(|view| view.item(&id))
+            .map(|item| item.status),
+        Some(artisan_api::Status::Done)
+    );
+    assert_eq!(
+        answer_state(&conversation, &id),
+        None,
+        "the resolved item replaces the local answered state"
+    );
+}
+
+#[test]
+fn a_request_resolved_before_its_reply_arrives_keeps_nothing_answered() {
+    let (_directory, _listener, mut core, mut conversation) = fixture_at(Clock::system());
+    let id = land_asked(&mut conversation, &mut core);
+    approve(&mut conversation, &core, &id);
+    let request = in_flight(&conversation, &id).expect("the answer is in flight");
+
+    forge_item(
+        &mut conversation,
+        &mut core,
+        asked(artisan_api::Status::Done, 2),
+    );
+    enqueue(
+        &conversation,
+        Completion::Answer {
+            origin: origin(&conversation),
+            item: id.clone(),
+            request,
+            result: Ok(()),
+        },
+    );
+    conversation.drain(&mut core);
+    assert_eq!(answer_state(&conversation, &id), None);
+    assert!(
+        conversation
+            .view
+            .as_ref()
+            .is_some_and(|view| view.answers.get(&id).is_none()),
+        "a reply for an already resolved request leaves no local answer behind"
+    );
+}
+
+#[test]
+fn a_request_forge_raises_again_can_be_answered_again() {
+    let (_directory, _listener, mut core, mut conversation) = fixture_at(Clock::system());
+    let id = land_asked(&mut conversation, &mut core);
+    reply(&mut conversation, &mut core, &id);
+    assert!(!answerable(&conversation, &id));
+
+    forge_item(
+        &mut conversation,
+        &mut core,
+        asked(artisan_api::Status::AwaitingUser, 2),
+    );
+    assert!(
+        answerable(&conversation, &id),
+        "Forge asked again after the answer, so the card offers its controls again"
+    );
+    approve(&mut conversation, &core, &id);
+    assert!(
+        in_flight(&conversation, &id).is_some(),
+        "the new answer is sent"
+    );
+}
+
+#[test]
+fn an_answered_request_in_an_agent_view_settles_when_the_agent_context_updates() {
+    let (_directory, _listener, mut core, mut conversation) = fixture_at(Clock::system());
+    let id = land_asked(&mut conversation, &mut core);
+    conversation.open_agent(&core, Some(id.clone()));
+    assert!(
+        answerable(&conversation, &id),
+        "the agent view shows the request it was opened on"
+    );
+    reply(&mut conversation, &mut core, &id);
+    assert!(!answerable(&conversation, &id));
+
+    enqueue(
+        &conversation,
+        Completion::Agent {
+            origin: origin(&conversation),
+            context: BTreeMap::from([(id.clone(), Arc::new(asked(artisan_api::Status::Done, 2)))]),
+            error: None,
+            effects: Vec::new(),
+        },
+    );
+    conversation.drain(&mut core);
+    assert_eq!(
+        conversation
+            .view
+            .as_ref()
+            .and_then(|view| view.item(&id))
+            .map(|item| item.status),
+        Some(artisan_api::Status::Done)
+    );
+    assert_eq!(
+        answer_state(&conversation, &id),
+        None,
+        "the resolved context item replaces the local answered state"
+    );
+
+    enqueue(
+        &conversation,
+        Completion::Agent {
+            origin: origin(&conversation),
+            context: BTreeMap::from([(
+                id.clone(),
+                Arc::new(asked(artisan_api::Status::AwaitingUser, 3)),
+            )]),
+            error: None,
+            effects: Vec::new(),
+        },
+    );
+    conversation.drain(&mut core);
+    assert!(
+        answerable(&conversation, &id),
+        "a request raised again in the agent context can be answered again"
     );
 }

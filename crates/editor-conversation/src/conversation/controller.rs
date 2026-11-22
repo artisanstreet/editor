@@ -685,6 +685,9 @@ impl Conversation {
         if let (Some(view), Some(run)) = (&mut self.view, &run) {
             view.remember_run(run.clone());
         }
+        if let Some(view) = &mut self.view {
+            view.prune_answers();
+        }
         if let Some(view) = &self.view {
             self.arrivals
                 .borrow_mut()
@@ -1351,9 +1354,10 @@ impl Conversation {
             return;
         };
         let Some(view) = &mut self.view else { return };
-        if view.answers.get(&item).is_some_and(ItemAnswer::sending) {
+        if view.answer_blocks(&item) {
             return;
         }
+        let asked = view.asked_seq(&item);
         let request = AnswerRequest(self.next_answer);
         self.next_answer = self.next_answer.wrapping_add(1);
         let client = host.client.clone();
@@ -1379,6 +1383,7 @@ impl Conversation {
             item,
             ItemAnswer::Sending {
                 request,
+                asked,
                 _task: Arc::new(task),
             },
         );
@@ -1685,9 +1690,7 @@ impl Conversation {
                     }) {
                         changed = true;
                         match result {
-                            Ok(()) => {
-                                view.answers.remove(&item);
-                            }
+                            Ok(()) => view.answered(item),
                             Err(error) => {
                                 view.answers
                                     .make_mut()

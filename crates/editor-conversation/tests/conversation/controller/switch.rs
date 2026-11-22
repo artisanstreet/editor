@@ -388,7 +388,7 @@ fn coming_back_while_the_first_page_loads_keeps_waiting_for_it() {
 fn answering(conversation: &Conversation, id: &ItemId) -> Option<u64> {
     match conversation.view.as_ref()?.answers.get(id)? {
         ItemAnswer::Sending { request, .. } => Some(request.0),
-        ItemAnswer::Failed(_) => None,
+        ItemAnswer::Answered { .. } | ItemAnswer::Failed(_) => None,
     }
 }
 
@@ -427,4 +427,77 @@ fn an_answer_abandoned_by_leaving_the_thread_can_be_given_again_on_return() {
     conversation.answer(&core, asked.clone(), approve);
     let again = answering(&conversation, &asked).expect("the answer is sent again");
     assert_ne!(again, abandoned, "answering again starts a new send");
+}
+
+fn awaiting(thread: &str) -> ItemsPage {
+    let mut page = page(thread);
+    for item in &mut page.items {
+        item.status = Status::AwaitingUser;
+    }
+    page
+}
+
+#[test]
+fn an_accepted_answer_stays_answered_after_leaving_and_returning_to_the_thread() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    let origin = current(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        Completion::Page {
+            origin,
+            fetch: Fetch::Tail,
+            asked: Instant::now(),
+            result: Ok(awaiting("first")),
+        },
+    );
+    conversation.landed();
+    let asked = ItemId("first-item".into());
+    conversation.answer(
+        &core,
+        asked.clone(),
+        Answer::Approval {
+            decision: artisan_api::Decision::AllowOnce,
+        },
+    );
+    let request = answering(&conversation, &asked).expect("the answer is being sent");
+    let origin = current(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        Completion::Answer {
+            origin,
+            item: asked.clone(),
+            request: AnswerRequest(request),
+            result: Ok(()),
+        },
+    );
+
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("second".into()));
+    let origin = held(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        page_for(origin, Fetch::Tail, "second"),
+    );
+    conversation.landed();
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("first".into()));
+
+    assert_eq!(shown(&conversation), "first");
+    assert!(
+        conversation.view.as_ref().unwrap().answer_blocks(&asked),
+        "Forge accepted the answer, so the returned card still holds its controls"
+    );
+    conversation.answer(
+        &core,
+        asked.clone(),
+        Answer::Approval {
+            decision: artisan_api::Decision::AllowOnce,
+        },
+    );
+    assert_eq!(
+        answering(&conversation, &asked),
+        None,
+        "an accepted answer is not sent twice after returning"
+    );
 }
