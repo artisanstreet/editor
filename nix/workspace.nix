@@ -57,6 +57,7 @@ let
     fontconfig
     freetype
     wayland
+    libxkbcommon
     libX11
     libxcb
     openssl
@@ -103,13 +104,13 @@ let
       build = craneLib.buildPackage;
       deps = craneLib.buildDepsOnly;
       environment = {
-        nativeBuildInputs = nativeTools;
+        nativeBuildInputs = nativeTools ++ [ pkgs.directx-shader-compiler ];
         buildInputs = libraries;
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+        AQUA_DXC_SPIRV = "${pkgs.directx-shader-compiler}/bin/dxc";
       };
-      # mold, wrapped by nixpkgs like the default linker, for the dev loop.
       fastLinker = environment // {
-        nativeBuildInputs = nativeTools ++ [ pkgs.mold ];
+        nativeBuildInputs = environment.nativeBuildInputs ++ [ pkgs.mold ];
         NIX_CFLAGS_LINK = "-fuse-ld=mold";
       };
     };
@@ -160,6 +161,11 @@ let
           # The Editor's build script compiles its icon resource.
           TARGET_WINDRES = "${cc.bintools.bintools}/bin/${cc.targetPrefix}windres";
           HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
+          HOST_CXX = pkgs.writeShellScript "native-c++" ''
+            unset NIX_CC_WRAPPER_TARGET_HOST_${pkgs.stdenv.cc.suffixSalt}
+            exec ${pkgs.stdenv.cc}/bin/c++ "$@"
+          '';
+          LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
       # Keep the release GNU linker in the development shell too. With the

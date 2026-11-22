@@ -8,6 +8,9 @@ ignore = [
     { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained; only the vendored syntect uses it, to load its packed syntax and theme dumps" },
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; editor-ui formats local times with it and forge-engines parses provider dates with it" },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; only rav1d uses it, through aqua-avif" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant moved into zbus 6; Aqua's Linux screen reader bridge reaches zbus 5 only through accesskit_unix" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names moved into zbus 6; Aqua's Linux screen reader bridge reaches zbus 5 only through accesskit_unix" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive moved into zbus 6; Aqua's Linux screen reader bridge reaches zbus 5 only through accesskit_unix" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained; only serde_yaml_ng uses it, which forge-engines reads skill frontmatter with" },
 ]
 
