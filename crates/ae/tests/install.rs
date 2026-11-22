@@ -856,6 +856,7 @@ mod tests {
         assert!(sandbox.listening(), "the updated Forge serves: {told}");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_first_forge_install_that_cannot_start_leaves_no_login_service_behind() {
         let sandbox = Sandbox::without_forge(Listen::AnyPort);
