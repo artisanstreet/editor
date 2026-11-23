@@ -740,10 +740,15 @@ fn settings_search(
     if results.is_empty() {
         results.push(ui::note(theme, "No matching settings."));
     }
-    let card = ui::column().padded(Space::S24).children(results).build();
+    let card = ui::column()
+        .width(Length::Pct(100.0))
+        .padded(Space::S24)
+        .children(results)
+        .build();
     Scroll::new()
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
+        .style(Style::new().column())
         .child(card)
         .build()
         .with_key("settings-search-results")

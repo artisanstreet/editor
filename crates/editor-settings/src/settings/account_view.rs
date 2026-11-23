@@ -501,16 +501,21 @@ pub(crate) fn page(
             Rc::clone(emit),
         ))
         .build();
+    let refresh = Rc::clone(emit);
     let security = ui::actions()
-        .child(button(
-            theme,
-            "account-refresh",
-            "Refresh profile",
-            ButtonTone::Quiet,
-            false,
-            ViewAction::AccountRefresh,
-            Rc::clone(emit),
-        ))
+        .child(
+            IconButton::new(
+                "account-refresh",
+                *theme,
+                AssetId::TABLER_REFRESH,
+                "Refresh profile",
+                IconButtonSize::Md,
+                Finish::Glass,
+            )
+            .muted()
+            .on_activate(move |_| refresh(ViewAction::AccountRefresh))
+            .build(),
+        )
         .child(button(
             theme,
             "account-sign-out-everywhere",
