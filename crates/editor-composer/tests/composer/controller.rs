@@ -692,7 +692,7 @@ fn sending_while_an_image_uploads_sends_the_message_once_the_image_lands() {
             "sending while the image uploads shows no error"
         );
         assert!(
-            composer.send_waiting_on_images(),
+            composer.send_state == super::SendState::AwaitingImages,
             "the message waits for its image"
         );
         assert_eq!(composer.editor.borrow().text(), "look at this");

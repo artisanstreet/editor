@@ -519,6 +519,50 @@ fn model_trigger_shows_context_and_default_or_fixed_effort() {
     );
 }
 
+fn antigravity_with_two_models() -> artisan_api::EngineStatus {
+    artisan_api::EngineStatus {
+        discovery: artisan_api::DiscoveryState::Fresh { observed_at: 0 },
+        engine: artisan_api::EngineId::Antigravity,
+        install: artisan_api::InstallState::Installed {
+            version: "1.5.14".into(),
+            update: None,
+        },
+        sign_in: artisan_api::SignInState::SignedIn { account: None },
+        models: std::sync::Arc::from([
+            artisan_api::Model {
+                id: "gpt-oss-120b-medium".into(),
+                name: "GPT-OSS 120B".into(),
+                efforts: vec!["medium".into()],
+                default_effort: Some("medium".into()),
+                context_window: Some(131_072),
+                context_windows: vec![artisan_api::ContextWindow {
+                    tokens: 131_072,
+                    override_tokens: None,
+                }],
+                ..artisan_api::Model::default()
+            },
+            artisan_api::Model {
+                id: "gemini-4-argon".into(),
+                name: "Gemini 4 Argon".into(),
+                efforts: vec!["low".into(), "medium".into(), "high".into()],
+                default_effort: None,
+                context_window: Some(1_048_576),
+                context_windows: vec![artisan_api::ContextWindow {
+                    tokens: 1_048_576,
+                    override_tokens: None,
+                }],
+                ..artisan_api::Model::default()
+            },
+        ]),
+        default_model: Some("gpt-oss-120b-medium".into()),
+        commands: std::sync::Arc::from([]),
+        usage: None,
+        integrity: None,
+        versions: std::sync::Arc::from([]),
+        claude_ai: None,
+    }
+}
+
 #[test]
 fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
     use crate::composer::picker::{Axis, PickerState};
@@ -542,47 +586,7 @@ fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
     let host = core.host_mut(&host_config.id).unwrap();
     host.engines.insert(
         artisan_api::EngineId::Antigravity,
-        artisan_api::EngineStatus {
-            discovery: artisan_api::DiscoveryState::Fresh { observed_at: 0 },
-            engine: artisan_api::EngineId::Antigravity,
-            install: artisan_api::InstallState::Installed {
-                version: "1.5.14".into(),
-                update: None,
-            },
-            sign_in: artisan_api::SignInState::SignedIn { account: None },
-            models: std::sync::Arc::from([
-                artisan_api::Model {
-                    id: "gpt-oss-120b-medium".into(),
-                    name: "GPT-OSS 120B".into(),
-                    efforts: vec!["medium".into()],
-                    default_effort: Some("medium".into()),
-                    context_window: Some(131_072),
-                    context_windows: vec![artisan_api::ContextWindow {
-                        tokens: 131_072,
-                        override_tokens: None,
-                    }],
-                    ..artisan_api::Model::default()
-                },
-                artisan_api::Model {
-                    id: "gemini-4-argon".into(),
-                    name: "Gemini 4 Argon".into(),
-                    efforts: vec!["low".into(), "medium".into(), "high".into()],
-                    default_effort: None,
-                    context_window: Some(1_048_576),
-                    context_windows: vec![artisan_api::ContextWindow {
-                        tokens: 1_048_576,
-                        override_tokens: None,
-                    }],
-                    ..artisan_api::Model::default()
-                },
-            ]),
-            default_model: Some("gpt-oss-120b-medium".into()),
-            commands: std::sync::Arc::from([]),
-            usage: None,
-            integrity: None,
-            versions: std::sync::Arc::from([]),
-            claude_ai: None,
-        },
+        antigravity_with_two_models(),
     );
     let host = core.host(&host_config.id).unwrap();
     let picker = PickerState::default();

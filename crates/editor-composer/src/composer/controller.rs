@@ -1184,11 +1184,6 @@ impl Composer {
         Ok((images, config))
     }
 
-    #[must_use]
-    pub fn send_waiting_on_images(&self) -> bool {
-        self.send_state == SendState::AwaitingImages
-    }
-
     pub(crate) fn images_landed_for_waiting_send(&mut self) -> bool {
         if self.send_state != SendState::AwaitingImages
             || self
