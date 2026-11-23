@@ -783,10 +783,14 @@ struct TokenAccount {
     id_token_email: Option<String>,
 }
 
-fn account(home: &Path) -> Option<String> {
-    let path = TOKEN_FILE
+pub(crate) fn token_path(home: &Path) -> PathBuf {
+    TOKEN_FILE
         .iter()
-        .fold(home.join(GEMINI_DIR), |path, part| path.join(part));
+        .fold(home.join(GEMINI_DIR), |path, part| path.join(part))
+}
+
+fn account(home: &Path) -> Option<String> {
+    let path = token_path(home);
     match read_account(&path) {
         Ok(account) => account,
         Err(AccountError::Read { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {

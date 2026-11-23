@@ -1,3 +1,5 @@
+mod antigravity;
+
 use crate::account::engine_command;
 use artisan_api::{
     EngineId, SpendLine, Timestamp, UsageCadence, UsageLimits, UsageSpend, UsageWindow,
@@ -26,6 +28,8 @@ pub(crate) enum ReadUsageError {
     Codex(#[source] ReadCodexUsageError),
     #[error("read OpenCode's usage")]
     OpenCode(#[source] ReadOpenCodeUsageError),
+    #[error("read Antigravity's quota")]
+    Antigravity(#[source] antigravity::ReadAntigravityUsageError),
 }
 
 async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<UsageLimits> {
@@ -41,7 +45,10 @@ async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<Usag
         EngineId::OpenCode => read_opencode(binary, home)
             .await
             .map_err(ReadUsageError::OpenCode),
-        EngineId::Antigravity => return None,
+        EngineId::Antigravity => antigravity::read(binary, home)
+            .await
+            .map(|windows| (windows, None))
+            .map_err(ReadUsageError::Antigravity),
     };
     match read {
         Ok((windows, spend)) if !windows.is_empty() || spend.is_some() => Some(UsageLimits {
@@ -610,7 +617,7 @@ fn spend_by_model(models: &[Value]) -> Vec<SpendLine> {
 pub(crate) const fn has_usage_reader(engine: EngineId) -> bool {
     matches!(
         engine,
-        EngineId::Claude | EngineId::Codex | EngineId::OpenCode
+        EngineId::Claude | EngineId::Codex | EngineId::OpenCode | EngineId::Antigravity
     )
 }
 

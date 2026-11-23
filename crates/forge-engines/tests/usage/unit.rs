@@ -200,3 +200,41 @@ async fn a_failed_read_keeps_the_last_good_one() {
         "a failed read dropped the last good one"
     );
 }
+
+#[test]
+fn antigravity_quota_groups_become_session_and_weekly_windows() {
+    let recorded = br#"{"groups":[{"buckets":[{"bucketId":"3p-weekly","displayName":"Weekly Limit Remaining","window":"weekly","resetTime":"2026-11-30T07:21:54Z","remainingFraction":0.75},{"bucketId":"3p-5h","displayName":"Five Hour Limit Remaining","window":"5h","resetTime":"2026-11-23T12:21:54Z"}],"displayName":"Claude and GPT models"}],"description":"Within each group, models share a weekly limit and a 5-hour limit."}"#;
+    let windows = antigravity::parse_quota_summary(recorded).unwrap();
+    let shown: Vec<_> = windows
+        .iter()
+        .map(|window| {
+            (
+                window.label.as_str(),
+                window.cadence,
+                window.scope.as_deref(),
+                window.used_percent,
+                window.resets_at,
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                "Weekly",
+                UsageCadence::Week,
+                Some("Claude and GPT models"),
+                25.0,
+                Some(1_796_023_314_000)
+            ),
+            (
+                "5 hours",
+                UsageCadence::Session,
+                Some("Claude and GPT models"),
+                100.0,
+                Some(1_795_436_514_000)
+            ),
+        ],
+        "a bucket without remainingFraction has none left, as Google omits zero"
+    );
+}

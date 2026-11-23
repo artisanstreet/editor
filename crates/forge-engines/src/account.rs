@@ -142,7 +142,7 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
     }
 }
 
-async fn antigravity_sign_in(binary: &Path, home: &Path) -> SignInState {
+pub(crate) async fn antigravity_sign_in(binary: &Path, home: &Path) -> SignInState {
     let engine = EngineId::Antigravity;
     let usage = match crate::install::usage_lock(home) {
         Ok(usage) => usage,
