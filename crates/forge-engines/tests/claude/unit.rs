@@ -358,6 +358,7 @@ fn transcripts() {
                 user_lines += 1;
                 decoder.expect_replay(
                     (user_lines > 1).then(|| ItemId::from(format!("steer-{user_lines}"))),
+                    &serde_json::from_str(line).expect("a replay line is JSON"),
                 );
             }
             match decoder.feed(line) {

@@ -78,7 +78,7 @@ pub(crate) struct ClaudeDecoder {
     retired: crate::retained::Retired,
     pending: HashMap<String, Pending>,
     replies: Vec<Value>,
-    replays: VecDeque<Option<ItemId>>,
+    replays: VecDeque<Replay>,
     title: Title,
     usage: Usage,
     limit_reached: Option<LimitReached>,
@@ -92,6 +92,16 @@ pub(crate) struct ClaudeDecoder {
     counter: u32,
     said_since_work: Vec<Said>,
     worked_this_turn: bool,
+}
+
+#[derive(Debug)]
+struct Replay {
+    steer: Option<ItemId>,
+    blocks: usize,
+}
+
+fn content_blocks(content: &Value) -> usize {
+    content.as_array().map_or(1, Vec::len).max(1)
 }
 
 #[derive(Debug, Default)]
@@ -387,8 +397,28 @@ impl ClaudeDecoder {
         std::mem::take(&mut self.replies)
     }
 
-    pub(crate) fn expect_replay(&mut self, steer: Option<ItemId>) {
-        self.replays.push_back(steer);
+    pub(crate) fn expect_replay(&mut self, steer: Option<ItemId>, line: &Value) {
+        self.replays.push_back(Replay {
+            steer,
+            blocks: content_blocks(&line["message"]["content"]),
+        });
+    }
+
+    fn replayed(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
+        let mut uncovered = content_blocks(&frame["message"]["content"]);
+        while let Some(replay) = self.replays.pop_front() {
+            uncovered = uncovered.saturating_sub(replay.blocks);
+            if let Some(id) = replay.steer {
+                out.push(EngineEvent::InputAccepted { id });
+            }
+            if self
+                .replays
+                .front()
+                .is_none_or(|next| next.blocks > uncovered)
+            {
+                break;
+            }
+        }
     }
 
     pub(crate) fn title_request(&mut self, text: &str) -> Value {
@@ -1024,9 +1054,7 @@ impl ClaudeDecoder {
         }
         if frame["isReplay"].as_bool() == Some(true) {
             self.said_since_work.clear();
-            if let Some(Some(id)) = self.replays.pop_front() {
-                out.push(EngineEvent::InputAccepted { id });
-            }
+            self.replayed(frame, out);
             return;
         }
         for block in frame["message"]["content"].as_array().into_iter().flatten() {

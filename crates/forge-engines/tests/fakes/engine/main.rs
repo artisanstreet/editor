@@ -17,6 +17,7 @@ fn main() -> ExitCode {
         "claude-interrupt" => claude::interrupt(),
         "claude-closes-output" => claude::closes_output(),
         "claude-monitor-steer" => claude::monitor_steer(),
+        "claude-coalesced-steer" => claude::coalesced_steer(),
         "claude-protocol-error" => claude::protocol_error(),
         "claude-background-agent" => claude::background_agent(),
         "claude-long-turn" => claude::long_turn(),
