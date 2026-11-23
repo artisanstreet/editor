@@ -4,6 +4,9 @@ use std::time::Duration;
 
 const QUOTA_SUMMARY: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+const MODELS: &str = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+const GOOGLE: &str = "MODEL_PROVIDER_GOOGLE";
+const GEMINI: &str = "Gemini";
 const USER_AGENT: &str = "antigravity";
 const TIMEOUT: Duration = Duration::from_secs(15);
 const EXPIRY_MARGIN_MS: i64 = 60_000;
@@ -26,14 +29,29 @@ pub(crate) enum ReadAntigravityUsageError {
     Expired { path: PathBuf },
     #[error("build the HTTP client for Antigravity's quota")]
     Client(#[source] reqwest::Error),
-    #[error("ask Antigravity for its quota")]
-    Request(#[source] reqwest::Error),
-    #[error("Antigravity answered its quota with {status}")]
-    Status { status: reqwest::StatusCode },
-    #[error("read Antigravity's quota")]
-    Body(#[source] reqwest::Error),
-    #[error("decode Antigravity's quota")]
-    Decode(#[source] serde_json::Error),
+    #[error("ask Antigravity at {endpoint}")]
+    Request {
+        endpoint: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Antigravity answered {endpoint} with {status}")]
+    Status {
+        endpoint: &'static str,
+        status: reqwest::StatusCode,
+    },
+    #[error("read Antigravity's answer from {endpoint}")]
+    Body {
+        endpoint: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("decode Antigravity's answer from {endpoint}")]
+    Decode {
+        endpoint: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -94,27 +112,51 @@ pub(crate) async fn read(
             }
         }
     };
-    let response = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(USER_AGENT)
         .build()
-        .map_err(ReadAntigravityUsageError::Client)?
-        .post(QUOTA_SUMMARY)
+        .map_err(ReadAntigravityUsageError::Client)?;
+    let (summary, models) = tokio::join!(
+        ask(&client, &token, QUOTA_SUMMARY),
+        ask(&client, &token, MODELS)
+    );
+    let mut windows =
+        parse_quota_summary(&summary?).map_err(|source| ReadAntigravityUsageError::Decode {
+            endpoint: QUOTA_SUMMARY,
+            source,
+        })?;
+    windows.extend(parse_gemini_quota(&models?).map_err(|source| {
+        ReadAntigravityUsageError::Decode {
+            endpoint: MODELS,
+            source,
+        }
+    })?);
+    Ok(windows)
+}
+
+async fn ask(
+    client: &reqwest::Client,
+    token: &str,
+    endpoint: &'static str,
+) -> Result<Vec<u8>, ReadAntigravityUsageError> {
+    let response = client
+        .post(endpoint)
         .bearer_auth(token)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body("{}")
         .send()
         .await
-        .map_err(ReadAntigravityUsageError::Request)?;
+        .map_err(|source| ReadAntigravityUsageError::Request { endpoint, source })?;
     let status = response.status();
     if !status.is_success() {
-        return Err(ReadAntigravityUsageError::Status { status });
+        return Err(ReadAntigravityUsageError::Status { endpoint, status });
     }
-    let bytes = response
+    response
         .bytes()
         .await
-        .map_err(ReadAntigravityUsageError::Body)?;
-    parse_quota_summary(&bytes).map_err(ReadAntigravityUsageError::Decode)
+        .map(|body| body.to_vec())
+        .map_err(|source| ReadAntigravityUsageError::Body { endpoint, source })
 }
 
 fn rfc3339<'de, D: serde::Deserializer<'de>>(at: D) -> Result<Option<Timestamp>, D::Error> {
@@ -175,4 +217,46 @@ pub(crate) fn parse_quota_summary(body: &[u8]) -> Result<Vec<UsageWindow>, serde
             })
         })
         .collect())
+}
+
+#[derive(serde::Deserialize)]
+struct Models {
+    #[serde(default)]
+    models: std::collections::BTreeMap<String, Model>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Model {
+    model_provider: Option<String>,
+    quota_info: Option<QuotaInfo>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuotaInfo {
+    remaining_fraction: Option<f64>,
+    #[serde(default, deserialize_with = "rfc3339")]
+    reset_time: Option<Timestamp>,
+}
+
+pub(crate) fn parse_gemini_quota(body: &[u8]) -> Result<Option<UsageWindow>, serde_json::Error> {
+    let models: Models = serde_json::from_slice(body)?;
+    Ok(models
+        .models
+        .into_values()
+        .filter(|model| model.model_provider.as_deref() == Some(GOOGLE))
+        .filter_map(|model| {
+            let quota = model.quota_info?;
+            let resets_at = quota.reset_time?;
+            Some((quota.remaining_fraction.unwrap_or(0.0), resets_at))
+        })
+        .min_by(|(left, _), (right, _)| left.total_cmp(right))
+        .map(|(remaining, resets_at)| UsageWindow {
+            label: "5 hours".to_owned(),
+            cadence: UsageCadence::Session,
+            scope: Some(GEMINI.to_owned()),
+            used_percent: ((1.0 - remaining) * 100.0).clamp(0.0, 100.0),
+            resets_at: Some(resets_at),
+        }))
 }

@@ -238,3 +238,31 @@ fn antigravity_quota_groups_become_session_and_weekly_windows() {
         "a bucket without remainingFraction has none left, as Google omits zero"
     );
 }
+
+#[test]
+fn the_most_used_gemini_model_becomes_the_gemini_window() {
+    let recorded = br#"{"models":{
+        "claude-opus-5-5-high":{"displayName":"Claude Opus 5.5 (High)","modelProvider":"MODEL_PROVIDER_ANTHROPIC","quotaInfo":{"resetTime":"2026-11-23T12:45:26Z"}},
+        "gemini-3-flash":{"displayName":"Gemini 3 Flash","modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{"remainingFraction":0.8,"resetTime":"2026-11-23T12:45:26Z"}},
+        "gemini-3.8-flash-tiered":{"modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{"remainingFraction":0.4,"resetTime":"2026-11-23T12:45:26Z"}},
+        "chat_23310":{"modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{}}
+    },"defaultAgentModelId":"gemini-3.8-flash-tiered"}"#;
+    let window = antigravity::parse_gemini_quota(recorded)
+        .unwrap()
+        .expect("Gemini models carry a quota");
+    assert_eq!(
+        (
+            window.scope.as_deref(),
+            window.cadence,
+            window.used_percent.round(),
+            window.resets_at
+        ),
+        (
+            Some("Gemini"),
+            UsageCadence::Session,
+            60.0,
+            Some(1_795_437_926_000)
+        ),
+        "the Claude model and the internal model without a reset are not Gemini quota"
+    );
+}
