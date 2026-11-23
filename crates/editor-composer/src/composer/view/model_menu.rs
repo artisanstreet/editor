@@ -312,7 +312,7 @@ fn model_list_pane(
     scroll: f32,
     dispatch: &Dispatch,
 ) -> Element {
-    use super::super::model_list::{MODEL_GAP, ROW_GAP, SECTION_SPACER, group_row_height};
+    use super::super::model_list::{ROW_GAP, SECTION_SPACER, group_row_height, model_row_height};
     use super::super::picker::ModelRow;
     let muted = theme.colors.text_muted;
     let mut rows = UiBox::new()
@@ -348,7 +348,7 @@ fn model_list_pane(
             ModelRow::Gap(_) => {
                 rows = rows.child(
                     UiBox::new()
-                        .height(MODEL_GAP)
+                        .height(model_row_height(theme))
                         .style(Style::new().flex_shrink(0.0))
                         .build(),
                 );
