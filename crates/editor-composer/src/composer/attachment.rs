@@ -154,7 +154,6 @@ pub struct Attachment {
     pub(crate) shown: bool,
     source: Option<(u64, usize)>,
     origin: Option<Arc<Source>>,
-    encoded: Option<Vec<u8>>,
     task: Option<tokio::task::AbortHandle>,
 }
 
@@ -178,6 +177,13 @@ impl PendingUpload {
     pub(crate) fn from_path(path: PathBuf, name: String) -> Self {
         Self {
             origin: Arc::new(Source::Path(path)),
+            name,
+        }
+    }
+
+    pub(crate) fn held(source: Source, name: String) -> Self {
+        Self {
+            origin: Arc::new(source),
             name,
         }
     }
@@ -314,7 +320,6 @@ impl Attachments {
             shown: false,
             source: None,
             origin: Some(Arc::clone(&source)),
-            encoded: None,
             task: None,
         });
         let sender = self.delivery.sender();
@@ -365,7 +370,6 @@ impl Attachments {
             shown: true,
             source: None,
             origin: None,
-            encoded: None,
             task: None,
         });
         self.load_preview(key, hash);
@@ -433,7 +437,6 @@ impl Attachments {
             shown: true,
             source: None,
             origin: None,
-            encoded: None,
             task: None,
         });
         key
@@ -467,6 +470,11 @@ impl Attachments {
                         let mut hasher = std::hash::DefaultHasher::new();
                         bytes.hash(&mut hasher);
                         let source = (hasher.finish(), bytes.len());
+                        self.items.retain(|item| {
+                            item.key == key
+                                || item.source != Some(source)
+                                || !matches!(item.state, State::Failed(_))
+                        });
                         if let Some(existing) = self
                             .items
                             .iter()
@@ -525,15 +533,27 @@ impl Attachments {
                 Completion::Converted(key, result) => {
                     if let Some(item) = self.items.iter_mut().find(|item| item.key == key) {
                         match result {
-                            Ok(bytes) => match assets.decode(bytes.clone()) {
-                                Ok(preview) => {
-                                    item.pending_preview = Some(preview);
-                                    item.encoded = Some(bytes);
+                            Ok(bytes) => {
+                                match assets.decode(bytes.clone()) {
+                                    Ok(preview) => item.pending_preview = Some(preview),
+                                    Err(error) => {
+                                        item.preview_error = Some(diagnostics::chain(&error));
+                                    }
                                 }
-                                Err(error) => {
-                                    fail(item, &error);
+                                if item.state.accept(&Input::Encoded) {
+                                    let client = self.client.clone();
+                                    let sender = self.delivery.sender();
+                                    let task = runtime().spawn(async move {
+                                        let result = client
+                                            .put_blob(bytes)
+                                            .await
+                                            .map(|blob| blob.hash)
+                                            .map_err(UploadAttachmentError::Put);
+                                        sender.offer(Completion::Uploaded(key, result)).await;
+                                    });
+                                    item.task = Some(task.abort_handle());
                                 }
-                            },
+                            }
                             Err(error) => {
                                 fail(item, &error);
                             }
@@ -546,7 +566,6 @@ impl Attachments {
                             Ok(hash) => {
                                 item.origin = None;
                                 item.state.accept(&Input::Uploaded(hash));
-                                item.revealed = Some(Instant::now());
                             }
                             Err(error) => {
                                 fail(item, &error);
@@ -570,50 +589,30 @@ impl Attachments {
             }
         }
         for item in &mut self.items {
-            let Some(preview) = &item.pending_preview else {
-                continue;
-            };
-            match preview.status() {
-                ImageStatus::Ready { .. }
-                    if item.encoded.is_some() && matches!(item.state, State::Encoding) =>
-                {
-                    item.preview = item.pending_preview.take();
-                    let bytes = item
-                        .encoded
-                        .take()
-                        .expect("invariant: the guard checked the encoded bytes are present");
-                    if item.state.accept(&Input::Encoded) {
-                        let key = item.key;
-                        let client = self.client.clone();
-                        let sender = self.delivery.sender();
-                        let task = runtime().spawn(async move {
-                            let result = client
-                                .put_blob(bytes)
-                                .await
-                                .map(|blob| blob.hash)
-                                .map_err(UploadAttachmentError::Put);
-                            sender.offer(Completion::Uploaded(key, result)).await;
-                        });
-                        item.task = Some(task.abort_handle());
+            if let Some(preview) = &item.pending_preview {
+                match preview.status() {
+                    ImageStatus::Ready { .. } => {
+                        item.preview = item.pending_preview.take();
+                        changed = true;
                     }
-                    changed = true;
+                    ImageStatus::Failed(error) => {
+                        abandon_preview(item, error.to_string());
+                        changed = true;
+                    }
+                    ImageStatus::Cancelled => {
+                        abandon_preview(item, "The preview was cancelled.".to_owned());
+                        changed = true;
+                    }
+                    ImageStatus::Pending => {}
                 }
-                ImageStatus::Ready { .. }
-                    if item.state.hash().is_some() && item.revealed.is_none() =>
-                {
-                    item.preview = item.pending_preview.take();
-                    item.revealed = Some(Instant::now());
-                    changed = true;
-                }
-                ImageStatus::Failed(error) => {
-                    abandon_preview(item, error.to_string());
-                    changed = true;
-                }
-                ImageStatus::Cancelled => {
-                    abandon_preview(item, "The preview was cancelled.".to_owned());
-                    changed = true;
-                }
-                ImageStatus::Pending | ImageStatus::Ready { .. } => {}
+            }
+            if item.state.hash().is_some()
+                && item.revealed.is_none()
+                && item.pending_preview.is_none()
+                && (item.preview.is_some() || item.preview_error.is_some())
+            {
+                item.revealed = Some(Instant::now());
+                changed = true;
             }
         }
         changed
@@ -621,13 +620,8 @@ impl Attachments {
 }
 
 fn abandon_preview(item: &mut Attachment, reason: String) {
-    if matches!(item.state, State::Encoding) {
-        settle_failed(item, reason);
-    } else {
-        item.preview_error = Some(reason);
-    }
+    item.preview_error = Some(reason);
     item.pending_preview = None;
-    item.encoded = None;
 }
 
 fn fail(item: &mut Attachment, error: &dyn std::error::Error) {

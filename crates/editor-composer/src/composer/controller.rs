@@ -1,5 +1,5 @@
 use super::{
-    attachment::{Attachments, Source},
+    attachment::{Attachments, PendingUpload, Source},
     draft_body::{DraftBody, DraftPath, SavedFile},
     draft_session::{DraftSession, LostKey, Submission, Unrecovered},
     mentions::Mentions,
@@ -123,6 +123,7 @@ pub struct Composer {
     pub config: Option<EngineConfig>,
     pub(crate) project: Option<ProjectId>,
     pub attachments: Option<Attachments>,
+    held_images: Vec<(Source, String)>,
     pub files: Vec<DraftFile>,
     next_file_key: u64,
     placeholder_generation: u64,
@@ -189,6 +190,7 @@ impl Composer {
             config: None,
             project: None,
             attachments,
+            held_images: Vec::new(),
             files: Vec::new(),
             next_file_key: 0,
             placeholder_generation: 0,
@@ -274,10 +276,15 @@ impl Composer {
     }
 
     fn hand_off_attachments(&mut self) {
-        let uploads = self
-            .attachments
-            .as_mut()
-            .map_or_else(Vec::new, Attachments::take_unfinished);
+        let mut uploads: Vec<PendingUpload> = std::mem::take(&mut self.held_images)
+            .into_iter()
+            .map(|(source, name)| PendingUpload::held(source, name))
+            .collect();
+        uploads.extend(
+            self.attachments
+                .as_mut()
+                .map_or_else(Vec::new, Attachments::take_unfinished),
+        );
         if uploads.is_empty() {
             return;
         }
@@ -682,6 +689,10 @@ impl Composer {
     }
 
     pub(crate) fn add_image(&mut self, source: Source, name: String) {
+        if self.draft_busy() {
+            self.held_images.push((source, name));
+            return;
+        }
         if !self.accepts_attachments() {
             return;
         }
@@ -827,6 +838,7 @@ impl Composer {
             ));
         }
         self.show_lost(lost);
+        self.add_held_images();
         events
     }
 
@@ -861,6 +873,21 @@ impl Composer {
                 ));
             }
             self.restore_body(body);
+        }
+    }
+
+    fn draft_busy(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.read(|state| state.sending() || state.recovering()))
+    }
+
+    fn add_held_images(&mut self) {
+        if self.held_images.is_empty() || self.draft_busy() {
+            return;
+        }
+        for (source, name) in std::mem::take(&mut self.held_images) {
+            self.add_image(source, name);
         }
     }
 
