@@ -23,6 +23,12 @@ struct Origin {
     generation: u64,
 }
 
+fn retire_echoes(core: &mut Core, origin: &Origin, thread: &ThreadId, items: &[Item]) {
+    if let Some(host) = core.host_mut_if_instance(&origin.host, origin.instance) {
+        host.retire_echoes(thread, items.iter().map(|item| &item.id));
+    }
+}
+
 fn completion_is_current<I: Copy + Eq>(
     captured: (&HostId, I, u64),
     open: Option<(&HostId, I, u64)>,
@@ -1629,6 +1635,7 @@ impl Conversation {
                                 });
                             }
                             let (items, spans) = (page.items.len(), page.work.len());
+                            retire_echoes(core, &origin, &view.thread, &page.items);
                             let apply_started = Instant::now();
                             let effects = view.apply_page(fetch, page);
                             applied = Some((items, spans, apply_started.elapsed()));
@@ -1676,6 +1683,7 @@ impl Conversation {
                     match result {
                         Ok(page) => {
                             self.load_error = None;
+                            retire_echoes(core, &origin, &view.thread, &page.items);
                             if view.apply_work(first, page) {
                                 self.rebuild(core);
                             }
