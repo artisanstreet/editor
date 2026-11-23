@@ -90,17 +90,25 @@ pub fn essentials(engine: EngineId, usage: &UsageLimits) -> Vec<Limit> {
         .enumerate()
         .min_by_key(|(index, window)| (rank(window.cadence), window.scope.is_some(), *index))
         .map(|(_, window)| *window);
-    let models = readable
+    let mut pools: Vec<&UsageWindow> = Vec::new();
+    for window in readable
         .iter()
         .copied()
-        .filter(|_| engine == EngineId::Claude)
-        .filter(|window| headline.is_none_or(|headline| !std::ptr::eq(*window, headline)))
-        .filter_map(|window| {
-            window.scope.clone().map(|label| Limit {
-                label,
-                ..limit(window)
-            })
-        });
+        .filter(|_| matches!(engine, EngineId::Claude | EngineId::Antigravity))
+        .filter(|window| headline.is_none_or(|headline| headline.scope != window.scope))
+    {
+        match pools.iter_mut().find(|pool| pool.scope == window.scope) {
+            Some(pool) if rank(window.cadence) < rank(pool.cadence) => *pool = window,
+            Some(_) => {}
+            None => pools.push(window),
+        }
+    }
+    let models = pools.into_iter().filter_map(|window| {
+        window.scope.clone().map(|label| Limit {
+            label,
+            ..limit(window)
+        })
+    });
     headline
         .into_iter()
         .map(|window| Limit {
