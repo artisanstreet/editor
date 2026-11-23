@@ -405,10 +405,6 @@ async fn start(
     let store = hub.store();
     let previous = store.latest_run(&thread.id).await?;
     let first_run = previous.is_none();
-    let carry_on = match run.continuation {
-        Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
-        None => None,
-    };
     let launch = LaunchSession::current(hub, run.engine, previous.as_ref())
         .await
         .map_err(|source| DriveError::Transport {
@@ -419,6 +415,10 @@ async fn start(
     run.usage = carried_usage(carried, &thread.config);
     run.session_id = launch.resume().map(|session| session.as_str().to_owned());
     let run = store.begin_run(run).await?;
+    let carry_on = match run.continuation {
+        Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
+        None => None,
+    };
     Ok(Started {
         run,
         previous,
