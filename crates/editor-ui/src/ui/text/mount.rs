@@ -753,7 +753,7 @@ fn token_presentation(
     let tokens = state.styled_tokens();
     let compiled =
         match super::tokens::compile_tokens(state.text(), style, theme.colors.text, &tokens, |_| {
-            20.0
+            super::tokens::MENTION_GLYPH_CELL_PX
         }) {
             Ok(compiled) => compiled,
             Err(error) => {

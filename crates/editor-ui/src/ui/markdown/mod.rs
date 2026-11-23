@@ -22,6 +22,7 @@ mod fence;
 mod language;
 mod list;
 pub mod literal;
+mod mentions;
 mod projected;
 pub mod reveal;
 mod source_index;
@@ -29,6 +30,7 @@ pub mod stored;
 mod table;
 mod table_view;
 pub use crate::ui::rich::narrative::callout::GlyphFactory;
+pub use mentions::MessageMarks;
 pub use projected::ShapedSource;
 use source_index::normalize_record;
 pub use source_index::{
@@ -143,6 +145,14 @@ pub enum Span {
     Code(String),
     Html(String),
     Command(String),
+    MentionLead {
+        kind: artisan_mentions::MentionKind,
+        name: String,
+    },
+    MentionTail {
+        kind: artisan_mentions::MentionKind,
+        text: String,
+    },
     Emphasis(Vec<Self>),
     Strong(Vec<Self>),
     Link {
@@ -155,9 +165,12 @@ impl Span {
     #[must_use]
     fn text_content(&self) -> String {
         match self {
-            Self::Text(text) | Self::Code(text) | Self::Html(text) | Self::Command(text) => {
-                text.clone()
-            }
+            Self::Text(text)
+            | Self::Code(text)
+            | Self::Html(text)
+            | Self::Command(text)
+            | Self::MentionTail { text, .. } => text.clone(),
+            Self::MentionLead { kind, name } => format!("{}{name}", kind.sigil()),
             Self::Emphasis(inner) | Self::Strong(inner) => {
                 inner.iter().map(Self::text_content).collect()
             }
@@ -224,71 +237,85 @@ fn mark_command_spans(spans: &mut Vec<Span>, command: &str) {
     }
 }
 
-impl MarkdownDocument {
-    fn resident_bytes(&self) -> usize {
-        fn spans_bytes(spans: &Vec<Span>) -> usize {
-            spans.capacity() * size_of::<Span>()
-                + spans
-                    .iter()
-                    .map(|span| match span {
-                        Span::Text(text)
-                        | Span::Code(text)
-                        | Span::Html(text)
-                        | Span::Command(text) => text.capacity(),
-                        Span::Emphasis(inner) | Span::Strong(inner) => spans_bytes(inner),
-                        Span::Link { label, destination } => {
-                            spans_bytes(label) + destination.capacity()
-                        }
-                    })
-                    .sum::<usize>()
-        }
-        fn blocks_bytes(blocks: &Vec<Block>) -> usize {
-            blocks.capacity() * size_of::<Block>()
-                + blocks
-                    .iter()
-                    .map(|block| match block {
-                        Block::Heading { spans, .. } | Block::Paragraph { spans, .. } => {
-                            spans_bytes(spans)
-                        }
-                        Block::Code(fence) => {
-                            fence.diagram.as_ref().map_or(0, |svg| svg.inks.bytes())
-                                + fence.source.capacity()
-                                + fence.language.as_ref().map_or(0, String::capacity)
-                                + fence
-                                    .tokens
-                                    .as_ref()
-                                    .map_or(0, |tokens| size_of_val(tokens.as_ref()))
-                        }
-                        Block::Html { source } => source.capacity(),
-                        Block::List { items, .. } => {
-                            items.capacity() * size_of::<ListItem>()
-                                + items
-                                    .iter()
-                                    .map(|item| blocks_bytes(&item.blocks))
-                                    .sum::<usize>()
-                        }
-                        Block::Table(table) => {
-                            table.alignments.capacity() * size_of::<TableAlignment>()
-                                + table.header.capacity() * size_of::<TableCell>()
-                                + table.rows.capacity() * size_of::<Vec<TableCell>>()
-                                + table
-                                    .rows
-                                    .iter()
-                                    .map(|row| row.capacity() * size_of::<TableCell>())
-                                    .sum::<usize>()
-                                + table
-                                    .header
-                                    .iter()
-                                    .chain(table.rows.iter().flatten())
-                                    .map(|cell| spans_bytes(&cell.spans))
-                                    .sum::<usize>()
-                        }
-                    })
-                    .sum::<usize>()
-        }
-        size_of::<Self>() + blocks_bytes(&self.blocks)
-    }
+fn spans_bytes(spans: &Vec<Span>) -> usize {
+    spans.capacity() * size_of::<Span>()
+        + spans
+            .iter()
+            .map(|span| match span {
+                Span::Text(text)
+                | Span::Code(text)
+                | Span::Html(text)
+                | Span::Command(text)
+                | Span::MentionTail { text, .. }
+                | Span::MentionLead { name: text, .. } => text.capacity(),
+                Span::Emphasis(inner) | Span::Strong(inner) => spans_bytes(inner),
+                Span::Link { label, destination } => spans_bytes(label) + destination.capacity(),
+            })
+            .sum::<usize>()
+}
 
+fn cells_bytes<'a>(cells: impl IntoIterator<Item = &'a TableCell>) -> usize {
+    cells
+        .into_iter()
+        .map(|cell| spans_bytes(&cell.spans))
+        .sum::<usize>()
+}
+
+fn block_bytes(block: &Block) -> usize {
+    match block {
+        Block::Heading { spans, .. } | Block::Paragraph { spans, .. } => spans_bytes(spans),
+        Block::Code(fence) => {
+            fence.diagram.as_ref().map_or(0, |svg| svg.inks.bytes())
+                + fence.source.capacity()
+                + fence.language.as_ref().map_or(0, String::capacity)
+                + fence
+                    .tokens
+                    .as_ref()
+                    .map_or(0, |tokens| size_of_val(tokens.as_ref()))
+        }
+        Block::Html { source } => source.capacity(),
+        Block::List { items, .. } => {
+            items.capacity() * size_of::<ListItem>()
+                + items
+                    .iter()
+                    .map(|item| blocks_bytes(&item.blocks))
+                    .sum::<usize>()
+        }
+        Block::Table(table) => {
+            table.alignments.capacity() * size_of::<TableAlignment>()
+                + table.header.capacity() * size_of::<TableCell>()
+                + table.rows.capacity() * size_of::<Vec<TableCell>>()
+                + table
+                    .rows
+                    .iter()
+                    .map(|row| row.capacity() * size_of::<TableCell>())
+                    .sum::<usize>()
+                + cells_bytes(table.header.iter().chain(table.rows.iter().flatten()))
+        }
+    }
+}
+
+fn blocks_bytes(blocks: &Vec<Block>) -> usize {
+    blocks.capacity() * size_of::<Block>() + blocks.iter().map(block_bytes).sum::<usize>()
+}
+
+impl IndexedLeafContent {
+    fn resident_bytes(&self) -> usize {
+        size_of::<Self>()
+            + match self {
+                Self::Block(block) => block_bytes(block),
+                Self::TableRow {
+                    alignments, cells, ..
+                } => {
+                    alignments.capacity() * size_of::<TableAlignment>()
+                        + cells.capacity() * size_of::<TableCell>()
+                        + cells_bytes(cells)
+                }
+            }
+    }
+}
+
+impl MarkdownDocument {
     #[must_use]
     fn blocks(&self) -> &[Block] {
         &self.blocks
@@ -687,6 +714,7 @@ struct DocumentBuilder {
     lists: Vec<ActiveList>,
     items: Vec<ActiveItem>,
     formats: Vec<FormatFrame>,
+    mentions: Vec<artisan_mentions::MessageMention>,
 }
 
 #[derive(Default)]
@@ -791,7 +819,14 @@ impl DocumentBuilder {
                         html.push_str(raw);
                     }
                 }
-                Event::Text(text) => self.push_inline(Span::Text(text.as_ref().to_owned())),
+                Event::Text(text) if self.mentions.is_empty() => {
+                    self.push_inline(Span::Text(text.as_ref().to_owned()));
+                }
+                Event::Text(text) => {
+                    for span in mentions::split_text(text.as_ref(), &range, &self.mentions) {
+                        self.push_inline(span);
+                    }
+                }
                 Event::Code(code) => self.push_inline(Span::Code(code.as_ref().to_owned())),
                 Event::InlineHtml(html) => {
                     self.push_inline(Span::Html(html.as_ref().to_owned()));

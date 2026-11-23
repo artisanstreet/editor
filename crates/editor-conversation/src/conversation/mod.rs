@@ -8,6 +8,7 @@ pub mod controller;
 pub mod disclosure;
 pub mod fold;
 pub mod live;
+pub mod mentions;
 pub mod parked;
 pub use editor_core::diagnostics::open_timing;
 pub mod phase;

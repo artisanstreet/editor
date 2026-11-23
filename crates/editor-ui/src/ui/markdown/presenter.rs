@@ -27,6 +27,7 @@ mod code;
 mod media;
 mod narrative;
 mod preparation;
+pub use self::preparation::MentionRevision;
 mod projection;
 mod rendering;
 mod stored_leaves;
@@ -309,7 +310,7 @@ pub enum PresenterError {
 
 pub struct MarkdownPresenter {
     source: String,
-    command: Option<String>,
+    marks: Option<super::MessageMarks>,
     document: Option<MarkdownDocument>,
     projected: Option<super::projected::ProjectedDocument>,
     stored_leaves: RefCell<HashMap<(String, usize), StoredProjectedLeaf>>,
@@ -422,7 +423,7 @@ impl Default for MarkdownPresenter {
     fn default() -> Self {
         Self {
             source: String::new(),
-            command: None,
+            marks: None,
             document: None,
             projected: None,
             stored_leaves: RefCell::new(HashMap::new()),

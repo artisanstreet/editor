@@ -1,6 +1,7 @@
 use crate::conversation::adapter::Action;
 use crate::conversation::controller::Conversation;
 use crate::conversation::presentation::{MarkdownOwners, PresentationScope};
+use crate::conversation::stored::StoredConversation;
 use crate::conversation::view::factory::{RowFactory, RowServiceParts, RowServices, WorkResources};
 use crate::conversation::view::motion::RowMotion;
 use crate::conversation::view::reveal::{MountedReveals, RevealSync};
@@ -27,6 +28,7 @@ pub(crate) struct Transcript {
     motion: Rc<RefCell<RowMotion>>,
     next_source: Rc<Cell<u64>>,
     dispatched: Rc<RefCell<Vec<Action>>>,
+    stored: Rc<RefCell<StoredConversation>>,
 }
 
 impl Transcript {
@@ -46,10 +48,29 @@ impl Transcript {
             motion: Rc::new(RefCell::new(RowMotion::default())),
             next_source: Rc::new(Cell::new(0)),
             dispatched: Rc::default(),
+            stored: Rc::default(),
         }
     }
 
+    pub(crate) fn with_stored(mut self, stored: Rc<RefCell<StoredConversation>>) -> Self {
+        self.stored = stored;
+        self
+    }
+
+    pub(crate) fn markdown(&self) -> &Rc<RefCell<MarkdownOwners>> {
+        &self.markdown
+    }
+
     pub(crate) fn render(&mut self, conversation: &mut Conversation, core: &Core) -> RevealSync {
+        self.render_at(conversation, core, std::time::Instant::now())
+    }
+
+    pub(crate) fn render_at(
+        &mut self,
+        conversation: &mut Conversation,
+        core: &Core,
+        now: std::time::Instant,
+    ) -> RevealSync {
         let services = RowServices::new(
             &self.scope,
             RowServiceParts {
@@ -58,7 +79,7 @@ impl Transcript {
                     .expect("the stub host is connected"),
                 document: SelectionDocumentId(1),
                 on_source: Rc::new(|_| {}),
-                stored: Rc::default(),
+                stored: Rc::clone(&self.stored),
                 images: core
                     .host_if_instance(&self.scope.host, self.scope.instance)
                     .expect("the stub host is connected")
@@ -77,7 +98,7 @@ impl Transcript {
                 Rc::clone(&self.statuses),
                 ArtisanTheme::for_mode(ThemeMode::Dark),
                 true,
-                std::time::Instant::now(),
+                now,
                 Rc::new(move || {
                     next_source.set(next_source.get() + 1);
                     SelectionSourceId(next_source.get())
@@ -123,6 +144,21 @@ impl Transcript {
 
     pub(crate) fn texts(&self) -> Vec<String> {
         painted_texts(&self.app)
+    }
+
+    pub(crate) fn glyphs_in(&self, text: &str) -> usize {
+        self.app
+            .tree()
+            .traverse()
+            .into_iter()
+            .filter_map(|node| {
+                let aqua_ui::tree::NodeKind::Text(content) = &self.app.tree().get(node)?.kind
+                else {
+                    return None;
+                };
+                (content.text() == text).then_some(content.inline_paints.len())
+            })
+            .sum()
     }
 
     pub(crate) fn shows_selector(&self, selector: &str) -> bool {

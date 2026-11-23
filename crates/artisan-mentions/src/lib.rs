@@ -28,7 +28,7 @@ fn named_mentions(text: &str, names: &[&str], sigil: char) -> Vec<Mention> {
     MentionNames::new(names).mentions(text, sigil)
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MentionNames {
     known: HashSet<String>,
     longest: usize,
@@ -48,12 +48,37 @@ impl MentionNames {
 
     #[must_use]
     pub fn mentions(&self, text: &str, sigil: char) -> Vec<Mention> {
+        let mut mentions = Vec::new();
+        self.each_start(text, sigil, |start, names| {
+            if let Some(name) = names.last() {
+                mentions.push(Mention {
+                    name: (*name).to_owned(),
+                    range: start..start + sigil.len_utf8() + name.len(),
+                });
+            }
+        });
+        mentions
+    }
+
+    #[must_use]
+    fn candidates(&self, text: &str, sigil: char) -> Vec<Mention> {
+        let mut mentions = Vec::new();
+        self.each_start(text, sigil, |start, names| {
+            mentions.extend(names.iter().rev().map(|name| Mention {
+                name: (*name).to_owned(),
+                range: start..start + sigil.len_utf8() + name.len(),
+            }));
+        });
+        mentions
+    }
+
+    fn each_start<'a>(&self, text: &'a str, sigil: char, mut found: impl FnMut(usize, &[&'a str])) {
         let known = &self.known;
         let longest = self.longest;
         if longest == 0 {
-            return Vec::new();
+            return;
         }
-        let mut mentions = Vec::new();
+        let mut names = Vec::new();
         let mut previous = None;
         for (start, character) in text.char_indices() {
             let after_space = previous.is_none_or(char::is_whitespace);
@@ -62,30 +87,24 @@ impl MentionNames {
                 continue;
             }
             let (_, rest) = text.split_at(start + sigil.len_utf8());
-            let mut matched = None;
+            names.clear();
             for (index, next) in rest.char_indices() {
                 if index > longest {
                     break;
                 }
                 let (name, _) = rest.split_at(index);
                 if (next.is_whitespace() || TERMINATORS.contains(&next)) && known.contains(name) {
-                    matched = Some(name);
+                    names.push(name);
                 }
                 if next.is_whitespace() {
                     break;
                 }
             }
             if rest.len() <= longest && known.contains(rest) {
-                matched = Some(rest);
+                names.push(rest);
             }
-            if let Some(name) = matched {
-                mentions.push(Mention {
-                    name: name.to_owned(),
-                    range: start..start + sigil.len_utf8() + name.len(),
-                });
-            }
+            found(start, &names);
         }
-        mentions
     }
 }
 
@@ -99,7 +118,7 @@ pub fn valid_thread_title(title: &str) -> bool {
         && !title.contains(['\n', '\r'])
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThreadTitles {
     sorted: Vec<String>,
     longest: usize,
@@ -120,10 +139,9 @@ impl ThreadTitles {
         Self { sorted, longest }
     }
 
-    fn longest_at(&self, rest: &str) -> Option<&str> {
+    fn matches_at<'s>(&'s self, rest: &str, mut matched: impl FnMut(&'s str)) {
         let bytes = rest.as_bytes();
         let (mut low, mut high) = (0, self.sorted.len());
-        let mut matched = None;
         for depth in 0..=bytes.len().min(self.longest) {
             if low >= high {
                 break;
@@ -135,7 +153,7 @@ impl ThreadTitles {
                     .and_then(|after| after.chars().next())
                     .is_none_or(|next| next.is_whitespace() || TERMINATORS.contains(&next))
                 {
-                    matched = Some(shortest.as_str());
+                    matched(shortest.as_str());
                 }
                 low += 1;
             }
@@ -147,7 +165,6 @@ impl ThreadTitles {
             let last = range.partition_point(|title| title.as_bytes()[depth] <= byte);
             (low, high) = (low + first, low + last);
         }
-        matched
     }
 
     #[must_use]
@@ -164,7 +181,9 @@ impl ThreadTitles {
                 continue;
             }
             let (_, rest) = text.split_at(start + 1);
-            if let Some(title) = self.longest_at(rest) {
+            let mut longest = None;
+            self.matches_at(rest, |title| longest = Some(title));
+            if let Some(title) = longest {
                 mentions.push(Mention {
                     name: title.to_owned(),
                     range: start..start + 1 + title.len(),
@@ -173,6 +192,110 @@ impl ThreadTitles {
         }
         mentions
     }
+
+    #[must_use]
+    fn candidates(&self, text: &str) -> Vec<Mention> {
+        if self.sorted.is_empty() {
+            return Vec::new();
+        }
+        let mut mentions = Vec::new();
+        let mut titles = Vec::new();
+        let mut previous = None;
+        for (start, character) in text.char_indices() {
+            let after_space = previous.is_none_or(char::is_whitespace);
+            previous = Some(character);
+            if character != '@' || !after_space {
+                continue;
+            }
+            let (_, rest) = text.split_at(start + 1);
+            titles.clear();
+            self.matches_at(rest, |title| titles.push(title));
+            mentions.extend(titles.iter().rev().map(|title| Mention {
+                name: (*title).to_owned(),
+                range: start..start + 1 + title.len(),
+            }));
+        }
+        mentions
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MentionKind {
+    Skill,
+    Thread,
+}
+
+impl MentionKind {
+    #[must_use]
+    pub const fn sigil(self) -> char {
+        match self {
+            Self::Skill => '$',
+            Self::Thread => '@',
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MessageMention {
+    pub kind: MentionKind,
+    pub range: Range<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageVocabulary {
+    skills: MentionNames,
+    threads: ThreadTitles,
+}
+
+impl MessageVocabulary {
+    #[must_use]
+    pub fn new<S: AsRef<str>, T: AsRef<str>>(skills: &[S], threads: &[T]) -> Self {
+        let skills: Vec<&str> = skills.iter().map(AsRef::as_ref).collect();
+        Self {
+            skills: MentionNames::new(&skills),
+            threads: ThreadTitles::new(threads),
+        }
+    }
+
+    #[must_use]
+    pub fn mentions(&self, text: &str) -> Vec<MessageMention> {
+        exclusive(self.candidates(text))
+    }
+
+    #[must_use]
+    pub fn candidates(&self, text: &str) -> Vec<MessageMention> {
+        let skills = self
+            .skills
+            .candidates(text, MentionKind::Skill.sigil())
+            .into_iter()
+            .map(|mention| (MentionKind::Skill, mention));
+        let threads = self
+            .threads
+            .candidates(text)
+            .into_iter()
+            .map(|mention| (MentionKind::Thread, mention));
+        skills
+            .chain(threads)
+            .map(|(kind, mention)| MessageMention {
+                kind,
+                range: mention.range,
+            })
+            .collect()
+    }
+}
+
+#[must_use]
+pub fn exclusive(mut found: Vec<MessageMention>) -> Vec<MessageMention> {
+    found.sort_by_key(|mention| (mention.range.start, std::cmp::Reverse(mention.range.end)));
+    let mut end = 0;
+    found.retain(|mention| {
+        let keep = mention.range.start >= end;
+        if keep {
+            end = mention.range.end;
+        }
+        keep
+    });
+    found
 }
 
 #[must_use]

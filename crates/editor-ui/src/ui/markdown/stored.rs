@@ -206,8 +206,18 @@ pub enum LeafPreparation {
 }
 
 struct PreparedLease {
-    permit: Option<OwnedSemaphorePermit>,
+    permit: std::cell::Cell<Option<OwnedSemaphorePermit>>,
     wake: aqua::mailbox::Wake,
+}
+
+impl PreparedLease {
+    fn take(&self) -> Option<OwnedSemaphorePermit> {
+        self.permit.take()
+    }
+
+    fn restore(&self, permit: Option<OwnedSemaphorePermit>) {
+        self.permit.set(permit);
+    }
 }
 
 impl Drop for PreparedLease {
@@ -223,8 +233,155 @@ pub struct StoredLeaf {
     pub(crate) context: artisan_markdown_index::LeafContext,
     pub(crate) table_continues: bool,
     pub(crate) content: IndexedLeafContent,
+    mentions: LeafMentions,
     proof: LeafProof,
-    _capacity: PreparedLease,
+    capacity: PreparedLease,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeafKind {
+    Plain,
+    Message,
+}
+
+enum LeafMentions {
+    Plain,
+    Message(Box<MessageMentions>),
+}
+
+struct MessageMentions {
+    resolved_with: std::cell::RefCell<Arc<artisan_mentions::MessageVocabulary>>,
+    record: artisan_markdown_index::LeafRecord,
+    record_bytes: usize,
+    start: usize,
+    applied: Vec<artisan_mentions::MessageMention>,
+}
+
+enum Revision {
+    Kept,
+    Remark(PreparationInput),
+}
+
+impl MessageMentions {
+    fn current(&self, vocabulary: &Arc<artisan_mentions::MessageVocabulary>) -> bool {
+        Arc::ptr_eq(&self.resolved_with.borrow(), vocabulary)
+    }
+
+    fn revision(
+        &self,
+        key: &str,
+        source: &Arc<str>,
+        vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
+    ) -> Revision {
+        if self.current(vocabulary) {
+            return Revision::Kept;
+        }
+        match super::mentions::record_mentions(&self.record, self.start, source, vocabulary) {
+            Ok(resolved) if resolved == self.applied => {
+                self.resolved_with.replace(Arc::clone(vocabulary));
+                Revision::Kept
+            }
+            Ok(_) => Revision::Remark(PreparationInput::Retained {
+                record: Box::new(self.record.clone()),
+                record_bytes: self.record_bytes,
+                source: Arc::clone(source),
+            }),
+            Err(error) => {
+                tracing::warn!(leaf = key, %error, "resolve stored message mentions; keeping the shown marks");
+                Revision::Kept
+            }
+        }
+    }
+}
+
+impl StoredLeaf {
+    fn revision(
+        &self,
+        key: &str,
+        vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
+    ) -> Revision {
+        match &self.mentions {
+            LeafMentions::Plain => Revision::Kept,
+            LeafMentions::Message(mentions) => mentions.revision(key, &self.source, vocabulary),
+        }
+    }
+}
+
+enum PreparationInput {
+    Fetched {
+        metadata: String,
+        source: String,
+    },
+    Retained {
+        record: Box<artisan_markdown_index::LeafRecord>,
+        record_bytes: usize,
+        source: Arc<str>,
+    },
+}
+
+struct PreparedParts {
+    context: artisan_markdown_index::LeafContext,
+    table_continues: bool,
+    content: IndexedLeafContent,
+    mentions: LeafMentions,
+    source: Arc<str>,
+    bytes: usize,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareLeafError {
+    #[error("Markdown metadata of leaf {leaf} is not a leaf record")]
+    Metadata {
+        leaf: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Markdown leaf {leaf} has offset {offset}, beyond this platform")]
+    Offset {
+        leaf: String,
+        offset: u64,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
+    #[error("Markdown metadata of leaf {leaf} does not match its descriptor")]
+    Descriptor { leaf: String },
+    #[error("Markdown preparation is unavailable for leaf {leaf}")]
+    Engine {
+        leaf: String,
+        #[source]
+        source: Arc<super::MarkdownError>,
+    },
+    #[error("Couldn't prepare Markdown leaf {leaf}")]
+    Normalize {
+        leaf: String,
+        #[source]
+        source: super::MarkdownIndexError,
+    },
+    #[error(
+        "Markdown leaf {leaf} needs {bytes} bytes of syntax, beyond its budget; open the full source"
+    )]
+    SyntaxBudget { leaf: String, bytes: usize },
+    #[error(
+        "Markdown preview of leaf {leaf} needs {bytes} bytes, beyond its presentation-memory budget; open the full source"
+    )]
+    PresentationBudget { leaf: String, bytes: usize },
+    #[error("Markdown preparation worker stopped before it finished leaf {leaf}")]
+    WorkerStopped {
+        leaf: String,
+        #[source]
+        source: tokio::sync::oneshot::error::RecvError,
+    },
+}
+
+fn described(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(source) = cause {
+        text.push_str(": ");
+        text.push_str(&source.to_string());
+        cause = source.source();
+    }
+    text
 }
 
 impl StoredLeaf {
@@ -314,17 +471,68 @@ enum LeafPhase {
         metadata: String,
         collector: RangeCollector,
     },
-    WaitingWorker {
-        metadata: String,
-        source: String,
-    },
+    WaitingWorker(PreparationInput),
     Working,
     Ready(Rc<StoredLeaf>),
+    RemarkWaiting {
+        shown: Rc<StoredLeaf>,
+        input: PreparationInput,
+        decided: Arc<artisan_mentions::MessageVocabulary>,
+    },
+    Remarking(Rc<StoredLeaf>),
+    RemarkBlocked {
+        shown: Rc<StoredLeaf>,
+        needed: usize,
+    },
     Failed(String),
+}
+
+impl LeafPhase {
+    const fn settled(&self) -> bool {
+        match self {
+            Self::Ready(_)
+            | Self::RemarkWaiting { .. }
+            | Self::Remarking(_)
+            | Self::RemarkBlocked { .. }
+            | Self::Failed(_) => true,
+            Self::Metadata(_) | Self::Source { .. } | Self::WaitingWorker(_) | Self::Working => {
+                false
+            }
+        }
+    }
+
+    const fn advances(&self) -> bool {
+        match self {
+            Self::Metadata(_)
+            | Self::Source { .. }
+            | Self::WaitingWorker(_)
+            | Self::RemarkWaiting { .. } => true,
+            Self::Working
+            | Self::Ready(_)
+            | Self::Remarking(_)
+            | Self::RemarkBlocked { .. }
+            | Self::Failed(_) => false,
+        }
+    }
+
+    const fn shown(&self) -> Option<&Rc<StoredLeaf>> {
+        match self {
+            Self::Ready(leaf)
+            | Self::RemarkWaiting { shown: leaf, .. }
+            | Self::Remarking(leaf)
+            | Self::RemarkBlocked { shown: leaf, .. } => Some(leaf),
+            Self::Metadata(_)
+            | Self::Source { .. }
+            | Self::WaitingWorker(_)
+            | Self::Working
+            | Self::Failed(_) => None,
+        }
+    }
 }
 
 struct LeafEntry {
     key: String,
+    kind: LeafKind,
     source: StoredSource,
     descriptor: SourceLeafDescriptor,
     generation: u64,
@@ -358,33 +566,32 @@ enum Completion {
         generation: u64,
         _worker: Option<OwnedSemaphorePermit>,
         _capacity: Option<Arc<OwnedSemaphorePermit>>,
-        result: Result<
-            (
-                artisan_markdown_index::LeafContext,
-                bool,
-                IndexedLeafContent,
-                Arc<str>,
-                usize,
-            ),
-            String,
-        >,
+        vocabulary: Option<Arc<artisan_mentions::MessageVocabulary>>,
+        result: Result<Box<PreparedParts>, Box<FailedPreparation>>,
     },
+}
+
+struct FailedPreparation {
+    error: PrepareLeafError,
+    retry: Option<PreparationInput>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoredUpdate {
     Index { owner: String, revision: u64 },
     Leaf { key: String, ordinal: usize },
+    Remarked { key: String, ordinal: usize },
 }
 
-type WorkerJob = Box<dyn FnOnce(&Result<MarkdownEngine, String>) + Send>;
+type WorkerEngine = Result<MarkdownEngine, Arc<super::MarkdownError>>;
+type WorkerJob = Box<dyn FnOnce(&WorkerEngine) + Send>;
 
 fn preparation_worker() -> Result<tokio::sync::mpsc::Sender<WorkerJob>, String> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<WorkerJob>(QUEUE_DEPTH);
     std::thread::Builder::new()
         .name("artisan-markdown-stored".to_owned())
         .spawn(move || {
-            let engine = MarkdownEngine::new().map_err(|error| error.to_string());
+            let engine = MarkdownEngine::new().map_err(Arc::new);
             while let Some(job) = receiver.blocking_recv() {
                 job(&engine);
             }
@@ -402,6 +609,9 @@ pub struct StoredOwner {
     prepared_capacity: Arc<Semaphore>,
     worker: Result<tokio::sync::mpsc::Sender<WorkerJob>, String>,
     delivery: Delivery<Completion>,
+    vocabulary: Arc<artisan_mentions::MessageVocabulary>,
+    budget: usize,
+    syntax_budget: usize,
 }
 
 impl std::fmt::Debug for StoredOwner {
@@ -412,13 +622,20 @@ impl std::fmt::Debug for StoredOwner {
 
 impl Default for StoredOwner {
     fn default() -> Self {
+        Self::with_budgets(PREPARED_BYTES, PREPARED_BYTES / 8)
+    }
+}
+
+impl StoredOwner {
+    #[must_use]
+    fn with_budgets(budget: usize, syntax_budget: usize) -> Self {
         Self {
             indices: VecDeque::new(),
             pages: VecDeque::new(),
             leaves: VecDeque::new(),
             generation: 0,
-            capacity: Arc::new(Semaphore::new(PREPARED_BYTES)),
-            prepared_capacity: Arc::new(Semaphore::new(PREPARED_BYTES)),
+            capacity: Arc::new(Semaphore::new(budget)),
+            prepared_capacity: Arc::new(Semaphore::new(budget)),
             worker: preparation_worker(),
             delivery: Delivery::new(
                 const {
@@ -426,8 +643,169 @@ impl Default for StoredOwner {
                         .expect("invariant: MAX_PENDING_JOBS is nonzero")
                 },
             ),
+            vocabulary: Arc::default(),
+            budget,
+            syntax_budget,
         }
     }
+}
+
+fn refuse(entry: &mut LeafEntry, error: &str) -> bool {
+    if let LeafPhase::RemarkWaiting { shown, .. } = &entry.phase {
+        tracing::warn!(
+            leaf = entry.key,
+            error,
+            "mark a stored message leaf again; keeping the shown leaf"
+        );
+        entry.phase = LeafPhase::Ready(Rc::clone(shown));
+        false
+    } else {
+        entry.phase = LeafPhase::Failed(error.to_owned());
+        entry.capacity = None;
+        true
+    }
+}
+
+fn leaf_ordinal(key: &str, ordinal: u64) -> usize {
+    usize::try_from(ordinal)
+        .unwrap_or_else(|_| panic!("invariant: leaf {key} has an ordinal that fits its index"))
+}
+
+fn requeued(
+    key: &str,
+    shown: Option<Rc<StoredLeaf>>,
+    input: PreparationInput,
+    vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
+) -> LeafPhase {
+    let Some(shown) = shown else {
+        return LeafPhase::WaitingWorker(input);
+    };
+    match shown.revision(key, vocabulary) {
+        Revision::Kept => LeafPhase::Ready(shown),
+        Revision::Remark(input) => LeafPhase::RemarkWaiting {
+            shown,
+            input,
+            decided: Arc::clone(vocabulary),
+        },
+    }
+}
+
+fn leaf_offset(leaf: &str, offset: u64) -> Result<usize, PrepareLeafError> {
+    usize::try_from(offset).map_err(|source| PrepareLeafError::Offset {
+        leaf: leaf.to_owned(),
+        offset,
+        source,
+    })
+}
+
+struct LeafJob<'a> {
+    key: &'a str,
+    descriptor: &'a SourceLeafDescriptor,
+    vocabulary: Option<&'a Arc<artisan_mentions::MessageVocabulary>>,
+    syntax_budget: usize,
+}
+
+fn prepare_parts(
+    job: &LeafJob<'_>,
+    input: &PreparationInput,
+    engine: &WorkerEngine,
+) -> Result<Box<PreparedParts>, PrepareLeafError> {
+    let leaf = || job.key.to_owned();
+    let (record, record_bytes, source) = match input {
+        PreparationInput::Fetched { metadata, source } => (
+            serde_json::from_str::<artisan_markdown_index::LeafRecord>(metadata).map_err(
+                |source| PrepareLeafError::Metadata {
+                    leaf: leaf(),
+                    source,
+                },
+            )?,
+            metadata.len(),
+            source.as_str(),
+        ),
+        PreparationInput::Retained {
+            record,
+            record_bytes,
+            source,
+        } => ((**record).clone(), *record_bytes, &**source),
+    };
+    let start = leaf_offset(job.key, job.descriptor.source_start)?;
+    let end = leaf_offset(job.key, job.descriptor.source_end)?;
+    if record.leaf.source_range() != (start..end) {
+        return Err(PrepareLeafError::Descriptor { leaf: leaf() });
+    }
+    let engine = engine.as_ref().map_err(|source| PrepareLeafError::Engine {
+        leaf: leaf(),
+        source: Arc::clone(source),
+    })?;
+    let normalized = |source: super::MarkdownIndexError| PrepareLeafError::Normalize {
+        leaf: leaf(),
+        source,
+    };
+    let (content, resolved) = match job.vocabulary {
+        Some(vocabulary) => {
+            let message = super::source_index::normalize_message_record(
+                &record,
+                start,
+                source,
+                engine,
+                &mut super::NoFenceTokenMemo,
+                vocabulary,
+            )
+            .map_err(normalized)?;
+            (
+                message.content,
+                Some((Arc::clone(vocabulary), message.mentions)),
+            )
+        }
+        None => (
+            normalize_record(&record, start, source, engine, &mut super::NoFenceTokenMemo)
+                .map_err(normalized)?,
+            None,
+        ),
+    };
+    let syntax_bytes = content.resident_bytes();
+    if syntax_bytes > job.syntax_budget {
+        return Err(PrepareLeafError::SyntaxBudget {
+            leaf: leaf(),
+            bytes: syntax_bytes,
+        });
+    }
+    let leaf_context = record.context.clone();
+    let table_continues = record.table_continues;
+    let context_bytes = leaf_context.lists.capacity()
+        * size_of::<artisan_markdown_index::ListLevel>()
+        + leaf_context.table_alignments.capacity()
+            * size_of::<artisan_markdown_index::TableAlignment>()
+        + leaf_context.spacing.capacity() * size_of::<artisan_markdown_index::LeafSpacing>();
+    let (mentions, record_bytes) = match resolved {
+        Some((vocabulary, applied)) => (
+            LeafMentions::Message(Box::new(MessageMentions {
+                resolved_with: std::cell::RefCell::new(vocabulary),
+                record,
+                record_bytes,
+                start,
+                applied,
+            })),
+            record_bytes,
+        ),
+        None => (LeafMentions::Plain, 0),
+    };
+    let bytes = syntax_bytes
+        .saturating_add(context_bytes)
+        .saturating_add(record_bytes)
+        .saturating_add(source.len())
+        .saturating_add(size_of::<StoredLeaf>());
+    Ok(Box::new(PreparedParts {
+        context: leaf_context,
+        table_continues,
+        content,
+        mentions,
+        source: match input {
+            PreparationInput::Fetched { source, .. } => Arc::from(source.as_str()),
+            PreparationInput::Retained { source, .. } => Arc::clone(source),
+        },
+        bytes,
+    }))
 }
 
 impl StoredOwner {
@@ -737,14 +1115,71 @@ impl StoredOwner {
                 entry.generation == proof.generation
                     && entry.source.owner == proof.owner
                     && entry.descriptor == proof.descriptor
-                    && matches!(entry.phase, LeafPhase::Ready(_))
+                    && entry.phase.shown().is_some()
             })
     }
+    pub fn leaf(&mut self, key: &str, source: &StoredSource, ordinal: usize) -> LeafPreparation {
+        self.prepare_leaf(key, source, ordinal, LeafKind::Plain)
+    }
+
+    pub fn message_leaf(
+        &mut self,
+        key: &str,
+        source: &StoredSource,
+        ordinal: usize,
+        vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
+    ) -> LeafPreparation {
+        self.revise_mentions(vocabulary);
+        self.prepare_leaf(key, source, ordinal, LeafKind::Message)
+    }
+
+    pub fn revise_mentions(&mut self, vocabulary: &Arc<artisan_mentions::MessageVocabulary>) {
+        if Arc::ptr_eq(&self.vocabulary, vocabulary) {
+            return;
+        }
+        self.vocabulary = Arc::clone(vocabulary);
+        let mut remarked = Vec::new();
+        for entry in &mut self.leaves {
+            let shown = match &entry.phase {
+                LeafPhase::Ready(shown) | LeafPhase::RemarkBlocked { shown, .. } => {
+                    Rc::clone(shown)
+                }
+                LeafPhase::Metadata(_)
+                | LeafPhase::Source { .. }
+                | LeafPhase::WaitingWorker(_)
+                | LeafPhase::Working
+                | LeafPhase::RemarkWaiting { .. }
+                | LeafPhase::Remarking(_)
+                | LeafPhase::Failed(_) => continue,
+            };
+            entry.phase = match shown.revision(&entry.key, vocabulary) {
+                Revision::Kept => LeafPhase::Ready(shown),
+                Revision::Remark(input) => {
+                    remarked.push(entry.key.clone());
+                    LeafPhase::RemarkWaiting {
+                        shown,
+                        input,
+                        decided: Arc::clone(vocabulary),
+                    }
+                }
+            };
+        }
+        for key in remarked {
+            self.advance_leaf(&key);
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one leaf lookup walking the source, page and preparation states of a stored leaf"
     )]
-    pub fn leaf(&mut self, key: &str, source: &StoredSource, ordinal: usize) -> LeafPreparation {
+    fn prepare_leaf(
+        &mut self,
+        key: &str,
+        source: &StoredSource,
+        ordinal: usize,
+        kind: LeafKind,
+    ) -> LeafPreparation {
         if source.format() != SourceIndexFormat::Markdown {
             return LeafPreparation::Failed(
                 "Literal sources require the literal projection renderer".to_owned(),
@@ -761,6 +1196,7 @@ impl StoredOwner {
             let same = {
                 let entry = &self.leaves[index];
                 entry.source.owner == source.owner
+                    && entry.kind == kind
                     && Self::same_provider(&entry.source.provider, &source.provider)
                     && entry.source.header.source == source.header.source
                     && entry.descriptor == descriptor
@@ -771,11 +1207,16 @@ impl StoredOwner {
                     .remove(index)
                     .unwrap_or_else(|| panic!("invariant: leaf {key} was found at {index}"));
                 let result = match &entry.phase {
-                    LeafPhase::Ready(leaf) => LeafPreparation::Ready(Rc::clone(leaf)),
+                    LeafPhase::Ready(leaf)
+                    | LeafPhase::RemarkWaiting { shown: leaf, .. }
+                    | LeafPhase::Remarking(leaf)
+                    | LeafPhase::RemarkBlocked { shown: leaf, .. } => {
+                        LeafPreparation::Ready(Rc::clone(leaf))
+                    }
                     LeafPhase::Failed(error) => LeafPreparation::Failed(error.clone()),
                     LeafPhase::Metadata(_)
                     | LeafPhase::Source { .. }
-                    | LeafPhase::WaitingWorker { .. }
+                    | LeafPhase::WaitingWorker(_)
                     | LeafPhase::Working => LeafPreparation::Pending,
                 };
                 self.leaves.push_back(entry);
@@ -794,7 +1235,7 @@ impl StoredOwner {
                     .to_owned(),
             );
         };
-        if bytes > PREPARED_BYTES as u64 {
+        if bytes > self.budget as u64 {
             return LeafPreparation::Failed(
                 "Markdown source exceeds the preparation ownership budget; open the full source"
                     .to_owned(),
@@ -803,16 +1244,14 @@ impl StoredOwner {
         if self
             .leaves
             .iter()
-            .filter(|entry| !matches!(entry.phase, LeafPhase::Ready(_) | LeafPhase::Failed(_)))
+            .filter(|entry| !entry.phase.settled())
             .count()
             >= MAX_PENDING_JOBS
         {
             return LeafPreparation::Pending;
         }
         while self.leaves.len() >= MAX_PREPARED_ENTRIES {
-            let Some(index) = self.leaves.iter().position(|entry| {
-                matches!(entry.phase, LeafPhase::Ready(_) | LeafPhase::Failed(_))
-            }) else {
+            let Some(index) = self.leaves.iter().position(|entry| entry.phase.settled()) else {
                 return LeafPreparation::Pending;
             };
             self.leaves.remove(index);
@@ -823,9 +1262,7 @@ impl StoredOwner {
             {
                 break Arc::new(capacity);
             }
-            let Some(index) = self.leaves.iter().position(|entry| {
-                matches!(entry.phase, LeafPhase::Ready(_) | LeafPhase::Failed(_))
-            }) else {
+            let Some(index) = self.leaves.iter().position(|entry| entry.phase.settled()) else {
                 return LeafPreparation::Pending;
             };
             self.leaves.remove(index);
@@ -849,6 +1286,7 @@ impl StoredOwner {
         let generation = self.next_generation();
         self.leaves.push_back(LeafEntry {
             key: key.to_owned(),
+            kind,
             source: source.clone(),
             descriptor,
             generation,
@@ -875,9 +1313,12 @@ impl StoredOwner {
             LeafPhase::Metadata(collector) | LeafPhase::Source { collector, .. } => collector
                 .next_request()
                 .map(|(offset, limit)| (collector.reference.clone(), offset, limit)),
-            LeafPhase::WaitingWorker { .. }
+            LeafPhase::WaitingWorker(_)
             | LeafPhase::Working
             | LeafPhase::Ready(_)
+            | LeafPhase::RemarkWaiting { .. }
+            | LeafPhase::Remarking(_)
+            | LeafPhase::RemarkBlocked { .. }
             | LeafPhase::Failed(_) => None,
         };
         if let Some((reference, offset, limit)) = request {
@@ -911,122 +1352,87 @@ impl StoredOwner {
             );
             return false;
         }
-        let LeafPhase::WaitingWorker { .. } = &entry.phase else {
+        if !matches!(
+            entry.phase,
+            LeafPhase::WaitingWorker(_) | LeafPhase::RemarkWaiting { .. }
+        ) {
             return false;
-        };
+        }
         let queue = match &self.worker {
             Ok(queue) => queue.clone(),
-            Err(error) => {
-                entry.phase = LeafPhase::Failed(error.clone());
-                entry.capacity = None;
-                return true;
-            }
+            Err(error) => return refuse(entry, error),
         };
         let slot = match queue.try_reserve() {
             Ok(slot) => slot,
             Err(tokio::sync::mpsc::error::TrySendError::Full(())) => return false,
             Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
-                entry.phase = LeafPhase::Failed("Markdown preparation worker stopped".to_owned());
-                entry.capacity = None;
-                return true;
+                return refuse(entry, "Markdown preparation worker stopped");
             }
         };
-        let LeafPhase::WaitingWorker { metadata, source } =
-            std::mem::replace(&mut entry.phase, LeafPhase::Working)
-        else {
-            return false;
+        let (input, capacity) = match std::mem::replace(&mut entry.phase, LeafPhase::Working) {
+            LeafPhase::WaitingWorker(input) => (
+                input,
+                Some(Arc::clone(entry.capacity.as_ref().unwrap_or_else(|| {
+                    panic!("invariant: leaf {key} holds capacity while it waits for the worker")
+                }))),
+            ),
+            LeafPhase::RemarkWaiting {
+                shown,
+                input,
+                decided,
+            } => {
+                let input = if Arc::ptr_eq(&decided, &self.vocabulary) {
+                    input
+                } else {
+                    match shown.revision(key, &self.vocabulary) {
+                        Revision::Kept => {
+                            entry.phase = LeafPhase::Ready(shown);
+                            return false;
+                        }
+                        Revision::Remark(input) => input,
+                    }
+                };
+                entry.phase = LeafPhase::Remarking(shown);
+                (input, None)
+            }
+            LeafPhase::Metadata(_)
+            | LeafPhase::Source { .. }
+            | LeafPhase::Working
+            | LeafPhase::Ready(_)
+            | LeafPhase::Remarking(_)
+            | LeafPhase::RemarkBlocked { .. }
+            | LeafPhase::Failed(_) => {
+                unreachable!("invariant: leaf {key} reserved the worker while it waits for it")
+            }
         };
         let descriptor = entry.descriptor.clone();
+        let vocabulary = match entry.kind {
+            LeafKind::Plain => None,
+            LeafKind::Message => Some(Arc::clone(&self.vocabulary)),
+        };
+        let syntax_budget = self.syntax_budget;
         let generation = entry.generation;
         let key = key.to_owned();
         let sender = self.delivery.sender();
-        let capacity = Arc::clone(entry.capacity.as_ref().unwrap_or_else(|| {
-            panic!("invariant: leaf {key} holds capacity while it waits for the worker")
-        }));
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        let job_key = key.clone();
+        let attempted = vocabulary.clone();
         let job: WorkerJob = Box::new(move |engine| {
             if reply.is_closed() {
                 return;
             }
-            let result = (|| {
-                let record: artisan_markdown_index::LeafRecord =
-                    serde_json::from_str(&metadata).map_err(|error| error.to_string())?;
-                let start = platform_offset(descriptor.source_start)?;
-                let end = platform_offset(descriptor.source_end)?;
-                if record.leaf.source_range() != (start..end) {
-                    return Err("Markdown metadata does not match its descriptor".to_owned());
-                }
-                let engine = engine.as_ref().map_err(Clone::clone)?;
-                let content = normalize_record(
-                    &record,
-                    start,
-                    &source,
-                    engine,
-                    &mut super::NoFenceTokenMemo,
-                )
-                .map_err(|error| error.to_string())?;
-                let (mut document, table_header) = match content {
-                    IndexedLeafContent::Block(block) => (
-                        super::MarkdownDocument {
-                            blocks: vec![block],
-                        },
-                        None,
-                    ),
-                    IndexedLeafContent::TableRow {
-                        header,
-                        alignments,
-                        cells,
-                    } => (
-                        super::MarkdownDocument {
-                            blocks: vec![super::Block::Table(super::Table {
-                                alignments,
-                                header: cells,
-                                rows: Vec::new(),
-                                range: 0..source.len(),
-                            })],
-                        },
-                        Some(header),
-                    ),
-                };
-                let syntax_bytes = document.resident_bytes();
-                if syntax_bytes > PREPARED_BYTES / 8 {
-                    return Err(
-                        "Markdown leaf exceeds its syntax-memory budget; open the full source"
-                            .to_owned(),
-                    );
-                }
-                let block = document
-                    .blocks
-                    .pop()
-                    .ok_or("Markdown leaf has no content")?;
-                let content = match (table_header, block) {
-                    (None, block) => IndexedLeafContent::Block(block),
-                    (Some(header), super::Block::Table(table)) => IndexedLeafContent::TableRow {
-                        header,
-                        alignments: table.alignments,
-                        cells: table.header,
-                    },
-                    _ => return Err("Markdown metadata does not match its content".to_owned()),
-                };
-                let leaf_context = record.context;
-                let context_bytes = leaf_context.lists.capacity()
-                    * size_of::<artisan_markdown_index::ListLevel>()
-                    + leaf_context.table_alignments.capacity()
-                        * size_of::<artisan_markdown_index::TableAlignment>()
-                    + leaf_context.spacing.capacity()
-                        * size_of::<artisan_markdown_index::LeafSpacing>();
-                let retained_bytes = syntax_bytes
-                    .saturating_add(context_bytes)
-                    .saturating_add(source.len())
-                    .saturating_add(size_of::<StoredLeaf>());
-                Ok((
-                    leaf_context,
-                    record.table_continues,
-                    content,
-                    Arc::<str>::from(source),
-                    retained_bytes,
-                ))
-            })();
+            let job = LeafJob {
+                key: &job_key,
+                descriptor: &descriptor,
+                vocabulary: vocabulary.as_ref(),
+                syntax_budget,
+            };
+            let result = prepare_parts(&job, &input, engine).map_err(|error| {
+                Box::new(FailedPreparation {
+                    error,
+                    retry: Some(input),
+                })
+            });
             match reply.send((result, capacity)) {
                 Ok(()) | Err((_, _)) => {}
             }
@@ -1035,16 +1441,26 @@ impl StoredOwner {
         entry.task = Some(
             runtime::runtime()
                 .spawn(async move {
-                    let (result, worker, capacity) = match receiver.await {
-                        Ok((result, capacity)) => (result, None, Some(capacity)),
-                        Err(error) => (Err(error.to_string()), None, None),
+                    let (result, capacity) = match receiver.await {
+                        Ok((result, capacity)) => (result, capacity),
+                        Err(source) => (
+                            Err(Box::new(FailedPreparation {
+                                error: PrepareLeafError::WorkerStopped {
+                                    leaf: key.clone(),
+                                    source,
+                                },
+                                retry: None,
+                            })),
+                            None,
+                        ),
                     };
                     sender
                         .offer(Completion::Prepared {
                             key,
                             generation,
                             result,
-                            _worker: worker,
+                            vocabulary: attempted,
+                            _worker: None,
                             _capacity: capacity,
                         })
                         .await;
@@ -1053,6 +1469,206 @@ impl StoredOwner {
         );
         false
     }
+
+    fn admit(&mut self, key: &str, bytes: usize) -> Option<OwnedSemaphorePermit> {
+        let count = u32::try_from(bytes).unwrap_or_else(|_| {
+            panic!("invariant: leaf {key} prepares {bytes} bytes, bounded by its budget")
+        });
+        loop {
+            if let Ok(permit) = Arc::clone(&self.prepared_capacity).try_acquire_many_owned(count) {
+                return Some(permit);
+            }
+            let oldest = self
+                .leaves
+                .iter()
+                .position(|entry| entry.key != key && entry.phase.settled())?;
+            self.leaves.remove(oldest);
+        }
+    }
+
+    fn remark_permit(
+        &mut self,
+        key: &str,
+        shown: &StoredLeaf,
+        bytes: usize,
+    ) -> Option<OwnedSemaphorePermit> {
+        let held = shown.capacity.take();
+        let count = held.as_ref().map_or(0, OwnedSemaphorePermit::num_permits);
+        if let Some(mut permit) = held {
+            if count >= bytes {
+                drop(permit.split(count - bytes));
+                return Some(permit);
+            }
+            let Some(extra) = self.admit(key, bytes - count) else {
+                shown.capacity.restore(Some(permit));
+                return None;
+            };
+            permit.merge(extra);
+            return Some(permit);
+        }
+        self.admit(key, bytes)
+    }
+
+    fn unblock_remarks(&mut self) {
+        let available = self.prepared_capacity.available_permits();
+        for entry in &mut self.leaves {
+            let LeafPhase::RemarkBlocked { shown, needed } = &entry.phase else {
+                continue;
+            };
+            let held = shown.capacity.take();
+            let count = held.as_ref().map_or(0, OwnedSemaphorePermit::num_permits);
+            shown.capacity.restore(held);
+            if available + count < *needed {
+                continue;
+            }
+            let shown = Rc::clone(shown);
+            entry.phase = match shown.revision(&entry.key, &self.vocabulary) {
+                Revision::Kept => LeafPhase::Ready(shown),
+                Revision::Remark(input) => LeafPhase::RemarkWaiting {
+                    shown,
+                    input,
+                    decided: Arc::clone(&self.vocabulary),
+                },
+            };
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one publication walking failure, obsolete marks, admission and the new leaf"
+    )]
+    fn publish(
+        &mut self,
+        key: String,
+        generation: u64,
+        attempted: Option<&Arc<artisan_mentions::MessageVocabulary>>,
+        result: Result<Box<PreparedParts>, Box<FailedPreparation>>,
+    ) -> Option<StoredUpdate> {
+        let index = self.leaves.iter().position(|entry| {
+            entry.key == key
+                && entry.generation == generation
+                && entry.source.provider.is_available()
+        })?;
+        let entry = &mut self.leaves[index];
+        entry.task = None;
+        let ordinal = leaf_ordinal(&key, entry.descriptor.ordinal);
+        let shown = match &entry.phase {
+            LeafPhase::Remarking(shown) => Some(Rc::clone(shown)),
+            LeafPhase::Working => None,
+            LeafPhase::Metadata(_)
+            | LeafPhase::Source { .. }
+            | LeafPhase::WaitingWorker(_)
+            | LeafPhase::Ready(_)
+            | LeafPhase::RemarkWaiting { .. }
+            | LeafPhase::RemarkBlocked { .. }
+            | LeafPhase::Failed(_) => {
+                unreachable!(
+                    "invariant: leaf {key} publishes only the preparation it is waiting for"
+                )
+            }
+        };
+        let obsolete = attempted.is_some_and(|used| !Arc::ptr_eq(used, &self.vocabulary));
+        let parts = match result {
+            Ok(parts) => parts,
+            Err(failed) => {
+                let FailedPreparation { error, retry } = *failed;
+                if let Some(input) = retry.filter(|_| obsolete) {
+                    entry.phase = requeued(&key, shown, input, &self.vocabulary);
+                    return None;
+                }
+                let described = described(&error);
+                tracing::warn!(
+                    leaf = key,
+                    error = described,
+                    "prepare a stored Markdown leaf"
+                );
+                if let Some(shown) = shown {
+                    entry.phase = LeafPhase::Ready(shown);
+                    return None;
+                }
+                entry.phase = LeafPhase::Failed(described);
+                entry.capacity = None;
+                return Some(StoredUpdate::Leaf { key, ordinal });
+            }
+        };
+        if let LeafMentions::Message(mentions) = &parts.mentions
+            && let Revision::Remark(input) =
+                mentions.revision(&key, &parts.source, &self.vocabulary)
+        {
+            entry.phase = requeued(&key, shown, input, &self.vocabulary);
+            return None;
+        }
+        let bytes = parts.bytes;
+        let permit = if bytes > self.budget {
+            None
+        } else {
+            match &shown {
+                Some(shown) => self.remark_permit(&key, shown, bytes),
+                None => self.admit(&key, bytes),
+            }
+        };
+        let index = self
+            .leaves
+            .iter()
+            .position(|entry| entry.key == key && entry.generation == generation)
+            .unwrap_or_else(|| panic!("invariant: admission never evicts leaf {key} itself"));
+        let entry = &mut self.leaves[index];
+        let Some(permit) = permit else {
+            let error = PrepareLeafError::PresentationBudget {
+                leaf: key.clone(),
+                bytes,
+            };
+            let described = described(&error);
+            tracing::warn!(
+                leaf = key,
+                error = described,
+                "admit a stored Markdown leaf"
+            );
+            return match shown {
+                Some(shown) if bytes <= self.budget => {
+                    entry.phase = LeafPhase::RemarkBlocked {
+                        shown,
+                        needed: bytes,
+                    };
+                    None
+                }
+                Some(shown) => {
+                    entry.phase = LeafPhase::Ready(shown);
+                    None
+                }
+                None => {
+                    entry.phase = LeafPhase::Failed(described);
+                    entry.capacity = None;
+                    Some(StoredUpdate::Leaf { key, ordinal })
+                }
+            };
+        };
+        entry.capacity = None;
+        entry.phase = LeafPhase::Ready(Rc::new(StoredLeaf {
+            descriptor: entry.descriptor.clone(),
+            source: parts.source,
+            context: parts.context,
+            table_continues: parts.table_continues,
+            content: parts.content,
+            mentions: parts.mentions,
+            proof: LeafProof {
+                provider: entry.source.provider.clone(),
+                owner: entry.source.owner.clone(),
+                reference: entry.source.header.source.clone(),
+                descriptor: entry.descriptor.clone(),
+                generation,
+            },
+            capacity: PreparedLease {
+                permit: std::cell::Cell::new(Some(permit)),
+                wake: self.delivery.waker(),
+            },
+        }));
+        Some(match shown {
+            Some(_) => StoredUpdate::Remarked { key, ordinal },
+            None => StoredUpdate::Leaf { key, ordinal },
+        })
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one match applying every kind of completed index, page and leaf delivery"
@@ -1153,31 +1769,35 @@ impl StoredOwner {
                                 Ok(()) if collector.next_request().is_some() => {
                                     LeafPhase::Metadata(collector)
                                 }
-                                Ok(()) => match collector.finish().and_then(|metadata| {
-                                    let start = platform_offset(entry.descriptor.source_start)?;
-                                    let end = platform_offset(entry.descriptor.source_end)?;
-                                    Ok((
-                                        metadata,
-                                        RangeCollector::new(
-                                            entry.source.header.source.clone(),
-                                            start..end,
-                                        )?,
-                                    ))
-                                }) {
-                                    Ok((metadata, collector))
-                                        if collector.next_request().is_some() =>
-                                    {
-                                        LeafPhase::Source {
+                                Ok(()) => {
+                                    match collector.finish().and_then(|metadata| {
+                                        let start = platform_offset(entry.descriptor.source_start)?;
+                                        let end = platform_offset(entry.descriptor.source_end)?;
+                                        Ok((
                                             metadata,
-                                            collector,
+                                            RangeCollector::new(
+                                                entry.source.header.source.clone(),
+                                                start..end,
+                                            )?,
+                                        ))
+                                    }) {
+                                        Ok((metadata, collector))
+                                            if collector.next_request().is_some() =>
+                                        {
+                                            LeafPhase::Source {
+                                                metadata,
+                                                collector,
+                                            }
                                         }
-                                    }
-                                    Ok((metadata, collector)) => match collector.finish() {
-                                        Ok(source) => LeafPhase::WaitingWorker { metadata, source },
+                                        Ok((metadata, collector)) => match collector.finish() {
+                                            Ok(source) => LeafPhase::WaitingWorker(
+                                                PreparationInput::Fetched { metadata, source },
+                                            ),
+                                            Err(error) => LeafPhase::Failed(error),
+                                        },
                                         Err(error) => LeafPhase::Failed(error),
-                                    },
-                                    Err(error) => LeafPhase::Failed(error),
-                                },
+                                    }
+                                }
                             }
                         }
                         (
@@ -1193,7 +1813,10 @@ impl StoredOwner {
                                 collector,
                             },
                             Ok(()) => match collector.finish() {
-                                Ok(source) => LeafPhase::WaitingWorker { metadata, source },
+                                Ok(source) => LeafPhase::WaitingWorker(PreparationInput::Fetched {
+                                    metadata,
+                                    source,
+                                }),
                                 Err(error) => LeafPhase::Failed(error),
                             },
                         },
@@ -1203,8 +1826,7 @@ impl StoredOwner {
                         entry.capacity = None;
                         updates.push(StoredUpdate::Leaf {
                             key: key.clone(),
-                            ordinal: usize::try_from(entry.descriptor.ordinal)
-                                .unwrap_or(usize::MAX),
+                            ordinal: leaf_ordinal(&key, entry.descriptor.ordinal),
                         });
                     }
                 }
@@ -1212,88 +1834,25 @@ impl StoredOwner {
                     key,
                     generation,
                     result,
+                    vocabulary,
                     _worker,
                     _capacity,
-                } => {
-                    if !self.leaves.iter().any(|entry| {
-                        entry.key == key
-                            && entry.generation == generation
-                            && entry.source.provider.is_available()
-                    }) {
-                        continue;
-                    }
-                    let result = result.and_then(|(context, table_continues, content, source, bytes)| {
-                        if bytes > PREPARED_BYTES {
-                            return Err("Markdown preview exceeds its presentation-memory budget; open the full source".to_owned());
-                        }
-                        let permit = loop {
-                            if let Ok(permit) = Arc::clone(&self.prepared_capacity).try_acquire_many_owned(u32::try_from(bytes).unwrap_or_else(|_| panic!("invariant: leaf {key} prepares {bytes} bytes, bounded by PREPARED_BYTES"))) {
-                                break permit;
-                            }
-                            let Some(oldest) = self.leaves.iter().position(|entry| entry.key != key && matches!(entry.phase, LeafPhase::Ready(_) | LeafPhase::Failed(_))) else {
-                                return Err("Markdown preview exceeds its presentation-memory budget; open the full source".to_owned());
-                            };
-                            self.leaves.remove(oldest);
-                        };
-                        Ok((context, table_continues, content, source, permit))
-                    });
-                    let Some(entry) = self
-                        .leaves
-                        .iter_mut()
-                        .find(|entry| entry.key == key && entry.generation == generation)
-                    else {
-                        continue;
-                    };
-                    entry.task = None;
-                    entry.capacity = None;
-                    let ordinal = usize::try_from(entry.descriptor.ordinal).unwrap_or(usize::MAX);
-                    entry.phase = match result {
-                        Ok((leaf_context, table_continues, content, source, capacity)) => {
-                            LeafPhase::Ready(Rc::new(StoredLeaf {
-                                descriptor: entry.descriptor.clone(),
-                                source,
-                                context: leaf_context,
-                                table_continues,
-                                content,
-                                proof: LeafProof {
-                                    provider: entry.source.provider.clone(),
-                                    owner: entry.source.owner.clone(),
-                                    reference: entry.source.header.source.clone(),
-                                    descriptor: entry.descriptor.clone(),
-                                    generation,
-                                },
-                                _capacity: PreparedLease {
-                                    permit: Some(capacity),
-                                    wake: self.delivery.waker(),
-                                },
-                            }))
-                        }
-                        Err(error) => LeafPhase::Failed(error),
-                    };
-                    updates.push(StoredUpdate::Leaf { key, ordinal });
-                }
+                } => updates.extend(self.publish(key, generation, vocabulary.as_ref(), result)),
             }
         }
+        self.unblock_remarks();
         let keys: Vec<_> = self
             .leaves
             .iter()
-            .filter(|entry| {
-                entry.task.is_none()
-                    && !matches!(
-                        entry.phase,
-                        LeafPhase::Ready(_) | LeafPhase::Failed(_) | LeafPhase::Working
-                    )
-            })
+            .filter(|entry| entry.task.is_none() && entry.phase.advances())
             .map(|entry| entry.key.clone())
             .collect();
         for key in keys {
             if self.advance_leaf(&key)
                 && let Some(entry) = self.leaves.iter().find(|entry| entry.key == key)
             {
-                updates.push(StoredUpdate::Leaf {
-                    key,
-                    ordinal: usize::try_from(entry.descriptor.ordinal).unwrap_or(usize::MAX),
-                });
+                let ordinal = leaf_ordinal(&key, entry.descriptor.ordinal);
+                updates.push(StoredUpdate::Leaf { key, ordinal });
             }
         }
         updates

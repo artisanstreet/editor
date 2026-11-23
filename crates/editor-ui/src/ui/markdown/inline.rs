@@ -15,6 +15,8 @@ pub(crate) enum InlineLayer {
     Strong { in_link: bool },
     Link,
     Command,
+    Mention(artisan_mentions::MentionKind),
+    MentionSigil(artisan_mentions::MentionKind),
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -26,11 +28,18 @@ pub(crate) struct FlatInline {
     pub(crate) code_ranges: Vec<Range<usize>>,
     pub(crate) file_icons: Vec<(usize, (editor_assets::AssetId, editor_assets::AssetId))>,
     pub(crate) file_slots: Vec<Range<usize>>,
+    pub(crate) mention_slots: Vec<MentionSlot>,
     pub(crate) swatches: bool,
     pub(crate) colors: Vec<InlineColor>,
 }
 
 pub(crate) const SWATCH_SLOT: &str = "\u{2060}\u{2003}\u{2060}";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MentionSlot {
+    pub(crate) sigil: Range<usize>,
+    pub(crate) kind: artisan_mentions::MentionKind,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InlineColor {
@@ -174,6 +183,15 @@ fn flatten(spans: &[Span], chain: &mut Vec<InlineLayer>, flat: &mut FlatInline, 
                 emit(flat, start, end, chain);
                 chain.pop();
             }
+            Span::MentionLead { kind, name } => push_mention(flat, *kind, name, chain),
+            Span::MentionTail { kind, text } => {
+                chain.push(InlineLayer::Mention(*kind));
+                let start = flat.source.len();
+                flat.source.push_str(text);
+                let end = flat.source.len();
+                emit(flat, start, end, chain);
+                chain.pop();
+            }
             Span::Emphasis(inner) => {
                 chain.push(InlineLayer::Emphasis);
                 flatten(inner, chain, flat, in_link);
@@ -193,6 +211,29 @@ fn flatten(spans: &[Span], chain: &mut Vec<InlineLayer>, flat: &mut FlatInline, 
             }
         }
     }
+}
+
+fn push_mention(
+    flat: &mut FlatInline,
+    kind: artisan_mentions::MentionKind,
+    name: &str,
+    chain: &mut Vec<InlineLayer>,
+) {
+    let start = flat.source.len();
+    flat.source.push(kind.sigil());
+    let sigil_end = flat.source.len();
+    flat.source.push_str(name);
+    let end = flat.source.len();
+    flat.mention_slots.push(MentionSlot {
+        sigil: start..sigil_end,
+        kind,
+    });
+    chain.push(InlineLayer::MentionSigil(kind));
+    emit(flat, start, sigil_end, chain);
+    chain.pop();
+    chain.push(InlineLayer::Mention(kind));
+    emit(flat, sigil_end, end, chain);
+    chain.pop();
 }
 
 fn flatten_link(
@@ -226,9 +267,8 @@ fn flatten_link(
     }
 }
 
-fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
-    let mut result = Vec::new();
-    let mut consumed = 0;
+pub(super) fn bare_url_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
     let mut cursor = 0;
     while cursor < text.len() {
         let Some(relative) = slice(text, cursor..).find("http") else {
@@ -236,8 +276,19 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
         };
         let start = cursor + relative;
         cursor = start + 4;
-        if !(slice(text, start..).starts_with("https://")
-            || slice(text, start..).starts_with("http://"))
+        let scheme = if slice(text, start..).starts_with("https://") {
+            "https://".len()
+        } else if slice(text, start..).starts_with("http://") {
+            "http://".len()
+        } else {
+            continue;
+        };
+        let authority = slice(text, start + scheme..)
+            .find(|c: char| {
+                c.is_whitespace() || matches!(c, '/' | '?' | '#' | '<' | '>' | '"' | '\'' | '`')
+            })
+            .unwrap_or(text.len() - start - scheme);
+        if authority == 0
             || slice(text, ..start)
                 .chars()
                 .next_back()
@@ -279,18 +330,29 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
         if authority.is_empty() || !is_openable_link_destination(destination) {
             continue;
         }
-        if consumed < start {
-            result.push(Span::Text(slice(text, consumed..start).to_owned()));
+        ranges.push(start..start + end);
+        cursor = start + end;
+    }
+    ranges
+}
+
+fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
+    let ranges = bare_url_ranges(text);
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut result = Vec::new();
+    let mut consumed = 0;
+    for range in ranges {
+        if consumed < range.start {
+            result.push(Span::Text(slice(text, consumed..range.start).to_owned()));
         }
+        let destination = slice(text, range.clone());
         result.push(Span::Link {
             label: vec![Span::Text(destination.to_owned())],
             destination: destination.to_owned(),
         });
-        consumed = start + end;
-        cursor = consumed;
-    }
-    if result.is_empty() {
-        return None;
+        consumed = range.end;
     }
     if consumed < text.len() {
         result.push(Span::Text(slice(text, consumed..).to_owned()));

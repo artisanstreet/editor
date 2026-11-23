@@ -5,7 +5,7 @@ use super::visual::{
 };
 use super::{
     Block, BlockShape, CodeFence, IndexedLeafContent, LeafContext, LeafSpacing, MarkdownEngine,
-    MarkdownIndex, MarkdownIndexError, TableAlignment, TableCell,
+    MarkdownIndex, MarkdownIndexError, MessageMarks, TableAlignment, TableCell,
 };
 use crate::ui::theme::{ArtisanTheme, ProseTypography};
 use aqua_core::Insets;
@@ -65,6 +65,7 @@ struct Leaf {
     signature: u64,
     context: LeafContext,
     content: IndexedLeafContent,
+    mentions: Vec<artisan_mentions::MessageMention>,
     table_continues: bool,
     rich_without_source: bool,
     fence: Option<super::fence::Fence>,
@@ -158,6 +159,7 @@ impl ShapedSource {
                 context,
                 table_continues(&index, ordinal, context),
                 command.as_deref().filter(|_| ordinal == 0),
+                &[],
             ));
         }
         Ok(Self {
@@ -191,6 +193,7 @@ fn leaf_signature(
     context: &LeafContext,
     table_continues: bool,
     command: Option<&str>,
+    mentions: &[artisan_mentions::MessageMention],
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -199,6 +202,7 @@ fn leaf_signature(
     context.hash(&mut hasher);
     table_continues.hash(&mut hasher);
     command.hash(&mut hasher);
+    mentions.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -212,25 +216,25 @@ impl ProjectedDocument {
     pub(super) fn new(
         engine: &MarkdownEngine,
         source: &str,
-        command: Option<&str>,
+        marks: Option<&MessageMarks>,
         memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<Self, MarkdownIndexError> {
         let index = MarkdownIndex::build(source)?;
-        Self::projected(index, Vec::new(), engine, source, command, memo)
+        Self::projected(index, Vec::new(), engine, source, marks, memo)
     }
 
     pub(super) fn append(
         self,
         engine: &MarkdownEngine,
         source: &str,
-        command: Option<&str>,
+        marks: Option<&MessageMarks>,
         memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<(Self, usize), MarkdownIndexError> {
         let (index, kept) = self.index.append(source)?;
         let mut leaves = self.leaves;
         leaves.truncate(kept);
         Ok((
-            Self::projected(index, leaves, engine, source, command, memo)?,
+            Self::projected(index, leaves, engine, source, marks, memo)?,
             kept,
         ))
     }
@@ -240,12 +244,12 @@ impl ProjectedDocument {
         mut leaves: Vec<Leaf>,
         engine: &MarkdownEngine,
         source: &str,
-        command: Option<&str>,
+        marks: Option<&MessageMarks>,
         memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<Self, MarkdownIndexError> {
         leaves.reserve(index.leaves().len().saturating_sub(leaves.len()));
         for ordinal in leaves.len()..index.leaves().len() {
-            leaves.push(Self::leaf(&index, ordinal, engine, source, command, memo)?);
+            leaves.push(Self::leaf(&index, ordinal, engine, source, marks, memo)?);
         }
         Ok(Self {
             index,
@@ -259,7 +263,7 @@ impl ProjectedDocument {
         ordinal: usize,
         engine: &MarkdownEngine,
         source: &str,
-        command: Option<&str>,
+        marks: Option<&MessageMarks>,
         memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<Leaf, MarkdownIndexError> {
         let leaf_context = index
@@ -267,12 +271,24 @@ impl ProjectedDocument {
             .cloned()
             .ok_or(MarkdownIndexError::InvalidShape)?;
         let table_continues = table_continues(index, ordinal, &leaf_context);
-        let mut content = index.normalize_leaf(ordinal, 0, source, engine, memo)?;
-        if let (0, Some(command), IndexedLeafContent::Block(Block::Paragraph { spans, .. })) =
-            (ordinal, command, &mut content)
-        {
-            super::mark_command_spans(spans, command);
-        }
+        let range = index.leaves()[ordinal].source_range();
+        let (content, applied) = match marks {
+            Some(marks) => {
+                let mut leaf = index.normalize_message_leaf(
+                    ordinal,
+                    source,
+                    engine,
+                    memo,
+                    marks.vocabulary(),
+                )?;
+                marks.mark_command(ordinal, &mut leaf.content);
+                (leaf.content, leaf.mentions)
+            }
+            None => (
+                index.normalize_leaf(ordinal, 0, source, engine, memo)?,
+                Vec::new(),
+            ),
+        };
         let rich = match &content {
             IndexedLeafContent::Block(Block::Code(code)) => {
                 crate::ui::rich::prepare(code.language.as_deref(), &code.source, code.closed)
@@ -298,19 +314,20 @@ impl ProjectedDocument {
             }
             IndexedLeafContent::Block(_) | IndexedLeafContent::TableRow { .. } => None,
         };
-        let range = index.leaves()[ordinal].source_range();
         let signature = leaf_signature(
             source,
             &range,
             &leaf_context,
             table_continues,
-            command.filter(|_| ordinal == 0),
+            marks.and_then(|marks| marks.command(ordinal)),
+            &applied,
         );
         Ok(Leaf {
             range,
             signature,
             context: leaf_context,
             content,
+            mentions: applied,
             table_continues,
             rich_without_source,
             fence,
@@ -320,6 +337,19 @@ impl ProjectedDocument {
     }
     pub(super) fn len(&self) -> usize {
         self.leaves.len()
+    }
+
+    pub(super) fn mentions_differ(
+        &self,
+        source: &str,
+        vocabulary: &artisan_mentions::MessageVocabulary,
+    ) -> Result<bool, MarkdownIndexError> {
+        for (ordinal, leaf) in self.leaves.iter().enumerate() {
+            if self.index.leaf_mentions(ordinal, source, vocabulary)? != leaf.mentions {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     pub(super) fn signature(&self, row: usize) -> Option<u64> {
         Some(self.leaves.get(row)?.signature)
@@ -1003,3 +1033,7 @@ fn table_row(
     }
     Ok(grid.build().role(aqua_core::Role::Row))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/projected.rs"]
+mod tests;

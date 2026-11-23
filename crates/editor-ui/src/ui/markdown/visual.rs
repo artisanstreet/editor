@@ -21,6 +21,13 @@ pub struct InlineStyle {
     pub weight: Option<FontWeight>,
     pub slant: Option<FontSlant>,
     pub monospace: bool,
+    pub cell: InlineCell,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineCell {
+    Text,
+    MentionGlyph,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,7 +50,30 @@ pub struct PreparedInline {
     pub interactions: Vec<TextInteractionRange>,
     pub code_ranges: Vec<Range<usize>>,
     pub file_icons: Vec<(usize, (editor_assets::AssetId, editor_assets::AssetId))>,
+    pub mentions: Vec<InlineMention>,
     pub colors: Vec<InlineSwatch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineMention {
+    pub(crate) glyph: Range<usize>,
+    pub(crate) kind: artisan_mentions::MentionKind,
+}
+
+impl InlineMention {
+    const fn asset(&self) -> editor_assets::AssetId {
+        match self.kind {
+            artisan_mentions::MentionKind::Skill => editor_assets::AssetId::TABLER_FILE_SPARK,
+            artisan_mentions::MentionKind::Thread => editor_assets::AssetId::TABLER_MESSAGE_CIRCLE,
+        }
+    }
+}
+
+const fn mention_color(theme: &ArtisanTheme, kind: artisan_mentions::MentionKind) -> Oklch {
+    match kind {
+        artisan_mentions::MentionKind::Skill => theme.colors.mention_skill,
+        artisan_mentions::MentionKind::Thread => theme.colors.mention_connector,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +114,7 @@ impl PreparedInline {
             + self.code_ranges.capacity() * size_of::<Range<usize>>()
             + self.file_icons.capacity()
                 * size_of::<(usize, (editor_assets::AssetId, editor_assets::AssetId))>()
+            + self.mentions.capacity() * size_of::<InlineMention>()
             + self.colors.capacity() * size_of::<InlineSwatch>()
             + self
                 .colors
@@ -151,6 +182,16 @@ impl PreparedInline {
             if run.style.monospace {
                 style.families = vec![FontFamily::Named(theme.typography.mono.family.to_owned())];
                 style.letter_spacing_em = Some(0.0);
+            }
+            if run.style.cell == InlineCell::MentionGlyph {
+                spans.push(
+                    StyledSpan::new(slice(&self.source.text, run.range.clone()), style)
+                        .gpui_source_color([0.0, 0.0, 0.0, 0.0])
+                        .inline_cell(crate::ui::text::tokens::MENTION_GLYPH_CELL_PX)
+                        .expect("invariant: a mention sigil is one grapheme in a fixed cell"),
+                );
+                cursor = run.range.end;
+                continue;
             }
             spans.push(styled_span(
                 slice(&self.source.text, run.range.clone()),
@@ -261,6 +302,7 @@ pub fn prepare_inline(
                 weight: None,
                 slant: None,
                 monospace: false,
+                cell: InlineCell::Text,
             };
             for layer in chain {
                 match layer {
@@ -285,6 +327,15 @@ pub fn prepare_inline(
                     InlineLayer::Command => {
                         style.color = Some(theme.colors.mention_command);
                         style.weight = Some(FontWeight::MEDIUM);
+                    }
+                    InlineLayer::Mention(kind) => {
+                        style.color = Some(mention_color(theme, *kind));
+                        style.weight = Some(crate::ui::kit::TextRole::LabelStrong.spec().weight);
+                    }
+                    InlineLayer::MentionSigil(kind) => {
+                        style.color = Some(mention_color(theme, *kind));
+                        style.weight = Some(crate::ui::kit::TextRole::LabelStrong.spec().weight);
+                        style.cell = InlineCell::MentionGlyph;
                     }
                 }
             }
@@ -328,6 +379,14 @@ pub fn prepare_inline(
         interactions,
         code_ranges: flat.code_ranges,
         file_icons: flat.file_icons,
+        mentions: flat
+            .mention_slots
+            .iter()
+            .map(|mention| InlineMention {
+                glyph: mention.sigil.clone(),
+                kind: mention.kind,
+            })
+            .collect(),
         colors: flat
             .colors
             .into_iter()
@@ -563,6 +622,19 @@ pub(crate) fn interactive_leaf(
             },
         });
     }
+    for mention in &prepared.mentions {
+        paints.push(aqua_ui::tree::TextInlinePaint {
+            bytes: mention.glyph.clone(),
+            content: aqua_ui::tree::TextInlinePaintContent::Svg {
+                source: Arc::from(editor_assets::get(mention.asset()).source),
+                tint: Some(
+                    mention_color(theme, mention.kind)
+                        .at(Opacity::MentionGlyph)
+                        .to_reference_paint(),
+                ),
+            },
+        });
+    }
     for swatch in &prepared.colors {
         if let Some(color) = color::parse(&swatch.value) {
             let offset = swatch.slot.start + '\u{2060}'.len_utf8();
@@ -681,7 +753,7 @@ pub fn prose_leaf(
     separator: impl Into<Arc<str>>,
 ) -> Result<ProseLeaf, LeafError> {
     let flat = flatten_inline_with_swatches(spans);
-    if !flat.file_slots.is_empty() || !flat.colors.is_empty() {
+    if !flat.file_slots.is_empty() || !flat.mention_slots.is_empty() || !flat.colors.is_empty() {
         return Err(LeafError::InlineDecorations);
     }
     if !flat.links.is_empty() {

@@ -282,6 +282,8 @@ pub struct RowFactory {
     live: Cell<bool>,
     settled: Rc<RefCell<HashMap<RowKey, u64>>>,
     style_epoch: u64,
+    mention_epochs: HashMap<BodyKey, u64>,
+    leaf_mention_epochs: HashMap<(BodyKey, usize), u64>,
     fingerprints: RefCell<HashMap<usize, (RowKey, Option<u64>)>>,
     live_texts: RefCell<HashMap<usize, LiveText>>,
     inline_texts: RefCell<HashMap<(artisan_api::ItemId, artisan_api::Seq), Rc<str>>>,

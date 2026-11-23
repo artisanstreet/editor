@@ -1,4 +1,6 @@
 use super::controller::Conversation;
+use super::fold::{Slot, TextSection};
+use super::mentions::MentionSources;
 use super::presentation::{BodyKey, PresentationScope};
 use super::projection::BodyProjection;
 use editor_core::{Core, host::ScopedSourceProvider};
@@ -9,8 +11,10 @@ use editor_ui::markdown::presenter::{
 };
 use editor_ui::markdown::stored::{
     LeafPreparation, PAGE_LEAVES, PagePreparation, StoredOwner, StoredPreparation, StoredSource,
+    StoredUpdate,
 };
 use editor_ui::markdown::visual::BodyContext;
+use std::time::Instant;
 
 pub const ROW_WINDOW: usize = 16 * PAGE_LEAVES;
 const WINDOW_EDGE: usize = 4 * PAGE_LEAVES;
@@ -189,6 +193,12 @@ pub struct StoredConversation {
     cleanup: Rc<RefCell<Vec<PendingRelease>>>,
     live: Vec<Weak<StoredLeafLease>>,
     order: VecDeque<(BodyKey, usize)>,
+    vocabulary: Arc<artisan_mentions::MessageVocabulary>,
+    mention_epochs: BTreeMap<(BodyKey, usize), u64>,
+    next_epoch: u64,
+    recheck: super::mentions::MentionRecheck,
+    sources: Option<Rc<RefCell<MentionSources>>>,
+    leaf_keys: HashMap<String, (BodyKey, usize)>,
 }
 
 impl std::fmt::Debug for StoredConversation {
@@ -198,11 +208,21 @@ impl std::fmt::Debug for StoredConversation {
 }
 
 impl StoredConversation {
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_timers(timers: tokio::runtime::Handle) -> Self {
+        Self {
+            recheck: super::mentions::MentionRecheck::on(timers),
+            ..Self::default()
+        }
+    }
+
     pub fn rebind(&mut self, scope: Option<PresentationScope>) {
         if self.scope != scope {
             self.owner.clear();
             self.literal.clear();
             self.order.clear();
+            self.leaf_keys.clear();
             for body in std::mem::take(&mut self.bodies).into_values() {
                 body.release();
             }
@@ -337,6 +357,7 @@ impl StoredConversation {
     }
 
     pub fn bind(&self, ctx: &aqua::AppCtx<'_>, window: aqua::prelude::AquaWindowId) {
+        self.recheck.bind(ctx, window);
         if let Some(wake) = self.owner.wake_mailbox() {
             ctx.bind_mailbox(window, wake);
         }
@@ -433,15 +454,18 @@ impl StoredConversation {
             .bodies
             .get_mut(key)
             .ok_or_else(|| StoredBodyError::Unprepared { key: key.clone() })?;
-        if body
+        if let Some(old) = body
             .leases
             .get(&ordinal)
-            .is_some_and(|old| !Rc::ptr_eq(&old.leaf, &leaf))
+            .filter(|old| !Rc::ptr_eq(&old.leaf, &leaf))
         {
+            let same_text = old.leaf.source() == leaf.source();
             body.presenter.release_stored_leaf(&body.owner, ordinal);
             body.leases.remove(&ordinal);
             body.batches.remove(&ordinal);
-            body.ids.remove(&ordinal);
+            if !same_text {
+                body.ids.remove(&ordinal);
+            }
         }
         let leaf_owner = &body.owner;
         if let Some(media) = media {
@@ -556,7 +580,89 @@ impl StoredConversation {
         ordinal: usize,
     ) -> LeafPreparation {
         let leaf_key = format!("{}:{}:leaf:{ordinal}", key.item, key.slot);
-        self.owner.leaf(&leaf_key, source, ordinal)
+        self.leaf_keys
+            .entry(leaf_key.clone())
+            .or_insert_with(|| (key.clone(), ordinal));
+        match key.slot {
+            Slot::Text(TextSection::User) => {
+                self.owner
+                    .message_leaf(&leaf_key, source, ordinal, &self.vocabulary)
+            }
+            Slot::Prose
+            | Slot::Plain(_)
+            | Slot::Text(_)
+            | Slot::Output
+            | Slot::Answer
+            | Slot::Preview => self.owner.leaf(&leaf_key, source, ordinal),
+        }
+    }
+
+    pub(crate) fn set_mentions(&mut self, sources: &Rc<RefCell<MentionSources>>, now: Instant) {
+        if !self
+            .sources
+            .as_ref()
+            .is_some_and(|known| Rc::ptr_eq(known, sources))
+        {
+            self.sources = Some(Rc::clone(sources));
+        }
+        self.adopt_mentions(now);
+    }
+
+    fn adopt_mentions(&mut self, now: Instant) {
+        let Some(sources) = &self.sources else {
+            return;
+        };
+        let (vocabulary, recheck) = {
+            let sources = sources.borrow();
+            (Arc::clone(sources.vocabulary()), sources.recheck_at())
+        };
+        self.recheck.arm(recheck, now);
+        if Arc::ptr_eq(&self.vocabulary, &vocabulary) {
+            return;
+        }
+        self.owner.revise_mentions(&vocabulary);
+        self.vocabulary = vocabulary;
+    }
+
+    fn recheck_mentions(&mut self, scope: &PresentationScope, core: &Core) {
+        let Some(sources) = &self.sources else {
+            return;
+        };
+        let Some(host) = core.host_if_instance(&scope.host, scope.instance) else {
+            return;
+        };
+        let now = core.clock().now();
+        sources.borrow_mut().sync(host, &scope.thread, now);
+        self.adopt_mentions(now);
+    }
+
+    pub(crate) fn mention_epochs(&self) -> impl Iterator<Item = (&(BodyKey, usize), u64)> {
+        self.mention_epochs.iter().map(|(key, epoch)| (key, *epoch))
+    }
+
+    fn remark(&mut self, updates: &[StoredUpdate]) {
+        let bodies = &self.bodies;
+        self.leaf_keys
+            .retain(|_, (body, _)| bodies.contains_key(body));
+        for update in updates {
+            match update {
+                StoredUpdate::Remarked { key, .. } => match self.leaf_keys.get(key) {
+                    Some(leaf) => {
+                        self.next_epoch = self.next_epoch.wrapping_add(1);
+                        self.mention_epochs.insert(leaf.clone(), self.next_epoch);
+                    }
+                    None => {
+                        tracing::debug!(
+                            leaf = key,
+                            "a leaf was marked again after its body left the transcript"
+                        );
+                    }
+                },
+                StoredUpdate::Index { .. } | StoredUpdate::Leaf { .. } => {}
+            }
+        }
+        self.mention_epochs
+            .retain(|(key, _), _| bodies.contains_key(key));
     }
 
     pub(crate) fn literal_leaf(
@@ -627,11 +733,15 @@ impl StoredConversation {
     }
 
     pub fn drain_publish(&mut self, conversation: &mut Conversation, core: &Core) -> bool {
+        let recheck = self.recheck.fire();
         let Some(scope) = self.scope.clone() else {
-            return false;
+            return recheck;
         };
         if !scope.current(conversation, core) {
-            return false;
+            return recheck;
+        }
+        if recheck {
+            self.recheck_mentions(&scope, core);
         }
         let updates = self.owner.drain();
         let literal_changed = self.literal.drain(&self.owner);
@@ -677,7 +787,8 @@ impl StoredConversation {
             self.retire_outside(&key, &window);
         }
         self.order.retain(|(key, _)| self.bodies.contains_key(key));
-        let mut changed = !updates.is_empty() || media_changed || literal_changed;
+        self.remark(&updates);
+        let mut changed = recheck || !updates.is_empty() || media_changed || literal_changed;
         changed |= conversation.publish_projections(core, &scope, projections);
         changed
     }

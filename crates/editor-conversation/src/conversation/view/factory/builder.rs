@@ -80,6 +80,8 @@ impl RowFactory {
             live: Cell::new(true),
             settled: Rc::default(),
             style_epoch: 0,
+            mention_epochs: HashMap::new(),
+            leaf_mention_epochs: HashMap::new(),
             fingerprints: RefCell::default(),
             live_texts: RefCell::default(),
             inline_texts: RefCell::default(),
@@ -170,6 +172,20 @@ impl RowFactory {
         let snapshots =
             crate::conversation::adapter::RowSnapshots::capture(conversation, composer_height)
                 .ok_or(ConfigureRowsError::NoSnapshot)?;
+        if let Some(host) = core.host_if_instance(&self.scope.host, self.scope.instance) {
+            self.markdown
+                .borrow_mut()
+                .sync_mentions(host, &self.scope.thread, self.now);
+        }
+        let sources = Rc::clone(self.markdown.borrow().mention_sources());
+        let mut stored = self.stored.owner.borrow_mut();
+        stored.set_mentions(&sources, self.now);
+        self.leaf_mention_epochs = stored
+            .mention_epochs()
+            .map(|(key, epoch)| (key.clone(), epoch))
+            .collect();
+        drop(stored);
+        self.mention_epochs = self.markdown.borrow().mention_epochs();
         let frontier = conversation
             .reveal_frontier
             .as_ref()
@@ -225,3 +241,7 @@ impl RowFactory {
         self
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/conversation/view/factory/builder.rs"]
+mod tests;

@@ -26,9 +26,12 @@ fn prepare_body(
     engine: &MarkdownEngine,
     source: &str,
     slot: Slot,
+    vocabulary: &Arc<artisan_mentions::MessageVocabulary>,
 ) -> Result<PreparationProof, editor_ui::markdown::presenter::PresenterError> {
     match slot {
-        Slot::Text(super::fold::TextSection::User) => presenter.prepare_message(engine, source),
+        Slot::Text(super::fold::TextSection::User) => {
+            presenter.prepare_message(engine, source, vocabulary)
+        }
         Slot::Prose
         | Slot::Plain(_)
         | Slot::Text(_)
@@ -249,6 +252,7 @@ struct MarkdownBody {
     batch: Option<Arc<aqua_ui::collection::SelectionSourceBatch>>,
     prepared_item_seq: Option<artisan_api::Seq>,
     preparation: Option<PreparationProof>,
+    mention_epoch: Option<u64>,
 }
 
 pub struct MarkdownOwners {
@@ -256,6 +260,9 @@ pub struct MarkdownOwners {
     selection: SelectionOwners,
     bodies: BTreeMap<BodyKey, MarkdownBody>,
     media: HashMap<BodyKey, (String, MediaServices)>,
+    mentions: Rc<std::cell::RefCell<super::mentions::MentionSources>>,
+    applied: Arc<artisan_mentions::MessageVocabulary>,
+    mention_epochs: u64,
 }
 
 impl std::fmt::Debug for MarkdownOwners {
@@ -354,7 +361,60 @@ impl MarkdownOwners {
             selection: SelectionOwners::new(document),
             bodies: BTreeMap::new(),
             media: HashMap::new(),
+            mentions: Rc::default(),
+            applied: Arc::default(),
+            mention_epochs: 0,
         }
+    }
+
+    pub(crate) fn sync_mentions(
+        &mut self,
+        host: &editor_core::HostData,
+        own: &ThreadId,
+        now: std::time::Instant,
+    ) {
+        self.mentions.borrow_mut().sync(host, own, now);
+        let vocabulary = Arc::clone(self.mentions.borrow().vocabulary());
+        if Arc::ptr_eq(&self.applied, &vocabulary) {
+            return;
+        }
+        self.applied = Arc::clone(&vocabulary);
+        for (key, body) in &mut self.bodies {
+            match body.presenter.revise_mentions(&vocabulary) {
+                Ok(editor_ui::markdown::presenter::MentionRevision::Unchanged) => continue,
+                Ok(editor_ui::markdown::presenter::MentionRevision::Remarked) => {}
+                Err(error) => {
+                    tracing::warn!(item = %key.item, %error, "resolve message mentions; preparing the message again");
+                }
+            }
+            body.rendered = None;
+            body.preparation = None;
+            self.mention_epochs = self.mention_epochs.wrapping_add(1);
+            body.mention_epoch = Some(self.mention_epochs);
+        }
+    }
+
+    #[cfg(test)]
+    fn recheck_at(&self) -> Option<std::time::Instant> {
+        self.mentions.borrow().recheck_at()
+    }
+
+    pub(crate) const fn mention_sources(
+        &self,
+    ) -> &Rc<std::cell::RefCell<super::mentions::MentionSources>> {
+        &self.mentions
+    }
+
+    #[cfg(test)]
+    pub(crate) fn vocabulary(&self) -> &Arc<artisan_mentions::MessageVocabulary> {
+        &self.applied
+    }
+
+    pub(crate) fn mention_epochs(&self) -> HashMap<BodyKey, u64> {
+        self.bodies
+            .iter()
+            .filter_map(|(key, body)| body.mention_epoch.map(|epoch| (key.clone(), epoch)))
+            .collect()
     }
 
     pub fn rebind(&mut self, app: &mut UiApp, scope: Option<PresentationScope>) {
@@ -426,6 +486,7 @@ impl MarkdownOwners {
                 batch: None,
                 prepared_item_seq: None,
                 preparation: None,
+                mention_epoch: None,
             });
         if body.id != request.id {
             body.presenter.release(&body.id);
@@ -453,6 +514,7 @@ impl MarkdownOwners {
                 engine,
                 request.source,
                 request.key.slot,
+                &self.applied,
             )
             .map_err(|source| BodyError::Present {
                 key: request.key.clone(),
@@ -544,6 +606,7 @@ impl MarkdownOwners {
             batch: None,
             prepared_item_seq: None,
             preparation: None,
+            mention_epoch: None,
         });
         if body.id != id {
             return Err(replaced);
@@ -565,7 +628,14 @@ impl MarkdownOwners {
         }
         if body.preparation.is_none() {
             body.preparation = Some(
-                prepare_body(&mut body.presenter, engine, &body.source, slot).map_err(failed)?,
+                prepare_body(
+                    &mut body.presenter,
+                    engine,
+                    &body.source,
+                    slot,
+                    &self.applied,
+                )
+                .map_err(failed)?,
             );
             let presenter = &body.presenter;
             body.projected
@@ -940,3 +1010,7 @@ impl MarkdownOwners {
         changed
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/presentation.rs"]
+mod tests;
