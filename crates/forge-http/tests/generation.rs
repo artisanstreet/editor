@@ -624,3 +624,47 @@ async fn a_turn_the_old_generation_finishes_stops_showing_as_working_on_the_new_
     )
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lone_generation_streams_what_it_stores_without_a_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path();
+    drop(Store::open(data).unwrap());
+    let registry = Registry::open(data).unwrap();
+    let (hub, _) = generation(
+        data,
+        &registry,
+        "lone",
+        Arc::new(AtomicUsize::new(0)),
+        Arc::default(),
+    )
+    .await;
+    let member = hub.generation().unwrap().member().clone();
+    runtime::request(&member, &Command::Activate).await.unwrap();
+    registry.promote(&member).unwrap();
+    let mut events = hub.store().subscribe();
+    let id = ProjectId::new();
+    hub.store()
+        .create_project(CreateProject {
+            id: id.clone(),
+            path: data.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+
+    test_support::wait::within(
+        "the stored project to reach the event stream",
+        test_support::wait::LIVENESS,
+        async {
+            loop {
+                if matches!(events.recv().await.unwrap().event, artisan_api::Event::Project { project } if project.id == id)
+                {
+                    break;
+                }
+            }
+        },
+    )
+    .await;
+    runtime::request(&member, &Command::Stop).await.unwrap();
+}

@@ -627,3 +627,51 @@ fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
     assert_eq!(context.value, "1M");
     assert!(context.locked);
 }
+
+fn card_with(attachments: Option<Element>) -> Element {
+    let block = |key: &str| UiBox::new().width(40.0).height(20.0).build().with_key(key);
+    super::composer_card(
+        &ArtisanTheme::resolved(),
+        false,
+        super::CardParts {
+            prompt: UiBox::new()
+                .width(200.0)
+                .height(24.0)
+                .build()
+                .with_key("typed-text")
+                .focusable(true),
+            primary: block("send"),
+            questionnaires: None,
+            attachments,
+            mention_overlay: None,
+            thread_error: None,
+            draft_error: None,
+        },
+    )
+}
+
+#[test]
+fn pasting_the_first_image_keeps_the_caret_in_the_prompt() {
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.set_viewport(420.0, 600.0, 1.0);
+    app.mount(|_| card_with(None)).unwrap();
+    app.build_frame().unwrap();
+    assert!(app.focus_key("typed-text"));
+    let typing = app.tree().focused();
+
+    app.refresh(vec![card_with(Some(
+        UiBox::new()
+            .width(64.0)
+            .height(64.0)
+            .build()
+            .with_key("composer-attachments"),
+    ))])
+    .unwrap();
+    app.build_frame().unwrap();
+
+    assert_eq!(
+        app.tree().focused(),
+        typing,
+        "the attachment strip appearing must not remount the prompt the user is typing in"
+    );
+}

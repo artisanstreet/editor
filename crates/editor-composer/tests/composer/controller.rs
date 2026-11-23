@@ -580,3 +580,66 @@ fn a_refused_permission_change_keeps_a_newer_choice_of_the_same_mode() {
         "the later Full choice still stands after the first Full is refused"
     );
 }
+
+#[test]
+fn an_image_pasted_while_the_last_message_is_sending_joins_the_next_one() {
+    use crate::composer::attachment::Source;
+    use crate::composer::draft_session::DraftSession;
+    let mut setup = thread_composer();
+    setup.composer.config = Some(chat_thread().config);
+    setup.composer.editor.borrow_mut().set_text("hello");
+    setup
+        .composer
+        .send(setup.forge.host())
+        .expect("the message is sent");
+    let ThreadComposer {
+        forge, composer, ..
+    } = &mut setup;
+    let post = test_support::wait::wait_for(
+        "the message is posted",
+        std::time::Duration::from_secs(10),
+        || {
+            drain_draft_writes(forge);
+            forge.forge.try_take("POST", "/threads/chat/messages")
+        },
+    );
+    assert!(
+        composer
+            .session
+            .as_ref()
+            .unwrap()
+            .read(DraftSession::sending)
+    );
+    composer.add_image(
+        Source::Bytes(test_support::editor::forge::png(7)),
+        "Pasted image".into(),
+    );
+    post.respond(test_support::items::item(
+        "sent",
+        "chat",
+        4,
+        test_support::items::user_message("hello"),
+    ));
+    test_support::wait::wait_until(
+        "the send is accepted",
+        std::time::Duration::from_secs(10),
+        || {
+            drain_draft_writes(forge);
+            composer.sync(&forge.core);
+            !composer
+                .session
+                .as_ref()
+                .unwrap()
+                .read(DraftSession::sending)
+        },
+    );
+    composer.sync(&forge.core);
+    assert_eq!(
+        composer
+            .attachments
+            .as_ref()
+            .map(|attachments| attachments.items.len()),
+        Some(1),
+        "the image pasted during the send is in the composer for the next message"
+    );
+}

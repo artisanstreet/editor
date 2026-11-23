@@ -1,0 +1,1 @@
+INSERT INTO items(id,thread_id,position,seq,run_id,status,body) VALUES('stopped-later','thread',100002,100002,'stopped','cancelled','{}'),('stopped-earlier','thread',100001,100001,'stopped','cancelled','{}'),('other-run','thread',100003,100003,'other','cancelled','{}')

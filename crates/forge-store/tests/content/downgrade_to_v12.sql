@@ -3,6 +3,7 @@ ALTER TABLE pair_codes DROP COLUMN redeemed_by;
 DROP TRIGGER item_content_owner_delete;
 DROP TRIGGER outline_revision_insert;
 DROP TRIGGER outline_revision_update;
+DROP INDEX items_cancelled_by_run;
 DROP INDEX items_live_by_thread;
 DROP INDEX items_work_spans;
 DROP INDEX items_outline;

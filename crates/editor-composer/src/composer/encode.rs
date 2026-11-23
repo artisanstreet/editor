@@ -104,7 +104,7 @@ pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>, EncodeError> {
             if format == StillFormat::WebP && fits(&image) {
                 return Ok(bytes.to_vec());
             }
-            encode(&resize(image))
+            encode(&resize(without_opaque_alpha(image)))
         }
         (_, None) => encode(&resize(transcoded(bytes, LONG_EDGE)?)),
     }
@@ -132,21 +132,20 @@ fn transcoded(bytes: &[u8], long_edge: u32) -> Result<DynamicImage, EncodeError>
     let still = aqua_media::decode::decode_still(bytes, detail, MAX_PIXELS * 4)
         .map_err(EncodeError::Media)?;
     let (width, height) = (still.image.width(), still.image.height());
-    let opaque = still
-        .image
-        .pixels()
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .all(|pixel| pixel[3] == u8::MAX);
-    let image = image::RgbaImage::from_raw(width, height, still.image.pixels().to_vec())
-        .map(DynamicImage::ImageRgba8)
-        .ok_or(EncodeError::Pixels { width, height })?;
-    Ok(if opaque {
+    image::RgbaImage::from_raw(width, height, still.image.pixels().to_vec())
+        .map(|image| without_opaque_alpha(DynamicImage::ImageRgba8(image)))
+        .ok_or(EncodeError::Pixels { width, height })
+}
+
+fn without_opaque_alpha(image: DynamicImage) -> DynamicImage {
+    let opaque = image
+        .as_rgba8()
+        .is_some_and(|rgba| rgba.pixels().all(|pixel| pixel.0[3] == u8::MAX));
+    if opaque {
         DynamicImage::ImageRgb8(image.into_rgb8())
     } else {
         image
-    })
+    }
 }
 
 pub fn placeholder(bytes: &[u8]) -> Result<image::RgbaImage, EncodeError> {
@@ -190,18 +189,22 @@ fn resize(image: DynamicImage) -> DynamicImage {
     if fits(&image) {
         image
     } else {
-        image.resize(LONG_EDGE, LONG_EDGE, FilterType::Lanczos3)
+        image.resize(LONG_EDGE, LONG_EDGE, FilterType::Triangle)
     }
 }
 
-fn config(lossless: bool) -> Result<webp::WebPConfig, EncodeError> {
+fn lossy() -> Result<webp::WebPConfig, EncodeError> {
     let mut config = webp::WebPConfig::new().map_err(|()| EncodeError::Encoder)?;
     config.quality = QUALITY;
-    config.use_sharp_yuv = 1;
-    if lossless {
-        config.lossless = 1;
-        config.quality = 75.0;
-    }
+    config.method = 2;
+    Ok(config)
+}
+
+fn lossless() -> Result<webp::WebPConfig, EncodeError> {
+    let mut config = webp::WebPConfig::new().map_err(|()| EncodeError::Encoder)?;
+    config.lossless = 1;
+    config.quality = 0.0;
+    config.method = 0;
     Ok(config)
 }
 
@@ -215,16 +218,25 @@ fn encode(image: &DynamicImage) -> Result<Vec<u8>, EncodeError> {
         pixels = image.to_rgb8().into_raw();
         webp::Encoder::from_rgb(&pixels, width, height)
     };
-    let lossy = encoder
-        .encode_advanced(&config(false)?)
-        .map_err(|failure| EncodeError::Still {
-            width,
-            height,
-            failure,
-        })?;
-    Ok(match encoder.encode_advanced(&config(true)?) {
-        Ok(lossless) if lossless.len() < lossy.len() => lossless.to_vec(),
-        Ok(_) => lossy.to_vec(),
+    let (lossy, lossless) = (lossy()?, lossless()?);
+    let (lossy, lossless) = std::thread::scope(|scope| {
+        let lossless = scope.spawn(|| encoder.encode_advanced(&lossless).map(|webp| webp.to_vec()));
+        let lossy = encoder.encode_advanced(&lossy).map(|webp| webp.to_vec());
+        (
+            lossy,
+            lossless
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        )
+    });
+    let lossy = lossy.map_err(|failure| EncodeError::Still {
+        width,
+        height,
+        failure,
+    })?;
+    Ok(match lossless {
+        Ok(lossless) if lossless.len() < lossy.len() => lossless,
+        Ok(_) => lossy,
         Err(failure) => {
             tracing::debug!(
                 width,
@@ -232,7 +244,7 @@ fn encode(image: &DynamicImage) -> Result<Vec<u8>, EncodeError> {
                 ?failure,
                 "lossless WebP failed; keeping the lossy encoding"
             );
-            lossy.to_vec()
+            lossy
         }
     })
 }
@@ -257,7 +269,7 @@ fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>, EncodeError> {
         .first()
         .map(|(image, _)| image.dimensions())
         .ok_or(EncodeError::NoFrames)?;
-    let config = config(false)?;
+    let config = lossy()?;
     let mut encoder = webp::AnimEncoder::new(width, height, &config);
     encoder.set_loop_count(0);
     for (image, at) in &frames {
@@ -277,3 +289,7 @@ fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>, EncodeError> {
         })?;
     Ok(animation.to_vec())
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/encode.rs"]
+mod tests;

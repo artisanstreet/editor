@@ -78,6 +78,22 @@ pub(crate) fn monitor_steer() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+pub(crate) fn coalesced_steer() -> ExitCode {
+    read_line();
+    touch("ready");
+    if read_line().is_none() {
+        return ExitCode::SUCCESS;
+    }
+    emit(
+        r#"{"type":"user","isReplay":true,"message":{"content":[{"type":"text","text":"go"},{"type":"text","text":"and this"}]}}"#,
+    );
+    emit(INIT);
+    emit(r#"{"type":"result","subtype":"success","result":"Did both.","usage":{}}"#);
+    drain_input();
+    touch("input_closed");
+    ExitCode::SUCCESS
+}
+
 #[derive(Debug)]
 enum BrokenOutput {
     Malformed,
