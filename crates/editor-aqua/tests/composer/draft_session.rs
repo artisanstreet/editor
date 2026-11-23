@@ -181,7 +181,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         std::rc::Rc::new(|_| {}),
     );
     crate::recovered(owner.controller.borrow().session.as_ref().unwrap());
-    owner.drain_async(&core, &aqua::images::ImageAssets::default());
+    owner.drain_async(&mut core, &aqua::images::ImageAssets::default());
     assert!(
         !owner
             .dispatch_with_change(&mut core, ComposerAction::SelectPane(None), None)
@@ -419,8 +419,8 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
             .1
     );
     let assets = aqua::images::ImageAssets::default();
-    owner.drain_async(&core, &assets);
-    let drained = owner.drain_async(&core, &assets);
+    owner.drain_async(&mut core, &assets);
+    let drained = owner.drain_async(&mut core, &assets);
     assert!(!drained.changed);
     assert!(drained.events.is_empty());
     assert!(drained.effects.is_empty());

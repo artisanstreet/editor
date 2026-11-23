@@ -845,6 +845,17 @@ impl<V: SectionViews> ShellApplication<V> {
                 let delay = deadline.saturating_duration_since(self.shell.core.clock().now());
                 ctx.request_animation_deadline(id, ctx.now() + delay);
             }
+            let now = self.shell.core.clock().now();
+            if let Some(deadline) = workspace
+                .composer
+                .as_ref()
+                .and_then(|composer| composer.attachment_waiting_deadline(now))
+            {
+                ctx.request_animation_deadline(
+                    id,
+                    ctx.now() + deadline.saturating_duration_since(now),
+                );
+            }
         }
         self.shell.bind(ctx, id);
         if !self.mounted {

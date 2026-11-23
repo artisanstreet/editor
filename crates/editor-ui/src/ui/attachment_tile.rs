@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use aqua_core::{Transform2D, image::ImageFit};
+use aqua_core::{GpuiBackground, Transform2D, image::ImageFit, scene::GpuiQuadPulse};
 use aqua_ui::{
     AlignItems, JustifyContent,
     element::{Box as UiBox, Button as UiButton, Element, Key, Media},
@@ -15,12 +15,23 @@ use super::{
         control::icon_button::CORNER_INSET,
     },
     media_frame::MediaFrame,
-    motion::smooth_out,
+    motion::{pulsing, smooth_out},
     theme::ArtisanTheme,
 };
 
 const PREPARING_BLUR: f32 = 10.0;
 const SHAKE: Duration = Duration::from_millis(280);
+const WAITING_DOT: f32 = 5.0;
+const WAITING_PERIOD_MS: u32 = 1_200;
+const WAITING_STAGGER_MS: u32 = 200;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Readiness {
+    #[default]
+    Ready,
+    Preparing,
+    Waiting,
+}
 
 pub struct AttachmentTile {
     id: Key,
@@ -30,7 +41,7 @@ pub struct AttachmentTile {
     glyph: Option<AssetId>,
     error: Option<editor_core::Problem>,
     reveal_elapsed: Option<Duration>,
-    preparing: bool,
+    readiness: Readiness,
     shake_elapsed: Option<Duration>,
     reduced_motion: bool,
     removable: bool,
@@ -59,7 +70,7 @@ impl AttachmentTile {
             glyph: None,
             error: None,
             reveal_elapsed: None,
-            preparing: false,
+            readiness: Readiness::Ready,
             shake_elapsed: None,
             reduced_motion: false,
             removable: true,
@@ -80,8 +91,8 @@ impl AttachmentTile {
         self
     }
     #[must_use]
-    pub const fn preparing(mut self, preparing: bool) -> Self {
-        self.preparing = preparing;
+    pub const fn readiness(mut self, readiness: Readiness) -> Self {
+        self.readiness = readiness;
         self
     }
     #[must_use]
@@ -142,7 +153,7 @@ impl AttachmentTile {
                 )
                 .build()
         } else if let Some(image) = self.image.clone() {
-            let blur = if self.preparing {
+            let blur = if self.readiness != Readiness::Ready {
                 PREPARING_BLUR
             } else if !self.reduced_motion {
                 self.reveal_elapsed.map_or(0.0, |elapsed| {
@@ -197,6 +208,9 @@ impl AttachmentTile {
         } else {
             layers = layers.child(content);
         }
+        if self.readiness == Readiness::Waiting && !failed {
+            layers = layers.child(waiting_dots(&theme, self.reduced_motion));
+        }
         let radius = MediaFrame::thumb_radius();
         if let Some(action) = self.retry {
             let retry = IconButton::new(
@@ -247,6 +261,57 @@ impl AttachmentTile {
         }
         element
     }
+}
+
+fn waiting_dots(theme: &ArtisanTheme, reduced_motion: bool) -> Element {
+    let dot = |index: u32| {
+        let dot = UiBox::new()
+            .width(Length::Px(WAITING_DOT))
+            .height(Length::Px(WAITING_DOT))
+            .style(
+                Style::new()
+                    .radius(Length::Px(WAITING_DOT / 2.0))
+                    .gpui_background(GpuiBackground::Solid(
+                        theme.colors.white.to_reference_paint(),
+                    )),
+            )
+            .build();
+        pulsing(
+            dot,
+            GpuiQuadPulse {
+                start_ms: index * WAITING_STAGGER_MS,
+                period_ms: WAITING_PERIOD_MS,
+                min_opacity: 0.3,
+            },
+            reduced_motion,
+        )
+    };
+    let pill = UiBox::new()
+        .spaced(Space::S4)
+        .padded(Space::S6)
+        .style(
+            Style::new()
+                .align(AlignItems::CENTER)
+                .radius(Length::Px(WAITING_DOT + 6.0))
+                .gpui_background(GpuiBackground::Solid(
+                    theme.colors.scrim.to_reference_paint(),
+                )),
+        )
+        .child(dot(0))
+        .child(dot(1))
+        .child(dot(2))
+        .build();
+    UiBox::new()
+        .style(
+            Style::new()
+                .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .align(AlignItems::CENTER)
+                .justify(JustifyContent::CENTER),
+        )
+        .child(pill)
+        .build()
+        .exclude_from_hit_testing()
+        .debug_selector("attachment-waiting")
 }
 
 fn shake_offset(elapsed: Duration) -> f32 {
