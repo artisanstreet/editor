@@ -213,7 +213,7 @@ pub(crate) async fn upload_image(
         .map_err(UploadImageError::Put)
 }
 
-pub(crate) const WAIT_BEFORE_SPINNER: std::time::Duration = std::time::Duration::from_secs(1);
+const WAIT_BEFORE_SPINNER: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Attachment {
     pub(crate) const fn preparing(&self) -> bool {
