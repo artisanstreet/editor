@@ -200,3 +200,69 @@ async fn a_failed_read_keeps_the_last_good_one() {
         "a failed read dropped the last good one"
     );
 }
+
+#[test]
+fn antigravity_quota_groups_become_session_and_weekly_windows() {
+    let recorded = br#"{"groups":[{"buckets":[{"bucketId":"3p-weekly","displayName":"Weekly Limit Remaining","window":"weekly","resetTime":"2026-11-30T07:21:54Z","remainingFraction":0.75},{"bucketId":"3p-5h","displayName":"Five Hour Limit Remaining","window":"5h","resetTime":"2026-11-23T12:21:54Z"}],"displayName":"Claude and GPT models"}],"description":"Within each group, models share a weekly limit and a 5-hour limit."}"#;
+    let windows = antigravity::parse_quota_summary(recorded).unwrap();
+    let shown: Vec<_> = windows
+        .iter()
+        .map(|window| {
+            (
+                window.label.as_str(),
+                window.cadence,
+                window.scope.as_deref(),
+                window.used_percent,
+                window.resets_at,
+            )
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            (
+                "Weekly",
+                UsageCadence::Week,
+                Some("Claude and GPT models"),
+                25.0,
+                Some(1_796_023_314_000)
+            ),
+            (
+                "5 hours",
+                UsageCadence::Session,
+                Some("Claude and GPT models"),
+                100.0,
+                Some(1_795_436_514_000)
+            ),
+        ],
+        "a bucket without remainingFraction has none left, as Google omits zero"
+    );
+}
+
+#[test]
+fn the_most_used_gemini_model_becomes_the_gemini_window() {
+    let recorded = br#"{"models":{
+        "claude-opus-5-5-high":{"displayName":"Claude Opus 5.5 (High)","modelProvider":"MODEL_PROVIDER_ANTHROPIC","quotaInfo":{"resetTime":"2026-11-23T12:45:26Z"}},
+        "gemini-3-flash":{"displayName":"Gemini 3 Flash","modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{"remainingFraction":0.8,"resetTime":"2026-11-23T12:45:26Z"}},
+        "gemini-3.8-flash-tiered":{"modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{"remainingFraction":0.4,"resetTime":"2026-11-23T12:45:26Z"}},
+        "chat_23310":{"modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{}}
+    },"defaultAgentModelId":"gemini-3.8-flash-tiered"}"#;
+    let window = antigravity::parse_gemini_quota(recorded)
+        .unwrap()
+        .expect("Gemini models carry a quota");
+    assert_eq!(
+        (
+            window.scope.as_deref(),
+            window.cadence,
+            window.used_percent.round(),
+            window.resets_at
+        ),
+        (
+            Some("Gemini"),
+            UsageCadence::Session,
+            60.0,
+            Some(1_795_437_926_000)
+        ),
+        "the Claude model and the internal model without a reset are not Gemini quota"
+    );
+}
