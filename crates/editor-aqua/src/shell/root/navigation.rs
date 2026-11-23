@@ -61,7 +61,7 @@ impl RootViews {
                             .iter()
                             .any(|row| row.id == thread && row.settleable)
                     {
-                        workspace.sidebar.settle(core, thread);
+                        workspace.sidebar.settle(core, &thread, observed_seq);
                     }
                 }
             }

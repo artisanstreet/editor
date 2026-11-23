@@ -179,6 +179,7 @@ pub struct Conversation {
     generation: u64,
     work_reading: Option<Seq>,
     page_task: Option<AbortOnDropHandle<()>>,
+    awaiting_thread: Option<Fetch>,
     work_task: Option<AbortOnDropHandle<()>>,
     agent_task: Option<AbortOnDropHandle<()>>,
     next_answer: u64,
@@ -263,6 +264,7 @@ impl Conversation {
             generation: 0,
             work_reading: None,
             page_task: None,
+            awaiting_thread: None,
             work_task: None,
             agent_task: None,
             next_answer: 0,
@@ -328,7 +330,11 @@ impl Conversation {
         if let Some(parked) = self.parked.take(&(host.clone(), instance, thread.clone())) {
             self.close(core);
             self.resume(core, host, thread, instance, parked);
-        } else if self.holds() {
+        } else if self.holds()
+            && !core
+                .host_if_instance(&host, instance)
+                .is_some_and(|data| data.is_provisional(&thread))
+        {
             self.hold(core, host, thread, instance);
         } else {
             self.close(core);
@@ -490,6 +496,7 @@ impl Conversation {
         self.park();
         self.generation = self.generation.wrapping_add(1);
         self.page_task = None;
+        self.awaiting_thread = None;
         self.reply_tail = None;
         self.settle = super::announce::SettleWatch::Unwatched;
         self.work_task = None;
@@ -684,6 +691,12 @@ impl Conversation {
             .cloned();
         if let (Some(view), Some(run)) = (&mut self.view, &run) {
             view.remember_run(run.clone());
+        }
+        if let (Some(view), Some((host, thread)), Some(instance)) =
+            (&mut self.view, &self.open, self.host_instance)
+            && let Some(host) = core.host_if_instance(host, instance)
+        {
+            view.sync_local(host.local_messages(thread));
         }
         if let Some(view) = &mut self.view {
             view.prune_answers();
@@ -1011,6 +1024,17 @@ impl Conversation {
             generation: self.generation,
         };
         let thread = thread.clone();
+        if core
+            .host_if_instance(host, instance)
+            .is_some_and(|data| data.is_provisional(&thread))
+        {
+            self.awaiting_thread = Some(fetch);
+            if self.landing.take().is_some() {
+                self.landed_at = Some(self.clock.now());
+            }
+            return;
+        }
+        self.awaiting_thread = None;
         if let Some(task) = self.spawn_page(core, &origin, &thread, fetch) {
             self.page_task = Some(task);
         }
@@ -1407,7 +1431,23 @@ impl Conversation {
         }
     }
 
+    fn fetch_once_created(&mut self, core: &Core, changed: &ThreadId) {
+        if let (Some((host_id, thread)), Some(instance)) = (&self.open, self.host_instance)
+            && changed == thread
+            && self.awaiting_thread.is_some()
+            && core
+                .host_if_instance(host_id, instance)
+                .is_some_and(|host| !host.is_provisional(thread))
+            && let Some(fetch) = self.awaiting_thread.take()
+        {
+            self.fetch(core, fetch);
+        }
+    }
+
     fn host_event(&mut self, core: &Core, event: &HostEvent, watched: bool) {
+        if let HostEvent::ThreadChanged { thread_id } = event {
+            self.fetch_once_created(core, thread_id);
+        }
         let Some((host_id, thread)) = &self.open else {
             return;
         };
@@ -1853,3 +1893,7 @@ mod memory_tests;
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/load_failure.rs"]
 mod load_failure_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/sending.rs"]
+mod sending_tests;

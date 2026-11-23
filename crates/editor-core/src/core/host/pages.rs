@@ -31,8 +31,15 @@ enum PageLoad {
     Failed(crate::core::Problem),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WindowMark {
+    page: usize,
+    window: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct ThreadPage {
+    window: u64,
     ids: Vec<ThreadId>,
     members: HashSet<ThreadId>,
     next: Option<ThreadCursor>,
@@ -74,6 +81,20 @@ impl ThreadPage {
             .or_else(|| self.ids.iter().position(|known| known == id))
             .expect("invariant: every page member is listed in the page");
         self.ids.remove(at);
+    }
+
+    fn covers(&self, thread: &Thread, threads: &HashMap<ThreadId, Thread>) -> bool {
+        let below_newest = self.at_latest
+            || self
+                .ids
+                .first()
+                .is_some_and(|first| newest_first(&threads[first], thread) != Ordering::Greater);
+        let above_oldest = self.next.is_none()
+            || self
+                .ids
+                .last()
+                .is_some_and(|last| newest_first(thread, &threads[last]) != Ordering::Greater);
+        self.is_loaded() && below_newest && above_oldest
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&ThreadId) -> bool) {
@@ -230,7 +251,7 @@ impl HostData {
     pub fn thread_unavailable(&self, id: &ThreadId) -> Option<&ThreadUnavailable> {
         self.thread_pages.unavailable.get(id)
     }
-    fn store_thread(&mut self, thread: Thread) -> Option<Thread> {
+    pub(super) fn store_thread(&mut self, thread: Thread) -> Option<Thread> {
         let id = thread.id.clone();
         let mut placed = [false; 2];
         for (index, page) in self.thread_pages.pages.iter_mut().enumerate() {
@@ -250,10 +271,16 @@ impl HostData {
     }
     pub(super) fn reset_thread_pages(&mut self, next: Option<ThreadCursor>) {
         let generation = self.thread_pages.generation.wrapping_add(1);
+        let windows = self
+            .thread_pages
+            .pages
+            .each_ref()
+            .map(|page| page.window.wrapping_add(1));
         self.thread_pages = ThreadPages {
             generation,
             ..ThreadPages::default()
         };
+        self.thread_pages.pages[1].window = windows[1];
         let mut threads: Vec<&Thread> = self
             .threads
             .values()
@@ -267,6 +294,7 @@ impl HostData {
             .collect();
         let members = ids.iter().cloned().collect();
         self.thread_pages.pages[0] = ThreadPage {
+            window: windows[0],
             ids,
             members,
             next,
@@ -384,6 +412,7 @@ impl HostData {
         let newer = matches!(direction, ThreadPageDirection::Newer);
         let index = usize::from(archived);
         let page = &mut self.thread_pages.pages[index];
+        page.window = page.window.wrapping_add(1);
         if newer {
             page.at_latest = !result.newer;
         } else {
@@ -403,6 +432,7 @@ impl HostData {
             if self.thread_pages.deleted(&id) {
                 continue;
             }
+            self.expected.listed(&id);
             self.accept_thread(thread);
             if self
                 .threads
@@ -491,6 +521,7 @@ impl HostData {
         self.thread_pages.direct.remove(&id);
         match result {
             Ok(thread) => {
+                let thread = self.thread_overlay.freshest(thread);
                 self.accept_thread(thread);
             }
             Err(source) => {
@@ -511,6 +542,9 @@ impl HostData {
                     error = %::diagnostics::chain(&error),
                     "couldn't load a thread"
                 );
+                if missing {
+                    self.forget_thread(&id);
+                }
                 let unavailable = if missing {
                     ThreadUnavailable::Missing
                 } else {
@@ -537,21 +571,55 @@ impl HostData {
                 .threads
                 .get(&thread.id)
                 .is_some_and(|old| old.seq > thread.seq)
+            || self.thread_overlay.stale(&thread)
         {
             return Accepted::Refused;
         }
-        self.store_thread(thread)
-            .map_or(Accepted::New, |old| Accepted::Replaced(Box::new(old)))
+        self.thread_overlay.caught_up(&thread);
+        self.sends.confirm_thread(&thread.id);
+        let id = thread.id.clone();
+        let shown = self.thread_overlay.shown(thread);
+        let accepted = self
+            .store_thread(shown)
+            .map_or(Accepted::New, |old| Accepted::Replaced(Box::new(old)));
+        self.release_creation_edits(&id);
+        accepted
     }
     pub(super) fn remember_thread(&mut self, thread: Thread) -> bool {
         let id = thread.id.clone();
-        let index = usize::from(thread.archived);
-        let top_level = thread.parent_thread_id.is_none();
         let old = match self.accept_thread(thread) {
             Accepted::Refused => return false,
             Accepted::New => None,
             Accepted::Replaced(old) => Some(*old),
         };
+        self.place_thread(&id, old.as_ref());
+        true
+    }
+    pub(super) fn window_mark(&self, id: &ThreadId, page: usize) -> Option<WindowMark> {
+        let listed = &self.thread_pages.pages[page];
+        listed.members.contains(id).then_some(WindowMark {
+            page,
+            window: listed.window,
+        })
+    }
+    pub(super) fn rejoin_page(&mut self, id: &ThreadId, mark: &WindowMark) {
+        let page = &self.thread_pages.pages[mark.page];
+        let back_in_window = self.threads.get(id).is_some_and(|thread| {
+            thread.parent_thread_id.is_none()
+                && usize::from(thread.archived) == mark.page
+                && (page.window == mark.window || page.covers(thread, &self.threads))
+        });
+        if back_in_window {
+            self.thread_pages.pages[mark.page].insert(id, &self.threads);
+        }
+    }
+    pub(super) fn place_thread(&mut self, id: &ThreadId, old: Option<&Thread>) {
+        let thread = self
+            .threads
+            .get(id)
+            .unwrap_or_else(|| panic!("invariant: thread {id} is placed right after it is stored"));
+        let index = usize::from(thread.archived);
+        let top_level = thread.parent_thread_id.is_none();
         for page in &mut self.thread_pages.pages {
             if let PageLoad::Loading { changed, .. } = &mut page.load {
                 changed.insert(id.clone());
@@ -562,21 +630,18 @@ impl HostData {
                 }
             }
         }
-        let moved = old
-            .as_ref()
-            .is_some_and(|old| usize::from(old.archived) != index);
+        let moved = old.is_some_and(|old| usize::from(old.archived) != index);
         if moved {
-            self.thread_pages.pages[1 - index].remove(&id, None, &self.threads);
+            self.thread_pages.pages[1 - index].remove(id, None, &self.threads);
         }
         let page = &mut self.thread_pages.pages[index];
-        let joined = top_level && page.is_loaded() && page.at_latest && !page.members.contains(&id);
+        let joined = top_level && page.is_loaded() && page.at_latest && !page.members.contains(id);
         if joined {
-            page.insert(&id, &self.threads);
+            page.insert(id, &self.threads);
         }
         if old.is_none() || moved || joined {
             self.prune_threads();
         }
-        true
     }
     pub(super) fn forget_thread(&mut self, id: &ThreadId) {
         let pages = &mut self.thread_pages;
@@ -596,7 +661,20 @@ impl HostData {
         self.threads.remove(id);
         self.runs.remove(id);
         self.stopping.remove(id);
-        self.cancel_read_ack(id);
+        self.drop_edits(id);
+        self.expected.listed(id);
+        self.sends.forget(id);
+    }
+    pub(super) fn drop_provisional(&mut self, id: &ThreadId) {
+        for page in &mut self.thread_pages.pages {
+            page.remove(id, None, &self.threads);
+            if let PageLoad::Loading { changed, .. } = &mut page.load {
+                changed.remove(id);
+            }
+        }
+        self.drop_edits(id);
+        self.expected.listed(id);
+        self.threads.remove(id);
     }
     pub(super) fn prune_threads(&mut self) {
         let mut keep: HashSet<ThreadId> = self
@@ -622,7 +700,9 @@ impl HostData {
                 .map(|thread| thread.id.clone()),
         );
         keep.extend(self.observed.borrow().iter().cloned());
-        keep.extend(self.read_acks.keys().cloned());
+        keep.extend(self.thread_overlay.kept().cloned());
+        keep.extend(self.expected.kept().cloned());
+        keep.extend(self.sends.kept().cloned());
         keep.extend(
             self.runs
                 .iter()

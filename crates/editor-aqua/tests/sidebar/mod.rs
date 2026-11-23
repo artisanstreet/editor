@@ -278,7 +278,6 @@ fn paging_retries_only_after_scroll_and_closed_history_stops_older_loading() {
     reason = "one host-recreation scenario walked step by step"
 )]
 fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
-    use axum::http::StatusCode;
     use editor_aqua::core::Screen;
     use editor_aqua::sidebar::controller::Sidebar;
     use test_support::editor::core::{Delivered, connect, stub_host};
@@ -313,16 +312,6 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
     editor_aqua::sidebar::view::dispatch(&mut sidebar, &mut core, create);
     assert!(sidebar.picker.as_ref().unwrap().creating);
     let late_create = forge.take("POST", "/projects");
-    let late_renames = [ThreadId::new(), ThreadId::new()].map(|thread| {
-        sidebar.rename = Some(thread.clone());
-        editor_aqua::sidebar::view::dispatch(
-            &mut sidebar,
-            &mut core,
-            editor_aqua::sidebar::view::ViewAction::SubmitRename("Renamed".into()),
-        );
-        forge.take("PATCH", &format!("/threads/{thread}"))
-    });
-    let [removed_rename, replaced_rename] = late_renames;
     let old_project = Project {
         id: ProjectId::new(),
         path: "/old".into(),
@@ -333,13 +322,6 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
     };
     core.remove_host(&id).unwrap();
     assert!(core.host_if_instance(&id, first).is_none());
-    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
-    removed_rename.fail(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "rename refused",
-    );
-    delivered.wait("the removed host's rename failure");
     sidebar.drain(&mut core, 0);
     assert!(sidebar.error.is_none());
     assert!(sidebar.picker.is_none());
@@ -456,14 +438,6 @@ fn removed_and_recreated_host_rejects_delayed_sidebar_completions() {
         },
     ));
     sidebar.error = Some(editor_aqua::core::Problem::new("new host error"));
-    let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
-    replaced_rename.fail(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "internal",
-        "rename refused",
-    );
-    delivered.wait("the removed host's second rename failure");
-    sidebar.drain(&mut core, 0);
     let delivered = Delivered::watch(sidebar.wake_mailbox().unwrap());
     late_create.respond(&old_project);
     delivered.wait("the removed host's project creation");
@@ -776,7 +750,7 @@ fn a_rename_failure_from_an_earlier_visit_to_the_same_host_is_not_shown_after_re
     let instance = core.host(&first.id).unwrap().instance();
     let mut sidebar = Sidebar::new(false);
     sidebar.sync(&core, 0);
-    let thread = ThreadId::new();
+    let thread = known_thread(&mut core, &first_forge, &first.id);
     sidebar.rename = Some(thread.clone());
     editor_aqua::sidebar::view::dispatch(
         &mut sidebar,
@@ -797,11 +771,130 @@ fn a_rename_failure_from_an_earlier_visit_to_the_same_host_is_not_shown_after_re
         "internal",
         "rename refused",
     );
+    test_support::wait::wait_until(
+        "the host applies the failed rename",
+        std::time::Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            core.host(&first.id)
+                .is_some_and(|host| !host.has_requests_in_flight())
+        },
+    );
     delivered.wait("the first visit's rename failure");
     sidebar.drain(&mut core, 0);
     assert_eq!(
         sidebar.error, None,
         "a failure from before the host switch must not appear on the return visit"
+    );
+}
+
+fn known_thread(
+    core: &mut editor_aqua::core::Core,
+    forge: &test_support::editor::forge::StubForge,
+    host: &editor_aqua::core::HostId,
+) -> ThreadId {
+    let thread = thread(&ProjectId::new(), 1, 0);
+    let id = thread.id.clone();
+    forge.publish(artisan_api::Event::Thread { thread });
+    test_support::wait::wait_until(
+        "Forge's thread to reach the Editor",
+        std::time::Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            core.host(host)
+                .is_some_and(|data| data.threads.contains_key(&id))
+        },
+    );
+    id
+}
+
+#[test]
+fn a_rename_shows_in_the_sidebar_at_once_and_a_failure_restores_the_title() {
+    use axum::http::StatusCode;
+    use editor_aqua::core::Screen;
+    use editor_aqua::sidebar::controller::Sidebar;
+    use test_support::editor::core::stub_host;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let forge = stub_forge();
+    let config = stub_host("rename", "Forge", &forge);
+    connect_live(&mut core, &config);
+    let project = Project {
+        id: ProjectId::new(),
+        path: "/work".into(),
+        name: "work".into(),
+        seq: 1,
+        created_at: 0,
+        removed: false,
+    };
+    forge.publish(artisan_api::Event::Project {
+        project: project.clone(),
+    });
+    let mut known = thread(&project.id, 2, 0);
+    known.title = Some("Before".into());
+    let id = known.id.clone();
+    forge.publish(artisan_api::Event::Thread { thread: known });
+    core.navigate(Screen::NewThread {
+        host: config.id.clone(),
+        project: None,
+    });
+    let mut sidebar = Sidebar::new(false);
+    let row_title = |sidebar: &Sidebar| {
+        sidebar
+            .lists
+            .inbox
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.title.clone())
+    };
+    test_support::wait::wait_until(
+        "the thread's row",
+        std::time::Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            sidebar.drain(&mut core, 0);
+            row_title(&sidebar).is_some()
+        },
+    );
+    sidebar.rename = Some(id.clone());
+    editor_aqua::sidebar::view::dispatch(
+        &mut sidebar,
+        &mut core,
+        editor_aqua::sidebar::view::ViewAction::SubmitRename("After".into()),
+    );
+    sidebar.drain(&mut core, 0);
+    assert_eq!(
+        row_title(&sidebar).as_deref(),
+        Some("After"),
+        "the row shows the new title before Forge answers"
+    );
+    forge.take("PATCH", &format!("/threads/{id}")).fail(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+        "disk full",
+    );
+    test_support::wait::wait_until(
+        "the rename failure",
+        std::time::Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            sidebar.drain(&mut core, 0);
+            sidebar.error.is_some()
+        },
+    );
+    assert_eq!(
+        row_title(&sidebar).as_deref(),
+        Some("Before"),
+        "the failed rename puts the old title back"
+    );
+    assert!(
+        sidebar
+            .error
+            .as_ref()
+            .is_some_and(|error| error.headline().starts_with("Couldn't rename this thread.")),
+        "the sidebar says what failed: {:?}",
+        sidebar.error
     );
 }
 

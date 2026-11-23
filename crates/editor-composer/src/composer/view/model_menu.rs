@@ -886,13 +886,10 @@ pub(super) fn choose_axis_config(
     config: artisan_api::EngineConfig,
 ) {
     let host = core
-        .host(host_id)
+        .host_mut(host_id)
         .expect("invariant: the composer's host stays in the store while it dispatches");
-    let instance = host.instance();
     composer.apply_permissions(host, config.permissions);
     composer.config = Some(config.clone());
     composer.edited();
-    if let Some(host) = core.host_mut_if_instance(host_id, instance) {
-        host.remember_model_config(config);
-    }
+    host.remember_model_config(config);
 }

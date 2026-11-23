@@ -118,11 +118,23 @@ async fn respond_status(socket: &mut TlsStream<TcpStream>, status: &str, body: V
     socket.flush().await.unwrap();
 }
 
+fn preserved(id: &str) -> editor_aqua::composer::draft_session::Submission {
+    use artisan_api::{ItemId, SendMessage, ThreadId};
+    editor_aqua::composer::draft_session::Submission {
+        thread: ThreadId("thread".into()),
+        create: None,
+        message: SendMessage {
+            id: ItemId(id.into()),
+            text: "preserve this prompt".into(),
+            images: Vec::new(),
+            config: None,
+            draft: None,
+        },
+    }
+}
+
 #[test]
 fn rejected_write_hands_the_message_back_and_sending_it_again_keeps_its_id() {
-    use artisan_api::{ItemId, SendMessage, ThreadId};
-    use editor_aqua::composer::draft_session::Submission;
-
     let (_directory, core, config, _client) = fixture();
     run(async {
         let (listener, acceptor, client) = server().await;
@@ -140,17 +152,7 @@ fn rejected_write_hands_the_message_back_and_sending_it_again_keeps_its_id() {
         let draft = json!({"text": "preserve this prompt"});
         type_into(&lease, typed("preserve this prompt"));
         lease
-            .submit(Submission {
-                thread: ThreadId("thread".into()),
-                create: None,
-                message: SendMessage {
-                    id: ItemId("original-message".into()),
-                    text: "preserve this prompt".into(),
-                    images: Vec::new(),
-                    config: None,
-                    draft: None,
-                },
-            })
+            .submit(preserved("original-message"), None, None)
             .unwrap();
         assert!(lease.read(editor_aqua::composer::draft_session::DraftSession::sending));
         let (mut socket, route, _) = request(&listener, &acceptor).await;
@@ -173,17 +175,7 @@ fn rejected_write_hands_the_message_back_and_sending_it_again_keeps_its_id() {
         assert!(lease.read(editor_aqua::composer::draft_session::DraftSession::pending));
 
         lease
-            .submit(Submission {
-                thread: ThreadId("thread".into()),
-                create: None,
-                message: SendMessage {
-                    id: ItemId("second-attempt".into()),
-                    text: "preserve this prompt".into(),
-                    images: Vec::new(),
-                    config: None,
-                    draft: None,
-                },
-            })
+            .submit(preserved("second-attempt"), None, None)
             .unwrap();
         let (mut socket, route, _) = request(&listener, &acceptor).await;
         assert_eq!(route, "GET /drafts/new HTTP/1.1");
@@ -360,17 +352,21 @@ fn graceful_teardown_finishes_an_inflight_write_and_queued_post() {
         load(&lease, &listener, &acceptor).await;
         type_into(&lease, typed("send survives teardown"));
         lease
-            .submit(Submission {
-                thread: ThreadId("thread".into()),
-                create: None,
-                message: SendMessage {
-                    id: ItemId("message".into()),
-                    text: "send survives teardown".into(),
-                    images: Vec::new(),
-                    config: None,
-                    draft: None,
+            .submit(
+                Submission {
+                    thread: ThreadId("thread".into()),
+                    create: None,
+                    message: SendMessage {
+                        id: ItemId("message".into()),
+                        text: "send survives teardown".into(),
+                        images: Vec::new(),
+                        config: None,
+                        draft: None,
+                    },
                 },
-            })
+                None,
+                None,
+            )
             .unwrap();
         let handle = DraftHandle::clone(&lease);
         let mut changed = handle.subscribe();
@@ -428,17 +424,21 @@ fn explicit_host_removal_cancels_an_inflight_write_and_queued_post() {
         load(&lease, &listener, &acceptor).await;
         type_into(&lease, typed("stale pairing"));
         lease
-            .submit(Submission {
-                thread: ThreadId("thread".into()),
-                create: None,
-                message: SendMessage {
-                    id: ItemId("stale-message".into()),
-                    text: "stale pairing".into(),
-                    images: Vec::new(),
-                    config: None,
-                    draft: None,
+            .submit(
+                Submission {
+                    thread: ThreadId("thread".into()),
+                    create: None,
+                    message: SendMessage {
+                        id: ItemId("stale-message".into()),
+                        text: "stale pairing".into(),
+                        images: Vec::new(),
+                        config: None,
+                        draft: None,
+                    },
                 },
-            })
+                None,
+                None,
+            )
             .unwrap();
         let (mut socket, route, body) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
@@ -1283,7 +1283,9 @@ fn a_send_left_unanswered_at_closing_is_finished_instead_of_coming_back_as_a_dra
         answer_empty_draft(&listener, &acceptor, 0).await;
         wait_for_session(&lease, DraftSession::is_loaded).await;
         type_into(&lease, typed("send me"));
-        lease.submit(message(&thread, "send me")).unwrap();
+        lease
+            .submit(message(&thread, "send me"), None, None)
+            .unwrap();
         let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
         assert!(route.starts_with("PUT /drafts/"), "{route}");
         respond(
@@ -1697,7 +1699,9 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
         composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
         composer.editor.borrow_mut().set_text(&prompt);
         composer.edited();
-        assert_eq!(composer.send(core.host(&host).unwrap()), Ok(()));
+        composer
+            .send(core.host(&host).unwrap())
+            .expect("the message is sent");
         composer.editor.borrow_mut().set_text("the follow-up");
         composer.edited();
 
@@ -1984,7 +1988,9 @@ async fn close_while_sending(
     composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
     composer.editor.borrow_mut().set_text("send me");
     composer.edited();
-    assert_eq!(composer.send(core.host(target.host()).unwrap()), Ok(()));
+    composer
+        .send(core.host(target.host()).unwrap())
+        .expect("the message is sent");
     let (mut socket, route, body) = composer_request(listener, acceptor).await;
     assert!(route.starts_with("PUT /drafts/"), "{route}");
     let sent = body["body"].clone();
@@ -2090,7 +2096,9 @@ fn text_typed_after_an_unanswered_send_shows_on_reopening_and_survives_the_resen
             "the later text is kept beside it"
         );
 
-        assert_eq!(composer.send(core.host(&host).unwrap()), Ok(()));
+        composer
+            .send(core.host(&host).unwrap())
+            .expect("the message is sent");
         loop {
             let (mut socket, route, body) = composer_request(&listener, &acceptor).await;
             if route.starts_with("PUT /drafts/") {
@@ -2130,7 +2138,9 @@ async fn send_and_type_over(
     composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
     composer.editor.borrow_mut().set_text("send me");
     composer.edited();
-    assert_eq!(composer.send(core.host(host).unwrap()), Ok(()));
+    composer
+        .send(core.host(host).unwrap())
+        .expect("the message is sent");
     composer.editor.borrow_mut().set_text("typed meanwhile");
     composer.edited();
     let (mut socket, route, body) = composer_request(listener, acceptor).await;
@@ -2182,7 +2192,9 @@ async fn resent_thread(
         [follow_up],
         "what was typed after sending is kept beside it"
     );
-    assert_eq!(composer.send(core.host(host).unwrap()), Ok(()));
+    composer
+        .send(core.host(host).unwrap())
+        .expect("the message is sent");
     loop {
         let (mut socket, route, body) = composer_request(listener, acceptor).await;
         if route.starts_with("PUT /drafts/") {
@@ -2306,7 +2318,9 @@ async fn composer_whose_send_to_failed(
         composer.config = Some(artisan_api::EngineConfig::new(artisan_api::EngineId::Codex));
         composer.editor.borrow_mut().set_text("send me");
         composer.edited();
-        assert_eq!(composer.send(core.host(&host).unwrap()), Ok(()));
+        composer
+            .send(core.host(&host).unwrap())
+            .expect("the message is sent");
     }
     let (mut socket, route, body) = composer_request(listener, acceptor).await;
     assert!(route.starts_with("PUT /drafts/"), "{route}");

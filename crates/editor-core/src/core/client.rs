@@ -427,7 +427,7 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn update_thread(
+    pub(crate) async fn update_thread(
         &self,
         id: &ThreadId,
         update: &UpdateThread,
@@ -779,7 +779,7 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn settle_thread(
+    pub(crate) async fn settle_thread(
         &self,
         id: &ThreadId,
         observed_seq: artisan_api::Seq,
@@ -792,7 +792,7 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn mark_unread(&self, id: &ThreadId) -> Result<Thread, CallError> {
+    pub(crate) async fn mark_unread(&self, id: &ThreadId) -> Result<Thread, CallError> {
         self.call(self.request(reqwest::Method::POST, &format!("/threads/{id}/unread")))
             .await
     }

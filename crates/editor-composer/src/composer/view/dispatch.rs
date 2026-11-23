@@ -156,8 +156,13 @@ impl ComposerOwner {
                         effects.push(ComposerEffect::EditorChanged);
                     }
                 } else {
+                    let instance = host.instance();
+                    let host_id = host.id.clone();
                     match composer.send(host) {
-                        Ok(()) => effects.push(ComposerEffect::EditorChanged),
+                        Ok(sent) => {
+                            begin_send(core, &host_id, instance, sent, &mut effects);
+                            effects.push(ComposerEffect::EditorChanged);
+                        }
                         Err(refusal) => composer.refuse(refusal),
                     }
                 }
@@ -203,14 +208,12 @@ impl ComposerOwner {
             ComposerAction::ChooseModel { engine, id } => {
                 self.tooltip.borrow_mut().clear();
                 let config = composer.choose_model(host, engine, &id);
-                if let Some(config) = &config {
-                    composer.apply_permissions(host, config.permissions);
-                }
                 let host_id = host.id.clone();
                 let instance = host.instance();
                 if let (Some(config), Some(host)) =
                     (config, core.host_mut_if_instance(&host_id, instance))
                 {
+                    composer.apply_permissions(host, config.permissions);
                     host.remember_model_config(config);
                 }
             }
@@ -321,8 +324,13 @@ impl ComposerOwner {
                 });
                 if resend {
                     composer.reconcile();
+                    let instance = host.instance();
+                    let host_id = host.id.clone();
                     match composer.send(host) {
-                        Ok(()) => effects.push(ComposerEffect::EditorChanged),
+                        Ok(sent) => {
+                            begin_send(core, &host_id, instance, sent, &mut effects);
+                            effects.push(ComposerEffect::EditorChanged);
+                        }
                         Err(refusal) => composer.refuse(refusal),
                     }
                 } else if let Some(session) = &composer.session {
@@ -438,5 +446,31 @@ impl ComposerOwner {
             }
         }
         effects
+    }
+}
+
+fn begin_send(
+    core: &mut editor_core::Core,
+    host: &editor_core::HostId,
+    instance: editor_core::HostInstance,
+    sent: editor_core::LocalSend,
+    effects: &mut Vec<ComposerEffect>,
+) {
+    let data = core
+        .host_mut_if_instance(host, instance)
+        .unwrap_or_else(|| {
+            panic!(
+                "invariant: host {host} that took message {} is still open",
+                sent.message
+            )
+        });
+    let opened = sent.create.is_some().then(|| sent.thread.clone());
+    let replaced = data.begin_send(sent);
+    if let Some(thread) = opened {
+        effects.push(ComposerEffect::OpenSent {
+            host: host.clone(),
+            thread,
+            replaced,
+        });
     }
 }

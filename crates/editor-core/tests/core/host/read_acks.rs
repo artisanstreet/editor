@@ -43,7 +43,7 @@ fn read(stubbed: &mut StubbedHost, id: &str) {
         core.host(host)
             .is_some_and(|data| data.threads.contains_key(&thread_id))
     });
-    stubbed.host_mut().acknowledge_read(thread_id, 5);
+    stubbed.host_mut().acknowledge_read(&thread_id, 5);
 }
 
 fn acknowledgement(stubbed: &mut StubbedHost, id: &str) -> HeldRequest {
@@ -92,10 +92,34 @@ fn a_read_acknowledgement_answered_after_a_delete_keeps_the_thread_deleted() {
     forge.settle("the later acknowledgement settles", |core, host| {
         core.host(host)
             .and_then(|data| data.threads.get(&ThreadId("kept".into())))
-            .is_some_and(|thread| thread.read_seq == 5)
+            .is_some_and(|thread| thread.seq == 4)
     });
     assert!(
         !has_thread(&forge, "held"),
         "a late acknowledgement does not bring the deleted thread back"
     );
+}
+
+fn unread(stubbed: &StubbedHost, id: &str) -> bool {
+    stubbed
+        .host()
+        .threads
+        .get(&ThreadId(id.into()))
+        .is_some_and(artisan_api::Thread::is_unread)
+}
+
+#[test]
+fn a_read_thread_shows_read_at_once_and_unread_again_when_forge_refuses() {
+    let mut forge = forge();
+    read(&mut forge, "chat");
+    assert!(
+        !unread(&forge, "chat"),
+        "the thread shows read before Forge answers"
+    );
+    acknowledgement(&mut forge, "chat").fail(StatusCode::NOT_FOUND, "not_found", "no such thread");
+    forge.settle("the refused acknowledgement rolls back", |core, host| {
+        core.host(host)
+            .and_then(|data| data.threads.get(&ThreadId("chat".into())))
+            .is_some_and(artisan_api::Thread::is_unread)
+    });
 }

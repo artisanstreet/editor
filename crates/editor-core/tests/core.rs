@@ -20,6 +20,8 @@ mod inspector_outline;
 mod mcp_sign_in;
 #[path = "core/media_http.rs"]
 mod media_http;
+#[path = "core/host/overlay.rs"]
+mod overlay;
 #[path = "core/host/pages.rs"]
 mod pages;
 #[path = "core/host/preferences.rs"]
@@ -34,6 +36,8 @@ mod read_acks;
 mod released_forge;
 #[path = "core/screen.rs"]
 mod screen;
+#[path = "core/host/sending.rs"]
+mod sending;
 #[path = "core/host/settings.rs"]
 mod settings;
 #[path = "core/settings_writer.rs"]

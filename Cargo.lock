@@ -2146,6 +2146,7 @@ dependencies = [
  "aqua-ui",
  "artisan-api",
  "artisan-mentions",
+ "axum",
  "diagnostics",
  "divan",
  "editor-assets",

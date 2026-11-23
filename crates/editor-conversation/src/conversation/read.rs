@@ -77,7 +77,7 @@ pub fn painted(bounds: Rect, clip: Rect, window_active: bool, revealed: bool) ->
 }
 
 pub(crate) fn acknowledge(
-    candidate: ReadCandidate,
+    candidate: &ReadCandidate,
     conversation: &Conversation,
     core: &mut Core,
     prepared: impl FnOnce(&Row, &Item) -> bool,
@@ -100,7 +100,7 @@ pub(crate) fn acknowledge(
     let Some(host) = core.host_mut_if_instance(&candidate.host, candidate.instance) else {
         return false;
     };
-    host.acknowledge_read(candidate.thread, candidate.seq);
+    host.acknowledge_read(&candidate.thread, candidate.seq);
     super::open_timing::acknowledged();
     true
 }
