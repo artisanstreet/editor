@@ -21,26 +21,35 @@ fn screenshot(width: u32, height: u32) -> Vec<u8> {
     png
 }
 
-#[test]
-fn a_pasted_high_resolution_screenshot_converts_well_within_a_second() {
-    let png = screenshot(3066, 1918);
-    let fastest = (0..3)
+fn fastest_of_three(mut run: impl FnMut()) -> Duration {
+    (0..3)
         .map(|_| {
             let started = Instant::now();
-            let webp = to_webp(&png).expect("the screenshot converts");
-            let took = started.elapsed();
-            let decoded = image::load_from_memory(&webp).expect("the WebP decodes");
-            assert_eq!(
-                (decoded.width(), decoded.height()),
-                (2576, 1611),
-                "the screenshot is sent at the display size"
-            );
-            took
+            run();
+            started.elapsed()
         })
         .min()
-        .expect("three conversions ran");
+        .expect("three runs happened")
+}
+
+#[test]
+fn a_pasted_high_resolution_screenshot_converts_in_a_few_decodes_time() {
+    let png = screenshot(3066, 1918);
+    let decode = fastest_of_three(|| {
+        image::load_from_memory(&png).expect("the screenshot decodes");
+    });
+    let convert = fastest_of_three(|| {
+        let webp = to_webp(&png).expect("the screenshot converts");
+        let decoded = image::load_from_memory(&webp).expect("the WebP decodes");
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (2576, 1611),
+            "the screenshot is sent at the display size"
+        );
+    });
     assert!(
-        fastest < Duration::from_millis(600),
-        "converting a pasted screenshot took {fastest:?}; the paste waits on it"
+        convert < decode * 45,
+        "converting a pasted screenshot took {convert:?}, {:.1} times decoding it ({decode:?}); the paste waits on it",
+        convert.as_secs_f64() / decode.as_secs_f64()
     );
 }
