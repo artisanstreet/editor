@@ -613,7 +613,7 @@ async fn deliver(
             item: input.id.clone(),
             source,
         })?;
-    decoder.expect_replay(Some(input.id.clone()));
+    decoder.expect_replay(Some(input.id.clone()), &line);
     Ok(())
 }
 
