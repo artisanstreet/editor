@@ -903,7 +903,6 @@ async fn threads_page(
 }
 
 async fn thread(AppState(app): AppState<App>, Path(id): Path<ThreadId>) -> Result<Json<Thread>> {
-    app.hub.mcp().warm_servers();
     app.hub
         .store()
         .thread(&id)
@@ -1298,7 +1297,6 @@ async fn set_draft(
     Path(scope): Path<String>,
     Json(request): Json<artisan_api::WriteDraft>,
 ) -> Result<Json<artisan_api::DraftWriteResult>> {
-    app.hub.mcp().warm_servers();
     Ok(Json(app.hub.store().set_draft(scope, request).await?))
 }
 

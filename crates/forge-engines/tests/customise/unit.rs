@@ -79,7 +79,7 @@ fn materialize_writes_prompt_links_skills_and_passes_mcp() {
                 fs::write(shadow, "override").unwrap();
             }
         }
-        let launch = materialize(engine, &home, &c).unwrap();
+        let launch = materialize(engine, &home, &c, <[_]>::to_vec).unwrap();
         let files = paths.map(|paths| {
             (
                 paths
@@ -111,7 +111,7 @@ fn materialize_writes_prompt_links_skills_and_passes_mcp() {
         ..Customisation::default()
     };
     let home = root.join("claude");
-    let launch = materialize(EngineId::Claude, &home, &cleared).unwrap();
+    let launch = materialize(EngineId::Claude, &home, &cleared, <[_]>::to_vec).unwrap();
     assert_eq!(
         listing(&home.join(".claude/skills"), root),
         ["deploy -> data/extensions/skills/deploy"]

@@ -28,7 +28,7 @@ fn a_prompt_that_cannot_be_written_fails_the_launch() {
         skills_dir: root.path().join("skills"),
         ..Customisation::default()
     };
-    let launched = materialize(EngineId::Claude, &home, &settings);
+    let launched = materialize(EngineId::Claude, &home, &settings, <[_]>::to_vec);
     assert!(
         matches!(
             &launched,

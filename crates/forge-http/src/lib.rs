@@ -498,6 +498,14 @@ async fn start_services(
     } else {
         generation::start_primary_services(data_dir.to_path_buf(), routes_app, shutdown, tasks);
     }
+    let watching = hub.mcp().watch_server_changes();
+    let stop = shutdown.clone();
+    tasks.spawn(async move {
+        tokio::select! {
+            () = stop.cancelled() => {}
+            () = watching => {}
+        }
+    });
     hub.resume_pending();
     let traces = forge_engines::trace::folder(data_dir);
     tasks.spawn_blocking(move || {
@@ -512,14 +520,6 @@ async fn start_services(
     tasks.spawn(async move { auth.mcp().check_auth().await });
     let agents = hub.clone();
     tasks.spawn(async move { agents.reconcile_agents().await });
-    let watching = hub.mcp().watch_server_changes();
-    let stop = shutdown.clone();
-    tasks.spawn(async move {
-        tokio::select! {
-            () = stop.cancelled() => {}
-            () = watching => {}
-        }
-    });
     if hub.generation().is_none() {
         tasks.spawn(remove_inactive_threads(
             hub.clone(),

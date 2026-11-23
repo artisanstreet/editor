@@ -49,7 +49,7 @@ fn an_interrupted_replacement_restores_the_installed_skill_at_the_next_launch() 
     );
 
     let home = dir.path().join("claude");
-    materialize(EngineId::Claude, &home, &config).unwrap();
+    materialize(EngineId::Claude, &home, &config, <[_]>::to_vec).unwrap();
 
     assert!(body(&installed).contains("first"));
     assert!(body(&home.join(".claude/skills/review")).contains("first"));
