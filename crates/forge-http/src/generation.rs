@@ -284,23 +284,19 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
         return;
     };
     let mut overlap = generation.watch();
+    let mut local_commits = hub.store().watch_commits();
     let mut cursor = hub.store().head();
     let mut peers = HashSet::new();
     let wake = Arc::new(Wake::default());
     let mut last: Option<tokio::time::Instant> = None;
     loop {
-        let cause = if overlap.borrow_and_update().overlapping() {
-            tokio::select! {
-                () = stop.cancelled() => break,
-                () = wake.committed.notified() => Cause::Committed,
-                () = wake.peers.notified() => Cause::Peers,
-                changed = overlap.changed() => if changed.is_err() { break } else { Cause::Peers },
-            }
-        } else {
-            tokio::select! {
-                () = stop.cancelled() => break,
-                watching = settled(&mut overlap, Overlap::overlapping) => if watching { Cause::Peers } else { break },
-            }
+        let overlapping = overlap.borrow_and_update().overlapping();
+        let cause = tokio::select! {
+            () = stop.cancelled() => break,
+            changed = local_commits.changed() => if changed.is_err() { break } else { Cause::Committed },
+            () = wake.committed.notified(), if overlapping => Cause::Committed,
+            () = wake.peers.notified(), if overlapping => Cause::Peers,
+            changed = overlap.changed() => if changed.is_err() { break } else { Cause::Peers },
         };
         if let Some(previous) = last {
             tokio::select! {
@@ -315,6 +311,9 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
                 error = diagnostics::chain(&error),
                 "synchronize generation store"
             );
+        }
+        if !overlapping && matches!(cause, Cause::Committed) {
+            continue;
         }
         if matches!(cause, Cause::Peers) {
             follow(&hub, &generation, &mut peers, &wake, &stop, &tasks).await;

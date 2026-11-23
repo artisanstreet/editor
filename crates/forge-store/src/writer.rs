@@ -135,11 +135,13 @@ impl Durability {
 pub(crate) struct Commits {
     pub(crate) count: Arc<AtomicU64>,
     pub(crate) committed: std::sync::mpsc::SyncSender<()>,
+    pub(crate) watch: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl Commits {
     fn note(&self) {
-        self.count.fetch_add(1, Ordering::AcqRel);
+        let count = self.count.fetch_add(1, Ordering::AcqRel) + 1;
+        self.watch.send_replace(count);
         match self.committed.try_send(()) {
             Ok(()) | Err(std::sync::mpsc::TrySendError::Full(())) => {}
             Err(std::sync::mpsc::TrySendError::Disconnected(())) => {

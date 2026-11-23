@@ -304,6 +304,7 @@ struct Inner {
     live_revision: AtomicU64,
     reads: AtomicU64,
     commits: Arc<AtomicU64>,
+    committed: Arc<watch::Sender<u64>>,
     readers: Mutex<Vec<Connection>>,
     read_slots: Arc<Semaphore>,
     scan_slots: Arc<Semaphore>,
@@ -885,6 +886,7 @@ impl Store {
         let head = Arc::new(AtomicU64::new(0));
         let hot = Arc::new(hot::HotPages::default());
         let commits = Arc::new(AtomicU64::new(0));
+        let committed_watch = Arc::new(watch::Sender::new(0));
         let (committed, wakes) = std::sync::mpsc::sync_channel(1);
         let mut writer = Writer::new(
             conn,
@@ -894,6 +896,7 @@ impl Store {
             writer::Commits {
                 count: Arc::clone(&commits),
                 committed,
+                watch: Arc::clone(&committed_watch),
             },
             clock.clone(),
         )
@@ -916,18 +919,7 @@ impl Store {
         threads.recall = builder;
 
         let checkpoint_conn = open_database(&connections, &database).map_err(prepare)?;
-        threads.checkpointer = Some(
-            std::thread::Builder::new()
-                .name("forge-store-checkpoint".into())
-                .spawn({
-                    let commits = Arc::clone(&commits);
-                    move || checkpoint_when_due(&checkpoint_conn, &commits, &wakes)
-                })
-                .map_err(|source| OpenStoreError::Spawn {
-                    thread: "checkpointer",
-                    source,
-                })?,
-        );
+        threads.checkpointer = Some(spawn_checkpointer(checkpoint_conn, &commits, wakes)?);
 
         let first_reader = open_database(&connections, &database).map_err(prepare)?;
         let revocations = broadcast::channel(64).0;
@@ -945,6 +937,7 @@ impl Store {
                 live_revision: AtomicU64::new(0),
                 reads: AtomicU64::new(0),
                 commits,
+                committed: committed_watch,
                 readers: Mutex::new(vec![first_reader]),
                 read_slots: Arc::new(Semaphore::new(READ_SLOTS)),
                 scan_slots: Arc::new(Semaphore::new(SCAN_SLOTS)),
@@ -1051,6 +1044,11 @@ impl Store {
     #[must_use]
     pub fn commits(&self) -> u64 {
         self.inner.commits.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn watch_commits(&self) -> watch::Receiver<u64> {
+        self.inner.committed.subscribe()
     }
 
     #[must_use]
@@ -1291,6 +1289,21 @@ impl Inner {
         }
         result
     }
+}
+
+fn spawn_checkpointer(
+    conn: Connection,
+    commits: &Arc<AtomicU64>,
+    wakes: std::sync::mpsc::Receiver<()>,
+) -> Result<std::thread::JoinHandle<()>, OpenStoreError> {
+    let commits = Arc::clone(commits);
+    std::thread::Builder::new()
+        .name("forge-store-checkpoint".into())
+        .spawn(move || checkpoint_when_due(&conn, &commits, &wakes))
+        .map_err(|source| OpenStoreError::Spawn {
+            thread: "checkpointer",
+            source,
+        })
 }
 
 fn checkpoint_when_due(
