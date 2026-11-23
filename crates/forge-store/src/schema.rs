@@ -171,6 +171,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[sql!("migrations/v33.sql"), Step::Rust(backfill_work_spans)],
     &[sql!("migrations/v34.sql")],
     &[sql!("migrations/v35.sql")],
+    &[sql!("migrations/v36.sql")],
 ];
 
 pub(crate) const fn version() -> usize {
