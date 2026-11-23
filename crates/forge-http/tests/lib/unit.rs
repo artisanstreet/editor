@@ -596,10 +596,63 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .send()
         .await
         .unwrap();
-    assert_eq!(off.status(), 204);
+    assert_eq!(off.status(), 200);
+    let saved: artisan_api::SettingSaved = off.json().await.unwrap();
     assert_eq!(
         store.setting("you_should_know").await.unwrap(),
         Some(serde_json::json!(false))
+    );
+    let after_save: State = editor
+        .http
+        .get(editor.url("/state"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        saved.revision, after_save.head,
+        "a save answers with the revision its change streams under"
+    );
+    let streamed = store
+        .changes_since(0, 10_000)
+        .await
+        .unwrap()
+        .expect("the change log reaches back to the start")
+        .into_iter()
+        .rev()
+        .find(|envelope| {
+            matches!(
+                &envelope.event,
+                Event::Setting { key, value }
+                    if key == "you_should_know" && *value == serde_json::json!(false)
+            )
+        })
+        .expect("the save streams as a setting event");
+    assert_eq!(
+        streamed.seq,
+        Some(saved.revision),
+        "the save's revision is the seq of the event that streams it"
+    );
+    let unrelated = store
+        .set_setting("summary_titles".into(), serde_json::json!(false))
+        .await
+        .unwrap();
+    assert!(unrelated > saved.revision);
+    let unchanged: artisan_api::SettingSaved = editor
+        .http
+        .put(editor.url("/settings/you_should_know"))
+        .json(&serde_json::json!(false))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        unchanged.revision, unrelated,
+        "a save that changes nothing answers with Forge's newest revision, which no later change can precede"
     );
     let garbled = editor
         .http
@@ -631,7 +684,7 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
             .send()
             .await
             .unwrap();
-        assert_eq!(off.status(), 204, "{key}");
+        assert_eq!(off.status(), 200, "{key}");
         assert_eq!(
             store.setting(key).await.unwrap(),
             Some(serde_json::json!(false))
@@ -644,7 +697,7 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .send()
         .await
         .unwrap();
-    assert_eq!(claude_ai.status(), 204);
+    assert_eq!(claude_ai.status(), 200);
     assert_eq!(
         store.setting("claude_transport").await.unwrap(),
         Some(serde_json::json!("claude_ai"))
@@ -670,7 +723,7 @@ async fn the_editor_turns_computer_use_on_through_the_settings_route() {
         .send()
         .await
         .unwrap();
-    assert_eq!(on.status(), 204);
+    assert_eq!(on.status(), 200);
     let state: State = editor
         .http
         .get(editor.url("/state"))

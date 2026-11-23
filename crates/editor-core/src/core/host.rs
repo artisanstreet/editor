@@ -9,9 +9,10 @@ mod preferences;
 mod project_icons;
 mod sending;
 mod settings;
+use settings::StageId;
 pub use settings::{
     DEFAULT_ENGINE_CONFIG_KEY, HostSettingError, HostSettings, HostSwitch, MCP_SERVERS_KEY,
-    McpServersError,
+    McpServersError, Restaged, Staging,
 };
 pub mod stopping;
 mod wsl;
@@ -225,6 +226,7 @@ impl HostMessage {
 
 pub(super) enum HostCompletion {
     SendSettled(SendAttempt, SendSettlement),
+    SettingReleased(String, StageId),
     DecodedImage(
         artisan_api::BlobHash,
         u64,
@@ -947,7 +949,7 @@ impl HostData {
             Update::State(state) => self.reset_to_state(*state, events),
             Update::Event(envelope, _permit) => {
                 self.invalidate_thread_summary(&envelope.event, envelope.seq);
-                self.apply_event(envelope.event, events);
+                self.apply_event(envelope.event, envelope.seq, events);
             }
         }
     }
@@ -997,7 +999,7 @@ impl HostData {
         for run in state.runs {
             self.remember_run(run);
         }
-        self.settings = HostSettings::from_values(self.id.clone(), state.settings);
+        self.settings.replace(state.settings, state.head);
         self.invalidate_prompt();
         self.invalidate_catalog();
         self.learn_wsl_distro(
@@ -1104,6 +1106,11 @@ impl HostData {
             }
             HostCompletion::SendSettled(attempt, settlement) => {
                 self.settle_send(attempt, settlement);
+            }
+            HostCompletion::SettingReleased(key, stage) => {
+                if self.settings.release(&key, stage) {
+                    events.push(HostEvent::Changed);
+                }
             }
             HostCompletion::Summary(thread, generation, minimum, result) => {
                 self.finish_summary(thread, generation, minimum, result, events);
@@ -1278,7 +1285,34 @@ impl HostData {
         }
         changed
     }
-    fn apply_event(&mut self, event: Event, events: &HostEffects) {
+    pub fn stage_setting(&mut self, key: &str, value: serde_json::Value) -> Staging {
+        let sender = self.delivery.sender().map(HostMessage::completion);
+        self.settings.staging(sender, self.instance, key, value)
+    }
+
+    fn apply_setting(
+        &mut self,
+        key: &str,
+        value: serde_json::Value,
+        seq: Option<artisan_api::Seq>,
+    ) {
+        if matches!(
+            key,
+            "global_prompt" | "global_prompt_version" | "prompt_revision"
+        ) {
+            self.invalidate_prompt();
+        }
+        if matches!(key, "disabled_skills" | "skills_revision") {
+            self.invalidate_catalog();
+        }
+        self.settings.streamed(
+            key,
+            value,
+            seq.expect("invariant: Forge streams every setting change under its revision"),
+        );
+    }
+
+    fn apply_event(&mut self, event: Event, seq: Option<artisan_api::Seq>, events: &HostEffects) {
         match event {
             Event::Hello { forge_version, .. } => self.forge_version = Some(forge_version),
             Event::Project { project } => self.apply_project(project, events),
@@ -1308,16 +1342,7 @@ impl HostData {
                 events.push(HostEvent::ThreadChanged { thread_id });
             }
             Event::Setting { key, value } => {
-                if matches!(
-                    key.as_str(),
-                    "global_prompt" | "global_prompt_version" | "prompt_revision"
-                ) {
-                    self.invalidate_prompt();
-                }
-                if matches!(key.as_str(), "disabled_skills" | "skills_revision") {
-                    self.invalidate_catalog();
-                }
-                self.settings.insert(&key, value);
+                self.apply_setting(&key, value, seq);
                 events.push(HostEvent::Changed);
             }
             Event::EngineInstall { engine, install } => {

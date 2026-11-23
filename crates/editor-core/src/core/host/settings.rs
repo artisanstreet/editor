@@ -1,11 +1,11 @@
 use crate::core::hosts::HostId;
 use artisan_api::{
     EngineConfig, EngineId, MCP_AUTH_KEY, MODEL_CONFIGS_KEY, MODEL_CUSTOMIZATIONS_KEY,
-    MODEL_GROUPS_KEY, McpAuthStatus, McpServer, ModelCustomization, ModelCustomizationsError,
+    MODEL_GROUPS_KEY, McpAuthStatus, McpServer, ModelCustomization, ModelCustomizationsError, Seq,
 };
 use serde::Deserialize as _;
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
@@ -77,10 +77,159 @@ impl HostSwitch {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StageId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Snapshots(u64);
+
+#[derive(Debug)]
+struct Flight {
+    value: Value,
+    snapshots: Snapshots,
+    echoed: bool,
+}
+
+#[derive(Debug)]
+enum Staged {
+    Held {
+        stage: StageId,
+        shown: Value,
+        flight: Flight,
+        echoes: VecDeque<Value>,
+    },
+    Echoing {
+        echoes: VecDeque<Value>,
+    },
+}
+
+impl Staged {
+    fn shown(&self) -> &Value {
+        match self {
+            Self::Held { shown, .. } => shown,
+            Self::Echoing { echoes } => echoes
+                .back()
+                .expect("invariant: a released setting stays staged only while echoes are due"),
+        }
+    }
+
+    fn held_by(&mut self, token: StageId) -> Option<(&mut Flight, &mut VecDeque<Value>)> {
+        match self {
+            Self::Held {
+                stage,
+                flight,
+                echoes,
+                ..
+            } if *stage == token => Some((flight, echoes)),
+            Self::Held { .. } | Self::Echoing { .. } => None,
+        }
+    }
+
+    fn into_echoes(self) -> VecDeque<Value> {
+        match self {
+            Self::Held { echoes, .. } | Self::Echoing { echoes } => echoes,
+        }
+    }
+}
+
+#[must_use = "a superseded staging token no longer shows its value"]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restaged {
+    Shown,
+    Superseded,
+}
+
+#[must_use = "a staged setting stays on screen until its token is released"]
+pub struct Staging {
+    sender: crate::core::delivery::MappedSender<super::HostCompletion, super::HostMessage>,
+    host: HostId,
+    instance: super::HostInstance,
+    held: Option<(String, StageId)>,
+}
+
+impl Staging {
+    pub fn restage(&self, host: &mut super::HostData, value: Value) -> Restaged {
+        self.check(host);
+        let (key, stage) = self.held();
+        host.settings.restage(key, *stage, value)
+    }
+
+    pub fn accepted(
+        &self,
+        host: &mut super::HostData,
+        value: Value,
+        ack: crate::core::client::SettingAck,
+    ) {
+        self.check(host);
+        let (key, stage) = self.held();
+        host.settings.accepted(key, *stage, value, ack);
+    }
+
+    pub fn dispatched(&self, host: &mut super::HostData, value: Value) {
+        self.check(host);
+        let (key, stage) = self.held();
+        host.settings.dispatched(key, *stage, value);
+    }
+
+    pub fn release(mut self, host: &mut super::HostData) {
+        self.check(host);
+        let (key, stage) = self
+            .held
+            .take()
+            .expect("invariant: a staging token holds its setting until released");
+        host.settings.release(&key, stage);
+    }
+
+    fn check(&self, host: &super::HostData) {
+        assert!(
+            host.id == self.host && host.instance() == self.instance,
+            "invariant: setting staged on {} {:?} is changed only through that host, not {} {:?}",
+            self.host,
+            self.instance,
+            host.id,
+            host.instance()
+        );
+    }
+
+    fn held(&self) -> &(String, StageId) {
+        self.held
+            .as_ref()
+            .expect("invariant: a staging token holds its setting until released")
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if let Some((key, stage)) = self.held.take() {
+            let sender = self.sender.clone();
+            crate::core::runtime::runtime().spawn(async move {
+                sender
+                    .offer(super::HostCompletion::SettingReleased(key, stage))
+                    .await;
+            });
+        }
+    }
+}
+
+impl std::fmt::Debug for Staging {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Staging")
+            .field("host", &self.host)
+            .field("instance", &self.instance)
+            .field("held", &self.held)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug)]
 pub struct HostSettings {
     host: HostId,
-    values: Map<String, Value>,
+    forge: Map<String, Value>,
+    revisions: BTreeMap<String, Seq>,
+    snapshot: Seq,
+    staged: BTreeMap<String, Staged>,
+    stages: u64,
+    snapshots: Snapshots,
     mcp_servers: Result<Vec<McpServer>, Arc<McpServersError>>,
     mcp_auth: Result<BTreeMap<String, McpAuthStatus>, Arc<HostSettingError>>,
     default_engine_config: Option<EngineConfig>,
@@ -100,7 +249,12 @@ impl HostSettings {
     pub fn from_values(host: HostId, values: Map<String, Value>) -> Self {
         let mut settings = Self {
             host,
-            values,
+            forge: values,
+            revisions: BTreeMap::new(),
+            snapshot: 0,
+            staged: BTreeMap::new(),
+            stages: 0,
+            snapshots: Snapshots(0),
             mcp_servers: Ok(Vec::new()),
             mcp_auth: Ok(BTreeMap::new()),
             default_engine_config: None,
@@ -109,37 +263,209 @@ impl HostSettings {
             model_groups: BTreeMap::new(),
             switches: BTreeMap::new(),
         };
-        for switch in HostSwitch::ALL {
-            settings.decode(switch.key());
-        }
-        for key in [
-            MCP_SERVERS_KEY,
-            MCP_AUTH_KEY,
-            DEFAULT_ENGINE_CONFIG_KEY,
-            MODEL_CONFIGS_KEY,
-            MODEL_CUSTOMIZATIONS_KEY,
-            MODEL_GROUPS_KEY,
-        ] {
-            settings.decode(key);
-        }
+        settings.decode_all();
         settings
     }
 
+    pub fn replace(&mut self, mut values: Map<String, Value>, head: Seq) {
+        self.revisions.retain(|_, revision| *revision > head);
+        for key in self.revisions.keys() {
+            match self.forge.get(key) {
+                Some(value) => values.insert(key.clone(), value.clone()),
+                None => values.remove(key),
+            };
+        }
+        self.snapshot = head;
+        self.forge = values;
+        self.snapshots = Snapshots(self.snapshots.0 + 1);
+        self.staged.retain(|_, staged| match staged {
+            Staged::Held { echoes, .. } => {
+                echoes.clear();
+                true
+            }
+            Staged::Echoing { .. } => false,
+        });
+        self.decode_all();
+    }
+
     #[must_use]
-    pub fn get(&self, key: &str) -> Option<&Value> {
-        self.values.get(key)
+    pub(crate) fn get(&self, key: &str) -> Option<&Value> {
+        self.staged
+            .get(key)
+            .map(Staged::shown)
+            .or_else(|| self.forge.get(key))
     }
 
-    pub fn insert(&mut self, key: &str, value: Value) -> Option<Value> {
-        let previous = self.values.insert(key.to_owned(), value);
-        self.decode(key);
-        previous
+    fn known(&self, key: &str) -> Seq {
+        self.revisions.get(key).copied().unwrap_or(self.snapshot)
     }
 
-    pub fn remove(&mut self, key: &str) -> Option<Value> {
-        let previous = self.values.remove(key);
+    fn accepted(
+        &mut self,
+        key: &str,
+        stage: StageId,
+        value: Value,
+        ack: crate::core::client::SettingAck,
+    ) {
+        match ack {
+            crate::core::client::SettingAck::Revision(revision) => {
+                self.insert(key, value, revision);
+            }
+            crate::core::client::SettingAck::Unversioned => {
+                self.unversioned(key, stage, value);
+            }
+        }
+    }
+
+    fn unversioned(&mut self, key: &str, stage: StageId, value: Value) {
+        let snapshots = self.snapshots;
+        let current = self.forge.get(key) == Some(&value);
+        let Some((flight, echoes)) = self
+            .staged
+            .get_mut(key)
+            .and_then(|staged| staged.held_by(stage))
+        else {
+            tracing::debug!(
+                host = %self.host,
+                key,
+                "an unversioned save answer arrived for a superseded staging"
+            );
+            return;
+        };
+        if flight.snapshots != snapshots {
+            tracing::debug!(
+                host = %self.host,
+                key,
+                "an unversioned save answer arrived after a resnapshot, which already holds it"
+            );
+            return;
+        }
+        if flight.echoed || (current && echoes.is_empty()) {
+            return;
+        }
+        echoes.push_back(value);
+    }
+
+    fn dispatched(&mut self, key: &str, stage: StageId, value: Value) {
+        let snapshots = self.snapshots;
+        if let Some((flight, _)) = self
+            .staged
+            .get_mut(key)
+            .and_then(|staged| staged.held_by(stage))
+        {
+            *flight = Flight {
+                value,
+                snapshots,
+                echoed: false,
+            };
+        }
+    }
+
+    pub(crate) fn streamed(&mut self, key: &str, value: Value, revision: Seq) {
+        match self.staged.get_mut(key) {
+            Some(Staged::Held { flight, echoes, .. }) => {
+                if echoes.front() == Some(&value) {
+                    echoes.pop_front();
+                } else if flight.value == value {
+                    flight.echoed = true;
+                }
+            }
+            Some(Staged::Echoing { echoes }) => {
+                if echoes.front() == Some(&value) {
+                    echoes.pop_front();
+                }
+                if echoes.is_empty() {
+                    self.staged.remove(key);
+                }
+            }
+            None => {}
+        }
+        self.insert(key, value, revision);
         self.decode(key);
-        previous
+    }
+
+    fn insert(&mut self, key: &str, value: Value, revision: Seq) {
+        let known = self.known(key);
+        if revision <= known {
+            return;
+        }
+        self.revisions.insert(key.to_owned(), revision);
+        self.forge.insert(key.to_owned(), value);
+        self.decode(key);
+    }
+
+    fn stage(&mut self, key: &str, value: Value) -> StageId {
+        self.stages += 1;
+        let stage = StageId(self.stages);
+        let echoes = self
+            .staged
+            .remove(key)
+            .map(Staged::into_echoes)
+            .unwrap_or_default();
+        self.staged.insert(
+            key.to_owned(),
+            Staged::Held {
+                stage,
+                shown: value.clone(),
+                flight: Flight {
+                    value,
+                    snapshots: self.snapshots,
+                    echoed: false,
+                },
+                echoes,
+            },
+        );
+        self.decode(key);
+        stage
+    }
+
+    fn restage(&mut self, key: &str, stage: StageId, value: Value) -> Restaged {
+        match self.staged.get_mut(key) {
+            Some(Staged::Held {
+                stage: held, shown, ..
+            }) if *held == stage => {
+                *shown = value;
+                self.decode(key);
+                Restaged::Shown
+            }
+            Some(Staged::Held { .. } | Staged::Echoing { .. }) | None => Restaged::Superseded,
+        }
+    }
+
+    pub(crate) fn release(&mut self, key: &str, stage: StageId) -> bool {
+        let held = self
+            .staged
+            .get_mut(key)
+            .is_some_and(|staged| staged.held_by(stage).is_some());
+        if held {
+            let echoes = self
+                .staged
+                .remove(key)
+                .map(Staged::into_echoes)
+                .unwrap_or_default();
+            if !echoes.is_empty() {
+                self.staged
+                    .insert(key.to_owned(), Staged::Echoing { echoes });
+            }
+            self.decode(key);
+        }
+        held
+    }
+
+    pub(super) fn staging(
+        &mut self,
+        sender: crate::core::delivery::MappedSender<super::HostCompletion, super::HostMessage>,
+        instance: super::HostInstance,
+        key: &str,
+        value: Value,
+    ) -> Staging {
+        let stage = self.stage(key, value);
+        Staging {
+            sender,
+            host: self.host.clone(),
+            instance,
+            held: Some((key.to_owned(), stage)),
+        }
     }
 
     pub fn mcp_servers(&self) -> Result<&[McpServer], &McpServersError> {
@@ -198,6 +524,22 @@ impl HostSettings {
             .unwrap_or_else(|| switch.declared())
     }
 
+    fn decode_all(&mut self) {
+        for switch in HostSwitch::ALL {
+            self.decode(switch.key());
+        }
+        for key in [
+            MCP_SERVERS_KEY,
+            MCP_AUTH_KEY,
+            DEFAULT_ENGINE_CONFIG_KEY,
+            MODEL_CONFIGS_KEY,
+            MODEL_CUSTOMIZATIONS_KEY,
+            MODEL_GROUPS_KEY,
+        ] {
+            self.decode(key);
+        }
+    }
+
     fn decode(&mut self, key: &str) {
         if let Some(switch) = HostSwitch::of_key(key) {
             let on = self
@@ -210,7 +552,7 @@ impl HostSettings {
             self.switches.insert(switch, on);
             return;
         }
-        let value = self.values.get(key);
+        let value = self.get(key);
         match key {
             MCP_SERVERS_KEY => {
                 self.mcp_servers = match value {
@@ -265,8 +607,7 @@ impl HostSettings {
         &self,
         key: &'static str,
     ) -> Result<Option<T>, HostSettingError> {
-        self.values
-            .get(key)
+        self.get(key)
             .map(|value| {
                 T::deserialize(value).map_err(|source| HostSettingError::Decode {
                     host: self.host.clone(),

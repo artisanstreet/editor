@@ -397,6 +397,11 @@ pub fn setting_decl(key: &str) -> Option<&'static SettingDecl> {
     SETTINGS.iter().find(|decl| decl.key == key)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingSaved {
+    pub revision: crate::Seq,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub enum EditorCall {

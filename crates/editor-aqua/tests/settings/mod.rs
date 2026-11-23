@@ -215,8 +215,13 @@ fn delayed_setting_failure_does_not_rollback_replaced_host() {
     connect_live(&mut core, &config);
     let original = core.host(&config.id).unwrap().instance();
     let host = core.host_mut(&config.id).unwrap();
-    host.settings.insert("suggestions", json!(false));
-    host.settings.insert("summary_titles", json!(false));
+    host.settings.replace(
+        serde_json::Map::from_iter([
+            ("suggestions".to_owned(), json!(false)),
+            ("summary_titles".to_owned(), json!(false)),
+        ]),
+        2,
+    );
     let mut settings = SettingsController::default();
     for key in ["suggestions", "summary_titles"] {
         settings.set_host_setting_for(&mut core, config.id.clone(), original, key, json!(true));
@@ -231,7 +236,10 @@ fn delayed_setting_failure_does_not_rollback_replaced_host() {
     connect_live(&mut core, &config);
     let host = core.host_mut(&config.id).unwrap();
     assert_ne!(host.instance(), original);
-    host.settings.insert("suggestions", json!("replacement"));
+    host.settings.replace(
+        serde_json::Map::from_iter([("suggestions".to_owned(), json!("replacement"))]),
+        1,
+    );
     settings.set_host_setting_for(
         &mut core,
         config.id.clone(),
@@ -634,7 +642,10 @@ fn retention_target(
 
 fn offline(
     target: &editor_aqua::settings::preferences::SettingKey,
-) -> Result<(), editor_aqua::settings::preferences::SaveSettingError> {
+) -> Result<
+    editor_aqua::core::client::SettingAck,
+    editor_aqua::settings::preferences::SaveSettingError,
+> {
     Err(editor_aqua::settings::preferences::SaveSettingError::Send {
         host: target.host.clone(),
         key: target.key,
@@ -645,6 +656,10 @@ fn offline(
     })
 }
 
+const fn saved(revision: u64) -> editor_aqua::core::client::SettingAck {
+    editor_aqua::core::client::SettingAck::Revision(revision)
+}
+
 #[test]
 fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     use editor_aqua::settings::preferences::SettingWrites;
@@ -653,57 +668,169 @@ fn an_older_failed_setting_never_rolls_back_a_newer_choice() {
     let mut core = test_support::editor::core::test_core(dir.path());
     let target = retention_target(&mut core);
     let key = target.key;
-    let mut settings = editor_aqua::core::HostSettings::new(target.host.clone());
-    settings.insert(key, json!(90));
+    let host = core.host_mut(&target.host).unwrap();
+    host.settings
+        .replace(serde_json::Map::from_iter([(key.to_owned(), json!(90))]), 1);
     let mut writes = SettingWrites::default();
 
     let seven = writes
-        .begin(&mut settings, target.clone(), json!(7))
+        .begin(host, target.clone(), json!(7))
         .expect("the first choice is sent");
     assert!(
-        writes
-            .begin(&mut settings, target.clone(), json!(14))
-            .is_none(),
+        writes.begin(host, target.clone(), json!(14)).is_none(),
         "a second choice waits for the first to finish"
     );
     let fourteen = writes
-        .complete(Some(&mut settings), &seven, offline(&target))
+        .complete(Some(host), &seven, offline(&target))
         .expect("the newer choice is sent after the older one finishes");
-    assert_eq!(settings.get(key), Some(&json!(14)));
+    assert_eq!(host.setting(key), Some(&json!(14)));
     assert!(
         writes
-            .complete(Some(&mut settings), &fourteen, Ok(()))
+            .complete(Some(host), &fourteen, Ok(saved(3)))
             .is_none()
     );
-    assert_eq!(settings.get(key), Some(&json!(14)));
+    assert_eq!(host.setting(key), Some(&json!(14)));
 
-    let thirty = writes
-        .begin(&mut settings, target.clone(), json!(30))
-        .expect("sent");
+    let thirty = writes.begin(host, target.clone(), json!(30)).expect("sent");
     assert!(
         writes
-            .complete(Some(&mut settings), &thirty, offline(&target))
+            .complete(Some(host), &thirty, offline(&target))
             .is_none()
     );
     assert_eq!(
-        settings.get(key),
+        host.setting(key),
         Some(&json!(14)),
         "a failure restores the last value Forge accepted"
     );
 
-    let sixty = writes
-        .begin(&mut settings, target.clone(), json!(60))
-        .expect("sent");
-    settings.insert(key, json!(45));
+    let sixty = writes.begin(host, target.clone(), json!(60)).expect("sent");
+    host.settings
+        .replace(serde_json::Map::from_iter([(key.to_owned(), json!(45))]), 5);
     assert!(
         writes
-            .complete(Some(&mut settings), &sixty, offline(&target))
+            .complete(Some(host), &sixty, offline(&target))
             .is_none()
     );
     assert_eq!(
-        settings.get(key),
+        host.setting(key),
         Some(&json!(45)),
         "a failure never overwrites a value Forge reported since"
+    );
+}
+
+#[test]
+fn a_refused_last_choice_falls_back_to_the_earlier_choice_forge_accepted() {
+    use editor_aqua::settings::preferences::SettingWrites;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let target = retention_target(&mut core);
+    let key = target.key;
+    let host = core.host_mut(&target.host).unwrap();
+    host.settings
+        .replace(serde_json::Map::from_iter([(key.to_owned(), json!(90))]), 1);
+    let mut writes = SettingWrites::default();
+    let seven = writes
+        .begin(host, target.clone(), json!(7))
+        .expect("the first choice is sent");
+    assert!(writes.begin(host, target.clone(), json!(14)).is_none());
+    let fourteen = writes
+        .complete(Some(host), &seven, Ok(saved(3)))
+        .expect("the newer choice is sent once the first is saved");
+    assert_eq!(host.setting(key), Some(&json!(14)));
+    assert!(
+        writes
+            .complete(Some(host), &fourteen, offline(&target))
+            .is_none()
+    );
+    assert_eq!(
+        host.setting(key),
+        Some(&json!(7)),
+        "the refused choice falls back to the one Forge accepted, though its echo has not arrived"
+    );
+}
+
+#[test]
+fn a_save_answered_after_a_newer_change_elsewhere_never_hides_that_change() {
+    use editor_aqua::settings::preferences::SettingWrites;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let target = retention_target(&mut core);
+    let key = target.key;
+    let host = core.host_mut(&target.host).unwrap();
+    host.settings
+        .replace(serde_json::Map::from_iter([(key.to_owned(), json!(90))]), 1);
+    let mut writes = SettingWrites::default();
+    let seven = writes
+        .begin(host, target.clone(), json!(7))
+        .expect("the first choice is sent");
+    assert!(writes.begin(host, target.clone(), json!(14)).is_none());
+    host.settings.replace(
+        serde_json::Map::from_iter([(key.to_owned(), json!(30))]),
+        11,
+    );
+    let fourteen = writes
+        .complete(Some(host), &seven, Ok(saved(10)))
+        .expect("the newer choice is sent once the first is saved");
+    assert!(
+        writes
+            .complete(Some(host), &fourteen, offline(&target))
+            .is_none()
+    );
+    assert_eq!(
+        host.setting(key),
+        Some(&json!(30)),
+        "another Editor's later value shows, not our older save Forge answered late"
+    );
+}
+
+#[test]
+fn a_writer_that_goes_away_mid_save_lets_go_of_the_setting() {
+    use editor_aqua::settings::controller::SettingsController;
+    use serde_json::json;
+
+    let dir = tempfile::tempdir().unwrap();
+    let forge = stub_forge();
+    let config = test_support::editor::core::stub_host("gone-writer", "Test Forge", &forge);
+    let mut core = test_support::editor::core::test_core(dir.path());
+    connect_live(&mut core, &config);
+    let instance = core.host(&config.id).unwrap().instance();
+    let mut settings = SettingsController::default();
+    settings.set_host_setting_for(
+        &mut core,
+        config.id.clone(),
+        instance,
+        "suggestions",
+        json!(false),
+    );
+    let _held = forge.take("PUT", "/settings/suggestions");
+    assert_eq!(
+        core.host(&config.id).unwrap().setting("suggestions"),
+        Some(&json!(false))
+    );
+    drop(settings);
+    test_support::wait::wait_until(
+        "the setting to be let go once its writer went away",
+        std::time::Duration::from_secs(10),
+        || {
+            core.drain_with(|_, _| {});
+            core.host(&config.id)
+                .is_some_and(|host| host.setting("suggestions").is_none())
+        },
+    );
+    let mut settings = SettingsController::default();
+    settings.set_host_setting_for(
+        &mut core,
+        config.id.clone(),
+        instance,
+        "suggestions",
+        json!(false),
+    );
+    assert_eq!(
+        core.host(&config.id).unwrap().setting("suggestions"),
+        Some(&json!(false)),
+        "a new settings page can save the setting again"
     );
 }
 
@@ -1080,9 +1207,12 @@ fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
     let dir = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(dir.path());
     let (_silent, id) = silent_host(&mut core, "Desk");
-    core.host_mut(&id).unwrap().settings.insert(
-        "mcp_servers",
-        json!([{"name": "linear", "url": "https://mcp.linear.app/mcp"}]),
+    core.host_mut(&id).unwrap().settings.replace(
+        serde_json::Map::from_iter([(
+            "mcp_servers".to_owned(),
+            json!([{"name": "linear", "url": "https://mcp.linear.app/mcp"}]),
+        )]),
+        1,
     );
     core.navigate(Screen::Settings(SettingsPage::Extensions));
     let mut settings = SettingsController::default();
@@ -1256,4 +1386,333 @@ fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
     let followed = choose("Match system", "Match system");
     assert!((followed.typography.scale - 1.25).abs() < f32::EPSILON);
     assert_eq!(followed.colors.contrast, Contrast::High);
+}
+
+#[test]
+fn a_forge_that_answers_a_save_without_a_revision_still_keeps_the_saved_value() {
+    use artisan_api::Event;
+    use editor_aqua::core::HostSwitch;
+    use editor_aqua::settings::controller::SettingsController;
+    use serde_json::json;
+    use test_support::editor::core::StubbedHost;
+    use test_support::editor::forge::empty_state;
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    let mut settings = SettingsController::default();
+    let host = stubbed.host.clone();
+    let instance = stubbed.host().instance();
+    let key = HostSwitch::Suggestions.key();
+    let suggestions =
+        |stubbed: &StubbedHost| stubbed.host().settings.switch(HostSwitch::Suggestions);
+
+    settings.set_host_setting_for(&mut stubbed.core, host, instance, key, json!(false));
+    stubbed
+        .take("PUT", &format!("/settings/{key}"))
+        .no_content();
+    test_support::wait::wait_until(
+        "the save to be answered",
+        std::time::Duration::from_secs(10),
+        || {
+            stubbed.core.drain_with(|_, _| {});
+            settings.drain(&mut stubbed.core)
+        },
+    );
+    assert!(
+        !suggestions(&stubbed),
+        "an older Forge's empty answer reads as a save, not as a failure"
+    );
+    stubbed.forge.publish(Event::Setting {
+        key: key.into(),
+        value: json!(false),
+    });
+    stubbed.forge.publish(Event::Setting {
+        key: key.into(),
+        value: json!(true),
+    });
+    stubbed.apply_published();
+    assert!(
+        suggestions(&stubbed),
+        "a change Forge streams after the save shows"
+    );
+}
+
+#[test]
+fn an_older_forge_answering_late_never_hides_a_change_made_elsewhere() {
+    use artisan_api::Event;
+    use editor_aqua::core::HostSwitch;
+    use editor_aqua::settings::controller::SettingsController;
+    use serde_json::json;
+    use test_support::editor::core::StubbedHost;
+    use test_support::editor::forge::empty_state;
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    let mut settings = SettingsController::default();
+    let host = stubbed.host.clone();
+    let instance = stubbed.host().instance();
+    let key = HostSwitch::Suggestions.key();
+    let suggestions =
+        |stubbed: &StubbedHost| stubbed.host().settings.switch(HostSwitch::Suggestions);
+
+    settings.set_host_setting_for(&mut stubbed.core, host, instance, key, json!(false));
+    let request = stubbed.take("PUT", &format!("/settings/{key}"));
+    stubbed.forge.publish(Event::Setting {
+        key: key.into(),
+        value: json!(false),
+    });
+    stubbed.forge.publish(Event::Setting {
+        key: key.into(),
+        value: json!(true),
+    });
+    stubbed.apply_published();
+    assert!(
+        !suggestions(&stubbed),
+        "the choice being saved shows until Forge answers"
+    );
+    request.no_content();
+    test_support::wait::wait_until(
+        "the save to be answered",
+        std::time::Duration::from_secs(10),
+        || {
+            stubbed.core.drain_with(|_, _| {});
+            settings.drain(&mut stubbed.core)
+        },
+    );
+    assert!(
+        suggestions(&stubbed),
+        "another Editor's change streamed before the older Forge's empty answer stays on screen"
+    );
+}
+
+#[test]
+fn an_older_setting_echo_never_undoes_a_newer_toggle() {
+    use artisan_api::Event;
+    use editor_aqua::core::HostSwitch;
+    use editor_aqua::settings::controller::SettingsController;
+    use serde_json::json;
+    use test_support::editor::core::StubbedHost;
+    use test_support::editor::forge::empty_state;
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    stubbed.apply_published();
+    let mut settings = SettingsController::default();
+    let host = stubbed.host.clone();
+    let instance = stubbed.host().instance();
+    let key = HostSwitch::Suggestions.key();
+    let path = format!("/settings/{key}");
+    let suggestions =
+        |stubbed: &StubbedHost| stubbed.host().settings.switch(HostSwitch::Suggestions);
+
+    settings.set_host_setting_for(&mut stubbed.core, host.clone(), instance, key, json!(false));
+    let off = stubbed.take("PUT", &path);
+    settings.set_host_setting_for(&mut stubbed.core, host, instance, key, json!(true));
+    let off_saved = stubbed.forge.publish(Event::Setting {
+        key: key.into(),
+        value: json!(false),
+    });
+    stubbed.apply_published();
+    assert!(
+        suggestions(&stubbed),
+        "Forge's echo of the first toggle leaves the second one on screen"
+    );
+
+    off.respond(artisan_api::SettingSaved {
+        revision: off_saved,
+    });
+    let on = test_support::wait::wait_for(
+        "the second toggle to be sent",
+        std::time::Duration::from_secs(10),
+        || {
+            stubbed.core.drain_with(|_, _| {});
+            settings.drain(&mut stubbed.core);
+            stubbed.forge.try_take("PUT", &path)
+        },
+    );
+    assert_eq!(on.json::<serde_json::Value>(), json!(true));
+    assert!(
+        suggestions(&stubbed),
+        "the first toggle saving leaves the second one on screen"
+    );
+
+    let on_saved = stubbed.forge.head() + 1;
+    on.respond(artisan_api::SettingSaved { revision: on_saved });
+    test_support::wait::wait_until(
+        "the second toggle saves",
+        std::time::Duration::from_secs(10),
+        || {
+            stubbed.core.drain_with(|_, _| {});
+            settings.drain(&mut stubbed.core)
+        },
+    );
+    assert!(
+        suggestions(&stubbed),
+        "the saved toggle shows before Forge's echo of it arrives"
+    );
+    assert_eq!(
+        stubbed.forge.publish(Event::Setting {
+            key: key.into(),
+            value: json!(true),
+        }),
+        on_saved
+    );
+    stubbed.apply_published();
+    assert!(suggestions(&stubbed));
+
+    stubbed.forge.publish(Event::Setting {
+        key: key.into(),
+        value: json!(false),
+    });
+    stubbed.apply_published();
+    assert!(
+        !suggestions(&stubbed),
+        "once nothing is saving, a change made elsewhere shows"
+    );
+}
+
+#[test]
+fn an_older_forge_answering_both_toggles_before_either_echo_keeps_the_last_choice() {
+    use artisan_api::Event;
+    use editor_aqua::core::HostSwitch;
+    use editor_aqua::settings::controller::SettingsController;
+    use serde_json::json;
+    use test_support::editor::core::StubbedHost;
+    use test_support::editor::forge::empty_state;
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    let mut settings = SettingsController::default();
+    let host = stubbed.host.clone();
+    let instance = stubbed.host().instance();
+    let key = HostSwitch::Suggestions.key();
+    let path = format!("/settings/{key}");
+    let suggestions =
+        |stubbed: &StubbedHost| stubbed.host().settings.switch(HostSwitch::Suggestions);
+
+    settings.set_host_setting_for(&mut stubbed.core, host.clone(), instance, key, json!(false));
+    let off = stubbed.take("PUT", &path);
+    settings.set_host_setting_for(&mut stubbed.core, host, instance, key, json!(true));
+    off.no_content();
+    test_support::wait::wait_for(
+        "the second toggle to be sent",
+        std::time::Duration::from_secs(10),
+        || {
+            stubbed.core.drain_with(|_, _| {});
+            settings.drain(&mut stubbed.core);
+            stubbed.forge.try_take("PUT", &path)
+        },
+    )
+    .no_content();
+    test_support::wait::wait_until(
+        "the second toggle to be answered",
+        std::time::Duration::from_secs(10),
+        || {
+            stubbed.core.drain_with(|_, _| {});
+            settings.drain(&mut stubbed.core)
+        },
+    );
+    assert!(
+        suggestions(&stubbed),
+        "the last choice shows once both are saved"
+    );
+    for (value, after) in [(false, true), (true, true)] {
+        stubbed.forge.publish(Event::Setting {
+            key: key.into(),
+            value: json!(value),
+        });
+        stubbed.apply_published();
+        assert_eq!(
+            suggestions(&stubbed),
+            after,
+            "each echo, delivered on its own, leaves the last choice on screen"
+        );
+    }
+    stubbed.forge.publish(Event::Setting {
+        key: key.into(),
+        value: json!(false),
+    });
+    stubbed.apply_published();
+    assert!(
+        !suggestions(&stubbed),
+        "after both echoes, a change made elsewhere shows"
+    );
+}
+
+#[test]
+fn a_queued_save_sent_after_a_change_elsewhere_shows_when_an_older_forge_answers_it() {
+    use artisan_api::Event;
+    use editor_aqua::settings::preferences::{SettingKey, SettingWrites};
+    use serde_json::json;
+    use test_support::editor::core::StubbedHost;
+    use test_support::editor::forge::empty_state;
+    let mut stubbed = StubbedHost::start(empty_state(), axum::Router::new());
+    let target = SettingKey {
+        host: stubbed.host.clone(),
+        instance: stubbed.host().instance(),
+        key: "thread_note",
+    };
+    let mut writes = SettingWrites::default();
+    let seven = writes
+        .begin(stubbed.host_mut(), target.clone(), json!(7))
+        .expect("the first choice is sent");
+    assert!(
+        writes
+            .begin(stubbed.host_mut(), target.clone(), json!(14))
+            .is_none(),
+        "the second choice waits for the first"
+    );
+    stubbed.forge.publish(Event::Setting {
+        key: target.key.into(),
+        value: json!(30),
+    });
+    stubbed.apply_published();
+    let fourteen = writes
+        .complete(Some(stubbed.host_mut()), &seven, offline(&target))
+        .expect("the queued choice is sent after the first fails");
+    assert!(
+        writes
+            .complete(
+                Some(stubbed.host_mut()),
+                &fourteen,
+                Ok(editor_aqua::core::client::SettingAck::Unversioned)
+            )
+            .is_none()
+    );
+    assert_eq!(
+        stubbed.host().setting(target.key),
+        Some(&json!(14)),
+        "the queued save was sent after the other change, so Forge holds it"
+    );
+    stubbed.forge.publish(Event::Setting {
+        key: target.key.into(),
+        value: json!(14),
+    });
+    stubbed.apply_published();
+    assert_eq!(stubbed.host().setting(target.key), Some(&json!(14)));
+}
+
+#[test]
+fn a_second_writer_staging_the_same_setting_hands_over_instead_of_crashing() {
+    use editor_aqua::settings::preferences::SettingWrites;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    let target = retention_target(&mut core);
+    let key = target.key;
+    let host = core.host_mut(&target.host).unwrap();
+    let mut first = SettingWrites::default();
+    let mut second = SettingWrites::default();
+    let seven = first
+        .begin(host, target.clone(), json!(7))
+        .expect("the first writer sends");
+    let _fourteen = second
+        .begin(host, target.clone(), json!(14))
+        .expect("the second writer sends");
+    assert!(
+        first.begin(host, target.clone(), json!(30)).is_none(),
+        "the first writer's next choice waits for its own save"
+    );
+    assert_eq!(
+        host.setting(key),
+        Some(&json!(30)),
+        "the newest choice shows although another writer staged the setting in between"
+    );
+    assert!(
+        first.complete(Some(host), &seven, Ok(saved(3))).is_some(),
+        "the first writer sends its newest choice next"
+    );
+    assert_eq!(host.setting(key), Some(&json!(30)));
 }

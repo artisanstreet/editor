@@ -79,6 +79,8 @@ pub enum SessionError {
     FrameTooLarge { limit: usize },
     #[error("Forge sent an invalid event; resnapshot required")]
     InvalidEvent(#[source] serde_json::Error),
+    #[error("Forge streamed setting {key} without its revision; resnapshot required")]
+    UnsequencedSetting { key: String },
     #[error("Forge's event protocol changed to {protocol}; update Forge or the Editor")]
     ProtocolChanged { protocol: u32 },
     #[error("subscribe to Forge's events through the Relay")]
@@ -113,6 +115,7 @@ impl SessionError {
             | Self::Silent { .. }
             | Self::FrameTooLarge { .. }
             | Self::InvalidEvent(_)
+            | Self::UnsequencedSetting { .. }
             | Self::RelayEvent(_)
             | Self::Encode(_) => None,
         }
@@ -465,6 +468,10 @@ async fn admit(
         return Err(SessionError::ProtocolChanged {
             protocol: *protocol,
         });
+    }
+    if let (Event::Setting { key, .. }, None) = (&envelope.event, envelope.seq) {
+        *since = None;
+        return Err(SessionError::UnsequencedSetting { key: key.clone() });
     }
     let permits = admission_bytes(bytes).inspect_err(|_too_large| *since = None)?;
     let permit = tokio::select! {

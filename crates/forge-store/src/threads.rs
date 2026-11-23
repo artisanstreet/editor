@@ -251,9 +251,9 @@ impl Store {
     }
 
     pub async fn state(&self) -> Result<Snapshot, StateError> {
-        let head = self.head();
         self.read(move |conn| {
             let tx = conn.unchecked_transaction().at("begin a read snapshot")?;
+            let head = read::max_seq(&tx)?;
             let snapshot = snapshot(&tx, head)?;
             tx.commit().at("end the read snapshot")?;
             Ok(snapshot)

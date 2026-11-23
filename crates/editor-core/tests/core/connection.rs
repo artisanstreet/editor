@@ -251,3 +251,73 @@ fn opening_another_thread_after_a_recovered_drop_does_not_report_a_lost_connecti
         );
     });
 }
+
+async fn hello_then_unsequenced_setting() -> Response {
+    let setting = Envelope {
+        seq: None,
+        live_revision: 0,
+        event: Event::Setting {
+            key: "suggestions".into(),
+            value: serde_json::json!(false),
+        },
+    };
+    event_stream(
+        [
+            hello(),
+            serde_json::to_string(&setting).expect("encode the setting"),
+        ],
+        StreamEnd::Hang,
+    )
+}
+
+#[test]
+fn a_setting_streamed_without_its_revision_is_refused_and_resnapshots() {
+    current_thread(Duration::from_secs(20), async {
+        let mut follower = Follower::start(
+            axum::Router::new().route(
+                "/events",
+                axum::routing::get(hello_then_unsequenced_setting),
+            ),
+            Deadlines::FORGE,
+        )
+        .await;
+        let reason = loop {
+            match follower
+                .updates
+                .recv()
+                .await
+                .expect("the connection keeps running")
+            {
+                Update::Event(envelope, _) => assert!(
+                    !matches!(envelope.event, Event::Setting { .. }),
+                    "an unsequenced setting never reaches the host"
+                ),
+                Update::Status(ConnectionStatus::Offline { reason, .. }) => break reason,
+                Update::Status(_) | Update::State(_) => {}
+            }
+        };
+        assert!(
+            reason
+                .detail()
+                .is_some_and(|detail| detail.contains("setting suggestions without its revision")),
+            "the reason names the setting: {reason:?}"
+        );
+        follower.retry.notify_one();
+        let resnapshot = loop {
+            match follower
+                .updates
+                .recv()
+                .await
+                .expect("the connection keeps running")
+            {
+                Update::State(_) => break true,
+                Update::Status(ConnectionStatus::Offline { .. }) => break false,
+                Update::Status(_) | Update::Event(..) => {}
+            }
+        };
+        assert!(
+            resnapshot,
+            "the next connection starts from a fresh snapshot"
+        );
+    });
+}
