@@ -513,7 +513,10 @@ fn model_trigger_shows_context_and_default_or_fixed_effort() {
         model: Some(model.id.clone()),
         ..artisan_api::EngineConfig::new(artisan_api::EngineId::Antigravity)
     };
-    assert_eq!(super::model_details(&config, Some(&model)), ["128K", "Medium"]);
+    assert_eq!(
+        super::model_details(&config, Some(&model)),
+        ["128K", "Medium"]
+    );
 }
 
 #[test]
@@ -533,7 +536,8 @@ fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
         fingerprint: fingerprint(identity.certificate_der().unwrap().as_ref()),
         kind: HostKind::Local,
     };
-    let client = ForgeClient::new(&host_config.address, &host_config.fingerprint, &identity).unwrap();
+    let client =
+        ForgeClient::new(&host_config.address, &host_config.fingerprint, &identity).unwrap();
     test_support::editor::core::connect_client(&mut core, &host_config, client);
     let host = core.host_mut(&host_config.id).unwrap();
     host.engines.insert(
@@ -587,13 +591,22 @@ fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
         ..artisan_api::EngineConfig::new(artisan_api::EngineId::Antigravity)
     };
     let gpt_items = super::model_menu::model_menu_items(host, &picker, Some(gpt));
-    let effort = gpt_items.iter().find(|item| item.pane == Some(Axis::Thinking)).unwrap();
+    let effort = gpt_items
+        .iter()
+        .find(|item| item.pane == Some(Axis::Thinking))
+        .unwrap();
     assert_eq!(effort.value, "Medium");
     assert!(effort.locked);
-    let context = gpt_items.iter().find(|item| item.pane == Some(Axis::Context)).unwrap();
+    let context = gpt_items
+        .iter()
+        .find(|item| item.pane == Some(Axis::Context))
+        .unwrap();
     assert_eq!(context.value, "128K");
     assert!(context.locked);
-    let permission = gpt_items.iter().find(|item| item.pane == Some(Axis::Permission)).unwrap();
+    let permission = gpt_items
+        .iter()
+        .find(|item| item.pane == Some(Axis::Permission))
+        .unwrap();
     assert!(!permission.locked);
 
     let argon = artisan_api::EngineConfig {
@@ -601,10 +614,16 @@ fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
         ..artisan_api::EngineConfig::new(artisan_api::EngineId::Antigravity)
     };
     let argon_items = super::model_menu::model_menu_items(host, &picker, Some(argon));
-    let effort = argon_items.iter().find(|item| item.pane == Some(Axis::Thinking)).unwrap();
+    let effort = argon_items
+        .iter()
+        .find(|item| item.pane == Some(Axis::Thinking))
+        .unwrap();
     assert_eq!(effort.value, "Default");
     assert!(!effort.locked);
-    let context = argon_items.iter().find(|item| item.pane == Some(Axis::Context)).unwrap();
+    let context = argon_items
+        .iter()
+        .find(|item| item.pane == Some(Axis::Context))
+        .unwrap();
     assert_eq!(context.value, "1M");
     assert!(context.locked);
 }

@@ -415,7 +415,10 @@ fn antigravity_models_receive_context_windows_from_the_models_dev_digest() {
         ..Listing::default()
     };
     enrich_antigravity(&mut listing, Some(&digest));
-    assert_eq!(model(&listing, "gemini-4-neon").context_window, Some(1_048_576));
+    assert_eq!(
+        model(&listing, "gemini-4-neon").context_window,
+        Some(1_048_576)
+    );
     assert_eq!(
         model(&listing, "gemini-4-neon").context_windows,
         [ContextWindow {
@@ -423,7 +426,10 @@ fn antigravity_models_receive_context_windows_from_the_models_dev_digest() {
             override_tokens: None
         }]
     );
-    assert_eq!(model(&listing, "claude-opus-5-5").context_window, Some(1_000_000));
+    assert_eq!(
+        model(&listing, "claude-opus-5-5").context_window,
+        Some(1_000_000)
+    );
     assert_eq!(
         model(&listing, "gpt-oss-120b-medium").context_window,
         Some(131_072)

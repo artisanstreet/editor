@@ -1378,21 +1378,24 @@ fn models_dev_digest(catalog: &Value) -> Value {
                 .and_then(Value::as_u64)
                 .filter(|tokens| (1..=100_000_000).contains(tokens));
             if let Some(context) = context {
-                let key = canonical
-                    .map(str::to_ascii_lowercase)
-                    .unwrap_or_else(|| format!("{provider}/{id}").to_ascii_lowercase());
+                let key = canonical.map_or_else(
+                    || format!("{provider}/{id}").to_ascii_lowercase(),
+                    str::to_ascii_lowercase,
+                );
                 let first_party = key
                     .split_once('/')
                     .is_some_and(|(owner, _)| owner == provider.as_str());
                 contexts
                     .entry(key)
-                    .and_modify(|(existing_first_party, existing)| match (*existing_first_party, first_party) {
-                        (false, true) => {
-                            *existing_first_party = true;
-                            *existing = context;
+                    .and_modify(|(existing_first_party, existing)| {
+                        match (*existing_first_party, first_party) {
+                            (false, true) => {
+                                *existing_first_party = true;
+                                *existing = context;
+                            }
+                            (true, false) => {}
+                            _ => *existing = (*existing).max(context),
                         }
-                        (true, false) => {}
-                        _ => *existing = (*existing).max(context),
                     })
                     .or_insert((first_party, context));
             }
