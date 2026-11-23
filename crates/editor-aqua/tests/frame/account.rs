@@ -38,7 +38,7 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
     use aqua_ui::{element::Box as UiBox, popup::PopupFocus, style::Style, tree::NodeKind};
     use artisan_api::{EngineId, UsageCadence};
     use editor_aqua::frame::account::{Account, Sheet, menu};
-    use editor_aqua::frame::limits::{EngineLimits, Limit};
+    use editor_aqua::frame::limits::{EngineLimits, Gauge, Limit};
     use editor_aqua::frame::menu::Menu;
     use editor_aqua::ui::{
         popover::{AnimatedPickerHost, PickerEntrance},
@@ -80,13 +80,13 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
         avatar: None,
         limits: vec![EngineLimits {
             engine: EngineId::Claude,
-            limits: vec![Limit {
+            gauge: Gauge::Meters(vec![Limit {
                 label: "Weekly".into(),
                 cadence: UsageCadence::Week,
                 scope: None,
                 used_percent: 40.0,
                 resets_at: None,
-            }],
+            }]),
         }],
     };
     let state = Menu::default();

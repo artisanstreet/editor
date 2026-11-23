@@ -1,5 +1,5 @@
 use crate::ui::hint_card::Phrase;
-use artisan_api::{EngineId, Timestamp, UsageCadence, UsageLimits, UsageWindow};
+use artisan_api::{EngineId, SpendLine, Timestamp, UsageCadence, UsageLimits, UsageWindow};
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
@@ -24,7 +24,16 @@ pub enum Outlook {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineLimits {
     pub engine: EngineId,
-    pub limits: Vec<Limit>,
+    pub gauge: Gauge,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Gauge {
+    Meters(Vec<Limit>),
+    Spend {
+        headline: SpendLine,
+        periods: Vec<SpendLine>,
+    },
 }
 
 #[must_use]
@@ -33,11 +42,39 @@ pub fn resolve<'a>(
 ) -> Vec<EngineLimits> {
     reports
         .into_iter()
-        .map(|(engine, usage)| EngineLimits {
-            engine,
-            limits: essentials(engine, usage),
+        .filter_map(|(engine, usage)| {
+            let meters = essentials(engine, usage);
+            let gauge = if meters.is_empty() {
+                let periods = usage.spend.as_ref()?.periods.clone();
+                Gauge::Spend {
+                    headline: periods.last()?.clone(),
+                    periods,
+                }
+            } else {
+                Gauge::Meters(meters)
+            };
+            Some(EngineLimits { engine, gauge })
         })
-        .filter(|engine| !engine.limits.is_empty())
+        .collect()
+}
+
+#[must_use]
+pub fn dollars(cost_usd: f64) -> String {
+    format!("${cost_usd:.2}")
+}
+
+#[must_use]
+pub fn spend_explanation(periods: &[SpendLine]) -> Vec<Phrase> {
+    periods
+        .iter()
+        .enumerate()
+        .flat_map(|(index, period)| {
+            let lead = if index == 0 { "" } else { " · " };
+            [
+                Phrase::Muted(format!("{lead}{} ", period.label)),
+                Phrase::Strong(dollars(period.cost_usd)),
+            ]
+        })
         .collect()
 }
 
