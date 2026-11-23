@@ -1,3 +1,4 @@
+mod brain;
 mod decoder;
 mod protocol;
 #[cfg(test)]
@@ -18,20 +19,19 @@ use protocol::{ConfigOption, Frame, Opened, Prompted, StopReason};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use wake::Wake;
+use std::time::{Duration, Instant};
+use wake::{Due, Wake};
 
 pub(crate) const GEMINI_DIR: &str = ".gemini";
 pub(crate) const LOGIN_ARGS: &[&str] = &["acp", "--login"];
 const SERVE: &str = "acp";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(90);
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
-const WAKE_GRACE: Duration = Duration::from_secs(180);
-const REPLY_SETTLE: Duration = Duration::from_secs(3);
 const AUTO_MODE: &str = "auto";
 const ASKING_MODE: &str = "default";
 const QUOTA_MARKERS: [&str; 3] = ["QUOTA_EXHAUSTED", "RESOURCE_EXHAUSTED", "quota"];
 const SIGN_IN: &str = "Sign in to Antigravity in Settings, then send the message again.";
+const SILENT: &str = "Antigravity stopped responding for 15 minutes, so Forge stopped the turn.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
@@ -420,24 +420,25 @@ async fn drive(
     };
     prompt(connection, &session, &mut state, decoder, io, &turn.input).await?;
     let cancel = io.cancel.clone();
+    let gemini_dir = turn.home.join(GEMINI_DIR);
     loop {
         let settled = state.prompts.is_empty() && !decoder.waiting();
-        let quiet_for = match decoder.wake() {
-            _ if !settled => None,
-            Wake::Quiet => match io.inbox.try_recv() {
+        if settled && decoder.wake() == Wake::Quiet {
+            match io.inbox.try_recv() {
                 Ok(input) => {
                     input_arrived(connection, &mut session, &mut state, decoder, io, input).await?;
                     continue;
                 }
                 Err(_) => return Ok(state.outcome),
-            },
-            Wake::Waking => Some(WAKE_GRACE),
-            Wake::Replied => Some(REPLY_SETTLE),
-            Wake::Prompted | Wake::Jobs | Wake::Replying => None,
-        };
+            }
+        }
+        let due = decoder.due();
         let lull = async {
-            match quiet_for {
-                Some(duration) => tokio::time::sleep(duration).await,
+            match due {
+                Some((at, due)) => {
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+                    due
+                }
                 None => std::future::pending().await,
             }
         };
@@ -450,7 +451,38 @@ async fn drive(
             frame = connection.frame() => {
                 frame_arrived(connection, &mut state, decoder, io, frame?).await?;
             }
-            () = lull => emit_all(io, decoder.lapse()).await,
+            due = lull => match due {
+                Due::Probe => {
+                    let pending = pending_wake(&gemini_dir, &session.id).await;
+                    emit_all(io, decoder.probed(pending, Instant::now())).await;
+                }
+                Due::Lapse => emit_all(io, decoder.lapse(Instant::now())).await,
+                Due::Abandon => {
+                    tracing::warn!(
+                        thread = %turn.thread_id,
+                        session = session.id,
+                        silence_secs = wake::PROMPT_SILENCE.as_secs(),
+                        "Antigravity went silent mid-prompt; stopping it"
+                    );
+                    stop(connection, &session, &mut state, decoder, io).await?;
+                    return Ok(Outcome::failed(SILENT));
+                }
+            },
+        }
+    }
+}
+
+async fn pending_wake(gemini_dir: &Path, session: &str) -> bool {
+    match brain::pending_wake(gemini_dir, session).await {
+        Ok(pending) => pending,
+        Err(failure) => {
+            let error: &dyn std::error::Error = &failure;
+            tracing::warn!(
+                session,
+                error,
+                "couldn't read Antigravity's queued wakes; waiting for one"
+            );
+            true
         }
     }
 }
@@ -471,7 +503,7 @@ async fn prompt(
         )
         .await?;
     state.prompts.insert(id, input.id.clone());
-    emit_all(io, decoder.prompted()).await;
+    emit_all(io, decoder.prompted(Instant::now())).await;
     io.emit(EngineEvent::InputAccepted {
         id: input.id.clone(),
     })
@@ -521,7 +553,7 @@ async fn input_arrived(
 ) -> Result<(), RunError> {
     match input {
         Input::Steer(input) => prompt(connection, session, state, decoder, io, &input).await?,
-        Input::Answer { key, answer } => match decoder.answer(&key, &answer) {
+        Input::Answer { key, answer } => match decoder.answer(&key, &answer, Instant::now()) {
             Answered::Reply {
                 rpc,
                 result,
@@ -578,7 +610,7 @@ async fn frame_arrived(
                 Ok(value) => {
                     let prompted: Prompted = answer("session/prompt", value)?;
                     let superseded = !state.prompts.is_empty();
-                    emit_all(io, decoder.ended(&prompted, superseded)).await;
+                    emit_all(io, decoder.ended(&prompted, superseded, Instant::now())).await;
                     if !superseded {
                         state.outcome = stopped(prompted.stop_reason);
                     }
@@ -595,9 +627,9 @@ async fn frame_arrived(
                 }
             }
         }
-        Frame::Update { update, .. } => emit_all(io, decoder.update(*update)).await,
+        Frame::Update { update, .. } => emit_all(io, decoder.update(*update, Instant::now())).await,
         Frame::Permission { id, request } => {
-            match decoder.permission(id, *request, state.permissions) {
+            match decoder.permission(id, *request, state.permissions, Instant::now()) {
                 Permitted::Ask(events) => emit_all(io, events).await,
                 Permitted::Reply {
                     rpc,
@@ -609,7 +641,7 @@ async fn frame_arrived(
                 }
             }
         }
-        Frame::Form { id, request } => match decoder.form(id, *request) {
+        Frame::Form { id, request } => match decoder.form(id, *request, Instant::now()) {
             Formed::Asked(events) => emit_all(io, events).await,
             Formed::Refused {
                 rpc,

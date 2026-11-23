@@ -3,7 +3,7 @@ use super::protocol::{
     PermissionOption, PermissionRequest, PlanStatus, Prompted, StopReason, ToolContent,
     ToolKind as WireKind, ToolStatus, TurnUsage, dismissed, selected, submitted, withdrawn,
 };
-use super::wake::{Seen, Wake};
+use super::wake::{Due, Hold, Seen, Wake};
 use crate::harness::{EngineEvent, LiveKind};
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Decision, FileChange, FileOp, ItemKind, Output, Permissions,
@@ -11,7 +11,8 @@ use artisan_api::{
     ToolKind, Usage,
 };
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 const COMMAND_KEYS: [&str; 4] = ["CommandLine", "commandLine", "command_line", "command"];
 const CWD_KEYS: [&str; 5] = [
@@ -40,6 +41,7 @@ const OUTPUT_KEYS: [&str; 4] = [
 const EXIT_KEYS: [&str; 2] = ["exitCode", "exit_code"];
 const DAEMON_KEYS: [&str; 2] = ["IsDaemon", "isDaemon"];
 const COMMAND_OUTPUT: &str = "Command output:\n";
+const SCHEDULE_TITLES: [&str; 2] = ["Run schedule", "Running schedule"];
 
 #[derive(Debug, Default)]
 pub(super) struct Decoder {
@@ -53,8 +55,8 @@ pub(super) struct Decoder {
     model: Option<String>,
     commands: Option<Vec<artisan_api::SlashCommand>>,
     usage: Usage,
-    jobs: BTreeSet<String>,
     wake: Wake,
+    waiting_on_hold: bool,
 }
 
 #[derive(Debug)]
@@ -67,7 +69,26 @@ struct Text {
 struct Tool {
     status: Status,
     kind: ItemKind,
-    daemon: bool,
+    lifetime: Lifetime,
+    backgrounded: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lifetime {
+    Turn,
+    Command,
+    Daemon,
+    Schedule,
+}
+
+impl Tool {
+    fn holds(&self) -> Option<Hold> {
+        match (self.lifetime, self.status) {
+            (Lifetime::Schedule, status) if !status.is_terminal() => Some(Hold::Schedule),
+            (Lifetime::Command, Status::Running) => Some(Hold::Commands),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -130,31 +151,28 @@ pub(super) enum Answered {
 }
 
 impl Decoder {
-    pub(super) fn update(&mut self, update: Change) -> Vec<EngineEvent> {
+    pub(super) fn update(&mut self, update: Change, now: Instant) -> Vec<EngineEvent> {
         let mut out = Vec::new();
+        self.see(Seen::Progress, now, &mut out);
         match update {
             Change::AgentMessageChunk { content } => {
                 if let Some(text) = content.text() {
-                    self.see(Seen::Activity, &mut out);
+                    if self.wake.reply_closed() {
+                        self.close_text(&mut out);
+                    }
+                    self.see(Seen::Output, now, &mut out);
                     self.text(text, &mut out);
                 }
             }
             Change::AgentThoughtChunk { content } => {
                 if let Some(text) = content.text() {
-                    self.see(Seen::Activity, &mut out);
+                    self.see(Seen::Output, now, &mut out);
                     self.think(text, &mut out);
                 }
             }
-            Change::Call(call) | Change::ToolCallUpdate(call) => {
-                if !self.jobs.contains(&call.tool_call_id) {
-                    self.see(Seen::Activity, &mut out);
-                    self.close_text(&mut out);
-                    self.thinking = false;
-                }
-                self.tool(&call, &mut out);
-            }
+            Change::Call(call) | Change::ToolCallUpdate(call) => self.call(&call, now, &mut out),
             Change::Plan { entries } => {
-                self.see(Seen::Activity, &mut out);
+                self.see(Seen::Output, now, &mut out);
                 let key = self.plan.get_or_insert_with(|| {
                     self.plans += 1;
                     format!("plan:{}", self.plans)
@@ -206,13 +224,14 @@ impl Decoder {
                     self.usage.cost_usd = Some(cost.amount);
                 }
                 out.push(EngineEvent::Usage(self.usage.clone()));
-                self.see(Seen::StepEnded, &mut out);
+                self.step_ended(now, &mut out);
             }
             Change::UserMessageChunk { .. }
             | Change::CurrentModeUpdate { .. }
             | Change::SessionInfoUpdate { .. }
             | Change::Unknown => {}
         }
+        self.announce(&mut out);
         out
     }
 
@@ -234,13 +253,14 @@ impl Decoder {
         rpc: Value,
         request: PermissionRequest,
         permissions: Permissions,
+        now: Instant,
     ) -> Permitted {
         let PermissionRequest {
             tool_call, options, ..
         } = request;
         let key = tool_call.tool_call_id.clone();
         let mut out = Vec::new();
-        self.see(Seen::Activity, &mut out);
+        self.see(Seen::Output, now, &mut out);
         self.close_text(&mut out);
         self.thinking = false;
         if permissions == Permissions::Full
@@ -279,9 +299,9 @@ impl Decoder {
         Permitted::Ask(out)
     }
 
-    pub(super) fn form(&mut self, rpc: Value, request: FormRequest) -> Formed {
+    pub(super) fn form(&mut self, rpc: Value, request: FormRequest, now: Instant) -> Formed {
         let mut out = Vec::new();
-        self.see(Seen::Activity, &mut out);
+        self.see(Seen::Output, now, &mut out);
         self.close_text(&mut out);
         self.thinking = false;
         let (questions, fields) = match questions(&request) {
@@ -319,7 +339,8 @@ impl Decoder {
                     answers: None,
                     answer_text: None,
                 },
-                daemon: false,
+                lifetime: Lifetime::Turn,
+                backgrounded: false,
             },
         );
         self.pending
@@ -328,7 +349,7 @@ impl Decoder {
         Formed::Asked(out)
     }
 
-    pub(super) fn answer(&mut self, key: &str, answer: &Answer) -> Answered {
+    pub(super) fn answer(&mut self, key: &str, answer: &Answer, now: Instant) -> Answered {
         let Some(pending) = self.pending.get(key) else {
             return Answered::Unexpected;
         };
@@ -351,6 +372,7 @@ impl Decoder {
             return Answered::Unexpected;
         };
         let mut events = Vec::new();
+        self.see(Seen::Output, now, &mut events);
         if let Some(tool) = self.tools.get_mut(key) {
             tool.status = match (&mut tool.kind, answer) {
                 (
@@ -401,7 +423,12 @@ impl Decoder {
         }
     }
 
-    pub(super) fn ended(&mut self, prompted: &Prompted, superseded: bool) -> Vec<EngineEvent> {
+    pub(super) fn ended(
+        &mut self,
+        prompted: &Prompted,
+        superseded: bool,
+        now: Instant,
+    ) -> Vec<EngineEvent> {
         let mut out = Vec::new();
         if let Some(usage) = &prompted.usage {
             self.add_usage(usage);
@@ -414,12 +441,12 @@ impl Decoder {
         if cancelled {
             out.extend(self.settle_open(Status::Cancelled));
         }
-        self.adopt_jobs();
+        let hold = self.hold();
         if let Some(text) = self.text.take() {
-            let (status, phase) = match (cancelled, self.jobs.is_empty()) {
+            let (status, phase) = match (cancelled, hold) {
                 (true, _) => (Status::Cancelled, Phase::Commentary),
-                (false, false) => (Status::Done, Phase::Commentary),
-                (false, true) => (Status::Done, Phase::Final),
+                (false, Hold::Commands | Hold::Schedule) => (Status::Done, Phase::Commentary),
+                (false, Hold::Free) => (Status::Done, Phase::Final),
             };
             out.insert(0, text_item(text, status, phase));
         }
@@ -430,19 +457,21 @@ impl Decoder {
                 status: Status::Done,
             });
         }
-        self.see(Seen::PromptEnded, &mut out);
+        let lingers =
+            !cancelled && (hold != Hold::Free || self.tools.values().any(|tool| tool.backgrounded));
+        self.see(Seen::PromptEnded { lingers }, now, &mut out);
         out
     }
 
-    pub(super) fn prompted(&mut self) -> Vec<EngineEvent> {
+    pub(super) fn prompted(&mut self, now: Instant) -> Vec<EngineEvent> {
         let mut out = Vec::new();
-        self.see(Seen::PromptSent, &mut out);
+        self.see(Seen::PromptSent, now, &mut out);
         out
     }
 
     pub(super) fn abandoned(&mut self) -> Vec<EngineEvent> {
         let mut out = Vec::new();
-        self.see(Seen::Stopped, &mut out);
+        self.stopped(&mut out);
         out
     }
 
@@ -450,32 +479,89 @@ impl Decoder {
         self.wake
     }
 
-    pub(super) fn lapse(&mut self) -> Vec<EngineEvent> {
-        let mut out = Vec::new();
-        if self.wake == Wake::Replied {
-            self.adopt_jobs();
-            if !self.jobs.is_empty() {
-                self.close_text(&mut out);
-            }
+    pub(super) fn due(&self) -> Option<(Instant, Due)> {
+        if !self.pending.is_empty() {
+            return None;
         }
-        self.see(Seen::Lapsed, &mut out);
+        let busy = self
+            .tools
+            .values()
+            .any(|tool| !tool.status.is_terminal() && tool.lifetime != Lifetime::Daemon);
+        self.wake.due(self.hold(), busy)
+    }
+
+    pub(super) fn lapse(&mut self, now: Instant) -> Vec<EngineEvent> {
+        let mut out = Vec::new();
+        self.see(Seen::Lapsed, now, &mut out);
         out
     }
 
-    fn adopt_jobs(&mut self) {
-        self.jobs.extend(
-            self.tools
-                .iter()
-                .filter(|(_, tool)| !tool.status.is_terminal() && !tool.daemon)
-                .map(|(key, _)| key.clone()),
-        );
+    pub(super) fn probed(&mut self, pending: bool, now: Instant) -> Vec<EngineEvent> {
+        let mut out = Vec::new();
+        self.see(Seen::Probed { pending }, now, &mut out);
+        out
     }
 
-    fn see(&mut self, seen: Seen, out: &mut Vec<EngineEvent>) {
-        let waited = self.wake.waiting_on_jobs();
-        self.wake = self.wake.next(seen, !self.jobs.is_empty());
-        let waiting = self.wake.waiting_on_jobs();
-        if waited != waiting {
+    fn call(&mut self, call: &Call, now: Instant, out: &mut Vec<EngineEvent>) {
+        let held = self
+            .tools
+            .get(&call.tool_call_id)
+            .and_then(Tool::holds)
+            .is_some();
+        if !held {
+            self.see(Seen::Output, now, out);
+            self.close_text(out);
+            self.thinking = false;
+        }
+        self.tool(call, out);
+        let released = held
+            && self
+                .tools
+                .get(&call.tool_call_id)
+                .is_some_and(|tool| tool.status.is_terminal());
+        if released {
+            self.see(Seen::Output, now, out);
+        }
+    }
+
+    fn step_ended(&mut self, now: Instant, out: &mut Vec<EngineEvent>) {
+        for tool in self.tools.values_mut() {
+            if tool.holds().is_some() {
+                tool.backgrounded = true;
+            }
+        }
+        self.see(Seen::StepEnded, now, out);
+        if self.wake.after_prompt() && self.hold() != Hold::Free {
+            self.close_text(out);
+        }
+    }
+
+    fn hold(&self) -> Hold {
+        self.tools
+            .values()
+            .filter_map(Tool::holds)
+            .max_by_key(|hold| match hold {
+                Hold::Free => 0,
+                Hold::Commands => 1,
+                Hold::Schedule => 2,
+            })
+            .unwrap_or(Hold::Free)
+    }
+
+    fn see(&mut self, seen: Seen, now: Instant, out: &mut Vec<EngineEvent>) {
+        self.wake = self.wake.next(seen, now);
+        self.announce(out);
+    }
+
+    fn stopped(&mut self, out: &mut Vec<EngineEvent>) {
+        self.wake = Wake::Quiet;
+        self.announce(out);
+    }
+
+    fn announce(&mut self, out: &mut Vec<EngineEvent>) {
+        let waiting = self.wake.after_prompt() && self.hold() != Hold::Free;
+        if waiting != self.waiting_on_hold {
+            self.waiting_on_hold = waiting;
             out.push(EngineEvent::background_wait(
                 artisan_api::EngineId::Antigravity,
                 waiting,
@@ -494,7 +580,7 @@ impl Decoder {
             out.push(text_item(text, Status::Cancelled, Phase::Commentary));
         }
         out.extend(self.settle_open(Status::Cancelled));
-        self.see(Seen::Stopped, &mut out);
+        self.stopped(&mut out);
         (replies, out)
     }
 
@@ -504,7 +590,7 @@ impl Decoder {
             out.push(text_item(text, Status::Done, Phase::Final));
         }
         out.extend(self.settle_open(Status::Cancelled));
-        self.see(Seen::Stopped, &mut out);
+        self.stopped(&mut out);
         out
     }
 
@@ -514,7 +600,6 @@ impl Decoder {
 
     fn settle_open(&mut self, status: Status) -> Vec<EngineEvent> {
         self.pending.clear();
-        self.jobs.clear();
         self.tools
             .iter_mut()
             .filter(|(_, tool)| !tool.status.is_terminal())
@@ -605,7 +690,8 @@ impl Decoder {
                 exit_code: None,
                 approval: None,
             },
-            daemon: false,
+            lifetime: Lifetime::Turn,
+            backgrounded: false,
         });
         if let ItemKind::Tool {
             tool,
@@ -637,19 +723,11 @@ impl Decoder {
                 *exit_code = i32::try_from(code).ok();
             }
         }
-        if let Some(input) = call.raw_input.as_ref() {
-            entry.daemon = DAEMON_KEYS
-                .iter()
-                .any(|key| input.get(*key).and_then(Value::as_bool) == Some(true));
-        }
+        entry.lifetime = lifetime(call, entry.lifetime);
         if let Some(status) = status {
             entry.status = entry.status.advance(status);
         }
-        let finished = entry.status.is_terminal() && self.jobs.remove(&key);
         out.push(self.event(&key));
-        if finished && self.jobs.is_empty() {
-            self.see(Seen::JobsFinished, out);
-        }
     }
 
     fn event(&self, key: &str) -> EngineEvent {
@@ -660,6 +738,29 @@ impl Decoder {
             status: tool.status,
             kind: tool.kind.clone(),
         }
+    }
+}
+
+fn lifetime(call: &Call, current: Lifetime) -> Lifetime {
+    if current == Lifetime::Schedule
+        || call
+            .title
+            .as_deref()
+            .is_some_and(|title| SCHEDULE_TITLES.contains(&title))
+    {
+        return Lifetime::Schedule;
+    }
+    let daemon = call.raw_input.as_ref().map(|input| {
+        DAEMON_KEYS
+            .iter()
+            .any(|key| input.get(*key).and_then(Value::as_bool) == Some(true))
+    });
+    match (call.kind, current, daemon) {
+        (Some(WireKind::Execute) | None, Lifetime::Command | Lifetime::Daemon, Some(true))
+        | (Some(WireKind::Execute), _, Some(true)) => Lifetime::Daemon,
+        (Some(WireKind::Execute) | None, Lifetime::Command | Lifetime::Daemon, Some(false))
+        | (Some(WireKind::Execute), Lifetime::Turn, Some(false) | None) => Lifetime::Command,
+        (_, current, _) => current,
     }
 }
 
