@@ -19,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 pub enum PrepareError {
     #[error("{} is not installed", engine.display_name())]
     NotInstalled { engine: EngineId },
+    #[error("{engine} is turned off. Turn it on in Settings to use it.")]
+    EngineDisabled { engine: EngineId },
     #[error(transparent)]
     Gateway(Box<crate::gateway::GatewayError>),
     #[error("prepare the folder of thread {thread}")]
@@ -1038,6 +1040,10 @@ async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<Option<PathBuf>, P
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the turn prepares the engine launch in order"
+)]
 pub(crate) async fn prepare(
     hub: &Hub,
     thread: &artisan_api::Thread,
@@ -1046,6 +1052,11 @@ pub(crate) async fn prepare(
     binary: Option<PathBuf>,
 ) -> Result<Prepared, PrepareError> {
     let engine = thread.config.engine;
+    let key = engine.enabled_setting();
+    let enabled = hub.store().setting(key).await?;
+    if !artisan_api::switch_decl(key).switch(enabled.as_ref()).on() {
+        return Err(PrepareError::EngineDisabled { engine });
+    }
     let engines = hub.engines();
     let binary = binary.ok_or(PrepareError::NotInstalled { engine })?;
     let cwd = hub

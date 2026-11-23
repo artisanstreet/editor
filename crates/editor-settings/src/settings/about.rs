@@ -9,20 +9,64 @@ pub struct BuildInfo {
     pub executable: Option<PathBuf>,
 }
 
-pub(crate) fn rows(build: &BuildInfo) -> Vec<(&'static str, String)> {
-    let mut rows = vec![("Version", build.version.clone())];
-    rows.push((
-        "Commit",
-        if build.commit.is_empty() {
-            "Unknown".to_owned()
+impl BuildInfo {
+    pub fn identifier(&self) -> String {
+        if self.version.is_empty() || self.version == "0.0.0" || self.version.contains("nightly") {
+            format!(
+                "N-{}",
+                if self.commit.is_empty() {
+                    "unknown"
+                } else {
+                    &self.commit
+                }
+            )
         } else {
-            build.commit.clone()
-        },
-    ));
-    rows.push(("Profile", build.profile.clone()));
-    rows.push(("Target", build.target.clone()));
-    if let Some(executable) = &build.executable {
-        rows.push(("Executable", executable.display().to_string()));
+            format!("S-{}", self.version)
+        }
     }
-    rows
+
+    pub fn diagnostics(&self) -> String {
+        format!(
+            "Artisan Editor {}\nTarget: {}\nProfile: {}\nCommit: {}\n",
+            self.identifier(),
+            self.target,
+            self.profile,
+            self.commit
+        )
+    }
 }
+
+pub(crate) const LICENCES: [(&str, &str); 8] = [
+    (
+        "Aqua",
+        include_str!("../../../editor-assets/licenses/aqua-BSD.txt"),
+    ),
+    (
+        "Taffy",
+        include_str!("../../../editor-assets/licenses/aqua-taffy-MIT.txt"),
+    ),
+    (
+        "Spline Sans",
+        include_str!("../../../editor-assets/licenses/spline-sans-OFL.txt"),
+    ),
+    (
+        "Spline Sans Mono",
+        include_str!("../../../editor-assets/licenses/spline-sans-mono-OFL.txt"),
+    ),
+    (
+        "Tabler Icons",
+        include_str!("../../../editor-assets/licenses/tabler-MIT.txt"),
+    ),
+    (
+        "Simple Icons",
+        include_str!("../../../editor-assets/licenses/simple-icons-CC0.txt"),
+    ),
+    (
+        "Lobe Icons",
+        include_str!("../../../editor-assets/licenses/lobe-icons-MIT.txt"),
+    ),
+    (
+        "SVGL",
+        include_str!("../../../editor-assets/licenses/svgl-svelte-LICENSE.txt"),
+    ),
+];

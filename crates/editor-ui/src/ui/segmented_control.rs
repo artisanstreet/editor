@@ -15,22 +15,30 @@ use super::theme::{ArtisanTheme, Opacity};
 const SEGMENT: Row = Row::ListItem(Density::Dense);
 const SEGMENT_TEXT: TextRole = TextRole::Caption;
 
-pub(crate) struct Segment<T> {
+#[derive(Debug)]
+pub struct Segment<T> {
     value: T,
     label: String,
+    icon: Option<editor_assets::AssetId>,
 }
 impl<T> Segment<T> {
-    pub(crate) fn new(value: T, label: impl Into<String>) -> Self {
+    pub fn new(value: T, label: impl Into<String>) -> Self {
         Self {
             value,
             label: label.into(),
+            icon: None,
         }
+    }
+    #[must_use]
+    pub fn icon(mut self, icon: editor_assets::AssetId) -> Self {
+        self.icon = Some(icon);
+        self
     }
 }
 
 type Change<T> = Rc<dyn Fn(T)>;
 
-pub(crate) struct SegmentedControl<T: Clone + Eq + 'static> {
+pub struct SegmentedControl<T: Clone + Eq + 'static> {
     id: Key,
     theme: ArtisanTheme,
     label: String,
@@ -40,12 +48,20 @@ pub(crate) struct SegmentedControl<T: Clone + Eq + 'static> {
     change: Option<Change<T>>,
 }
 
+impl<T: Clone + Eq + 'static> std::fmt::Debug for SegmentedControl<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentedControl")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T: Clone + Eq + 'static> SegmentedControl<T> {
     #[expect(
         clippy::large_types_passed_by_value,
         reason = "the segmented control stores this theme copy and paints from it when built"
     )]
-    pub(crate) fn new(
+    pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,
@@ -62,7 +78,8 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             change: None,
         }
     }
-    pub(crate) fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
+    #[must_use]
+    pub fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
         for option in options {
             if !self
                 .options
@@ -74,7 +91,8 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         }
         self
     }
-    pub(crate) fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
+    #[must_use]
+    pub fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
         self.change = Some(Rc::new(handler));
         self
     }
@@ -83,7 +101,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         clippy::too_many_lines,
         reason = "one segmented control build with its segments and keyboard semantics"
     )]
-    pub(crate) fn build(self) -> Element {
+    pub fn build(self) -> Element {
         let theme = self.theme;
         let segment_height = SEGMENT
             .pad()
@@ -122,6 +140,9 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .gpui_source_color(foreground.to_reference_text_color())
                 .style(Style::new().text_wrap(false))
                 .build();
+            let text = option.icon.map_or(text, |icon| {
+                super::kit::IconSize::Md.glyph(icon, foreground.to_reference_paint())
+            });
             let style = Style::new()
                 .align(aqua_ui::AlignItems::CENTER)
                 .justify(aqua_ui::JustifyContent::CENTER)

@@ -4,9 +4,10 @@ use super::{
     view::ViewAction,
 };
 use aqua_ui::element::{Box as UiBox, Element};
+use editor_assets::AssetId;
 use editor_core::{AccountLink, AccountPhase, Core, LocalForge};
 use editor_ui::{
-    kit::{ButtonTone, Space, TextRole},
+    kit::{ButtonTone, Finish, IconButton, IconButtonSize, Space, Spaced, TextRole},
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
@@ -183,15 +184,25 @@ fn sign_in(
     body.build()
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the Forges page lays out its enrollment states in one top-to-bottom column"
-)]
 pub fn forges(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
     emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    computers(controller, core, theme, emit, false)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the Forges page lays out its enrollment states in one top-to-bottom column"
+)]
+pub(crate) fn computers(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+    settings: bool,
 ) -> Element {
     let account = core.account();
     let email = account
@@ -199,13 +210,14 @@ pub fn forges(
         .map(|profile| profile.email.as_str())
         .unwrap_or_default();
     let machines = account.machines();
-    let mut rows = ui::stack(Space::S16);
+    let mut rows = ui::stack(Space::S12);
     if machines.is_empty() {
-        rows = rows.child(text(theme, "No Forges on this account yet.", true));
+        rows = rows.child(text(theme, "No computers on this account yet.", true));
     }
     for machine in machines {
         let id = machine.id.clone();
         let live = core.machine_live(&id);
+        let connecting = core.machine_connecting(&id);
         let (kind, label, tone, action) = if live {
             (
                 "open",
@@ -216,15 +228,34 @@ pub fn forges(
         } else {
             (
                 "connect",
-                "Connect",
+                if connecting {
+                    "Connecting…"
+                } else if settings {
+                    "Reconnect"
+                } else {
+                    "Connect"
+                },
                 ButtonTone::Primary,
                 ViewAction::ForgeConnect(id.clone()),
             )
         };
-        let seen = machine.last_seen_at.as_deref().map_or_else(
-            || "Never connected".to_owned(),
-            |seen| format!("Last seen {seen}"),
-        );
+        let seen = if settings {
+            if live && core.machine_uses_relay(&id) {
+                "Connected via ADR"
+            } else if live {
+                "Connected directly"
+            } else if connecting {
+                "Connecting…"
+            } else {
+                "Disconnected"
+            }
+            .to_owned()
+        } else {
+            machine.last_seen_at.as_deref().map_or_else(
+                || "Never connected".to_owned(),
+                |seen| format!("Last seen {seen}"),
+            )
+        };
         rows = rows.child(
             line(theme, machine.label, seen)
                 .child(
@@ -234,14 +265,18 @@ pub fn forges(
                             format!("forges-{kind}-{id}"),
                             label,
                             tone,
-                            false,
+                            connecting,
                             action,
                             Rc::clone(emit),
                         ))
                         .child(button(
                             theme,
                             format!("forges-remove-{id}"),
-                            "Remove",
+                            if settings {
+                                "Delete computer"
+                            } else {
+                                "Remove"
+                            },
                             ButtonTone::Quiet,
                             false,
                             ViewAction::ForgeRemove(id),
@@ -300,9 +335,17 @@ pub fn forges(
         ));
     }
     rows = rows.child(
-        line(theme, "This machine", detail)
-            .child(local_actions.build())
-            .build(),
+        line(
+            theme,
+            if settings {
+                "Enrollment"
+            } else {
+                "This machine"
+            },
+            detail,
+        )
+        .child(local_actions.build())
+        .build(),
     );
     rows = rows.child(
         ui::stack(Space::S4)
@@ -350,65 +393,93 @@ pub(crate) fn page(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
+    account: Option<&editor_ui::chrome::account::Account>,
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let page = editor_core::SettingsPage::Account;
-    let mut content = ui::column().child(ui::header(
-        theme,
-        page.label(),
-        super::page::description(page),
-    ));
     let Some(profile) = core.account().profile() else {
-        return content.child(ui::section(theme, "Sign in", Some("We email you a one-time link. Open it to approve this device, then finish here."), None, ui::card(theme, vec![ui::block(sign_in(controller, core, theme, emit))]))).build();
-    };
-    let who = if profile.display_name.is_empty() {
-        profile.email.clone()
-    } else {
-        format!("{} ({})", profile.display_name, profile.email)
-    };
-    let controls = ui::actions()
-        .child(button(
+        return ui::section(
             theme,
-            "account-refresh",
-            "Refresh",
-            ButtonTone::Neutral,
-            false,
-            ViewAction::AccountRefresh,
-            Rc::clone(emit),
-        ))
-        .child(button(
-            theme,
-            "account-sign-out",
-            "Sign out",
-            ButtonTone::Quiet,
-            false,
-            ViewAction::AccountSignOut,
-            Rc::clone(emit),
-        ))
-        .child(button(
-            theme,
-            "account-sign-out-everywhere",
-            "Sign out everywhere",
-            ButtonTone::Neutral,
-            false,
-            ViewAction::AccountSignOutEverywhere,
-            Rc::clone(emit),
-        ))
-        .build();
-    content = content.child(ui::section(
-        theme,
-        "Signed in",
-        None,
-        None,
-        ui::card(
-            theme,
-            vec![ui::row(
+            "Sign in",
+            None,
+            None,
+            ui::card(
                 theme,
-                who,
-                "Signed in on this device.",
-                Some(controls),
-            )],
-        ),
+                vec![ui::block(sign_in(controller, core, theme, emit))],
+            ),
+        );
+    };
+    let username = profile
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let handle = username.map(|name| format!("@{}", name.trim_start_matches('@')));
+    let display_name = match profile.display_name.trim() {
+        "" => username.unwrap_or("Artisan account"),
+        name => name,
+    };
+    let dashboard = Rc::clone(emit);
+    let sign_out = Rc::clone(emit);
+    let controls = ui::stack(Space::S2)
+        .child(
+            IconButton::new(
+                "account-dashboard",
+                *theme,
+                AssetId::TABLER_SETTINGS,
+                "Open Artisan dashboard",
+                IconButtonSize::Lg,
+                Finish::Glass,
+            )
+            .muted()
+            .on_activate(move |_| {
+                dashboard(ViewAction::OpenUrl("https://artisan.st/dashboard".into()));
+            })
+            .build(),
+        )
+        .child(
+            IconButton::new(
+                "account-sign-out",
+                *theme,
+                AssetId::TABLER_LOGOUT,
+                "Sign out",
+                IconButtonSize::Lg,
+                Finish::Glass,
+            )
+            .destructive()
+            .on_activate(move |_| sign_out(ViewAction::AccountSignOut))
+            .build(),
+        )
+        .build();
+    let identity = UiBox::new()
+        .spaced(Space::S16)
+        .style(aqua_ui::style::Style::new().align(aqua_ui::AlignItems::CENTER))
+        .children(
+            account.map(|account| editor_ui::chrome::account::portrait(account, 52.0, 14.0, 28.0)),
+        )
+        .child(
+            ui::stack(Space::S4)
+                .child(ui::line(theme, TextRole::Heading, Ink::Plain, display_name))
+                .children(handle.map(|handle| ui::line(theme, TextRole::Label, Ink::Muted, handle)))
+                .build(),
+        )
+        .build();
+    let body = UiBox::new()
+        .spaced(Space::S16)
+        .padded(Space::S12)
+        .style(
+            aqua_ui::style::Style::new()
+                .align(aqua_ui::AlignItems::CENTER)
+                .justify(aqua_ui::JustifyContent::SPACE_BETWEEN),
+        )
+        .child(identity)
+        .child(controls)
+        .build();
+    let content = ui::column().child(ui::section(
+        theme,
+        "Profile",
+        None,
+        None,
+        ui::card(theme, vec![body]),
     ));
     let policies = ui::actions()
         .child(button(
@@ -433,28 +504,10 @@ pub(crate) fn page(
     content
         .child(ui::section(
             theme,
-            "Forges",
-            Some("A connected Forge can run anything on its machine."),
-            None,
-            ui::card(
-                theme,
-                vec![ui::block(forges(controller, core, theme, emit))],
-            ),
-        ))
-        .child(ui::section(
-            theme,
             "Policies",
             None,
             None,
-            ui::card(
-                theme,
-                vec![ui::row(
-                    theme,
-                    "Terms and privacy",
-                    "The terms and privacy policy your Artisan account is under.",
-                    Some(policies),
-                )],
-            ),
+            ui::card(theme, vec![ui::row(theme, "Legal", "", Some(policies))]),
         ))
         .build()
 }

@@ -165,6 +165,16 @@ impl RootViews {
             paint: crate::ui::scroll_edge::EdgePaint::Gradient,
         }
         .advance(ui, reduced, now);
+        moving |= EdgeSurface {
+            edges: &workspace.settings.scroll_edges,
+            scroller: "settings-main-scroll",
+            top: "settings-edge-top",
+            bottom: "settings-edge-bottom",
+            top_color: theme.colors.background,
+            bottom_color: theme.colors.background,
+            paint: crate::ui::scroll_edge::EdgePaint::Gradient,
+        }
+        .advance(ui, reduced, now);
         if let Some(composer) = &workspace.composer {
             moving |= composer.advance_edges(ui, &theme, reduced, now);
         }

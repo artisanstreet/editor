@@ -39,6 +39,7 @@ pub struct EditorController {
     text_key: Rc<RefCell<Option<aqua_ui::element::Key>>>,
     theme: Rc<RefCell<Option<ArtisanTheme>>>,
     native_follow_caret: Rc<std::cell::Cell<bool>>,
+    password: bool,
 }
 
 impl std::fmt::Debug for EditorController {
@@ -132,7 +133,14 @@ impl EditorController {
             text_key: Rc::new(RefCell::new(None)),
             theme: Rc::new(RefCell::new(None)),
             native_follow_caret: Rc::new(std::cell::Cell::new(false)),
+            password: false,
         }
+    }
+
+    #[must_use]
+    pub fn password(mut self) -> Self {
+        self.password = true;
+        self
     }
 
     pub fn text_key(&self) -> Option<aqua_ui::element::Key> {
@@ -352,6 +360,9 @@ impl EditorController {
                         state.move_document_edge(true, shift);
                         Some(CommandOutcome::Ignored)
                     }
+                    Key::Char('c' | 'C' | 'x' | 'X') if command && self.password => {
+                        Some(CommandOutcome::Ignored)
+                    }
                     Key::Char('a' | 'A') if command => {
                         state.select_all();
                         Some(CommandOutcome::Ignored)
@@ -393,6 +404,7 @@ impl EditorController {
                 }
                 Some(CommandOutcome::Ignored)
             }
+            RoutedInput::ClipboardCut if self.password => Some(CommandOutcome::Ignored),
             RoutedInput::ClipboardCut => {
                 let changed = state.cut().is_some();
                 Some(CommandOutcome::Edit(if changed {
@@ -682,6 +694,7 @@ impl EditorController {
         }
         let mut element = leaf
             .editable(true)
+            .password(self.password)
             .external_text_input(true)
             .native_text_model(Rc::new(NativeEditorModel {
                 state: Rc::downgrade(&self.state),

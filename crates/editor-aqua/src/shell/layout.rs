@@ -36,8 +36,8 @@ pub struct SettingsLayout {
 pub(crate) fn settings_layout(window: Size) -> SettingsLayout {
     let scale = (2.0_f32.mul_add(-24.0, window.width) / window.width)
         .min(2.0_f32.mul_add(-24.0, window.height) / window.height)
-        .min(1100.0 / window.width)
-        .min(760.0 / window.height)
+        .min(1320.0 / window.width)
+        .min(880.0 / window.height)
         .max(0.0);
     let size = Size {
         width: (window.width * scale).max(1.0),
@@ -46,7 +46,7 @@ pub(crate) fn settings_layout(window: Size) -> SettingsLayout {
     SettingsLayout {
         size,
         navigation_width: settings_sidebar_width(size.width)
-            .min(260.0)
+            .min(276.0)
             .min(size.width * 0.4),
     }
 }

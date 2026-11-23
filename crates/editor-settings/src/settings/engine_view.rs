@@ -1,13 +1,10 @@
 use super::{
     controller::SettingsController,
-    page,
     ui::{self, Ink},
     view::ViewAction,
 };
 use aqua_ui::element::{Box as UiBox, Element};
-use artisan_api::{
-    ClaudeAiState, EngineCommand, EngineId, EngineStatus, InstallState, Integrity, SignInState,
-};
+use artisan_api::{EngineCommand, EngineId, EngineStatus, InstallState, SignInState};
 use editor_core::{HostData, Problem, SettingsPage, SettingsSection};
 use editor_ui::{
     kit::{ButtonTone, Space, Spaced, TextRole},
@@ -61,19 +58,6 @@ fn refresh(
         emit,
     )
 }
-fn integrity(value: Integrity) -> &'static str {
-    match value {
-        Integrity::VendorSha256 | Integrity::VendorSha512 => {
-            "Verified by the vendor's published checksum."
-        }
-        Integrity::NpmSha512 => {
-            "Verified by the checksum the npm registry publishes for each release."
-        }
-        Integrity::ArtisanSha256 => {
-            "Built by Artisan Street from the vendor's release and verified by its published checksum."
-        }
-    }
-}
 fn installation_copy(status: &EngineStatus) -> String {
     let label = status.engine.display_name();
     match &status.install {
@@ -104,24 +88,46 @@ fn installation_copy(status: &EngineStatus) -> String {
 )]
 fn installation(
     controller: &SettingsController,
+    host: &HostData,
     status: &EngineStatus,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let engine = status.engine;
     let busy = controller.engines.busy.contains(&engine);
-    let mut blocks = vec![match &status.install {
-        InstallState::Failed { message } => failure(
+    let key = engine.enabled_setting();
+    let enabled = artisan_api::switch_decl(key).switch(host.setting(key)).on();
+    let host_id = host.id.clone();
+    let instance = host.instance();
+    let toggle = Rc::clone(emit);
+    let enabled = Switch::new(
+        format!("settings-engine-enabled-{engine}"),
+        *theme,
+        enabled,
+        engine.display_name(),
+    )
+    .recessed()
+    .on_change(move |enabled| {
+        toggle(ViewAction::SetHostSetting(
+            host_id.clone(),
+            instance,
+            key,
+            enabled,
+        ));
+    })
+    .build();
+    let mut blocks: Vec<Element> = match &status.install {
+        InstallState::Failed { message } => vec![failure(
             theme,
             format!("settings-engine-install-error-{engine}"),
             installation_copy(status),
             message,
-        ),
-        InstallState::Absent
-        | InstallState::Downloading { .. }
-        | InstallState::Verifying { .. }
-        | InstallState::Installed { .. } => band(theme, installation_copy(status)),
-    }];
+        )],
+        InstallState::Downloading { .. } | InstallState::Verifying { .. } => {
+            vec![band(theme, installation_copy(status))]
+        }
+        InstallState::Absent | InstallState::Installed { .. } => Vec::new(),
+    };
     match &status.install {
         InstallState::Absent | InstallState::Failed { .. } => {
             let control = button(
@@ -139,60 +145,35 @@ fn installation(
                 },
                 busy,
                 ViewAction::EngineAction(engine, EngineCommand::Install {}),
-                Rc::clone(&emit),
+                Rc::clone(emit),
             );
             blocks.push(ui::row(
                 theme,
-                "Version",
-                format!(
-                    "Artisan installs and updates {} in its own home on this Forge.",
-                    engine.display_name()
-                ),
-                Some(control),
+                engine.display_name(),
+                "",
+                Some(ui::actions().child(enabled).child(control).build()),
             ));
         }
-        InstallState::Installed { version, update } => {
-            let mut controls = ui::actions();
-            if let Some(update) = update {
-                controls = controls.child(button(
-                    theme,
-                    "settings-engine-update",
-                    format!("Update to {update}"),
-                    ButtonTone::Primary,
-                    busy,
-                    ViewAction::EngineAction(engine, EngineCommand::Update {}),
-                    Rc::clone(&emit),
-                ));
-            }
-            controls = controls
-                .child(button(
-                    theme,
-                    "settings-engine-rollback",
-                    "Roll back",
-                    ButtonTone::Neutral,
-                    busy,
-                    ViewAction::EngineAction(engine, EngineCommand::Rollback {}),
-                    Rc::clone(&emit),
-                ))
-                .child(button(
-                    theme,
-                    "settings-engine-versions",
-                    "Choose version",
-                    ButtonTone::Neutral,
-                    busy,
-                    ViewAction::EngineVersions(engine),
-                    Rc::clone(&emit),
-                ));
-            let detail = update.as_ref().map_or_else(
-                || format!("Follows the latest release ({version})."),
-                |update| format!("Follows the latest release; {update} is available."),
+        InstallState::Installed { version, .. } => {
+            let control = button(
+                theme,
+                "settings-engine-versions",
+                format!("{version}  ⌄"),
+                ButtonTone::Neutral,
+                busy,
+                ViewAction::EngineVersions(engine),
+                Rc::clone(emit),
             );
-            blocks.push(ui::row(theme, "Version", detail, Some(controls.build())));
+            blocks.push(ui::row(
+                theme,
+                engine.display_name(),
+                "",
+                Some(ui::actions().child(enabled).child(control).build()),
+            ));
         }
-        InstallState::Downloading { .. } | InstallState::Verifying { .. } => {}
-    }
-    if let Some(value) = status.integrity {
-        blocks.push(ui::note(theme, integrity(value)));
+        InstallState::Downloading { .. } | InstallState::Verifying { .. } => {
+            blocks.insert(0, ui::row(theme, engine.display_name(), "", Some(enabled)));
+        }
     }
     if matches!(status.install, InstallState::Installed { .. })
         && controller.engines.choosing_version.contains(&engine)
@@ -238,7 +219,7 @@ fn installation(
                         ButtonTone::Neutral,
                         busy,
                         ViewAction::EngineUse(engine, version.version.clone()),
-                        Rc::clone(&emit),
+                        Rc::clone(emit),
                     ));
                 }
                 list = list.child(row.build());
@@ -246,20 +227,9 @@ fn installation(
             blocks.push(ui::block(list.build()));
         }
     }
-    ui::section(
-        theme,
-        "Installation",
-        None,
-        Some(refresh(
-            theme,
-            "settings-installation-refresh",
-            engine,
-            busy,
-            emit,
-        )),
-        ui::card(theme, blocks),
-    )
+    ui::card(theme, blocks)
 }
+
 fn account_copy(status: &EngineStatus) -> String {
     if status.engine == EngineId::OpenCode {
         match &status.sign_in {
@@ -443,106 +413,97 @@ fn account(
         }
         SignInState::SignedOut | SignInState::Failed { .. } | SignInState::Unknown => {}
     }
+    if engine == EngineId::Codex
+        && matches!(status.install, InstallState::Installed { .. })
+        && !matches!(status.sign_in, SignInState::LoggingIn { .. })
+    {
+        blocks.push(api_key_row(controller, status, theme, &emit));
+    }
     ui::section(
         theme,
-        "Account",
+        "Accounts",
         None,
         Some(refresh(theme, "settings-usage-refresh", engine, busy, emit)),
         ui::card(theme, blocks),
     )
 }
-fn claude(
+
+fn api_key_row(
     controller: &SettingsController,
-    host: &HostData,
     status: &EngineStatus,
     theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let busy = controller.engines.busy.contains(&EngineId::Claude);
-    let on = artisan_api::transport_of(host.setting(artisan_api::TRANSPORT_KEY))
-        == artisan_api::CLAUDE_AI;
-    let change = Rc::clone(&emit);
-    let host_id = host.id.clone();
-    let instance = host.instance();
-    let switch = Switch::new(
-        "settings-switch-enhanced-claude",
-        *theme,
-        on,
-        "claude.ai mode",
-    )
-    .on_change(move |checked| {
-        change(ViewAction::ClaudeTransport(
-            host_id.clone(),
-            instance,
-            checked,
-        ));
+    let Some(field) = &controller.engines.api_key else {
+        return ui::row(
+            theme,
+            "API Key",
+            "",
+            Some(button(
+                theme,
+                "settings-codex-api-key-add",
+                "Add API Key",
+                ButtonTone::Primary,
+                controller.engines.busy.contains(&EngineId::Codex),
+                ViewAction::OpenApiKey,
+                Rc::clone(emit),
+            )),
+        );
+    };
+    let send = Rc::clone(emit);
+    let editor = EditorController::from_shared(Rc::clone(field), move |event| match event {
+        EditorEvent::Submitted => send(ViewAction::SaveApiKey),
+        EditorEvent::Changed | EditorEvent::PresentationChanged => {
+            send(ViewAction::EnginePresentationChanged);
+        }
+        EditorEvent::SelectionChanged { .. }
+        | EditorEvent::List(_)
+        | EditorEvent::PastedFiles { .. } => {}
     })
-    .build();
-    let state = status.claude_ai.clone().unwrap_or(ClaudeAiState::SignedOut);
-    let (mut description, signed_in) = match &state {
-        ClaudeAiState::SignedOut => ("Not signed in. Signing in opens claude.ai in a browser window; it closes by itself once you're in.".to_owned(), false),
-        ClaudeAiState::SignedIn { account } => (account.as_ref().map_or_else(|| "Signed in.".into(), |account| format!("Signed in as {account}.")), true),
-        ClaudeAiState::NeedsRenewal { .. } => (if claude_ai_browser::can_renew(&host.id.0) { "claude.ai asked for a browser check. Artisan is renewing the session in the background." } else { "claude.ai asked for a browser check. Sign in again on this device, or wait for the device that signed in to renew it." }.to_owned(), false),
-        ClaudeAiState::Expired { .. } => ("Sign in again to keep using claude.ai mode.".to_owned(), false),
-    };
-    if busy {
-        description = "Waiting for you to sign in to claude.ai in the browser window…".into();
-    }
-    let control = if signed_in {
-        button(
-            theme,
-            "settings-claude-ai-sign-out",
-            "Sign out",
-            ButtonTone::Neutral,
-            busy,
-            ViewAction::EngineAction(EngineId::Claude, EngineCommand::ClaudeAiSignOut {}),
-            emit,
-        )
-    } else {
-        button(
-            theme,
-            "settings-claude-ai-sign-in",
-            if matches!(state, ClaudeAiState::SignedOut) {
-                "Sign in"
-            } else {
-                "Sign in again"
-            },
-            ButtonTone::Primary,
-            busy,
-            ViewAction::ClaudeSignIn,
-            emit,
-        )
-    };
-    ui::section(
-        theme,
-        "claude.ai mode",
-        None,
-        None,
-        ui::card(
-            theme,
-            vec![
-                ui::row(
-                    theme,
-                    "claude.ai mode",
-                    "Run Claude through claude.ai with local files, commands, skills, MCP servers and subagents. Turn this off to use Claude Code.",
-                    Some(switch),
-                ),
-                ui::row(theme, "claude.ai session", description, Some(control)),
-            ]
-            .into_iter()
-            .chain(match &state {
-                ClaudeAiState::Expired { reason } => Some(failure(
-                    theme,
-                    "settings-claude-ai-expired".to_owned(),
-                    "The claude.ai session stopped working.".to_owned(),
-                    reason,
-                )),
-                ClaudeAiState::SignedOut
-                | ClaudeAiState::SignedIn { .. }
-                | ClaudeAiState::NeedsRenewal { .. } => None,
-            })
-            .collect(),
-        ),
+    .password();
+    ui::block(
+        ui::stack(Space::S8)
+            .child(ui::line(
+                theme,
+                TextRole::Label,
+                Ink::Muted,
+                if matches!(status.sign_in, SignInState::SignedIn { .. }) {
+                    "Adding a key replaces the current Codex sign-in."
+                } else {
+                    "API Key"
+                },
+            ))
+            .child(editor.element_with_notice_keyed(
+                "settings-codex-api-key",
+                Mode::SingleLine,
+                theme,
+                "API Key",
+                false,
+                true,
+            ))
+            .child(
+                ui::actions()
+                    .child(button(
+                        theme,
+                        "settings-codex-api-key-cancel",
+                        "Cancel",
+                        ButtonTone::Quiet,
+                        false,
+                        ViewAction::CancelApiKey,
+                        Rc::clone(emit),
+                    ))
+                    .child(button(
+                        theme,
+                        "settings-codex-api-key-save",
+                        "Save",
+                        ButtonTone::Primary,
+                        false,
+                        ViewAction::SaveApiKey,
+                        Rc::clone(emit),
+                    ))
+                    .build(),
+            )
+            .build(),
     )
 }
 
@@ -555,17 +516,7 @@ pub(crate) fn page(
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let label = engine.display_name();
-    let title = if selected == selected.parent() {
-        label.to_owned()
-    } else {
-        format!("{label} · {}", selected.label())
-    };
-    let description = if selected == selected.parent() {
-        format!("{label}'s installation and sign-in on this Forge.")
-    } else {
-        page::description(selected).to_owned()
-    };
-    let mut content = ui::column().child(ui::header(theme, &title, &description));
+    let mut content = ui::column();
     let Some(status) = host.engines.get(&engine) else {
         let note = if host.is_live() {
             format!("This Forge reported no {label} engine.")
@@ -577,13 +528,10 @@ pub(crate) fn page(
             .build();
     };
     if selected.shows(SettingsSection::Installation(engine)) {
-        content = content.child(installation(controller, status, theme, Rc::clone(&emit)));
+        content = content.child(installation(controller, host, status, theme, &emit));
     }
     if selected.shows(SettingsSection::Account(engine)) {
-        content = content.child(account(controller, status, theme, Rc::clone(&emit)));
-    }
-    if engine == EngineId::Claude && selected.shows(SettingsSection::ClaudeAi) {
-        content = content.child(claude(controller, host, status, theme, emit));
+        content = content.child(account(controller, status, theme, emit));
     }
     if let Some(problem) = controller.engines.errors.get(&engine) {
         content = content.child(ui::problem(theme, "engine-error", problem).build());

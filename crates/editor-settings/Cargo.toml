@@ -23,6 +23,7 @@ serde_json.workspace = true
 tracing.workspace = true
 tokio-util.workspace = true
 claude-ai-browser.workspace = true
+editor-assets.workspace = true
 editor-core.workspace = true
 editor-ui.workspace = true
 

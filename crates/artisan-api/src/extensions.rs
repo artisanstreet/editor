@@ -126,6 +126,8 @@ pub struct McpServer {
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sse: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 fn origin(url: &str) -> String {
@@ -150,6 +152,7 @@ impl std::fmt::Debug for McpServer {
             .field("url", &self.url.as_deref().map(origin))
             .field("headers", &self.headers.keys().collect::<Vec<_>>())
             .field("sse", &self.sse)
+            .field("disabled", &self.disabled)
             .finish()
     }
 }
@@ -207,6 +210,7 @@ pub enum EngineCommand {
     Rollback {},
     Use { version: String },
     Login {},
+    LoginApiKey { key: crate::Secret },
     LoginCode { code: String },
     CancelLogin {},
     Logout {},
@@ -223,6 +227,7 @@ impl EngineCommand {
             Self::Rollback {} => "rollback",
             Self::Use { .. } => "use",
             Self::Login {} => "login",
+            Self::LoginApiKey { .. } => "login-api-key",
             Self::LoginCode { .. } => "login-code",
             Self::CancelLogin {} => "cancel-login",
             Self::Logout {} => "logout",

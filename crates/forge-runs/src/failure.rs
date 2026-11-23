@@ -882,9 +882,11 @@ impl GlobalPromptError {
     pub fn wire(&self) -> Failure {
         match self {
             Self::TakeOver(source) => setting(&source.cause),
-            Self::Read(_) | Self::Candidates(_) | Self::Version(_) | Self::Engines(_) => {
-                Failure::Internal
-            }
+            Self::Read(_)
+            | Self::ArtisanSystemPrompt(_)
+            | Self::Candidates(_)
+            | Self::Version(_)
+            | Self::Engines(_) => Failure::Internal,
         }
     }
 }

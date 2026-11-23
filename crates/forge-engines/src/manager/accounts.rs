@@ -76,6 +76,15 @@ impl Engines {
         Ok(())
     }
 
+    pub fn login_codex_api_key(&self, key: artisan_api::Secret) -> Result<(), NotInstalled> {
+        let engine = EngineId::Codex;
+        let lease = self.lease(engine).ok_or(NotInstalled { engine })?;
+        self.follow_sign_in(engine);
+        self.invalidate_models(engine);
+        self.slot(engine).sign_in.api_key_leased(lease, key);
+        Ok(())
+    }
+
     pub async fn submit_login_code(
         &self,
         engine: EngineId,

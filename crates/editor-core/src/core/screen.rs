@@ -98,7 +98,7 @@ impl SettingsSection {
             Self::Installation(_) => "Installation",
             Self::Account(_) => "Account",
             Self::ClaudeAi => "claude.ai mode",
-            Self::McpServers => "MCP servers",
+            Self::McpServers => "MCPs",
             Self::Skills => "Skills",
         }
     }
@@ -175,11 +175,11 @@ impl SettingsPage {
         match self {
             Self::General => "General",
             Self::Section(section) => section.label(),
-            Self::Hosts => "Forges",
+            Self::Hosts => "Computers",
             Self::About => "About",
             Self::Account => "Account",
             Self::Threads => "Threads",
-            Self::GlobalPrompt => "Global prompt",
+            Self::GlobalPrompt => "Global Prompt",
             Self::Extensions => "Extensions",
             Self::Engine(engine) => engine.display_name(),
         }
@@ -201,6 +201,9 @@ impl SettingsPage {
                 .find_map(|(page, page_name)| (page_name == parent).then_some(page))?;
             (page, section)
         };
+        if parent == Self::Engine(EngineId::Claude) && section == Some("claude-ai") {
+            return Some(parent);
+        }
         section.map_or(Some(parent), |name| {
             parent
                 .sections()

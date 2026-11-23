@@ -505,26 +505,23 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
         assert!(
             texts
                 .iter()
-                .any(|text| text.contains("Pair a Forge on the Account page")),
+                .any(|text| text.contains("Connect a computer first")),
             "{page:?} without a host"
         );
     }
     test_support::editor::core::connect_client(&mut core, &config, client);
     for page in host_pages {
         let texts = render(&mut core, page);
-        assert!(
-            texts.iter().any(|text| text == page.label()),
-            "{page:?} header"
-        );
+        assert!(!texts.is_empty(), "{page:?} did not load once connected");
         assert!(
             !texts
                 .iter()
-                .any(|text| text.contains("Pair a Forge on the Account page")),
+                .any(|text| text.contains("Connect a computer first")),
             "{page:?} with a host"
         );
     }
     let hosts = render(&mut core, SettingsPage::Hosts);
-    assert!(hosts.iter().any(|text| text == "Desk Forge"));
+    assert!(hosts.iter().any(|text| text == "Computers"));
 }
 
 fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String, [f32; 4])> {
@@ -946,7 +943,7 @@ fn about_page_opens_the_third_party_notices() {
     let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     let mut page = Some(page);
     app.mount(move |_| page.take().unwrap()).unwrap();
-    app.set_viewport(900.0, 700.0, 1.0);
+    app.set_viewport(900.0, 1200.0, 1.0);
     app.build_frame().unwrap();
     let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("about-open-notices"));
     let button = app
@@ -1318,24 +1315,17 @@ fn settings_pages_expose_their_title_and_sections_as_headings() {
     assert_eq!(
         headings(SettingsPage::General),
         [
-            (1, "General".to_owned()),
             (2, "Appearance".to_owned()),
-            (2, "Text Streaming".to_owned()),
-            (2, "Notifications".to_owned()),
+            (2, "Interface & Models".to_owned()),
             (2, "Performance".to_owned()),
         ]
     );
-    for page in [
-        SettingsPage::About,
-        SettingsPage::Account,
-        SettingsPage::Hosts,
+    for (page, title) in [
+        (SettingsPage::About, "Build"),
+        (SettingsPage::Account, "Profile"),
+        (SettingsPage::Hosts, "Computers"),
     ] {
-        let titles: Vec<_> = headings(page)
-            .into_iter()
-            .filter(|(level, _)| *level == 1)
-            .map(|(_, title)| title)
-            .collect();
-        assert_eq!(titles, [page.label()], "{page:?} has one page title");
+        assert!(headings(page).contains(&(2, title.to_owned())));
     }
 }
 
@@ -1358,6 +1348,7 @@ fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
         reduced_motion: false,
         high_contrast: true,
         text_scale: 1.25,
+        ..SystemAccess::default()
     };
     let mut choose = |size: &str, contrast: &str| {
         let actions = Rc::new(RefCell::new(Vec::new()));
@@ -1380,7 +1371,7 @@ fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
         }
         Preferences::from_core(&core, system).theme()
     };
-    let chosen = choose("150%", "Off");
+    let chosen = choose("Biggest", "Off");
     assert!((chosen.typography.scale - 1.5).abs() < f32::EPSILON);
     assert_eq!(chosen.colors.contrast, Contrast::Standard);
     let followed = choose("Match system", "Match system");
@@ -1715,4 +1706,35 @@ fn a_second_writer_staging_the_same_setting_hands_over_instead_of_crashing() {
         "the first writer sends its newest choice next"
     );
     assert_eq!(host.setting(key), Some(&json!(30)));
+}
+
+#[test]
+fn curated_models_overrides_both_legacy_choices_with_one_setting() {
+    use editor_aqua::settings::{
+        controller::SettingsController,
+        view::{ViewAction, dispatch},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    core.set_setting(artisan_api::SHOW_ALL_MODELS_KEY, true.into())
+        .unwrap();
+    core.set_setting(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY, false.into())
+        .unwrap();
+    let mut controller = SettingsController::default();
+    assert!(dispatch(
+        &mut controller,
+        &mut core,
+        ViewAction::SetCuratedModels(true)
+    ));
+    let preferences = core.settings().preferences();
+    assert!(!preferences.show_all_models.on());
+    assert!(preferences.hide_bad_model_options.on());
+    assert!(dispatch(
+        &mut controller,
+        &mut core,
+        ViewAction::SetCuratedModels(false)
+    ));
+    let preferences = core.settings().preferences();
+    assert!(preferences.show_all_models.on());
+    assert!(!preferences.hide_bad_model_options.on());
 }

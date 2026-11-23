@@ -44,16 +44,18 @@ pub enum HostSwitch {
     Suggestions,
     YouShouldKnow,
     SummaryTitles,
+    ArtisanSystemPrompt,
 }
 
 impl HostSwitch {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::RetryWhenOverloaded,
         Self::ContinueAfterUsageLimit,
         Self::ContinueAfterRestart,
         Self::Suggestions,
         Self::YouShouldKnow,
         Self::SummaryTitles,
+        Self::ArtisanSystemPrompt,
     ];
 
     #[must_use]
@@ -65,6 +67,7 @@ impl HostSwitch {
             Self::Suggestions => "suggestions",
             Self::YouShouldKnow => "you_should_know",
             Self::SummaryTitles => "summary_titles",
+            Self::ArtisanSystemPrompt => "artisan_system_prompt",
         }
     }
 

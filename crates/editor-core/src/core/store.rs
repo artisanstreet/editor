@@ -359,6 +359,23 @@ impl Core {
             .get(&HostId(machine_id.to_owned()))
             .is_some_and(HostData::is_live)
     }
+    pub fn machine_connecting(&self, machine_id: &str) -> bool {
+        let id = HostId(machine_id.to_owned());
+        matches!(self.dials.get(&id), Some(Dial::Opening { .. }))
+            || self.hosts.get(&id).is_some_and(|host| {
+                matches!(
+                    host.status,
+                    super::ConnectionStatus::Connecting
+                        | super::ConnectionStatus::Reconnecting { .. }
+                )
+            })
+    }
+
+    pub fn machine_uses_relay(&self, machine_id: &str) -> bool {
+        self.relay_configs
+            .contains_key(&HostId(machine_id.to_owned()))
+    }
+
     fn is_paired(&self, id: &HostId) -> bool {
         self.relay_configs.contains_key(id)
             || self.hosts_file.hosts.iter().any(|host| &host.id == id)
@@ -605,6 +622,10 @@ impl Core {
 
     pub fn connect_machine(&mut self, machine_id: &str) {
         let id = HostId(machine_id.to_owned());
+        if let Some(host) = self.hosts.get(&id) {
+            host.retry_now();
+            return;
+        }
         self.dials.remove(&id);
         self.dial(&id);
     }

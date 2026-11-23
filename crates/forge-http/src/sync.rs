@@ -1071,11 +1071,13 @@ fn rebind(
             env: previous.env.clone(),
             headers: previous.headers.clone(),
             sse: previous.sse,
+            disabled: previous.disabled,
             ..destination
         }
     } else {
         artisan_api::McpServer {
             sse: previous.sse,
+            disabled: previous.disabled,
             ..destination
         }
     }

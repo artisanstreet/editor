@@ -23,6 +23,7 @@ fn windows_accessibility_settings_reach_the_theme_unless_overridden() {
         reduced_motion: true,
         high_contrast: true,
         text_scale: 1.5,
+        ..SystemAccess::default()
     };
     let followed = preferences(system).theme();
     assert_eq!(followed.colors.contrast, Contrast::High);

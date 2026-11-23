@@ -36,7 +36,7 @@ pub mod project_mark;
 pub mod rich;
 pub mod scroll;
 pub mod scroll_edge;
-pub(crate) mod segmented_control;
+pub mod segmented_control;
 pub mod select;
 pub mod shimmer_text;
 pub mod sky;

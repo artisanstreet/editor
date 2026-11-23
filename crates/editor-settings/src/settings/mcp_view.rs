@@ -35,24 +35,6 @@ fn button(
     })
 }
 
-fn note(status: Option<McpAuthStatus>, sign_in: Option<&McpSignIn>) -> Option<String> {
-    if let Some(sign_in) = sign_in {
-        return Some(match sign_in.phase() {
-            McpSignInPhase::Starting => "Opening the sign-in…".into(),
-            McpSignInPhase::Waiting => "Waiting for the browser…".into(),
-            McpSignInPhase::Finishing => "Signing in…".into(),
-            McpSignInPhase::Failed(_) => "Sign-in failed".into(),
-        });
-    }
-    match status? {
-        McpAuthStatus::NeedsSignIn => Some("Needs sign-in".into()),
-        McpAuthStatus::SignedIn => Some("Signed in".into()),
-        McpAuthStatus::NeedsToken => {
-            Some("Refused without a token: add an Authorization header (Edit)".into())
-        }
-    }
-}
-
 fn controls(
     theme: &ArtisanTheme,
     name: &str,
@@ -237,6 +219,10 @@ fn sign_in_failure(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the MCP card renders the configured servers, operations, and inline form together"
+)]
 pub(crate) fn section(
     controller: &SettingsController,
     core: &Core,
@@ -265,22 +251,13 @@ pub(crate) fn section(
             .build(),
         ));
     }
+    let instance = host.instance();
     for server in servers.unwrap_or_default() {
-        let target = server.url.clone().unwrap_or_else(|| {
-            format!(
-                "{} {}",
-                server.command,
-                serde_json::to_string(&server.args)
-                    .expect("invariant: a list of strings always serializes")
-            )
-        });
         let status = match auth {
             Ok(auth) => auth.get(&server.name).copied(),
             Err(_shown_above) => None,
         };
         let sign_in = core.mcp_sign_in(&host.id, &server.name);
-        let summary = note(status, sign_in)
-            .map_or_else(|| target.clone(), |note| format!("{target} · {note}"));
         let mut actions = UiBox::new()
             .spaced(Space::S8)
             .style(Style::new().wrap(true))
@@ -304,7 +281,24 @@ pub(crate) fn section(
             Rc::clone(&emit),
         ));
         let failure = sign_in_failure(theme, &server.name, sign_in);
-        rows.push(ui::row(theme, server.name, summary, Some(actions.build())));
+        let send = Rc::clone(&emit);
+        let previous = server.clone();
+        let enabled = editor_ui::switch::Switch::new(
+            format!("settings-mcp-enabled-{}", server.name),
+            *theme,
+            !server.disabled,
+            server.name.clone(),
+        )
+        .recessed()
+        .disabled(controller.extensions.saving || controller.extensions.editing.is_some())
+        .on_change(move |enabled| send(ViewAction::McpToggle(instance, previous.clone(), enabled)))
+        .build();
+        rows.push(ui::row(
+            theme,
+            server.name,
+            "",
+            Some(actions.child(enabled).build()),
+        ));
         rows.extend(failure);
     }
     if rows.is_empty() && controller.extensions.editing.is_none() {
@@ -328,8 +322,8 @@ pub(crate) fn section(
                 .child(button(
                     theme,
                     "mcp-add".into(),
-                    "Add server",
-                    ButtonTone::Neutral,
+                    "Add new MCP server",
+                    ButtonTone::Primary,
                     false,
                     ViewAction::McpOpen(None),
                     emit,
@@ -340,7 +334,7 @@ pub(crate) fn section(
     ui::section(
         theme,
         "MCP servers",
-        Some("Tools every engine on this Forge can call."),
+        None,
         None,
         body.width(Length::Pct(100.0)).build(),
     )

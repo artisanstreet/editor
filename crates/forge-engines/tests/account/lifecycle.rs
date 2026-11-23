@@ -43,3 +43,16 @@ fn a_successful_probe_stops_an_active_login_before_publishing_the_account() {
         matches!(machine.state(), super::State::SignedIn { account: Some(account) } if account == "alice")
     );
 }
+
+#[test]
+fn key_sign_in_occupies_the_same_lane_as_account_sign_in() {
+    let mut machine = Machine::default();
+    let mut effects = Vec::new();
+    let key = artisan_api::Secret::from("test-provider-key");
+    machine.handle_with_context(&Event::LoginApiKey(key.clone()), &mut effects);
+    assert_eq!(std::mem::take(&mut effects), [Effect::StartApiKey(key)]);
+    machine.handle_with_context(&Event::Login, &mut effects);
+    assert!(effects.is_empty());
+    machine.handle_with_context(&Event::Cancel, &mut effects);
+    assert_eq!(effects, [Effect::StopLogin, Effect::Check]);
+}

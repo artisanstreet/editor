@@ -33,6 +33,11 @@ enum Completion {
     Engine(EngineRequest, Result<(), Problem>),
     Prompt(PromptRequest, Result<GlobalPrompt, Problem>),
     McpSignOut(String, Result<(), Problem>),
+    Skill {
+        skill: String,
+        mark: editor_core::CatalogMark,
+        result: Result<Vec<artisan_api::CatalogSkill>, Problem>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +96,12 @@ pub struct SettingsController {
     pub extensions: ExtensionsForm,
     pub prompt: PromptForm,
     pub prompt_editor: Rc<RefCell<Editor>>,
+    pub(crate) search_editor: Rc<RefCell<Editor>>,
+    pub scroll_edges: editor_ui::scroll_edge::ScrollEdges,
+    pub(crate) open_licence: Option<usize>,
+    pub(crate) diagnostics_result: Option<Result<(), Problem>>,
+    pub(crate) skill_pending: std::collections::HashSet<String>,
+    pub(crate) skill_error: Option<Problem>,
     pub(crate) editor_setting_error: Option<Problem>,
     parked_prompts: HashMap<String, (PromptForm, String)>,
     setting_writes: SettingWrites,
@@ -129,6 +140,12 @@ impl Default for SettingsController {
             extensions: ExtensionsForm::default(),
             prompt: PromptForm::default(),
             prompt_editor: Rc::new(RefCell::new(Editor::new("", Mode::Document))),
+            search_editor: Rc::new(RefCell::new(Editor::new("", Mode::SingleLine))),
+            scroll_edges: editor_ui::scroll_edge::ScrollEdges::default(),
+            open_licence: None,
+            diagnostics_result: None,
+            skill_pending: std::collections::HashSet::new(),
+            skill_error: None,
             editor_setting_error: None,
             parked_prompts: HashMap::new(),
             setting_writes: SettingWrites::default(),
@@ -147,8 +164,15 @@ impl SettingsController {
         self.completion.mailbox()
     }
 
+    pub fn clear_search(&self) {
+        if !self.search_editor.borrow().text().is_empty() {
+            self.search_editor.borrow_mut().set_text("");
+        }
+    }
+
     pub fn sync_editors(&self, ui: &mut aqua::UiApp) {
         let mut editors = vec![
+            ("settings-search".to_owned(), Rc::clone(&self.search_editor)),
             ("sign-in-email".to_owned(), Rc::clone(&self.sign_in.email)),
             (
                 "sign-in-second-factor".to_owned(),
@@ -172,6 +196,12 @@ impl SettingsController {
                 Rc::clone(editor),
             )
         }));
+        editors.extend(
+            self.engines
+                .api_key
+                .iter()
+                .map(|editor| ("settings-codex-api-key".to_owned(), Rc::clone(editor))),
+        );
         for (key, editor) in editors {
             let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
             if let Some(node) = ui.tree().sole_node_with_key(hash) {
@@ -187,6 +217,8 @@ impl SettingsController {
             self.active_instance = instance;
             self.park_prompt();
             self.engines.sync_host(None);
+            self.skill_pending.clear();
+            self.skill_error = None;
             self.archive.sync(None);
             self.prompt.sync_host(None);
             self.prompt_editor.borrow_mut().set_text("");
@@ -207,8 +239,15 @@ impl SettingsController {
             | Screen::Thread { .. }
             | Screen::NewThread { .. }
             | Screen::Marketplace
-            | Screen::Usage => return,
+            | Screen::Usage => {
+                self.engines.api_key = None;
+                self.clear_search();
+                return;
+            }
         };
+        if page.parent() != SettingsPage::Engine(EngineId::Codex) {
+            self.engines.api_key = None;
+        }
         if let SettingsPage::Engine(engine) = page.parent() {
             self.engines.prepare(engine);
         }
@@ -216,11 +255,27 @@ impl SettingsController {
             self.archive
                 .sync(host.as_ref().and_then(|id| core.host(id)));
             if let Some(host) = host.as_ref().and_then(|id| core.host_mut(id)) {
+                let projects: std::collections::BTreeSet<_> = self
+                    .archive
+                    .ids
+                    .iter()
+                    .filter_map(|id| host.threads.get(id).map(|thread| thread.project_id.clone()))
+                    .collect();
+                for project in projects {
+                    host.load_project_icon(&project);
+                }
                 let page = host.thread_page(true);
                 if !page.is_loaded() && !page.is_loading() {
                     host.load_threads(true, ThreadPageDirection::Latest);
                 }
             }
+        }
+        if matches!(
+            page,
+            SettingsPage::Extensions | SettingsPage::Section(editor_core::SettingsSection::Skills)
+        ) && let Some(host) = host.as_ref().and_then(|id| core.host_mut(id))
+        {
+            host.load_skill_catalog(false);
         }
         if page != SettingsPage::GlobalPrompt {
             return;
@@ -489,6 +544,71 @@ impl SettingsController {
         }
     }
 
+    pub(crate) fn toggle_skill(
+        &mut self,
+        core: &Core,
+        instance: HostInstance,
+        skill: String,
+        enabled: bool,
+    ) {
+        let Some(host) = core
+            .active_host()
+            .filter(|host| host.instance() == instance && self.active_instance == Some(instance))
+        else {
+            return;
+        };
+        if !self.skill_pending.insert(skill.clone()) {
+            return;
+        }
+        self.skill_error = None;
+        let client = host.client.clone();
+        let id = host.id.clone();
+        let mark = host.catalog_mark();
+        let sender = self.completion.sender();
+        let action = if enabled {
+            artisan_api::SkillAction::Enable
+        } else {
+            artisan_api::SkillAction::Disable
+        };
+        self.tasks.retain(|task| !task.is_finished());
+        self.tasks.push(tokio_util::task::AbortOnDropHandle::new(
+            runtime::runtime().spawn(async move {
+                let result = client.skill_action(&skill, action).await.map_err(|error| {
+                    Problem::calling_forge(
+                        &format!("Couldn't {} the skill.", action.as_str()),
+                        &error,
+                    )
+                });
+                sender
+                    .offer(HostCompletion {
+                        host: id,
+                        instance,
+                        result: Completion::Skill {
+                            skill,
+                            mark,
+                            result,
+                        },
+                    })
+                    .await;
+            }),
+        ));
+    }
+
+    pub(crate) fn toggle_mcp(
+        &mut self,
+        core: &Core,
+        instance: HostInstance,
+        previous: artisan_api::McpServer,
+        enabled: bool,
+    ) {
+        if self.active_instance == Some(instance)
+            && self.active_form_host(core)
+            && let Some(request) = self.extensions.toggle(previous, enabled)
+        {
+            self.mutate_mcp(core, request);
+        }
+    }
+
     pub(crate) fn remove_mcp(&mut self, core: &Core, previous: artisan_api::McpServer) {
         if !self.active_form_host(core) {
             return;
@@ -647,6 +767,7 @@ impl SettingsController {
             | EngineCommand::Rollback {}
             | EngineCommand::Use { .. }
             | EngineCommand::Login {}
+            | EngineCommand::LoginApiKey { .. }
             | EngineCommand::LoginCode { .. }
             | EngineCommand::Logout {}
             | EngineCommand::Refresh {}
@@ -787,6 +908,36 @@ impl SettingsController {
                         self.extensions.error = Some(problem);
                     }
                 }
+                Completion::Skill {
+                    skill,
+                    mark,
+                    result,
+                } => {
+                    if self.active_instance == Some(completion.instance) {
+                        self.skill_pending.remove(&skill);
+                    }
+                    match result {
+                        Ok(catalog) => {
+                            if let Some(host) =
+                                core.host_mut_if_instance(&completion.host, completion.instance)
+                            {
+                                match host.adopt_skill_catalog(catalog, mark) {
+                                    editor_core::Adoption::Adopted => {}
+                                    editor_core::Adoption::Older
+                                    | editor_core::Adoption::Overtaken => {
+                                        host.load_skill_catalog(true);
+                                    }
+                                }
+                            }
+                        }
+                        Err(problem) if self.active_instance == Some(completion.instance) => {
+                            self.skill_error = Some(problem);
+                        }
+                        Err(problem) => {
+                            tracing::warn!(%skill, error = ?problem.detail(), "saving skill settings on an inactive host");
+                        }
+                    }
+                }
                 Completion::Engine(request, result) => {
                     self.engines.complete(&request, result.err());
                 }
@@ -823,7 +974,7 @@ fn engine_verb(action: &EngineCommand) -> &'static str {
         EngineCommand::Rollback {} => "roll back",
         EngineCommand::Use { .. } => "switch the version of",
         EngineCommand::Versions {} => "list the published versions of",
-        EngineCommand::Login {} => "start signing in to",
+        EngineCommand::Login {} | EngineCommand::LoginApiKey { .. } => "start signing in to",
         EngineCommand::LoginCode { .. } => "finish signing in to",
         EngineCommand::CancelLogin {} => "cancel signing in to",
         EngineCommand::Logout {} => "sign out of",

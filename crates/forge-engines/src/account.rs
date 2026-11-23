@@ -125,6 +125,11 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
     } else if lower.contains("not logged in") || lower.contains("not authenticated") {
         return SignInState::SignedOut;
     } else if success {
+        if engine == EngineId::Codex && lower.contains("logged in using an api key") {
+            return SignInState::SignedIn {
+                account: Some("API Key".to_owned()),
+            };
+        }
         let account = text.lines().find_map(|line| {
             let line = line.trim();
             let at = line.to_ascii_lowercase().find("logged in as ")?;
@@ -397,6 +402,7 @@ fn strip_ansi(text: &str) -> String {
 enum Event {
     Checked(SignInState),
     Login,
+    LoginApiKey(artisan_api::Secret),
     Prompt {
         url: Option<String>,
         code: Option<String>,
@@ -412,6 +418,7 @@ enum Event {
 enum Effect {
     Check,
     StartLogin,
+    StartApiKey(artisan_api::Secret),
     StopLogin,
     Logout,
 }
@@ -505,6 +512,13 @@ impl Machine {
                 },
                 SignInState::Unknown | SignInState::LoggingIn { .. } => State::Unknown {},
             }),
+            (_, Event::LoginApiKey(key)) => {
+                effects.push(Effect::StartApiKey(key.clone()));
+                Some(State::LoggingIn {
+                    url: None,
+                    code: None,
+                })
+            }
             (_, Event::Login) => {
                 effects.push(Effect::StartLogin);
                 Some(State::LoggingIn {
@@ -603,6 +617,20 @@ impl SignIn {
         let binary = lease.path().to_owned();
         self.lock().lease = Some(Arc::new(lease));
         self.login(&binary);
+    }
+
+    pub(crate) fn api_key_leased(
+        self: &Arc<Self>,
+        lease: crate::BinaryLease,
+        key: artisan_api::Secret,
+    ) {
+        let binary = lease.path().to_owned();
+        {
+            let mut inner = self.lock();
+            inner.binary = Some(binary);
+            inner.lease = Some(Arc::new(lease));
+        }
+        self.handle(&Event::LoginApiKey(key));
     }
 
     pub(crate) fn logout_leased(self: &Arc<Self>, lease: crate::BinaryLease) {
@@ -733,7 +761,10 @@ impl SignIn {
             if generation.is_some_and(|generation| generation != inner.generation) {
                 return;
             }
-            if matches!(event, Event::Login | Event::Logout | Event::Cancel) {
+            if matches!(
+                event,
+                Event::Login | Event::LoginApiKey(_) | Event::Logout | Event::Cancel
+            ) {
                 inner.generation = inner.generation.wrapping_add(1);
             }
             if matches!(event, Event::LoginEnded { .. }) {
@@ -781,7 +812,12 @@ impl SignIn {
             }
             Effect::StartLogin => {
                 if let Some(binary) = binary {
-                    self.start_login(binary, lease, generation);
+                    self.start_login(binary, lease, None);
+                }
+            }
+            Effect::StartApiKey(key) => {
+                if let Some(binary) = binary {
+                    self.start_login(binary, lease, Some(key.clone()));
                 }
             }
             Effect::StopLogin => {
@@ -836,7 +872,7 @@ impl SignIn {
         self: &Arc<Self>,
         binary: PathBuf,
         lease: Option<Arc<crate::BinaryLease>>,
-        _generation: u64,
+        api_key: Option<artisan_api::Secret>,
     ) {
         let cancel = CancellationToken::new();
         let stdin = Arc::new(tokio::sync::Mutex::new(None));
@@ -849,11 +885,11 @@ impl SignIn {
         }
         let this = Arc::clone(self);
         tokio::spawn(async move {
-            let error = this
-                .run_login(binary, lease, stdin, cancel.clone())
-                .await
-                .err()
-                .map(|error| diagnostics::chain(&error));
+            let result = match api_key {
+                Some(key) => this.run_api_key_login(&binary, lease, key, &cancel).await,
+                None => this.run_login(binary, lease, stdin, cancel.clone()).await,
+            };
+            let error = result.err().map(|error| diagnostics::chain(&error));
             if !cancel.is_cancelled() {
                 if let Some(error) = &error {
                     tracing::warn!(engine = %this.engine, error, "sign-in failed");
@@ -861,6 +897,59 @@ impl SignIn {
                 this.handle_login(&Event::LoginEnded { error }, &cancel);
             }
         });
+    }
+
+    async fn run_api_key_login(
+        &self,
+        binary: &Path,
+        _lease: Option<Arc<crate::BinaryLease>>,
+        key: artisan_api::Secret,
+        cancel: &CancellationToken,
+    ) -> Result<(), LoginError> {
+        let engine = self.engine;
+        let usage = crate::install::usage_lock(&self.home)
+            .map_err(|source| LoginError::UsageLock { engine, source })?;
+        fs2::FileExt::lock_shared(&usage).map_err(|source| LoginError::Share { engine, source })?;
+        let mut command = engine_command(engine, binary, &self.home);
+        command
+            .args(["login", "--with-api-key"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child =
+            crate::process::owned_command(command, forge_isolation::Containment::Shared).map_err(
+                |source| LoginError::Start {
+                    engine,
+                    args: "login --with-api-key".into(),
+                    source,
+                },
+            )?;
+        let mut stdin = child
+            .stdin()
+            .take()
+            .expect("invariant: the Codex API key login process has piped stdin");
+        let login = async {
+            stdin
+                .write_all(key.expose().as_bytes())
+                .await
+                .map_err(|source| LoginError::WriteKey { engine, source })?;
+            drop(stdin);
+            drop(key);
+            child
+                .wait()
+                .await
+                .map_err(|source| LoginError::Wait { engine, source })
+        };
+        let status = tokio::select! {
+            () = cancel.cancelled() => return Ok(()),
+            result = tokio::time::timeout(CHECK_TIMEOUT, login) => result.map_err(|source| LoginError::KeyTimedOut { engine, source })??,
+        };
+        child.end().await;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(LoginError::RejectedKey { engine, status })
+        }
     }
 
     async fn run_login(
@@ -1017,6 +1106,23 @@ enum LoginError {
         engine: EngineId,
         #[source]
         source: std::io::Error,
+    },
+    #[error("{engine} API key sign-in timed out")]
+    KeyTimedOut {
+        engine: EngineId,
+        #[source]
+        source: tokio::time::error::Elapsed,
+    },
+    #[error("send the API key to the {engine} sign-in")]
+    WriteKey {
+        engine: EngineId,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{engine} did not accept the API key ({status})")]
+    RejectedKey {
+        engine: EngineId,
+        status: std::process::ExitStatus,
     },
     #[error("{} sign-in failed: {detail}", engine.display_name())]
     Failed { engine: EngineId, detail: String },

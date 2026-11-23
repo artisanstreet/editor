@@ -48,6 +48,7 @@ pub enum Browser {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditorPreferences {
     pub dark_mode: Switch,
+    pub theme: Option<bool>,
     pub outline_text: Switch,
     pub notifications: Switch,
     pub lower_refresh_rate: Switch,
@@ -88,14 +89,25 @@ impl EditorPreferences {
             | Value::Array(_)
             | Value::Object(_) => accepted(key),
         };
+        let curated = stored("curated_models").and_then(Value::as_bool);
         Self {
             dark_mode: switch("dark_mode"),
+            theme: stored("theme").map_or_else(
+                || stored("dark_mode").and_then(Value::as_bool),
+                Value::as_bool,
+            ),
             outline_text: switch("outline_text"),
             notifications: switch("notifications"),
             lower_refresh_rate: switch("lower_refresh_rate"),
             graphics_vsync: switch("graphics_vsync"),
-            hide_bad_model_options: switch(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY),
-            show_all_models: switch(artisan_api::SHOW_ALL_MODELS_KEY),
+            hide_bad_model_options: curated.map_or_else(
+                || switch(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY),
+                Switch::Stored,
+            ),
+            show_all_models: curated.map_or_else(
+                || switch(artisan_api::SHOW_ALL_MODELS_KEY),
+                |curated| Switch::Stored(!curated),
+            ),
             reduced_motion: system_switch("reduced_motion"),
             high_contrast: system_switch("high_contrast"),
             text_percent: match declared("text_scale") {

@@ -14,6 +14,7 @@ fn a_logged_mcp_server_shows_none_of_its_secrets() {
         )]
         .into(),
         sse: false,
+        disabled: false,
     };
     let logged = format!("{server:?}");
     for secret in [

@@ -139,6 +139,12 @@ impl IconButton {
     }
 
     #[must_use]
+    pub const fn destructive(mut self) -> Self {
+        self.hover = Hover::Destructive;
+        self
+    }
+
+    #[must_use]
     pub const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
@@ -168,7 +174,9 @@ impl IconButton {
     pub fn build(self) -> Element {
         let theme = self.theme;
         let edge = self.size.edge();
-        let rest = if self.muted {
+        let rest = if self.hover == Hover::Destructive {
+            theme.colors.destructive_text
+        } else if self.muted {
             theme.colors.text_muted
         } else {
             theme.colors.text

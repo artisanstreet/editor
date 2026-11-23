@@ -366,6 +366,10 @@ pub enum EngineFailure {
     NoSignIn { engine: EngineId },
     #[error("The {engine} sign-in no longer accepts input.")]
     SignInClosed { engine: EngineId },
+    #[error("{engine} does not support API key sign-in here.")]
+    ApiKeyUnsupported { engine: EngineId },
+    #[error("Enter an API key for {engine}.")]
+    ApiKeyInvalid { engine: EngineId },
     #[error("Only Claude signs in to claude.ai, not {engine}.")]
     ClaudeAiEngine { engine: EngineId },
     #[error("That browser isn't signed in to claude.ai.")]
@@ -561,6 +565,8 @@ impl EngineFailure {
             | Self::Versions { .. }
             | Self::NoSignIn { .. }
             | Self::SignInClosed { .. }
+            | Self::ApiKeyUnsupported { .. }
+            | Self::ApiKeyInvalid { .. }
             | Self::ClaudeAiEngine { .. }
             | Self::ClaudeAiSignedOut
             | Self::ClaudeAiNoUserAgent

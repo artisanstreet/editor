@@ -13,7 +13,6 @@ use aqua_ui::{
 };
 
 const EDGE_INSET: f32 = 2.0;
-const STRIP_PAD: Space = Space::S8;
 const CONVERSATION_WIDTH: f32 = 768.0;
 const FORGES_WIDTH: f32 = 560.0;
 
@@ -49,6 +48,69 @@ pub fn settings_panel(
     page: Element,
     dismiss: &std::rc::Rc<dyn Fn()>,
 ) -> Element {
+    settings_panel_with_title(
+        theme,
+        viewport,
+        sidebar,
+        page,
+        UiBox::new().build(),
+        dismiss,
+    )
+}
+
+pub(crate) fn settings_rail(theme: &ArtisanTheme, search: Element, navigation: Element) -> Element {
+    UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .height(Length::Pct(100.0))
+        .padded(Space::S16)
+        .spaced(Space::S16)
+        .child(TextRole::Heading.text(theme, "Settings").build())
+        .child(search)
+        .child(
+            UiBox::new()
+                .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0)))
+                .child(navigation)
+                .build(),
+        )
+        .build()
+}
+
+pub(crate) fn settings_title(
+    theme: &ArtisanTheme,
+    page: &str,
+    name: Option<&str>,
+    account: Option<&crate::ui::chrome::account::Account>,
+) -> Element {
+    let label = |text: &str| {
+        TextRole::Label
+            .text(theme, text.to_owned())
+            .wrap(false)
+            .build()
+    };
+    UiBox::new()
+        .height(layout::TITLEBAR_HEIGHT)
+        .padded(Space::S12)
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER))
+        .style(Corners::Top.style(Radius::Panel.px()))
+        .style(sheet(theme))
+        .children(
+            account.map(|account| crate::ui::chrome::account::portrait(account, 20.0, 6.0, 14.0)),
+        )
+        .children(name.into_iter().flat_map(|name| [label(name), label("/")]))
+        .child(label(page).role(aqua_core::Role::Heading(1)))
+        .build()
+}
+
+pub(crate) fn settings_panel_with_title(
+    theme: &ArtisanTheme,
+    viewport: Size,
+    sidebar: Element,
+    page: Element,
+    title: Element,
+    dismiss: &std::rc::Rc<dyn Fn()>,
+) -> Element {
     let dimensions = layout::settings_layout(viewport);
     let close = std::rc::Rc::clone(dismiss);
     let close = IconButton::new(
@@ -78,14 +140,14 @@ pub fn settings_panel(
         .build();
     let strip = UiBox::new()
         .height(layout::TITLEBAR_HEIGHT)
-        .padded(STRIP_PAD)
         .style(
             Style::new()
                 .flex_shrink(0.0)
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::END),
+                .align(AlignItems::END)
+                .justify(JustifyContent::SPACE_BETWEEN),
         )
-        .child(close)
+        .child(title)
+        .child(UiBox::new().padded(Space::S8).child(close).build())
         .build();
     UiBox::new()
         .layout("row")

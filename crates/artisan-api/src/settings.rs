@@ -151,7 +151,23 @@ pub const THREAD_RETENTION_DAYS_KEY: &str = "thread_retention_days";
 
 pub const SHOW_ALL_MODELS_KEY: &str = "show_all_models";
 
+const fn engine_setting(engine: crate::EngineId) -> SettingDecl {
+    SettingDecl {
+        key: engine.enabled_setting(),
+        owner: SettingOwner::Forge,
+        kind: SettingKind::Bool,
+        default: "true",
+        label: engine.display_name(),
+        description: "Allow this engine to start new turns.",
+        needs_approval: false,
+    }
+}
+
 pub const SETTINGS: &[SettingDecl] = &[
+    engine_setting(crate::EngineId::Claude),
+    engine_setting(crate::EngineId::Codex),
+    engine_setting(crate::EngineId::OpenCode),
+    engine_setting(crate::EngineId::Antigravity),
     SettingDecl {
         key: crate::HIDE_BAD_MODEL_OPTIONS_KEY,
         owner: SettingOwner::Editor,
@@ -245,6 +261,15 @@ pub const SETTINGS: &[SettingDecl] = &[
         needs_approval: true,
     },
     SettingDecl {
+        key: "curated_models",
+        owner: SettingOwner::Editor,
+        kind: SettingKind::SystemSwitch,
+        default: "null",
+        label: "Curated models",
+        description: "Only show recommended models and model options.",
+        needs_approval: false,
+    },
+    SettingDecl {
         key: SHOW_ALL_MODELS_KEY,
         owner: SettingOwner::Editor,
         kind: SettingKind::Bool,
@@ -269,6 +294,24 @@ pub const SETTINGS: &[SettingDecl] = &[
         default: "false",
         label: "Lower refresh rate",
         description: "Cap the Editor's redraws at 60 frames per second; off, it matches the monitor's refresh rate.",
+        needs_approval: false,
+    },
+    SettingDecl {
+        key: "theme",
+        owner: SettingOwner::Editor,
+        kind: SettingKind::SystemSwitch,
+        default: "null",
+        label: "Theme",
+        description: "Use a dark or light theme, or follow the system theme.",
+        needs_approval: false,
+    },
+    SettingDecl {
+        key: "artisan_system_prompt",
+        owner: SettingOwner::Forge,
+        kind: SettingKind::Bool,
+        default: "true",
+        label: "System prompt for Artisan Editor",
+        description: "Include the built-in Artisan Editor instructions when starting an engine.",
         needs_approval: false,
     },
     SettingDecl {
@@ -306,7 +349,7 @@ pub const SETTINGS: &[SettingDecl] = &[
         key: "outline_text",
         owner: SettingOwner::Editor,
         kind: SettingKind::Bool,
-        default: "true",
+        default: "false",
         label: "Outline text rendering",
         description: "Rasterize glyphs from their unhinted outlines with grayscale antialiasing and blend them without gamma or contrast correction; off uses hinted, subpixel-antialiased glyphs.",
         needs_approval: false,
@@ -355,6 +398,8 @@ pub const SETTINGS: &[SettingDecl] = &[
         kind: SettingKind::Choice {
             values: &[
                 None,
+                Some(80),
+                Some(90),
                 Some(100),
                 Some(125),
                 Some(150),

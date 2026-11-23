@@ -13,7 +13,7 @@ use editor_ui::{
     theme::ArtisanTheme,
 };
 
-const CARD: Surface = Surface::Card;
+const CARD: Surface = Surface::Inset;
 pub(crate) const CONTROL_WIDTH: f32 = 144.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +35,7 @@ fn ink_color(theme: &ArtisanTheme, ink: Ink) -> editor_ui::theme::Oklch {
 
 fn styled(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: String, wraps: bool) -> Element {
     let color = ink_color(theme, ink);
-    role.text(theme, value)
+    role.tracked(theme, value)
         .gpui_source_color(color.to_reference_text_color())
         .wrap(wraps)
         .build()
@@ -71,7 +71,7 @@ pub(crate) fn line(
 }
 
 pub(crate) fn column() -> UiBox {
-    UiBox::new().layout("column").spaced(Space::S32)
+    UiBox::new().layout("column").spaced(Space::S20)
 }
 
 pub(crate) fn stack(space: Space) -> UiBox {
@@ -131,9 +131,7 @@ pub(crate) fn section(
 ) -> Element {
     let mut heading = stack(Space::S4)
         .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-        .child(
-            text(theme, TextRole::LabelStrong, Ink::Plain, title).role(aqua_core::Role::Heading(2)),
-        );
+        .child(text(theme, TextRole::Heading, Ink::Plain, title).role(aqua_core::Role::Heading(2)));
     if let Some(intro) = intro {
         heading = heading.child(text(theme, TextRole::Caption, Ink::Muted, intro));
     }
@@ -146,7 +144,7 @@ pub(crate) fn section(
         )
         .child(heading.build())
         .children(action);
-    stack(Space::S12).child(head.build()).child(body).build()
+    stack(Space::S8).child(head.build()).child(body).build()
 }
 
 pub(crate) fn card(theme: &ArtisanTheme, blocks: Vec<Element>) -> Element {
@@ -170,6 +168,20 @@ pub(crate) fn row(
 ) -> Element {
     let title = title.into();
     let description = description.into();
+    if description.is_empty() {
+        return UiBox::new()
+            .height(56.0)
+            .padded(Space::S8)
+            .spaced(Space::S16)
+            .style(
+                Style::new()
+                    .align(AlignItems::CENTER)
+                    .justify(JustifyContent::SPACE_BETWEEN),
+            )
+            .child(grow(line(theme, TextRole::Label, Ink::Plain, title)))
+            .children(control)
+            .build();
+    }
     let item = RowItem::new(
         format!("settings-row-{title}"),
         *theme,
@@ -177,11 +189,7 @@ pub(crate) fn row(
         CARD,
         title,
     );
-    let item = if description.is_empty() {
-        item
-    } else {
-        item.detail(description)
-    };
+    let item = item.detail(description);
     match control {
         Some(control) => item.trailing(control),
         None => item,

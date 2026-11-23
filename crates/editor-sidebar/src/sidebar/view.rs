@@ -439,7 +439,7 @@ fn apply(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> bool {
             return sidebar.rail_motion.play(glyph, core.clock().now());
         }
         ViewAction::SetDarkMode(dark) => {
-            if let Err(error) = core.set_setting("dark_mode", dark.into()) {
+            if let Err(error) = core.set_setting("theme", dark.into()) {
                 tracing::error!(error = %::diagnostics::chain(&error), "saving the theme");
                 sidebar.error = Some(editor_core::Problem::caused_by(
                     "Couldn't save the theme.",

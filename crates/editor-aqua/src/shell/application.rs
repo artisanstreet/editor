@@ -386,6 +386,35 @@ impl<V: SectionViews> ShellApplication<V> {
                         failed = true;
                     }
                 }
+                crate::shell::workspace::SettingsPlatformEffect::ExportDiagnostics => {
+                    if let Some(workspace) = self.shell.entry.workspace() {
+                        let emit = workspace.settings_emit();
+                        let report = self.shell.build.diagnostics();
+                        let request = ctx.dialog(
+                            id,
+                            crate::ui::dialogs::save_file_spec("artisan-diagnostics.txt"),
+                        );
+                        self.shell.dialogs.route(request, move |outcome| {
+                            use crate::settings::view::ViewAction;
+                            let result = match crate::ui::dialogs::chosen_path(outcome) {
+                                Ok(Some(path)) => {
+                                    std::fs::write(path, report.as_bytes()).map_err(|error| {
+                                        crate::core::Problem::caused_by(
+                                            "Couldn't save the diagnostics file.",
+                                            &error,
+                                        )
+                                    })
+                                }
+                                Ok(None) => return,
+                                Err(error) => Err(crate::core::Problem::detailed(
+                                    "Couldn't choose where to save diagnostics.",
+                                    error,
+                                )),
+                            };
+                            emit(ViewAction::DiagnosticsExported(result));
+                        });
+                    }
+                }
                 crate::shell::workspace::SettingsPlatformEffect::CopyText(text) => {
                     if let Err(error) = ctx.clipboard().set_text(text) {
                         self.shell
@@ -702,7 +731,7 @@ impl<V: SectionViews> ShellApplication<V> {
             .into_parts()
         });
         let contrast = contrast_open.then(|| {
-            crate::settings::view::high_contrast_menu(
+            crate::settings::view::text_rendering_menu(
                 &workspace.settings,
                 &self.shell.core,
                 &theme,
@@ -732,7 +761,11 @@ impl<V: SectionViews> ShellApplication<V> {
                 streaming,
             ),
             (&mut self.text_size_popup, "settings-text-size", text_size),
-            (&mut self.contrast_popup, "settings-high-contrast", contrast),
+            (
+                &mut self.contrast_popup,
+                "settings-text-rendering",
+                contrast,
+            ),
             (
                 &mut self.retention_popup,
                 "settings-thread-retention",
