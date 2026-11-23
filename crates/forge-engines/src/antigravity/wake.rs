@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
-pub(super) const REPLY_SETTLE: Duration = Duration::from_secs(3);
-pub(super) const OPEN_REPLY_SILENCE: Duration = Duration::from_mins(2);
-pub(super) const COMMAND_SILENCE: Duration = Duration::from_mins(30);
+const REPLY_SETTLE: Duration = Duration::from_secs(3);
+const OPEN_REPLY_SILENCE: Duration = Duration::from_mins(2);
+const COMMAND_SILENCE: Duration = Duration::from_mins(30);
 pub(super) const PROMPT_SILENCE: Duration = Duration::from_mins(15);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
