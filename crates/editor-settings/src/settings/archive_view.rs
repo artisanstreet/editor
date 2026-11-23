@@ -111,14 +111,6 @@ pub(crate) fn cleanup(
     ui::section(theme, "Cleanup", None, None, ui::card(theme, vec![row]))
 }
 
-fn deletion_label(remaining: i64) -> String {
-    if remaining <= 0 {
-        "Eligible for deletion".to_owned()
-    } else {
-        format!("Deleting in {}", span(remaining))
-    }
-}
-
 fn span(millis: i64) -> String {
     let left = millis.max(60_000);
     let (count, unit) = if left >= 86_400_000 {
@@ -136,7 +128,7 @@ struct Row {
     id: ThreadId,
     title: String,
     icon: Option<std::sync::Arc<aqua::ImageHandle>>,
-    deletion: String,
+    detail: String,
     restoring: bool,
 }
 
@@ -158,19 +150,23 @@ pub(crate) fn archived(
         .ids
         .iter()
         .filter_map(|id| host.threads.get(id))
-        .map(|thread| Row {
-            id: thread.id.clone(),
-            title: thread.title.clone().unwrap_or_else(|| "New thread".into()),
-            icon: host.project_icon(&thread.project_id),
-            deletion: retention.map_or_else(
-                || "Kept indefinitely".to_owned(),
-                |days| {
-                    deletion_label(
-                        i64::from(days) * 86_400_000 - now.saturating_sub(thread.updated_at),
-                    )
-                },
-            ),
-            restoring: controller.archive.restoring.contains(&thread.id),
+        .map(|thread| {
+            let age = now.saturating_sub(thread.updated_at).max(0);
+            let age = format!("Last active {} ago", span(age));
+            let mut detail = host.projects.get(&thread.project_id).map_or_else(
+                || age.clone(),
+                |project| format!("{} · {age}", project.name),
+            );
+            if retention.is_none() {
+                detail.push_str(" · Kept indefinitely");
+            }
+            Row {
+                id: thread.id.clone(),
+                title: thread.title.clone().unwrap_or_else(|| "New thread".into()),
+                icon: host.project_icon(&thread.project_id),
+                detail,
+                restoring: controller.archive.restoring.contains(&thread.id),
+            }
         })
         .collect();
     let card = if rows.is_empty() {
@@ -246,7 +242,7 @@ pub(crate) fn archived(
                                 &theme,
                                 TextRole::Caption,
                                 Ink::Muted,
-                                row.deletion.clone(),
+                                row.detail.clone(),
                             ))
                             .build(),
                     ))

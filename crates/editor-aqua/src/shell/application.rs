@@ -389,7 +389,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 crate::shell::workspace::SettingsPlatformEffect::ExportDiagnostics => {
                     if let Some(workspace) = self.shell.entry.workspace() {
                         let emit = workspace.settings_emit();
-                        let report = self.shell.build.diagnostics();
+                        let report = self.shell.build.diagnostics(self.shell.core.active_host());
                         let request = ctx.dialog(
                             id,
                             crate::ui::dialogs::save_file_spec("artisan-diagnostics.txt"),
@@ -398,7 +398,11 @@ impl<V: SectionViews> ShellApplication<V> {
                             use crate::settings::view::ViewAction;
                             let result = match crate::ui::dialogs::chosen_path(outcome) {
                                 Ok(Some(path)) => {
-                                    std::fs::write(path, report.as_bytes()).map_err(|error| {
+                                    std::fs::write(&path, report.as_bytes()).map_err(|source| {
+                                        let error = crate::settings::about::WriteDiagnosticsError {
+                                            path,
+                                            source,
+                                        };
                                         crate::core::Problem::caused_by(
                                             "Couldn't save the diagnostics file.",
                                             &error,

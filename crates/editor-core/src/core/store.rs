@@ -524,6 +524,17 @@ impl Core {
         key: &str,
         value: serde_json::Value,
     ) -> Result<Option<u64>, SetSettingError> {
+        let (key, value) = match (key, value) {
+            ("dark_mode", serde_json::Value::Bool(dark))
+                if self.settings.get("theme").is_some() =>
+            {
+                (
+                    "theme",
+                    super::ThemePreference::from_dark(dark).as_str().into(),
+                )
+            }
+            (key, value) => (key, value),
+        };
         if let Settings::Unreadable(source) = &self.settings {
             return Err(SetSettingError::Unreadable {
                 key: key.to_owned(),

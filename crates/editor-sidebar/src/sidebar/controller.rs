@@ -84,7 +84,7 @@ pub struct Sidebar {
     history_motion: Option<(std::time::Instant, f32)>,
     motion_live: bool,
     pub(crate) rail_motion: super::rail::RailMotion,
-    pub settings_motion: super::settings_nav::NavMotion,
+    pub(crate) settings_motion: super::settings_nav::NavMotion,
     pub threads_edges: editor_ui::scroll_edge::ScrollEdges,
     working_pulses: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<ThreadId, editor_ui::motion::WorkingPulse>>,

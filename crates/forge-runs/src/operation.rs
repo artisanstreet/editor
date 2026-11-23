@@ -22,6 +22,22 @@ pub(crate) enum InputError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
+    #[error("{engine} is turned off for thread {thread}")]
+    EngineDisabled { engine: EngineId, thread: ThreadId },
+    #[error("read the enabled setting for {engine} before accepting a message for thread {thread}")]
+    EngineSetting {
+        engine: EngineId,
+        thread: ThreadId,
+        #[source]
+        source: forge_store::ReadSettingError,
+    },
+    #[error("look up a retry of message {item} for thread {thread}")]
+    Retry {
+        thread: ThreadId,
+        item: ItemId,
+        #[source]
+        source: forge_store::ReadItemError,
+    },
     #[error(transparent)]
     ReadThread(#[from] forge_store::ReadThreadError),
     #[error("thread {thread} does not exist")]
@@ -62,12 +78,14 @@ impl SendError {
     pub(crate) const fn class(&self) -> ErrorClass {
         match self {
             Self::ThreadNotFound { .. } => ErrorClass::NotFound,
-            Self::Command { .. } => ErrorClass::BadRequest,
+            Self::Command { .. } | Self::EngineDisabled { .. } => ErrorClass::BadRequest,
             Self::Store(store) => error::input(&store.cause),
             Self::Peer { source, .. } => source.class(),
-            Self::ReadThread(_) | Self::Route { .. } | Self::Abandoned { .. } => {
-                ErrorClass::Internal
-            }
+            Self::ReadThread(_)
+            | Self::Route { .. }
+            | Self::Abandoned { .. }
+            | Self::EngineSetting { .. }
+            | Self::Retry { .. } => ErrorClass::Internal,
         }
     }
 }

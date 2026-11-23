@@ -81,7 +81,7 @@ fn entry(
             UiBox::new()
                 .width(2.0)
                 .height(18.0)
-                .style(editor_ui::kit::Divider::guide(theme))
+                .style(editor_ui::kit::Divider::selection_guide(theme))
                 .opacity(if selected { motion } else { 0.0 })
                 .build(),
         )

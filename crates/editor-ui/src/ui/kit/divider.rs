@@ -42,6 +42,13 @@ fn rule(theme: &ArtisanTheme) -> UiBox {
 
 impl Divider {
     #[must_use]
+    pub fn selection_guide(theme: &ArtisanTheme) -> Style {
+        Style::new().gpui_background(GpuiBackground::Solid(
+            theme.colors.text_muted.to_reference_paint(),
+        ))
+    }
+
+    #[must_use]
     pub fn guide(theme: &ArtisanTheme) -> Style {
         Style::new().gpui_background(GpuiBackground::Solid(
             theme.colors.line.to_reference_paint(),

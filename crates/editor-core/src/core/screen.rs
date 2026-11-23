@@ -68,7 +68,7 @@ impl SettingsSection {
     }
 
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Appearance => "appearance",
             Self::Streaming => "streaming",

@@ -88,7 +88,7 @@ pub enum ViewAction {
     FontMenu(bool),
     SetFont(&'static str),
     SetDarkMode(bool),
-    SetTheme(Option<bool>),
+    SetTheme(editor_core::ThemePreference),
     SetOutlineText(bool),
     SetShowAllModels(bool),
     SetHideBadModelOptions(bool),
@@ -132,13 +132,21 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
     ) {
         return false;
     }
+    if matches!(action, ViewAction::SearchChanged) {
+        if !controller.search_editor.borrow().text().trim().is_empty()
+            && let Some(host) = core.active_host().map(|host| host.id.clone())
+            && let Some(host) = core.host_mut(&host)
+        {
+            host.load_skill_catalog(false);
+        }
+        return true;
+    }
     if matches!(
         action,
         ViewAction::PromptPresentationChanged
             | ViewAction::McpPresentationChanged
             | ViewAction::AccountPresentationChanged
             | ViewAction::EnginePresentationChanged
-            | ViewAction::SearchChanged
     ) {
         return true;
     }
@@ -152,8 +160,11 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
     let before = ViewSnapshot::capture(controller, core);
     match action {
         ViewAction::Navigate(screen) => {
-            controller.clear_search();
+            let cleared = controller.clear_search();
             core.navigate(screen);
+            if cleared {
+                return true;
+            }
         }
         ViewAction::EngineAction(engine, action) => controller.engine_action(core, engine, action),
         ViewAction::EngineVersions(engine) => {
@@ -294,7 +305,7 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         ViewAction::ContrastMenu(open) => controller.reported_menus.report(Menu::Contrast, open),
         ViewAction::SetFont(font) => controller.set_editor_setting(core, "font_set", font.into()),
         ViewAction::SetDarkMode(enabled) => {
-            controller.set_editor_setting(core, "theme", enabled.into());
+            controller.set_editor_setting(core, "dark_mode", enabled.into());
         }
         ViewAction::SetOutlineText(enabled) => {
             controller.set_editor_setting(core, "outline_text", enabled.into());
@@ -310,11 +321,7 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
             );
         }
         ViewAction::SetTheme(choice) => {
-            controller.set_editor_setting(
-                core,
-                "theme",
-                choice.map_or(serde_json::Value::Null, serde_json::Value::Bool),
-            );
+            controller.set_editor_setting(core, "theme", choice.as_str().into());
         }
         ViewAction::SetCuratedModels(curated) => {
             controller.set_editor_setting(core, "curated_models", curated.into());
@@ -640,6 +647,11 @@ fn settings_search(
             results.push(ui::section(theme, group, None, None, ui::card(theme, rows)));
         }
     }
+    if let Some(host) = core.active_host() {
+        results.extend(search_host_controls(
+            controller, host, theme, emit, &matches,
+        ));
+    }
     for (terms, label, target) in [
         (
             "profile identity account avatar",
@@ -697,7 +709,12 @@ fn settings_search(
     if let Some(host) = core.active_host() {
         for status in host.engines.values() {
             let name = status.engine.display_name();
-            if matches(&format!("{name} engine account version install")) {
+            let terms = if status.engine == artisan_api::EngineId::Codex {
+                format!("{name} engine account version install API key")
+            } else {
+                format!("{name} engine account version install")
+            };
+            if matches(&terms) {
                 let send = Rc::clone(emit);
                 let engine = status.engine;
                 results.push(ui::row(
@@ -973,7 +990,36 @@ fn hosts(
             ))],
         ),
     );
-    ui::column().child(relay).child(computers).build()
+    let enrolled = core.account().machines();
+    let open: Vec<_> = core
+        .hosts()
+        .filter(|(config, _)| !enrolled.iter().any(|machine| machine.id == config.id.0))
+        .map(|(config, host)| {
+            let (status, ink) = match &host.status {
+                editor_core::ConnectionStatus::Live => ("Connected", Ink::Success),
+                editor_core::ConnectionStatus::Connecting
+                | editor_core::ConnectionStatus::Reconnecting { .. } => ("Connecting…", Ink::Muted),
+                editor_core::ConnectionStatus::Offline { .. } => ("Disconnected", Ink::Danger),
+            };
+            ui::row(
+                theme,
+                config.name.clone(),
+                "",
+                Some(ui::line(theme, TextRole::Label, ink, status)),
+            )
+        })
+        .collect();
+    let mut content = ui::column().child(relay).child(computers);
+    if !open.is_empty() {
+        content = content.child(ui::section(
+            theme,
+            "Open Forges",
+            None,
+            None,
+            ui::card(theme, open),
+        ));
+    }
+    content.build()
 }
 
 fn notifications(
@@ -1021,17 +1067,10 @@ impl ThreadSection {
     }
 }
 
-fn thread_section(
-    theme: &ArtisanTheme,
-    host: &HostData,
-    section: ThreadSection,
-    emit: &Rc<dyn Fn(ViewAction)>,
-    include_header: bool,
-) -> Element {
-    let (title, entries): (
-        &str,
-        &[(&'static str, HostSwitch, &'static str, &'static str)],
-    ) = match section {
+type ThreadControl = (&'static str, HostSwitch, &'static str, &'static str);
+
+fn thread_controls(section: ThreadSection) -> (&'static str, &'static [ThreadControl]) {
+    match section {
         ThreadSection::Automation => (
             "Recovery & continuation",
             &[
@@ -1078,7 +1117,17 @@ fn thread_section(
                 ),
             ],
         ),
-    };
+    }
+}
+
+fn thread_section(
+    theme: &ArtisanTheme,
+    host: &HostData,
+    section: ThreadSection,
+    emit: &Rc<dyn Fn(ViewAction)>,
+    include_header: bool,
+) -> Element {
+    let (title, entries) = thread_controls(section);
     let rows = entries
         .iter()
         .map(|&(id, switch, label, _)| host_switch(theme, host, switch, id, label, emit))
@@ -1116,6 +1165,125 @@ fn host_switch(
     ui::row(theme, label, "", Some(control))
 }
 
+fn search_host_controls(
+    controller: &SettingsController,
+    host: &HostData,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+    matches: &impl Fn(&str) -> bool,
+) -> Vec<Element> {
+    let mut sections = Vec::new();
+    for section in [ThreadSection::Automation, ThreadSection::Assistance] {
+        let (title, entries) = thread_controls(section);
+        let rows: Vec<_> = entries
+            .iter()
+            .filter(|&&(_, _, label, description)| {
+                matches(&format!("threads {title} {label} {description}"))
+            })
+            .map(|&(id, switch, label, _)| host_switch(theme, host, switch, id, label, emit))
+            .collect();
+        if !rows.is_empty() {
+            sections.push(ui::section(theme, title, None, None, ui::card(theme, rows)));
+        }
+    }
+    if matches("threads delete inactive threads retention cleanup archive days") {
+        sections.push(super::archive_view::cleanup(
+            controller,
+            host,
+            theme,
+            Rc::clone(emit),
+        ));
+    }
+    let prompt_label = "System prompt for Artisan Editor";
+    if matches(&format!(
+        "{prompt_label} forge global prompt built-in instructions"
+    )) {
+        let row = host_switch(
+            theme,
+            host,
+            HostSwitch::ArtisanSystemPrompt,
+            "settings-artisan-system-prompt",
+            prompt_label,
+            emit,
+        );
+        sections.push(ui::section(
+            theme,
+            "Global Prompt",
+            None,
+            None,
+            ui::card(theme, vec![row]),
+        ));
+    }
+    if let Ok(servers) = host.mcp_servers() {
+        let rows: Vec<_> = servers
+            .iter()
+            .filter(|server| matches(&format!("mcp server tool {}", server.name)))
+            .map(|server| {
+                ui::row(
+                    theme,
+                    server.name.clone(),
+                    "",
+                    Some(super::mcp_view::toggle(
+                        controller, host, server, theme, emit,
+                    )),
+                )
+            })
+            .collect();
+        if !rows.is_empty() {
+            sections.push(ui::section(
+                theme,
+                "MCPs",
+                None,
+                None,
+                ui::card(theme, rows),
+            ));
+        }
+    }
+    if let Some(catalog) = host.skill_catalog() {
+        let rows: Vec<_> = catalog
+            .iter()
+            .filter(|skill| {
+                skill.origin != artisan_api::SkillOrigin::Discovered
+                    && matches(&format!("skills marketplace {}", skill.name))
+            })
+            .map(|skill| skill_row(controller, host, skill, theme, emit))
+            .collect();
+        if !rows.is_empty() {
+            sections.push(ui::section(
+                theme,
+                "Skills",
+                None,
+                None,
+                ui::card(theme, rows),
+            ));
+        }
+    }
+    sections
+}
+
+fn skill_row(
+    controller: &SettingsController,
+    host: &HostData,
+    skill: &artisan_api::CatalogSkill,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let instance = host.instance();
+    let send = Rc::clone(emit);
+    let id = skill.id.clone();
+    let control = Switch::new(
+        format!("settings-skill-{}", skill.id),
+        *theme,
+        skill.enabled,
+        skill.name.clone(),
+    )
+    .recessed()
+    .disabled(controller.skill_pending.contains(&skill.id))
+    .on_change(move |enabled| send(ViewAction::SkillToggle(instance, id.clone(), enabled)))
+    .build();
+    ui::row(theme, skill.name.clone(), "", Some(control))
+}
+
 fn skills_section(
     controller: &SettingsController,
     host: &HostData,
@@ -1132,26 +1300,13 @@ fn skills_section(
         move || open(ViewAction::Navigate(Screen::Marketplace)),
     );
     let mut rows = Vec::new();
-    let instance = host.instance();
     if let Some(catalog) = host.skill_catalog() {
-        for skill in catalog
-            .iter()
-            .filter(|skill| skill.origin != artisan_api::SkillOrigin::Discovered)
-        {
-            let send = Rc::clone(emit);
-            let id = skill.id.clone();
-            let control = Switch::new(
-                format!("settings-skill-{}", skill.id),
-                *theme,
-                skill.enabled,
-                skill.name.clone(),
-            )
-            .recessed()
-            .disabled(controller.skill_pending.contains(&skill.id))
-            .on_change(move |enabled| send(ViewAction::SkillToggle(instance, id.clone(), enabled)))
-            .build();
-            rows.push(ui::row(theme, skill.name.clone(), "", Some(control)));
-        }
+        rows.extend(
+            catalog
+                .iter()
+                .filter(|skill| skill.origin != artisan_api::SkillOrigin::Discovered)
+                .map(|skill| skill_row(controller, host, skill, theme, emit)),
+        );
     }
     if let Some(problem) = host.catalog_load().error.as_ref() {
         let retry = Rc::clone(emit);
@@ -1714,11 +1869,14 @@ fn appearance_rows(
         *theme,
         "Theme",
         preferences.theme,
-        Segment::new(None, "System").icon(editor_assets::AssetId::TABLER_DEVICE_LAPTOP),
+        Segment::new(editor_core::ThemePreference::System, "System")
+            .icon(editor_assets::AssetId::TABLER_DEVICE_LAPTOP),
     )
     .options([
-        Segment::new(Some(false), "Light").icon(editor_assets::AssetId::TABLER_SUN),
-        Segment::new(Some(true), "Dark").icon(editor_assets::AssetId::TABLER_MOON),
+        Segment::new(editor_core::ThemePreference::Light, "Light")
+            .icon(editor_assets::AssetId::TABLER_SUN),
+        Segment::new(editor_core::ThemePreference::Dark, "Dark")
+            .icon(editor_assets::AssetId::TABLER_MOON),
     ])
     .on_change(move |value| send(ViewAction::SetTheme(value)))
     .build();
@@ -1735,18 +1893,7 @@ fn appearance_rows(
     .on_change(move |font| font_send(ViewAction::SetFont(font)))
     .on_open_change(move |open| font_open(ViewAction::FontMenu(open)))
     .build();
-    let contrast_emit = Rc::clone(&emit);
-    let higher = Switch::new(
-        "settings-higher-contrast",
-        *theme,
-        preferences
-            .high_contrast
-            .unwrap_or(theme.colors.contrast == editor_ui::theme::Contrast::High),
-        "Higher contrast",
-    )
-    .recessed()
-    .on_change(move |enabled| contrast_emit(ViewAction::SetHighContrast(Some(enabled))))
-    .build();
+    let contrast_controls = contrast_switch(theme, preferences.high_contrast, &emit);
     let render_emit = Rc::clone(&emit);
     let render_menu = Rc::clone(&emit);
     let render = Select::new(
@@ -1794,9 +1941,42 @@ fn appearance_rows(
         ),
         (
             "higher contrast borders accessibility",
-            ui::row(theme, "Higher contrast", "", Some(higher)),
+            ui::row(theme, "Higher contrast", "", Some(contrast_controls)),
         ),
     ]
+}
+
+fn contrast_switch(
+    theme: &ArtisanTheme,
+    chosen: Option<bool>,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let contrast_emit = Rc::clone(emit);
+    let higher = Switch::new(
+        "settings-higher-contrast",
+        *theme,
+        chosen.unwrap_or(theme.colors.contrast == editor_ui::theme::Contrast::High),
+        "Higher contrast",
+    )
+    .recessed()
+    .on_change(move |enabled| contrast_emit(ViewAction::SetHighContrast(Some(enabled))))
+    .build();
+    if chosen.is_some() {
+        let follow_system = Rc::clone(emit);
+        ui::actions()
+            .child(ui::button(
+                theme,
+                "settings-contrast-follow-system",
+                "Match system",
+                ButtonTone::Quiet,
+                false,
+                move || follow_system(ViewAction::SetHighContrast(None)),
+            ))
+            .child(higher)
+            .build()
+    } else {
+        higher
+    }
 }
 
 fn switch_track(theme: &ArtisanTheme, child: Element, width: f32) -> Element {
@@ -1888,33 +2068,6 @@ pub fn text_rendering_menu(
     .on_open_change(move |open| emit(ViewAction::ContrastMenu(open)))
 }
 
-fn high_contrast_entries() -> Vec<SelectEntry<Option<bool>>> {
-    vec![
-        SelectEntry::item(None, "Match system"),
-        SelectEntry::item(Some(true), "On"),
-        SelectEntry::item(Some(false), "Off"),
-    ]
-}
-
-pub fn high_contrast_menu(
-    controller: &SettingsController,
-    core: &Core,
-    theme: &ArtisanTheme,
-    emit: Rc<dyn Fn(ViewAction)>,
-) -> SelectMenu<Option<bool>> {
-    let chosen = core.settings().preferences().high_contrast;
-    let change = Rc::clone(&emit);
-    SelectMenu::new(
-        *theme,
-        Some(chosen),
-        high_contrast_entries(),
-        Rc::clone(&controller.contrast_select),
-        ui::CONTROL_WIDTH,
-    )
-    .on_change(move |choice| change(ViewAction::SetHighContrast(choice)))
-    .on_open_change(move |open| emit(ViewAction::ContrastMenu(open)))
-}
-
 fn section_page(
     theme: &ArtisanTheme,
     page: SettingsPage,
@@ -1965,8 +2118,9 @@ struct ViewSnapshot {
 }
 
 type ShownPreferences = (
-    [bool; 7],
-    [Option<bool>; 3],
+    [bool; 6],
+    [Option<bool>; 2],
+    editor_core::ThemePreference,
     Option<u32>,
     editor_core::Fonts,
     editor_core::Streaming,
@@ -1976,7 +2130,6 @@ type ShownPreferences = (
 fn shown(preferences: &editor_core::EditorPreferences) -> ShownPreferences {
     (
         [
-            preferences.dark_mode.on(),
             preferences.outline_text.on(),
             preferences.notifications.on(),
             preferences.lower_refresh_rate.on(),
@@ -1984,11 +2137,8 @@ fn shown(preferences: &editor_core::EditorPreferences) -> ShownPreferences {
             preferences.hide_bad_model_options.on(),
             preferences.show_all_models.on(),
         ],
-        [
-            preferences.reduced_motion,
-            preferences.high_contrast,
-            preferences.theme,
-        ],
+        [preferences.reduced_motion, preferences.high_contrast],
+        preferences.theme,
         preferences.text_percent,
         preferences.fonts,
         preferences.streaming,

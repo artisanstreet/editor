@@ -1,5 +1,13 @@
 use std::path::PathBuf;
 
+#[derive(Debug, thiserror::Error)]
+#[error("write diagnostics to {}", path.display())]
+pub struct WriteDiagnosticsError {
+    pub path: PathBuf,
+    #[source]
+    pub source: std::io::Error,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BuildInfo {
     pub version: String,
@@ -10,7 +18,7 @@ pub struct BuildInfo {
 }
 
 impl BuildInfo {
-    pub fn identifier(&self) -> String {
+    pub(crate) fn identifier(&self) -> String {
         if self.version.is_empty() || self.version == "0.0.0" || self.version.contains("nightly") {
             format!(
                 "N-{}",
@@ -25,14 +33,28 @@ impl BuildInfo {
         }
     }
 
-    pub fn diagnostics(&self) -> String {
-        format!(
+    pub fn diagnostics(&self, host: Option<&editor_core::HostData>) -> String {
+        use std::fmt::Write;
+        let mut report = format!(
             "Artisan Editor {}\nTarget: {}\nProfile: {}\nCommit: {}\n",
             self.identifier(),
             self.target,
             self.profile,
             self.commit
-        )
+        );
+        if let Some(host) = host {
+            if let Some(version) = &host.forge_version {
+                writeln!(report, "Forge: {version}")
+                    .expect("invariant: writing diagnostics into a string cannot fail");
+            }
+            for (engine, status) in &host.engines {
+                if let artisan_api::InstallState::Installed { version, .. } = &status.install {
+                    writeln!(report, "{}: {version}", engine.display_name())
+                        .expect("invariant: writing diagnostics into a string cannot fail");
+                }
+            }
+        }
+        report
     }
 }
 

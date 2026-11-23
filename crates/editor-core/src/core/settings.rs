@@ -45,10 +45,31 @@ pub enum Browser {
     Named(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemePreference {
+    pub(crate) const fn from_dark(dark: bool) -> Self {
+        if dark { Self::Dark } else { Self::Light }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditorPreferences {
-    pub dark_mode: Switch,
-    pub theme: Option<bool>,
+    pub theme: ThemePreference,
     pub outline_text: Switch,
     pub notifications: Switch,
     pub lower_refresh_rate: Switch,
@@ -91,11 +112,14 @@ impl EditorPreferences {
         };
         let curated = stored("curated_models").and_then(Value::as_bool);
         Self {
-            dark_mode: switch("dark_mode"),
-            theme: stored("theme").map_or_else(
-                || stored("dark_mode").and_then(Value::as_bool),
-                Value::as_bool,
-            ),
+            theme: match stored("theme").and_then(Value::as_str) {
+                Some("light") => ThemePreference::Light,
+                Some("dark") => ThemePreference::Dark,
+                Some("system") => ThemePreference::System,
+                _ => stored("dark_mode")
+                    .and_then(Value::as_bool)
+                    .map_or(ThemePreference::System, ThemePreference::from_dark),
+            },
             outline_text: switch("outline_text"),
             notifications: switch("notifications"),
             lower_refresh_rate: switch("lower_refresh_rate"),

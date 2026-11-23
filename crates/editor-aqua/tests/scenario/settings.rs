@@ -24,6 +24,13 @@ fn settings_move_between_pages_and_close_back_to_the_thread() {
             view.find(Role::Switch, "Curated models").is_some() && !view.shows("Higher contrast")
         },
     ));
+    editor.click(Role::Button, "General");
+    drop(editor.settle_part(
+        "the General button to clear search without changing pages",
+        Role::Dialog,
+        Some("Settings"),
+        |view| view.find(Role::Switch, "Higher contrast").is_some(),
+    ));
     editor.click(Role::Button, "Computers");
     drop(editor.settle_part(
         "the Computers page",

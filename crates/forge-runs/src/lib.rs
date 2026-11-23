@@ -444,6 +444,49 @@ impl Hub {
         message: SendMessage,
         acceptance: forge_store::Acceptance,
     ) -> Result<Item, SendError> {
+        let thread =
+            self.store()
+                .thread(thread_id)
+                .await?
+                .ok_or_else(|| SendError::ThreadNotFound {
+                    thread: thread_id.clone(),
+                })?;
+        let requested = message
+            .config
+            .as_ref()
+            .map_or(thread.config.engine, |config| config.engine);
+        let engine = self
+            .lock()
+            .get(thread_id)
+            .and_then(|run| run.engine)
+            .unwrap_or(requested);
+        let key = engine.enabled_setting();
+        let enabled =
+            self.store()
+                .setting(key)
+                .await
+                .map_err(|source| SendError::EngineSetting {
+                    engine,
+                    thread: thread_id.clone(),
+                    source,
+                })?;
+        if !artisan_api::switch_decl(key).switch(enabled.as_ref()).on() {
+            let already_saved =
+                self.store()
+                    .item(&message.id)
+                    .await
+                    .map_err(|source| SendError::Retry {
+                        thread: thread_id.clone(),
+                        item: message.id.clone(),
+                        source,
+                    })?;
+            if already_saved.is_none() {
+                return Err(SendError::EngineDisabled {
+                    engine,
+                    thread: thread_id.clone(),
+                });
+            }
+        }
         let (item, created, saved_engine) = self
             .inner
             .store

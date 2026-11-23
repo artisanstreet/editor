@@ -922,7 +922,7 @@ impl Extensions {
             let prompt = self.reconcile_global_prompt().await?;
             prompt.candidates.is_empty().then_some(prompt.text)
         };
-        if ARTISAN_SYSTEM_PROMPT.is_empty() || prompt.is_none() {
+        if ARTISAN_SYSTEM_PROMPT.is_empty() {
             return Ok(prompt);
         }
         let setting = self
@@ -933,14 +933,12 @@ impl Extensions {
         let enabled = artisan_api::switch_decl(ARTISAN_SYSTEM_PROMPT_KEY)
             .switch(setting.as_ref())
             .on();
-        Ok(prompt.map(|prompt| {
-            if enabled && !prompt.is_empty() {
-                format!("{ARTISAN_SYSTEM_PROMPT}\n\n{prompt}")
-            } else if enabled {
-                ARTISAN_SYSTEM_PROMPT.to_owned()
-            } else {
-                prompt
-            }
+        if !enabled {
+            return Ok(prompt);
+        }
+        Ok(Some(match prompt {
+            Some(text) if !text.is_empty() => format!("{ARTISAN_SYSTEM_PROMPT}\n\n{text}"),
+            Some(_) | None => ARTISAN_SYSTEM_PROMPT.to_owned(),
         }))
     }
 

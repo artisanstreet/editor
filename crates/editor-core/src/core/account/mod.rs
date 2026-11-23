@@ -22,6 +22,7 @@ pub const AUTH_ORIGIN: &str = "https://auth.artisan.st";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccountLink {
+    Dashboard,
     Terms,
     Privacy,
     Recover,
@@ -31,6 +32,7 @@ impl AccountLink {
     #[must_use]
     pub fn url(self) -> String {
         let path = match self {
+            Self::Dashboard => return "https://artisan.st/dashboard".into(),
             Self::Terms => "/terms",
             Self::Privacy => "/privacy",
             Self::Recover => "/recover",

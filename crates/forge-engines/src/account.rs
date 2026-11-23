@@ -437,6 +437,7 @@ enum State {
         url: Option<String>,
         code: Option<String>,
     },
+    SavingApiKey,
 }
 
 #[derive(Debug)]
@@ -474,12 +475,12 @@ impl Machine {
                 }
                 None
             }
-            (State::LoggingIn { .. }, Event::LoginEnded { error: None }) => {
+            (State::LoggingIn { .. } | State::SavingApiKey, Event::LoginEnded { error: None }) => {
                 effects.push(Effect::Check);
                 Some(State::Unknown {})
             }
             (
-                State::LoggingIn { .. },
+                State::LoggingIn { .. } | State::SavingApiKey,
                 Event::LoginEnded {
                     error: Some(message),
                 },
@@ -492,12 +493,12 @@ impl Machine {
                     account: account.clone(),
                 })
             }
-            (State::LoggingIn { .. }, Event::Cancel) => {
+            (State::LoggingIn { .. } | State::SavingApiKey, Event::Cancel) => {
                 effects.push(Effect::StopLogin);
                 effects.push(Effect::Check);
                 Some(State::Unknown {})
             }
-            (State::LoggingIn { .. }, _) => None,
+            (State::LoggingIn { .. } | State::SavingApiKey, _) => None,
             (State::SignedIn { .. }, Event::Logout) => {
                 effects.push(Effect::Logout);
                 Some(State::Unknown {})
@@ -514,10 +515,7 @@ impl Machine {
             }),
             (_, Event::LoginApiKey(key)) => {
                 effects.push(Effect::StartApiKey(key.clone()));
-                Some(State::LoggingIn {
-                    url: None,
-                    code: None,
-                })
+                Some(State::SavingApiKey)
             }
             (_, Event::Login) => {
                 effects.push(Effect::StartLogin);
@@ -548,6 +546,11 @@ fn public_state(state: &State, engine: EngineId) -> SignInState {
             accepts_code: crate::engines::host_spec(engine).accepts_login_code,
             url: url.clone(),
             code: code.clone(),
+        },
+        State::SavingApiKey => SignInState::LoggingIn {
+            accepts_code: false,
+            url: None,
+            code: None,
         },
     }
 }
@@ -768,6 +771,9 @@ impl SignIn {
                 inner.generation = inner.generation.wrapping_add(1);
             }
             if matches!(event, Event::LoginEnded { .. }) {
+                if matches!(inner.machine.state(), State::SavingApiKey) {
+                    inner.generation = inner.generation.wrapping_add(1);
+                }
                 inner.login = None;
             }
             inner.machine.handle_with_context(event, &mut effects);
@@ -940,15 +946,17 @@ impl SignIn {
                 .await
                 .map_err(|source| LoginError::Wait { engine, source })
         };
-        let status = tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
-            result = tokio::time::timeout(CHECK_TIMEOUT, login) => result.map_err(|source| LoginError::KeyTimedOut { engine, source })??,
+        let completion = tokio::select! {
+            () = cancel.cancelled() => Ok(None),
+            result = tokio::time::timeout(CHECK_TIMEOUT, login) => match result {
+                Ok(result) => result.map(Some),
+                Err(source) => Err(LoginError::KeyTimedOut { engine, source }),
+            },
         };
         child.end().await;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(LoginError::RejectedKey { engine, status })
+        match completion? {
+            Some(status) if !status.success() => Err(LoginError::RejectedKey { engine, status }),
+            Some(_) | None => Ok(()),
         }
     }
 

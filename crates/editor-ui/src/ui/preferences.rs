@@ -76,14 +76,13 @@ impl Preferences {
     pub fn from_core(core: &Core, system: SystemAccess) -> Self {
         let chosen = core.settings().preferences();
         Self {
-            theme: if chosen.theme.unwrap_or_else(|| match system.theme {
-                aqua_protocol::shell::ColorScheme::Light => false,
-                aqua_protocol::shell::ColorScheme::Dark => true,
-                aqua_protocol::shell::ColorScheme::Unknown => chosen.dark_mode.on(),
-            }) {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
+            theme: match (chosen.theme, system.theme) {
+                (editor_core::ThemePreference::Light, _)
+                | (
+                    editor_core::ThemePreference::System,
+                    aqua_protocol::shell::ColorScheme::Light,
+                ) => ThemeMode::Light,
+                _ => ThemeMode::Dark,
             },
             fonts: FontSet::chosen(chosen.fonts),
             outline_text: chosen.outline_text.on(),

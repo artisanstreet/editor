@@ -348,6 +348,8 @@ pub enum ExtensionFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EngineFailure {
+    #[error("{engine} is turned off. Turn it on in Settings to use it.")]
+    Disabled { engine: EngineId },
     #[error("{engine} isn't installed.")]
     NotInstalled { engine: EngineId },
     #[error("{engine} has no build for this host.")]
@@ -558,7 +560,8 @@ impl ExtensionFailure {
 impl EngineFailure {
     const fn code(&self) -> ErrorCode {
         match self {
-            Self::NotInstalled { .. }
+            Self::Disabled { .. }
+            | Self::NotInstalled { .. }
             | Self::NoBuild { .. }
             | Self::UnusableVersion { .. }
             | Self::VersionTooOld { .. }

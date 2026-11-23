@@ -219,6 +219,28 @@ fn sign_in_failure(
     }
 }
 
+pub(crate) fn toggle(
+    controller: &SettingsController,
+    host: &HostData,
+    server: &McpServer,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let instance = host.instance();
+    let send = Rc::clone(emit);
+    let previous = server.clone();
+    editor_ui::switch::Switch::new(
+        format!("settings-mcp-enabled-{}", server.name),
+        *theme,
+        !server.disabled,
+        server.name.clone(),
+    )
+    .recessed()
+    .disabled(controller.extensions.saving || controller.extensions.editing.is_some())
+    .on_change(move |enabled| send(ViewAction::McpToggle(instance, previous.clone(), enabled)))
+    .build()
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the MCP card renders the configured servers, operations, and inline form together"
@@ -251,7 +273,6 @@ pub(crate) fn section(
             .build(),
         ));
     }
-    let instance = host.instance();
     for server in servers.unwrap_or_default() {
         let status = match auth {
             Ok(auth) => auth.get(&server.name).copied(),
@@ -281,22 +302,20 @@ pub(crate) fn section(
             Rc::clone(&emit),
         ));
         let failure = sign_in_failure(theme, &server.name, sign_in);
-        let send = Rc::clone(&emit);
-        let previous = server.clone();
-        let enabled = editor_ui::switch::Switch::new(
-            format!("settings-mcp-enabled-{}", server.name),
-            *theme,
-            !server.disabled,
-            server.name.clone(),
-        )
-        .recessed()
-        .disabled(controller.extensions.saving || controller.extensions.editing.is_some())
-        .on_change(move |enabled| send(ViewAction::McpToggle(instance, previous.clone(), enabled)))
-        .build();
+        let target = server.url.as_deref().map_or_else(
+            || server.command.clone(),
+            |url| url.split(['?', '#']).next().unwrap_or(url).to_owned(),
+        );
+        let detail = if matches!(status, Some(McpAuthStatus::NeedsToken)) {
+            format!("{target} · Edit the server to add an Authorization header.")
+        } else {
+            target
+        };
+        let enabled = toggle(controller, host, &server, theme, &emit);
         rows.push(ui::row(
             theme,
             server.name,
-            "",
+            detail,
             Some(actions.child(enabled).build()),
         ));
         rows.extend(failure);

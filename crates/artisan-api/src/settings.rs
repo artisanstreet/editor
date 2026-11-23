@@ -299,8 +299,10 @@ pub const SETTINGS: &[SettingDecl] = &[
     SettingDecl {
         key: "theme",
         owner: SettingOwner::Editor,
-        kind: SettingKind::SystemSwitch,
-        default: "null",
+        kind: SettingKind::Options {
+            values: &["system", "light", "dark"],
+        },
+        default: "\"system\"",
         label: "Theme",
         description: "Use a dark or light theme, or follow the system theme.",
         needs_approval: false,

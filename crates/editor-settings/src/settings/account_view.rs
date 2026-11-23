@@ -432,7 +432,7 @@ pub(crate) fn page(
             )
             .muted()
             .on_activate(move |_| {
-                dashboard(ViewAction::OpenUrl("https://artisan.st/dashboard".into()));
+                dashboard(ViewAction::OpenUrl(AccountLink::Dashboard.url()));
             })
             .build(),
         )
@@ -501,13 +501,39 @@ pub(crate) fn page(
             Rc::clone(emit),
         ))
         .build();
+    let security = ui::actions()
+        .child(button(
+            theme,
+            "account-refresh",
+            "Refresh profile",
+            ButtonTone::Quiet,
+            false,
+            ViewAction::AccountRefresh,
+            Rc::clone(emit),
+        ))
+        .child(button(
+            theme,
+            "account-sign-out-everywhere",
+            "Sign out everywhere",
+            ButtonTone::Quiet,
+            false,
+            ViewAction::AccountSignOutEverywhere,
+            Rc::clone(emit),
+        ))
+        .build();
     content
         .child(ui::section(
             theme,
             "Policies",
             None,
             None,
-            ui::card(theme, vec![ui::row(theme, "Legal", "", Some(policies))]),
+            ui::card(
+                theme,
+                vec![
+                    ui::row(theme, "Legal", "", Some(policies)),
+                    ui::row(theme, "Account access", "", Some(security)),
+                ],
+            ),
         ))
         .build()
 }

@@ -640,6 +640,11 @@ async fn execute(
     items: &mut Work,
 ) -> Result<Ending, ExecuteError> {
     let engine = run.engine;
+    let key = engine.enabled_setting();
+    let enabled = hub.store().setting(key).await.map_err(PrepareError::from)?;
+    if !artisan_api::switch_decl(key).switch(enabled.as_ref()).on() {
+        return Err(PrepareError::EngineDisabled { engine }.into());
+    }
     let handoff = if launch.resume().is_none() {
         let pending_ids = pending.iter().map(|item| item.id.clone()).collect();
         let switch = previous
@@ -1040,10 +1045,6 @@ async fn image_folder(hub: &Hub, thread: &ThreadId) -> Result<Option<PathBuf>, P
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the turn prepares the engine launch in order"
-)]
 pub(crate) async fn prepare(
     hub: &Hub,
     thread: &artisan_api::Thread,
@@ -1052,11 +1053,6 @@ pub(crate) async fn prepare(
     binary: Option<PathBuf>,
 ) -> Result<Prepared, PrepareError> {
     let engine = thread.config.engine;
-    let key = engine.enabled_setting();
-    let enabled = hub.store().setting(key).await?;
-    if !artisan_api::switch_decl(key).switch(enabled.as_ref()).on() {
-        return Err(PrepareError::EngineDisabled { engine });
-    }
     let engines = hub.engines();
     let binary = binary.ok_or(PrepareError::NotInstalled { engine })?;
     let cwd = hub

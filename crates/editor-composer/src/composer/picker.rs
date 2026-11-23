@@ -201,7 +201,13 @@ pub(crate) fn gate(status: &artisan_api::EngineStatus) -> Option<Gate> {
 
 #[must_use]
 pub(crate) fn offered_engines(host: &editor_core::HostData) -> Vec<&artisan_api::EngineStatus> {
-    host.engines.values().collect()
+    host.engines
+        .values()
+        .filter(|status| {
+            let key = status.engine.enabled_setting();
+            artisan_api::switch_decl(key).switch(host.setting(key)).on()
+        })
+        .collect()
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {

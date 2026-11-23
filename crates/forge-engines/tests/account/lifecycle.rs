@@ -56,3 +56,23 @@ fn key_sign_in_occupies_the_same_lane_as_account_sign_in() {
     machine.handle_with_context(&Event::Cancel, &mut effects);
     assert_eq!(effects, [Effect::StopLogin, Effect::Check]);
 }
+
+#[test]
+fn replacing_an_api_key_ignores_an_old_account_until_the_subprocess_exits() {
+    let mut machine = Machine::default();
+    let mut effects = Vec::new();
+    let key = artisan_api::Secret::from("test-provider-key");
+    machine.handle_with_context(&Event::LoginApiKey(key.clone()), &mut effects);
+    assert_eq!(std::mem::take(&mut effects), [Effect::StartApiKey(key)]);
+    machine.handle_with_context(
+        &Event::Checked(SignInState::SignedIn {
+            account: Some("old account".into()),
+        }),
+        &mut effects,
+    );
+    assert!(matches!(machine.state(), super::State::SavingApiKey));
+    assert!(effects.is_empty());
+    machine.handle_with_context(&Event::LoginEnded { error: None }, &mut effects);
+    assert_eq!(effects, [Effect::Check]);
+    assert!(matches!(machine.state(), super::State::Unknown {}));
+}

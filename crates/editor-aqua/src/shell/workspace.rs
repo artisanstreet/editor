@@ -1638,7 +1638,7 @@ impl Workspace {
                 &action,
                 crate::sidebar::view::ViewAction::Navigate(Screen::Settings(_))
             ) {
-                self.settings.clear_search();
+                changed |= self.settings.clear_search();
             }
             if let crate::sidebar::view::ViewAction::SetDarkMode(dark) = &action {
                 self.theme_transition = Some(*dark);

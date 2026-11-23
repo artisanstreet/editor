@@ -488,13 +488,20 @@ impl SendError {
     pub fn wire(&self) -> Failure {
         match self {
             Self::ThreadNotFound { thread } => thread_missing(thread),
+            Self::EngineDisabled { engine, .. } => {
+                Failure::Engine(artisan_api::EngineFailure::Disabled { engine: *engine })
+            }
             Self::Command { thread, engine, .. } => Failure::Run(RunFailure::CommandUnsupported {
                 thread: thread.clone(),
                 engine: *engine,
             }),
             Self::Store(store) => input(&store.cause),
             Self::Peer { source, .. } => source.wire(),
-            Self::ReadThread(_) | Self::Route { .. } | Self::Abandoned { .. } => Failure::Internal,
+            Self::ReadThread(_)
+            | Self::Route { .. }
+            | Self::Abandoned { .. }
+            | Self::EngineSetting { .. }
+            | Self::Retry { .. } => Failure::Internal,
         }
     }
 }

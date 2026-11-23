@@ -164,10 +164,13 @@ impl SettingsController {
         self.completion.mailbox()
     }
 
-    pub fn clear_search(&self) {
-        if !self.search_editor.borrow().text().is_empty() {
-            self.search_editor.borrow_mut().set_text("");
+    pub fn clear_search(&self) -> bool {
+        let mut search = self.search_editor.borrow_mut();
+        if search.text().is_empty() {
+            return false;
         }
+        search.set_text("");
+        true
     }
 
     pub fn sync_editors(&self, ui: &mut aqua::UiApp) {

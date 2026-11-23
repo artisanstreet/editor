@@ -510,9 +510,19 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
         );
     }
     test_support::editor::core::connect_client(&mut core, &config, client);
-    for page in host_pages {
+    for (page, expected) in [
+        (SettingsPage::Threads, "Continue after a restart"),
+        (SettingsPage::Extensions, "MCP servers"),
+        (
+            SettingsPage::Engine(EngineId::ALL[0]),
+            "Waiting for the Forge to connect…",
+        ),
+    ] {
         let texts = render(&mut core, page);
-        assert!(!texts.is_empty(), "{page:?} did not load once connected");
+        assert!(
+            texts.iter().any(|text| text.contains(expected)),
+            "{page:?} is missing {expected:?}: {texts:?}"
+        );
         assert!(
             !texts
                 .iter()
@@ -521,7 +531,7 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
         );
     }
     let hosts = render(&mut core, SettingsPage::Hosts);
-    assert!(hosts.iter().any(|text| text == "Computers"));
+    assert!(hosts.iter().any(|text| text == "Desk Forge"));
 }
 
 fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String, [f32; 4])> {
@@ -1333,13 +1343,14 @@ fn settings_pages_expose_their_title_and_sections_as_headings() {
 fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
     use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::{
+        about::BuildInfo,
         controller::SettingsController,
-        view::{ViewAction, dispatch, high_contrast_menu, text_size_menu},
+        view::{ViewAction, build, dispatch, text_size_menu},
     };
     use editor_aqua::ui::preferences::{Preferences, SystemAccess};
-    use editor_aqua::ui::theme::{ArtisanTheme, Contrast};
+    use editor_aqua::ui::theme::Contrast;
     use std::{cell::RefCell, rc::Rc};
-    use test_support::editor::ui::{click_text, mounted};
+    use test_support::editor::ui::{click, click_text, mounted};
     let dir = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(dir.path());
     core.navigate(Screen::Settings(SettingsPage::General));
@@ -1350,15 +1361,23 @@ fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
         text_scale: 1.25,
         ..SystemAccess::default()
     };
-    let mut choose = |size: &str, contrast: &str| {
+    let mut choose = |size: &str, contrast_control: &str| {
         let actions = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&actions);
         let emit: Rc<dyn Fn(ViewAction)> = Rc::new(move |action| sink.borrow_mut().push(action));
-        let theme = ArtisanTheme::resolved();
+        let theme = Preferences::from_core(&core, system).theme();
         let (menu, _) = text_size_menu(&settings, &core, &theme, Rc::clone(&emit)).into_parts();
         click_text(&mut mounted(400.0, 600.0, menu), size);
-        let (menu, _) = high_contrast_menu(&settings, &core, &theme, emit).into_parts();
-        click_text(&mut mounted(400.0, 600.0, menu), contrast);
+        let page = build(
+            &settings,
+            &core,
+            &theme,
+            &BuildInfo::default(),
+            aqua_core::Size::new(900.0, 900.0),
+            true,
+            emit,
+        );
+        click(&mut mounted(900.0, 900.0, page), contrast_control);
         for action in actions.take() {
             assert!(matches!(
                 action,
@@ -1371,10 +1390,10 @@ fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
         }
         Preferences::from_core(&core, system).theme()
     };
-    let chosen = choose("Biggest", "Off");
+    let chosen = choose("Biggest", "settings-higher-contrast");
     assert!((chosen.typography.scale - 1.5).abs() < f32::EPSILON);
     assert_eq!(chosen.colors.contrast, Contrast::Standard);
-    let followed = choose("Match system", "Match system");
+    let followed = choose("Match system", "settings-contrast-follow-system");
     assert!((followed.typography.scale - 1.25).abs() < f32::EPSILON);
     assert_eq!(followed.colors.contrast, Contrast::High);
 }

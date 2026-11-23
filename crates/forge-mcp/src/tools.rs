@@ -1726,6 +1726,7 @@ pub(crate) async fn call(
                 .await?
                 .into_iter()
                 .find(|server| server.name == add.name);
+            let disabled = previous.as_ref().is_some_and(|server| server.disabled);
             let servers = hub
                 .mcp()
                 .mutate(McpMutation::Upsert {
@@ -1736,6 +1737,7 @@ pub(crate) async fn call(
                         args: add.args,
                         env: add.env,
                         url: add.url,
+                        disabled,
                         ..McpServer::default()
                     },
                 })

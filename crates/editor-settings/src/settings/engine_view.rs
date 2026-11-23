@@ -178,6 +178,40 @@ fn installation(
     if matches!(status.install, InstallState::Installed { .. })
         && controller.engines.choosing_version.contains(&engine)
     {
+        if let InstallState::Installed { update, .. } = &status.install {
+            let mut controls = ui::actions();
+            if let Some(update) = update {
+                controls = controls.child(button(
+                    theme,
+                    "settings-engine-update",
+                    format!("Update to {update}"),
+                    ButtonTone::Primary,
+                    busy,
+                    ViewAction::EngineAction(engine, EngineCommand::Update {}),
+                    Rc::clone(emit),
+                ));
+            }
+            controls = controls.child(button(
+                theme,
+                "settings-engine-rollback",
+                "Roll back",
+                ButtonTone::Quiet,
+                busy,
+                ViewAction::EngineAction(engine, EngineCommand::Rollback {}),
+                Rc::clone(emit),
+            ));
+            blocks.push(ui::block(controls.build()));
+        }
+        if let Some(integrity) = status.integrity {
+            let verified = match integrity {
+                artisan_api::Integrity::VendorSha256 | artisan_api::Integrity::VendorSha512 => {
+                    "Verified against the vendor's published checksum."
+                }
+                artisan_api::Integrity::NpmSha512 => "Verified against npm's published checksum.",
+                artisan_api::Integrity::ArtisanSha256 => "Built and verified by Artisan Street.",
+            };
+            blocks.push(ui::note(theme, verified));
+        }
         if status.versions.is_empty() {
             blocks.push(ui::note(
                 theme,
@@ -527,6 +561,25 @@ pub(crate) fn page(
             .child(ui::text(theme, TextRole::Label, Ink::Muted, note))
             .build();
     };
+    if engine == EngineId::Claude
+        && artisan_api::transport_of(host.setting(artisan_api::TRANSPORT_KEY))
+            == artisan_api::CLAUDE_AI
+    {
+        content = content.child(ui::row(
+            theme,
+            "Claude connection",
+            "This Forge still uses the retired claude.ai mode.",
+            Some(button(
+                theme,
+                "settings-use-claude-code",
+                "Use Claude Code",
+                ButtonTone::Primary,
+                false,
+                ViewAction::ClaudeTransport(host.id.clone(), host.instance(), false),
+                Rc::clone(&emit),
+            )),
+        ));
+    }
     if selected.shows(SettingsSection::Installation(engine)) {
         content = content.child(installation(controller, host, status, theme, &emit));
     }
