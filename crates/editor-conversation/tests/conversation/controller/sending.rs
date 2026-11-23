@@ -188,3 +188,77 @@ fn a_message_streamed_before_the_first_page_lands_survives_that_page() {
     );
     assert_eq!(rows_for(&conversation, "hello"), 1);
 }
+
+fn open_with_tail(
+    forge: &mut StubbedHost,
+    conversation: &mut Conversation,
+    tail: Vec<Item>,
+    more: bool,
+) {
+    let host = forge.host.clone();
+    conversation.open_thread(&mut forge.core, host, ThreadId("new".into()));
+    let transcript = test_support::wait::wait_for(
+        "the transcript to be asked for",
+        std::time::Duration::from_secs(10),
+        || {
+            pump(forge, conversation);
+            forge.forge.try_take("GET", "/threads/new/transcript")
+        },
+    );
+    transcript.respond(ItemsPage {
+        items: tail,
+        runs: Vec::new(),
+        more,
+        work: Vec::new(),
+    });
+    test_support::wait::wait_until(
+        "the transcript to land",
+        std::time::Duration::from_secs(10),
+        || {
+            pump(forge, conversation);
+            conversation
+                .view
+                .as_ref()
+                .and_then(|view| view.item(&ItemId("later".into())))
+                .is_some_and(|item| item.seq == 6)
+        },
+    );
+}
+
+#[test]
+fn a_message_forge_never_streamed_stays_in_place_once_a_page_has_it() {
+    let mut forge = StubbedHost::start(empty_state(), axum::Router::new());
+    forge.forge.publish(Event::Thread { thread: created() });
+    forge.apply_published();
+    let attempt = forge.host().send_receipt().attempt();
+    forge.host_mut().begin_send(LocalSend {
+        attempt,
+        thread: ThreadId("new".into()),
+        message: ItemId("hello".into()),
+        text: "hello".into(),
+        images: Vec::new(),
+        create: None,
+    });
+
+    let mut first = Conversation::new(&forge.core);
+    open_with_tail(
+        &mut forge,
+        &mut first,
+        vec![message("hello", 5), message("later", 6)],
+        false,
+    );
+    assert_eq!(rows_for(&first, "hello"), 1);
+
+    let mut scrolled_back = Conversation::new(&forge.core);
+    open_with_tail(
+        &mut forge,
+        &mut scrolled_back,
+        vec![message("later", 6)],
+        true,
+    );
+    assert_eq!(
+        rows_for(&scrolled_back, "hello"),
+        0,
+        "a message Forge already holds earlier in the thread never resurfaces below newer ones"
+    );
+}

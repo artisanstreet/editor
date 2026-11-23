@@ -387,6 +387,22 @@ impl HostData {
         self.pending_events.push(HostEvent::Changed);
     }
 
+    pub fn retire_echoes<'a>(
+        &mut self,
+        thread: &ThreadId,
+        loaded: impl IntoIterator<Item = &'a ItemId>,
+    ) {
+        let mut retired = false;
+        for item in loaded {
+            retired |= self.sends.confirm_item(thread, item);
+        }
+        if retired {
+            self.pending_events.push(HostEvent::ThreadChanged {
+                thread_id: thread.clone(),
+            });
+        }
+    }
+
     pub fn local_messages(&self, thread: &ThreadId) -> impl Iterator<Item = &Arc<Item>> {
         self.sends
             .messages
