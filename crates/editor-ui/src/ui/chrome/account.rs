@@ -1,6 +1,6 @@
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::POLAR_HAZE;
-use crate::ui::chrome::limits::{EngineLimits, Limit};
+use crate::ui::chrome::limits::{EngineLimits, Gauge, Limit};
 use crate::ui::chrome::menu::{Event, Menu, Spot};
 use crate::ui::engine::engine_icon;
 use crate::ui::kit::hover::live;
@@ -313,15 +313,24 @@ fn limits(theme: &ArtisanTheme, palette: &Palette, engines: &[EngineLimits]) -> 
                         bottom: ITEM_PAD_Y,
                     })])
                 .children(engines.iter().flat_map(|engine| {
-                    engine.limits.iter().enumerate().map(move |(index, limit)| {
-                        limit_row(
-                            theme,
-                            palette,
-                            engine,
-                            (index == 0).then_some(engine.engine),
-                            limit,
-                        )
-                    })
+                    match &engine.gauge {
+                        Gauge::Meters(meters) => meters
+                            .iter()
+                            .enumerate()
+                            .map(|(index, limit)| {
+                                limit_row(
+                                    theme,
+                                    palette,
+                                    engine.engine,
+                                    (index == 0).then_some(engine.engine),
+                                    limit,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                        Gauge::Spend { headline, periods } => {
+                            vec![spend_row(theme, palette, engine.engine, headline, periods)]
+                        }
+                    }
                 }))
                 .build()
                 .with_key("artisan-account-limits"),
@@ -330,12 +339,10 @@ fn limits(theme: &ArtisanTheme, palette: &Palette, engines: &[EngineLimits]) -> 
     }
 }
 
-fn limit_row(
+fn limit_icon(
     theme: &ArtisanTheme,
     palette: &Palette,
-    engine: &EngineLimits,
     mark: Option<artisan_api::EngineId>,
-    limit: &Limit,
 ) -> Element {
     let icon = Aqua::Box().styles([Aqua::Style()
         .width(px(GLYPH))
@@ -343,7 +350,7 @@ fn limit_row(
         .flex_shrink(0.0)
         .align(AlignItems::CENTER)
         .justify(JustifyContent::CENTER)]);
-    let icon = match mark {
+    match mark {
         Some(engine) => icon
             .child(source_asset_glyph(
                 engine_icon(theme, engine),
@@ -356,8 +363,15 @@ fn limit_row(
             ))
             .build(),
         None => icon.build(),
-    };
-    let percent = limit.used_percent.round().clamp(0.0, 100.0);
+    }
+}
+
+fn limit_lead(
+    theme: &ArtisanTheme,
+    palette: &Palette,
+    icon: Element,
+    label: &str,
+) -> aqua_ui::element::Box {
     Aqua::Box()
         .styles([Aqua::Style()
             .width(pct(100.0))
@@ -371,47 +385,98 @@ fn limit_row(
                     .width(px(theme.typography.size(LIMIT_LABEL)))
                     .flex_shrink(0.0)
                     .clip(true)])
-                .child(small_label(theme, &limit.label, palette.ink_dim))
+                .child(small_label(theme, label, palette.ink_dim))
                 .build(),
         )
-        .child(
-            Aqua::Box()
-                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
-                .child(crate::ui::progress::bar(
-                    theme,
-                    limit.used_percent,
-                    crate::ui::progress::HEIGHT,
-                ))
-                .build(),
-        )
-        .build()
-        .with_key(format!(
-            "artisan-account-limit-{}-{}",
-            engine.engine, limit.label
-        ))
-        .aria_label(format!(
-            "{} {} limit: {percent:.0}% used",
-            engine.engine.display_name(),
-            limit.label
-        ))
-        .tooltip_with(0.5, crate::ui::hint_card::presence(), {
-            let theme = *theme;
-            let engine = engine.engine;
-            let limit = limit.clone();
-            move || {
-                let now = chrono::Utc::now().timestamp_millis();
-                let outlook = crate::ui::chrome::limits::outlook(&limit, now);
-                crate::ui::hint_card::hint_card(
-                    &theme,
-                    &crate::ui::chrome::limits::title(engine, &limit),
-                    &crate::ui::chrome::limits::explanation(
-                        &limit,
-                        outlook,
-                        crate::ui::local_time::occasion,
-                    ),
-                )
-            }
-        })
+}
+
+fn spend_row(
+    theme: &ArtisanTheme,
+    palette: &Palette,
+    engine: artisan_api::EngineId,
+    headline: &artisan_api::SpendLine,
+    periods: &[artisan_api::SpendLine],
+) -> Element {
+    let amount = crate::ui::chrome::limits::dollars(headline.cost_usd);
+    let period = headline.label.to_lowercase();
+    limit_lead(
+        theme,
+        palette,
+        limit_icon(theme, palette, Some(engine)),
+        "Spend",
+    )
+    .child(small_label(
+        theme,
+        &format!("{amount} · {period}"),
+        palette.ink,
+    ))
+    .build()
+    .with_key(format!("artisan-account-spend-{engine}"))
+    .aria_label(format!(
+        "{} spend: {amount} {period}",
+        engine.display_name()
+    ))
+    .tooltip_with(0.5, crate::ui::hint_card::presence(), {
+        let theme = *theme;
+        let periods = periods.to_vec();
+        move || {
+            crate::ui::hint_card::hint_card(
+                &theme,
+                &format!("{} spend", engine.display_name()),
+                &crate::ui::chrome::limits::spend_explanation(&periods),
+            )
+        }
+    })
+}
+
+fn limit_row(
+    theme: &ArtisanTheme,
+    palette: &Palette,
+    engine: artisan_api::EngineId,
+    mark: Option<artisan_api::EngineId>,
+    limit: &Limit,
+) -> Element {
+    let percent = limit.used_percent.round().clamp(0.0, 100.0);
+    limit_lead(
+        theme,
+        palette,
+        limit_icon(theme, palette, mark),
+        &limit.label,
+    )
+    .child(
+        Aqua::Box()
+            .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
+            .child(crate::ui::progress::bar(
+                theme,
+                limit.used_percent,
+                crate::ui::progress::HEIGHT,
+            ))
+            .build(),
+    )
+    .build()
+    .with_key(format!("artisan-account-limit-{engine}-{}", limit.label))
+    .aria_label(format!(
+        "{} {} limit: {percent:.0}% used",
+        engine.display_name(),
+        limit.label
+    ))
+    .tooltip_with(0.5, crate::ui::hint_card::presence(), {
+        let theme = *theme;
+        let limit = limit.clone();
+        move || {
+            let now = chrono::Utc::now().timestamp_millis();
+            let outlook = crate::ui::chrome::limits::outlook(&limit, now);
+            crate::ui::hint_card::hint_card(
+                &theme,
+                &crate::ui::chrome::limits::title(engine, &limit),
+                &crate::ui::chrome::limits::explanation(
+                    &limit,
+                    outlook,
+                    crate::ui::local_time::occasion,
+                ),
+            )
+        }
+    })
 }
 
 #[must_use]

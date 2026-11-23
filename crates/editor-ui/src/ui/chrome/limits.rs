@@ -1,5 +1,5 @@
 use crate::ui::hint_card::Phrase;
-use artisan_api::{EngineId, Timestamp, UsageCadence, UsageLimits, UsageWindow};
+use artisan_api::{EngineId, SpendLine, Timestamp, UsageCadence, UsageLimits, UsageWindow};
 
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
@@ -24,7 +24,16 @@ pub enum Outlook {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineLimits {
     pub engine: EngineId,
-    pub limits: Vec<Limit>,
+    pub gauge: Gauge,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Gauge {
+    Meters(Vec<Limit>),
+    Spend {
+        headline: SpendLine,
+        periods: Vec<SpendLine>,
+    },
 }
 
 #[must_use]
@@ -33,11 +42,39 @@ pub fn resolve<'a>(
 ) -> Vec<EngineLimits> {
     reports
         .into_iter()
-        .map(|(engine, usage)| EngineLimits {
-            engine,
-            limits: essentials(engine, usage),
+        .filter_map(|(engine, usage)| {
+            let meters = essentials(engine, usage);
+            let gauge = if meters.is_empty() {
+                let periods = usage.spend.as_ref()?.periods.clone();
+                Gauge::Spend {
+                    headline: periods.last()?.clone(),
+                    periods,
+                }
+            } else {
+                Gauge::Meters(meters)
+            };
+            Some(EngineLimits { engine, gauge })
         })
-        .filter(|engine| !engine.limits.is_empty())
+        .collect()
+}
+
+#[must_use]
+pub fn dollars(cost_usd: f64) -> String {
+    format!("${cost_usd:.2}")
+}
+
+#[must_use]
+pub fn spend_explanation(periods: &[SpendLine]) -> Vec<Phrase> {
+    periods
+        .iter()
+        .enumerate()
+        .flat_map(|(index, period)| {
+            let lead = if index == 0 { "" } else { " · " };
+            [
+                Phrase::Muted(format!("{lead}{} ", period.label)),
+                Phrase::Strong(dollars(period.cost_usd)),
+            ]
+        })
         .collect()
 }
 
@@ -53,17 +90,25 @@ pub fn essentials(engine: EngineId, usage: &UsageLimits) -> Vec<Limit> {
         .enumerate()
         .min_by_key(|(index, window)| (rank(window.cadence), window.scope.is_some(), *index))
         .map(|(_, window)| *window);
-    let models = readable
+    let mut pools: Vec<&UsageWindow> = Vec::new();
+    for window in readable
         .iter()
         .copied()
-        .filter(|_| engine == EngineId::Claude)
-        .filter(|window| headline.is_none_or(|headline| !std::ptr::eq(*window, headline)))
-        .filter_map(|window| {
-            window.scope.clone().map(|label| Limit {
-                label,
-                ..limit(window)
-            })
-        });
+        .filter(|_| matches!(engine, EngineId::Claude | EngineId::Antigravity))
+        .filter(|window| headline.is_none_or(|headline| headline.scope != window.scope))
+    {
+        match pools.iter_mut().find(|pool| pool.scope == window.scope) {
+            Some(pool) if rank(window.cadence) < rank(pool.cadence) => *pool = window,
+            Some(_) => {}
+            None => pools.push(window),
+        }
+    }
+    let models = pools.into_iter().filter_map(|window| {
+        window.scope.clone().map(|label| Limit {
+            label,
+            ..limit(window)
+        })
+    });
     headline
         .into_iter()
         .map(|window| Limit {

@@ -89,19 +89,19 @@ fn label(theme: &ArtisanTheme) -> aqua_ui::element::Element {
 
 fn account_menu(theme: &ArtisanTheme) -> aqua_ui::element::Element {
     use editor_ui::chrome::account::{Account, Identity, Sheet, menu};
-    use editor_ui::chrome::limits::{EngineLimits, Limit};
+    use editor_ui::chrome::limits::{EngineLimits, Gauge, Limit};
     let account = Account {
         identity: Identity::of("Ada Lovelace", "ada@example.com", None),
         avatar: None,
         limits: vec![EngineLimits {
             engine: artisan_api::EngineId::Claude,
-            limits: vec![Limit {
+            gauge: Gauge::Meters(vec![Limit {
                 label: "Week".into(),
                 cadence: artisan_api::UsageCadence::Week,
                 scope: None,
                 used_percent: 40.0,
                 resets_at: None,
-            }],
+            }]),
         }],
     };
     menu(
