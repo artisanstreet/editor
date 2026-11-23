@@ -4,6 +4,7 @@ use crate::EngineEvent;
 use artisan_api::{Answer, Decision, Permissions, QuestionAnswer};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 #[expect(dead_code, reason = "read through the Debug snapshot")]
@@ -93,9 +94,14 @@ struct Sent {
 }
 
 impl Sent {
-    fn track(&mut self, client: &Value) {
+    fn superseded(&self) -> bool {
+        !self.open_prompts.is_empty()
+    }
+
+    fn track(&mut self, client: &Value, decoder: &mut Decoder, now: Instant) {
         match client["method"].as_str() {
             Some("session/prompt") => {
+                decoder.prompted(now);
                 self.prompts.insert(client["id"].clone());
                 self.open_prompts.insert(client["id"].clone());
             }
@@ -116,7 +122,7 @@ fn answered(
 ) {
     steps.extend(asked.into_iter().map(|event| Step::Event(Box::new(event))));
     if let Some(answer) = answer
-        && let Answered::Reply { result, events, .. } = decoder.answer(key, &answer)
+        && let Answered::Reply { result, events, .. } = decoder.answer(key, &answer, Instant::now())
     {
         steps.push(Step::Reply(result));
         steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
@@ -137,8 +143,9 @@ fn replay(case: &str, permissions: Permissions) -> Vec<Step> {
     let mut sent = Sent::default();
     let mut steps = Vec::new();
     for (index, (line, value)) in lines.iter().zip(&parsed).enumerate() {
+        let now = Instant::now();
         if let Some(client) = value.get("client") {
-            sent.track(client);
+            sent.track(client, &mut decoder, now);
             continue;
         }
         let frame = match Frame::parse(line) {
@@ -150,16 +157,14 @@ fn replay(case: &str, permissions: Permissions) -> Vec<Step> {
         };
         let mut events = Vec::new();
         match frame {
-            Frame::Update { update } => events.extend(decoder.update(*update)),
+            Frame::Update { update } => events.extend(decoder.update(*update, now)),
             Frame::Response {
                 id,
                 result: Ok(result),
             } if sent.prompts.contains(&Value::from(id)) => {
                 sent.open_prompts.remove(&Value::from(id));
                 match serde_json::from_value::<Prompted>(result) {
-                    Ok(prompted) => {
-                        events.extend(decoder.ended(&prompted, !sent.open_prompts.is_empty()));
-                    }
+                    Ok(prompted) => events.extend(decoder.ended(&prompted, sent.superseded(), now)),
                     Err(error) => steps.push(Step::ProtocolError(error.to_string())),
                 }
             }
@@ -174,7 +179,7 @@ fn replay(case: &str, permissions: Permissions) -> Vec<Step> {
             Frame::Permission { id, request } => {
                 let key = request.tool_call.tool_call_id.clone();
                 let raw = value["params"].clone();
-                match decoder.permission(id.clone(), *request, permissions) {
+                match decoder.permission(id.clone(), *request, permissions, now) {
                     Permitted::Ask(asked) => answered(
                         &mut decoder,
                         &key,
@@ -195,7 +200,7 @@ fn replay(case: &str, permissions: Permissions) -> Vec<Step> {
             Frame::Form { id, request } => {
                 let key = request.tool_call_id.clone().unwrap_or_default();
                 let raw = value["params"].clone();
-                match decoder.form(id.clone(), *request) {
+                match decoder.form(id.clone(), *request, now) {
                     Formed::Asked(asked) => answered(
                         &mut decoder,
                         &key,
@@ -676,59 +681,398 @@ fn end_turn() -> Prompted {
         .expect("invariant: the test writes a valid prompt result")
 }
 
-fn prompted_with_a_job(daemon: bool) -> Decoder {
-    let mut decoder = Decoder::default();
-    decoder.prompted();
-    decoder.update(command("job", "in_progress", daemon));
-    decoder.update(say("Started it."));
-    decoder.ended(&end_turn(), false);
-    decoder
+fn schedule(id: &str, status: &str) -> super::protocol::Change {
+    change(serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": id,
+        "status": status,
+        "kind": "other",
+        "title": "Run schedule",
+        "rawInput": { "DurationSeconds": 600, "Prompt": "Check the deploy." },
+    }))
 }
 
-#[test]
-fn a_daemon_left_running_ends_the_run_like_before() {
-    let decoder = prompted_with_a_job(true);
-    assert_eq!(decoder.wake(), super::wake::Wake::Quiet);
+fn read(id: &str, status: &str) -> super::protocol::Change {
+    change(serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": id,
+        "status": status,
+        "kind": "read",
+        "rawInput": { "AbsolutePath": "/work/src/lib.rs" },
+    }))
 }
 
-#[test]
-fn a_job_that_finishes_without_a_woken_reply_ends_the_run_after_the_grace() {
-    let mut decoder = prompted_with_a_job(false);
-    assert_eq!(decoder.wake(), super::wake::Wake::Jobs);
-    decoder.update(command("job", "completed", false));
-    assert_eq!(decoder.wake(), super::wake::Wake::Waking);
-    decoder.lapse();
-    assert_eq!(decoder.wake(), super::wake::Wake::Quiet);
+#[derive(Debug, PartialEq, Eq)]
+enum Run {
+    Live,
+    Settled,
+    Abandoned,
 }
 
-#[test]
-fn a_woken_reply_that_starts_another_job_keeps_waiting_on_it() {
-    let mut decoder = prompted_with_a_job(false);
-    decoder.update(command("job", "completed", false));
-    decoder.update(command("next", "in_progress", false));
-    decoder.update(say("Tests passed; now building."));
-    decoder.update(step_ended());
-    assert_eq!(decoder.wake(), super::wake::Wake::Replied);
-    let events = decoder.lapse();
-    assert_eq!(decoder.wake(), super::wake::Wake::Jobs);
-    assert!(events.iter().any(|event| matches!(
-        event,
-        EngineEvent::Item {
-            kind: artisan_api::ItemKind::AssistantMessage {
-                phase: artisan_api::Phase::Commentary,
-                ..
-            },
-            ..
+struct Turn {
+    decoder: Decoder,
+    start: Instant,
+    now: Instant,
+    probes: usize,
+    events: Vec<EngineEvent>,
+}
+
+impl Turn {
+    fn prompt() -> Self {
+        let start = Instant::now();
+        let mut decoder = Decoder::default();
+        let events = decoder.prompted(start);
+        Self {
+            decoder,
+            start,
+            now: start,
+            probes: 0,
+            events,
         }
-    )));
+    }
+
+    fn at(&mut self, secs: u64) -> Instant {
+        let at = self.start + Duration::from_secs(secs);
+        assert!(
+            at >= self.now,
+            "invariant: the scenario moves forward in time"
+        );
+        self.now = at;
+        at
+    }
+
+    fn update(&mut self, secs: u64, change: super::protocol::Change) {
+        assert_eq!(
+            self.idle(secs, false),
+            Run::Live,
+            "the run ended before {secs}s"
+        );
+        let at = self.at(secs);
+        self.events.extend(self.decoder.update(change, at));
+    }
+
+    fn end_turn(&mut self, secs: u64) {
+        let at = self.at(secs);
+        self.events
+            .extend(self.decoder.ended(&end_turn(), false, at));
+    }
+
+    fn idle(&mut self, secs: u64, queued: bool) -> Run {
+        let until = self.start + Duration::from_secs(secs);
+        loop {
+            if self.decoder.wake() == super::wake::Wake::Quiet {
+                return Run::Settled;
+            }
+            match self.decoder.due() {
+                Some((at, due)) if at <= until => {
+                    self.now = at;
+                    match due {
+                        super::wake::Due::Probe => {
+                            self.probes += 1;
+                            self.events.extend(self.decoder.probed(queued, at));
+                        }
+                        super::wake::Due::Lapse => self.events.extend(self.decoder.lapse(at)),
+                        super::wake::Due::Abandon => return Run::Abandoned,
+                    }
+                }
+                Some(_) | None => {
+                    self.now = until;
+                    return Run::Live;
+                }
+            }
+        }
+    }
+
+    fn messages(&mut self) -> Vec<(String, artisan_api::Phase)> {
+        self.events.extend(self.decoder.finish());
+        let mut latest: Vec<(String, String, artisan_api::Phase)> = Vec::new();
+        for event in &self.events {
+            if let EngineEvent::Item {
+                key,
+                kind: artisan_api::ItemKind::AssistantMessage { text, phase },
+                ..
+            } = event
+            {
+                latest.retain(|(seen, ..)| seen != key);
+                latest.push((
+                    key.clone(),
+                    text.inline().unwrap_or_default().to_owned(),
+                    *phase,
+                ));
+            }
+        }
+        latest
+            .into_iter()
+            .map(|(_, text, phase)| (text, phase))
+            .collect()
+    }
+
+    fn waiting(&self) -> Option<&str> {
+        self.events.iter().filter_map(waiting_status).next_back()
+    }
+}
+
+fn backgrounded_command() -> Turn {
+    let mut turn = Turn::prompt();
+    turn.update(1, command("build", "in_progress", false));
+    turn.update(11, say("Building in the background."));
+    turn.update(11, step_ended());
+    turn.end_turn(11);
+    turn
 }
 
 #[test]
-fn a_woken_tool_call_right_after_its_step_is_still_the_reply_working() {
-    let mut decoder = prompted_with_a_job(false);
-    decoder.update(command("job", "completed", false));
-    decoder.update(say("Checking the output."));
-    decoder.update(step_ended());
-    decoder.update(command("read", "in_progress", false));
-    assert_eq!(decoder.wake(), super::wake::Wake::Replying);
+fn a_wake_agy_queued_while_the_last_reply_closed_is_not_cut_off() {
+    let mut turn = backgrounded_command();
+    turn.update(40, command("build", "completed", false));
+    turn.update(45, say("Tests passed; waiting for clippy."));
+    turn.update(45, step_ended());
+    assert_eq!(
+        turn.idle(50, true),
+        Run::Live,
+        "the queued wake was cut off"
+    );
+    turn.update(50, say("Clippy is clean too."));
+    turn.update(51, step_ended());
+    assert_eq!(turn.idle(60, false), Run::Settled);
+    assert_eq!(turn.now, turn.start + Duration::from_secs(54));
+    assert_eq!(
+        turn.messages().last(),
+        Some(&("Clippy is clean too.".to_owned(), artisan_api::Phase::Final))
+    );
+}
+
+#[test]
+fn a_closed_reply_with_nothing_queued_settles_after_the_short_quiet() {
+    let mut turn = backgrounded_command();
+    turn.update(40, command("build", "completed", false));
+    turn.update(45, say("The build passed."));
+    turn.update(45, step_ended());
+    assert_eq!(turn.idle(60, false), Run::Settled);
+    assert_eq!(turn.now, turn.start + Duration::from_secs(48));
+    assert_eq!(turn.probes, 1);
+}
+
+#[test]
+fn eighteen_silent_seconds_inside_an_open_woken_reply_do_not_end_the_turn() {
+    let mut turn = backgrounded_command();
+    turn.update(40, command("build", "completed", false));
+    turn.update(42, say("Reading the failure."));
+    turn.update(42, read("look", "in_progress"));
+    turn.update(43, read("look", "completed"));
+    assert_eq!(
+        turn.idle(61, false),
+        Run::Live,
+        "the open reply was cut off"
+    );
+    turn.update(61, say("Fixed the failing assertion."));
+    turn.update(61, step_ended());
+    assert_eq!(turn.idle(70, false), Run::Settled);
+    assert_eq!(
+        turn.messages().last(),
+        Some(&(
+            "Fixed the failing assertion.".to_owned(),
+            artisan_api::Phase::Final
+        ))
+    );
+}
+
+#[test]
+fn an_open_reply_that_never_closes_gives_up_after_two_minutes_of_silence() {
+    let mut turn = backgrounded_command();
+    turn.update(40, command("build", "completed", false));
+    turn.update(42, say("Reading the failure."));
+    assert_eq!(turn.idle(161, false), Run::Live);
+    assert_eq!(turn.idle(163, false), Run::Settled);
+}
+
+#[test]
+fn a_daemon_left_running_does_not_hold_the_turn() {
+    let mut turn = Turn::prompt();
+    turn.update(1, command("serve", "in_progress", true));
+    turn.update(2, say("The dev server is up."));
+    turn.update(2, step_ended());
+    turn.end_turn(2);
+    assert_eq!(turn.idle(2, false), Run::Settled);
+    assert_eq!(turn.waiting(), None);
+}
+
+#[test]
+fn a_command_left_running_holds_the_turn_until_it_finishes() {
+    let mut turn = backgrounded_command();
+    assert_eq!(turn.idle(20 * 60, false), Run::Live);
+    assert_eq!(
+        turn.waiting(),
+        Some("Antigravity is waiting on a background job")
+    );
+    turn.update(20 * 60, command("build", "completed", false));
+    assert_eq!(turn.waiting(), Some(""));
+}
+
+#[test]
+fn a_command_that_goes_silent_for_thirty_minutes_releases_the_turn() {
+    let mut turn = backgrounded_command();
+    turn.update(10 * 60, command("build", "in_progress", false));
+    assert_eq!(turn.idle(40 * 60 - 1, false), Run::Live);
+    assert_eq!(turn.idle(40 * 60, false), Run::Settled);
+}
+
+#[test]
+fn a_pending_schedule_holds_the_turn_past_every_silence_bound() {
+    let mut turn = Turn::prompt();
+    turn.update(1, schedule("timer", "in_progress"));
+    turn.update(2, say("I'll check back in ten minutes."));
+    turn.update(2, step_ended());
+    turn.end_turn(2);
+    assert_eq!(turn.idle(2 * 60 * 60, false), Run::Live);
+    assert_eq!(
+        turn.waiting(),
+        Some("Antigravity is waiting on a background job")
+    );
+    turn.update(2 * 60 * 60, schedule("timer", "completed"));
+    turn.update(2 * 60 * 60 + 1, say("The deploy finished."));
+    turn.update(2 * 60 * 60 + 1, step_ended());
+    assert_eq!(turn.idle(2 * 60 * 60 + 10, false), Run::Settled);
+}
+
+#[test]
+fn a_prompt_silent_for_fifteen_minutes_is_abandoned() {
+    let mut turn = Turn::prompt();
+    turn.update(5, say("Thinking it over."));
+    assert_eq!(turn.idle(15 * 60 + 4, false), Run::Live);
+    assert_eq!(turn.idle(15 * 60 + 5, false), Run::Abandoned);
+}
+
+#[test]
+fn a_prompt_waiting_on_a_running_tool_is_never_abandoned() {
+    let mut turn = Turn::prompt();
+    turn.update(5, read("big", "in_progress"));
+    assert_eq!(turn.idle(60 * 60, false), Run::Live);
+}
+
+struct Brain {
+    dir: tempfile::TempDir,
+}
+
+const SESSION: &str = "9b843313-9bdf-4693-b379-66db2d082483";
+
+impl Brain {
+    fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    fn generated(&self) -> std::path::PathBuf {
+        self.dir
+            .path()
+            .join("antigravity-cli/brain")
+            .join(SESSION)
+            .join(".system_generated")
+    }
+
+    fn message(&self, id: &str, priority: &str) -> &Self {
+        let inbox = self.generated().join("messages");
+        std::fs::create_dir_all(inbox.join("undelivered")).unwrap();
+        std::fs::write(
+            inbox.join(format!("{id}.json")),
+            serde_json::json!({
+                "id": id,
+                "recipient": SESSION,
+                "sender": format!("{SESSION}/task-108"),
+                "priority": priority,
+                "timestamp": "2026-11-23T08:44:29.112931711Z",
+                "content": "Task id finished with result:\nCommand exited with code 0.",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        self
+    }
+
+    fn read(&self, ids: &[&str]) -> &Self {
+        let receipts: serde_json::Map<String, Value> = ids
+            .iter()
+            .map(|id| ((*id).to_owned(), Value::Bool(true)))
+            .collect();
+        std::fs::write(
+            self.generated().join("messages/read.json"),
+            Value::Object(receipts).to_string(),
+        )
+        .unwrap();
+        self
+    }
+
+    fn transcript(&self, steps: &[(&str, &str)]) -> &Self {
+        let logs = self.generated().join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut lines = String::new();
+        for (index, (kind, content)) in steps.iter().enumerate() {
+            let step = serde_json::json!({
+                "step_index": index.to_string(),
+                "source": if *kind == "SYSTEM_MESSAGE" { "SYSTEM" } else { "MODEL" },
+                "type": kind,
+                "status": "DONE",
+                "created_at": "2026-11-23T08:44:34Z",
+                "content": content,
+            });
+            lines.push_str(&step.to_string());
+            lines.push('\n');
+        }
+        std::fs::write(logs.join("transcript.jsonl"), lines).unwrap();
+        self
+    }
+
+    async fn pending(&self) -> bool {
+        super::brain::pending_wake(self.dir.path(), SESSION)
+            .await
+            .expect("the fixture is readable")
+    }
+}
+
+const TASK_FINISHED: &str = "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-23T08:44:29Z sender=s/task-108 priority=MESSAGE_PRIORITY_HIGH content=Task finished";
+const RESTARTED: &str = "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-23T08:52:55Z sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped";
+
+#[tokio::test]
+async fn an_unread_task_message_is_a_queued_wake() {
+    let brain = Brain::new();
+    brain
+        .message("a1b3a93f", "MESSAGE_PRIORITY_HIGH")
+        .message("ca885867", "MESSAGE_PRIORITY_HIGH")
+        .read(&["ca885867"]);
+    assert!(brain.pending().await);
+    brain.read(&["ca885867", "a1b3a93f"]);
+    assert!(!brain.pending().await);
+}
+
+#[tokio::test]
+async fn an_unread_low_priority_notice_does_not_wake_the_model() {
+    let brain = Brain::new();
+    brain.message("3e16a40d", "MESSAGE_PRIORITY_LOW");
+    assert!(!brain.pending().await);
+}
+
+#[tokio::test]
+async fn a_task_message_dequeued_without_a_reply_yet_is_a_queued_wake() {
+    let brain = Brain::new();
+    brain.transcript(&[
+        (
+            "PLANNER_RESPONSE",
+            "Tests passed (12/12); waiting for clippy.",
+        ),
+        ("SYSTEM_MESSAGE", TASK_FINISHED),
+    ]);
+    assert!(brain.pending().await);
+    brain.transcript(&[
+        ("SYSTEM_MESSAGE", TASK_FINISHED),
+        ("PLANNER_RESPONSE", "Clippy is clean."),
+    ]);
+    assert!(!brain.pending().await);
+    brain.transcript(&[("PLANNER_RESPONSE", "Done."), ("SYSTEM_MESSAGE", RESTARTED)]);
+    assert!(!brain.pending().await);
+}
+
+#[tokio::test]
+async fn a_session_agy_never_recorded_has_nothing_queued() {
+    assert!(!Brain::new().pending().await);
 }
