@@ -1,7 +1,9 @@
 use super::{Attachments, Source, State};
-use artisan_api::tls::Identity;
+use artisan_api::{BlobHash, BlobRef, tls::Identity};
+use axum::http::StatusCode;
 use editor_core::ForgeClient;
 use std::time::{Duration, Instant};
+use test_support::editor::forge::{HeldRequest, StubForge};
 
 fn noisy_png(edge: u32) -> Vec<u8> {
     let image = image::RgbaImage::from_fn(edge, edge, |x, y| {
@@ -18,29 +20,117 @@ fn noisy_png(edge: u32) -> Vec<u8> {
     png
 }
 
-#[test]
-fn a_cancelled_preview_fails_the_attachment_instead_of_encoding_forever() {
+fn stub_forge() -> (StubForge, Attachments) {
+    let forge = editor_core::runtime::runtime().block_on(StubForge::serve(
+        test_support::editor::forge::empty_state(),
+        axum::Router::new(),
+    ));
     let identity = Identity::generate("attachment-test").expect("identity");
-    let client = ForgeClient::new("127.0.0.1:1", &"0".repeat(64), &identity).expect("client");
-    let mut attachments = Attachments::new(client);
+    let client = ForgeClient::new(forge.address(), forge.fingerprint(), &identity).expect("client");
+    (forge, Attachments::new(client))
+}
+
+fn upload_request(
+    forge: &StubForge,
+    attachments: &mut Attachments,
+    assets: &aqua::images::ImageAssets,
+) -> Option<HeldRequest> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        attachments.drain(assets);
+        if let Some(request) = forge.try_take("PUT", "/blobs") {
+            return Some(request);
+        }
+        if attachments.shake.is_some()
+            || attachments
+                .items
+                .iter()
+                .all(|item| matches!(item.state, State::Ready(_) | State::Failed(_)))
+        {
+            return None;
+        }
+        assert!(Instant::now() < deadline, "the image reaches Forge in time");
+        std::thread::yield_now();
+    }
+}
+
+fn settle(
+    attachments: &mut Attachments,
+    assets: &aqua::images::ImageAssets,
+    settled: impl Fn(&Attachments) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !settled(attachments) {
+        attachments.drain(assets);
+        assert!(Instant::now() < deadline, "the attachments settle in time");
+        std::thread::yield_now();
+    }
+}
+
+fn stored(hash: &str) -> BlobRef {
+    BlobRef {
+        hash: BlobHash(hash.into()),
+        bytes: 1,
+    }
+}
+
+#[test]
+fn an_image_uploads_even_when_its_preview_cannot_be_shown() {
+    let (forge, mut attachments) = stub_forge();
     assert!(attachments.add(Source::Bytes(noisy_png(1024)), "pasted.png".into()));
     let assets = aqua::images::ImageAssets::default();
     let deadline = Instant::now() + Duration::from_secs(60);
     while attachments.items[0].pending_preview.is_none() {
         attachments.drain(&assets);
-        assert!(
-            matches!(attachments.items[0].state, State::Encoding),
-            "the preview is still decoding when its assets go away"
-        );
         assert!(Instant::now() < deadline, "the image converts in time");
         std::thread::yield_now();
     }
     drop(assets);
-    attachments.drain(&aqua::images::ImageAssets::default());
-    let item = &attachments.items[0];
-    assert!(
-        matches!(&item.state, State::Failed(reason) if reason == "The preview was cancelled."),
-        "a cancelled preview releases the draft for sending"
+    let elsewhere = aqua::images::ImageAssets::default();
+    upload_request(&forge, &mut attachments, &elsewhere)
+        .unwrap_or_else(|| {
+            panic!(
+                "the image never reached Forge: {:?}",
+                attachments.items[0].state
+            )
+        })
+        .respond(stored("ab"));
+    settle(&mut attachments, &elsewhere, |attachments| {
+        matches!(attachments.items[0].state, State::Ready(_))
+    });
+    assert_eq!(
+        attachments.ready_hashes(),
+        Some(vec![BlobHash("ab".into())]),
+        "the image goes out with the message whether or not its preview shows"
     );
-    assert!(item.encoded.is_none() && item.pending_preview.is_none());
+}
+
+#[test]
+fn pasting_an_image_again_after_its_upload_failed_uploads_it_again() {
+    let (forge, mut attachments) = stub_forge();
+    let assets = aqua::images::ImageAssets::default();
+    let png = noisy_png(256);
+    assert!(attachments.add(Source::Bytes(png.clone()), "pasted.png".into()));
+    upload_request(&forge, &mut attachments, &assets)
+        .expect("the first paste uploads")
+        .fail(StatusCode::SERVICE_UNAVAILABLE, "busy", "Forge is busy");
+    settle(&mut attachments, &assets, |attachments| {
+        matches!(attachments.items[0].state, State::Failed(_))
+    });
+
+    assert!(attachments.add(Source::Bytes(png), "pasted.png".into()));
+    upload_request(&forge, &mut attachments, &assets)
+        .expect("pasting the image again tries the upload again")
+        .respond(stored("cd"));
+    settle(&mut attachments, &assets, |attachments| {
+        attachments
+            .items
+            .iter()
+            .any(|item| matches!(item.state, State::Ready(_)))
+    });
+    assert_eq!(
+        attachments.ready_hashes(),
+        Some(vec![BlobHash("cd".into())]),
+        "the retried image replaces the failed one"
+    );
 }
