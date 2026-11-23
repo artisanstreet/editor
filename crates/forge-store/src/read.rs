@@ -1124,5 +1124,9 @@ pub(crate) fn threads_page(
 mod waiting_query_tests;
 
 #[cfg(test)]
+#[path = "../tests/read/cancelled_query.rs"]
+mod cancelled_query_tests;
+
+#[cfg(test)]
 #[path = "../tests/read/outline.rs"]
 mod outline_tests;
