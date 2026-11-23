@@ -144,7 +144,7 @@ impl Mentions {
             };
             rows.push(Row::new(kind, name, title, description));
         };
-        if let Some(catalog) = &host.skill_catalog {
+        if let Some(catalog) = host.skill_catalog() {
             for skill in catalog.iter().filter(|skill| skill.enabled) {
                 add(Kind::Skill, skill.name.clone(), skill.description.clone());
             }

@@ -118,13 +118,14 @@ fn admitted_stream_and_projection_results_apply_in_order_before_invalidation() {
                 }
             ) {
                 let host = core.host(&id).unwrap();
-                states.push((host.global_prompt.is_some(), host.skill_catalog.is_some()));
+                states.push((host.global_prompt.is_some(), host.skill_catalog().is_some()));
             }
         });
     }
     assert_eq!(
         states,
-        [(true, false), (false, false), (false, true), (false, false)]
+        [(true, false), (false, false), (false, true), (false, true)],
+        "a skills notice keeps the loaded catalog until its replacement arrives"
     );
 }
 
@@ -149,7 +150,7 @@ fn invalidation_discards_already_admitted_stale_projection_results() {
     }
     let host = core.host(&id).unwrap();
     assert!(host.global_prompt.is_none());
-    assert!(host.skill_catalog.is_none());
+    assert!(host.skill_catalog().is_none());
 }
 
 #[test]

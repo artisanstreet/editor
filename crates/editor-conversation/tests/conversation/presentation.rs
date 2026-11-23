@@ -6,7 +6,6 @@ use aqua_text::document::SelectionDocumentId;
 use artisan_api::{CatalogSkill, ItemId, ThreadId};
 use editor_core::Screen;
 use editor_ui::markdown::MarkdownEngine;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use test_support::editor::core::StubbedHost;
 use test_support::editor::forge::empty_state;
@@ -67,6 +66,15 @@ fn user(item: &str) -> BodyKey {
     }
 }
 
+fn catalog(open: &mut Open, skills: Vec<CatalogSkill>) {
+    let host = open.stub.host_mut();
+    let mark = host.catalog_mark();
+    assert_eq!(
+        host.adopt_skill_catalog(skills, mark),
+        editor_core::Adoption::Adopted
+    );
+}
+
 fn skill(name: &str) -> CatalogSkill {
     serde_json::from_value(serde_json::json!({
         "id": name,
@@ -119,7 +127,7 @@ fn a_new_skill_changes_only_the_messages_that_show_it_as_a_chip() {
     }
     assert!(remarked(&open).is_empty());
 
-    open.stub.host_mut().skill_catalog = Some(Arc::from(vec![skill("review")]));
+    catalog(&mut open, vec![skill("review")]);
     open.markdown
         .sync_mentions(open.stub.host(), &open.thread, start);
 
@@ -134,14 +142,14 @@ fn removing_a_skill_unchips_quoted_and_compact_table_mentions() {
     let mut open = open();
     let engine = MarkdownEngine::new().expect("markdown engine");
     let start = Instant::now();
-    open.stub.host_mut().skill_catalog = Some(Arc::from(vec![skill("review")]));
+    catalog(&mut open, vec![skill("review")]);
     open.markdown
         .sync_mentions(open.stub.host(), &open.thread, start);
     for (item, text) in MESSAGES {
         prepare(&mut open, &engine, item, text);
     }
 
-    open.stub.host_mut().skill_catalog = Some(Arc::from(Vec::new()));
+    catalog(&mut open, Vec::new());
     open.markdown
         .sync_mentions(open.stub.host(), &open.thread, start);
 
@@ -156,7 +164,7 @@ fn an_unrelated_skill_keeps_every_prepared_message_current() {
     let mut open = open();
     let engine = MarkdownEngine::new().expect("markdown engine");
     let start = Instant::now();
-    open.stub.host_mut().skill_catalog = Some(Arc::from(vec![skill("review")]));
+    catalog(&mut open, vec![skill("review")]);
     open.markdown
         .sync_mentions(open.stub.host(), &open.thread, start);
     for (item, text) in MESSAGES {
@@ -172,7 +180,7 @@ fn an_unrelated_skill_keeps_every_prepared_message_current() {
         })
         .collect();
 
-    open.stub.host_mut().skill_catalog = Some(Arc::from(vec![skill("review"), skill("unused")]));
+    catalog(&mut open, vec![skill("review"), skill("unused")]);
     open.markdown
         .sync_mentions(open.stub.host(), &open.thread, start);
     for (item, text) in MESSAGES {

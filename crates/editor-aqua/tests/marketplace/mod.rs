@@ -4,7 +4,7 @@ use artisan_api::Listing;
 use editor_aqua::core::HostId;
 use editor_aqua::core::client::{CallError, CallFailure};
 use editor_aqua::marketplace::presentation::{self, Item, ServerRow};
-use editor_aqua::marketplace::{Marketplace, OperationError, Remote};
+use editor_aqua::marketplace::{Marketplace, OperationError, Remote, Settled};
 
 fn refused() -> OperationError {
     OperationError::Install {
@@ -69,7 +69,7 @@ fn rank_and_deduplicate_listings() {
 fn debounce_and_reject_stale_searches() {
     let mut page = Marketplace::default();
     page.set_shown(true);
-    page.sync_host(Some(HostId("host".into())), &[], &[]);
+    page.sync_host(Some(HostId("host".into())), &[], None, &[]);
     let now = Instant::now();
     page.set_query("pdf".into(), now);
     assert!(page.take_search(now + Duration::from_millis(249)).is_none());
@@ -83,13 +83,14 @@ fn debounce_and_reject_stale_searches() {
 }
 
 #[test]
-fn changing_host_discards_old_operation_completion() {
+fn a_change_on_one_host_finishes_there_after_switching_to_another() {
     use artisan_api::SkillAction;
     use editor_aqua::marketplace::Operation;
 
+    let first = HostId("first".into());
     let mut page = Marketplace::default();
     page.set_shown(true);
-    page.sync_host(Some(HostId("first".into())), &[], &[]);
+    page.sync_host(Some(first.clone()), &[], None, &[]);
     let request = page
         .begin_operation(Operation::Skill {
             id: "skill".into(),
@@ -97,41 +98,79 @@ fn changing_host_discards_old_operation_completion() {
         })
         .unwrap();
     assert!(
-        page.begin_operation(Operation::Listing("another".into()))
-            .is_none()
+        page.begin_operation(Operation::Skill {
+            id: "skill".into(),
+            action: SkillAction::Enable,
+        })
+        .is_none(),
+        "a skill already being changed takes no second change"
     );
-    page.sync_host(Some(HostId("second".into())), &[], &[]);
-    assert!(!page.finish_operation(&request, Err(refused())));
-    assert!(page.pending.is_none());
-    assert!(page.notice.is_none());
+    page.sync_host(Some(HostId("second".into())), &[], None, &[]);
+    assert_eq!(
+        page.pending().count(),
+        0,
+        "the second host has nothing saving"
+    );
+    assert!(matches!(
+        page.finish_operation(
+            &request,
+            Err(refused()),
+            editor_aqua::core::CatalogRead::default()
+        ),
+        Settled::Done { .. }
+    ));
+    assert_eq!(page.notices().count(), 0);
+    page.sync_host(Some(first), &[], None, &[]);
+    assert_eq!(
+        page.notices().count(),
+        1,
+        "the first host's failure shows once it is back on screen"
+    );
 }
 
 #[test]
-fn removed_and_readded_host_rejects_old_requests() {
+fn a_replaced_host_rejects_old_requests_and_names_each_change_it_may_have_lost() {
     use artisan_api::SkillAction;
     use editor_aqua::marketplace::Operation;
 
     let host = HostId("same-host".into());
     let mut page = Marketplace::default();
     page.set_shown(true);
-    page.sync_host(Some(host.clone()), &[], &[]);
-    let now = Instant::now();
-    page.set_query("pdf".into(), now);
-    let search = page.take_search(now + Duration::from_millis(250)).unwrap();
+    page.sync_host(Some(host.clone()), &[], None, &[]);
     let operation = page
         .begin_operation(Operation::Skill {
-            id: "skill".into(),
-            action: SkillAction::Adopt,
+            id: "alpha".into(),
+            action: SkillAction::Disable,
         })
         .unwrap();
-    page.sync_host(None, &[], &[]);
-    page.cancel_search();
-    page.sync_host(Some(host), &[], &[]);
-    page.finish_search(&search, Ok(vec![listing("old", "pdf", 10)]));
-    assert_eq!(page.listings, Remote::Idle);
-    assert!(!page.finish_operation(&operation, Err(refused())));
-    assert!(page.pending.is_none());
-    assert!(page.notice.is_none());
+    assert!(
+        page.begin_operation(Operation::Skill {
+            id: "beta".into(),
+            action: SkillAction::Disable,
+        })
+        .is_none(),
+        "the second toggle waits for the first"
+    );
+    page.replace_host(&host);
+    assert!(matches!(
+        page.finish_operation(
+            &operation,
+            Err(refused()),
+            editor_aqua::core::CatalogRead::default()
+        ),
+        Settled::Stale
+    ));
+    assert_eq!(page.pending().count(), 0);
+    assert_eq!(
+        page.notices()
+            .map(editor_aqua::core::Problem::headline)
+            .collect::<Vec<_>>(),
+        [
+            "The change to alpha may not have been saved: the Forge connection was replaced while it was sent.",
+            "Couldn't disable beta: the Forge connection was replaced before the change was sent."
+        ],
+        "the toggle in flight may be lost and the queued one never reached Forge"
+    );
     assert!(
         page.begin_operation(Operation::Listing("new".into()))
             .is_some()
@@ -170,13 +209,15 @@ fn same_id_host_replacement_resets_marketplace_requests() {
         .page
         .take_search(now + Duration::from_millis(250))
         .unwrap();
-    let operation = controller
-        .page
-        .begin_operation(Operation::Skill {
+    operate(
+        &mut controller,
+        &mut core,
+        Operation::Skill {
             id: "skill".into(),
             action: SkillAction::Adopt,
-        })
-        .unwrap();
+        },
+    );
+    assert_eq!(controller.page.pending().count(), 1);
     core.remove_host(&id).unwrap();
     assert!(core.host_if_instance(&id, first).is_none());
     test_support::editor::core::connect_client(&mut core, &config, client);
@@ -187,9 +228,22 @@ fn same_id_host_replacement_resets_marketplace_requests() {
         .page
         .finish_search(&search, Ok(vec![listing("old", "pdf", 10)]));
     assert_eq!(controller.page.listings, Remote::Searching);
-    assert!(!controller.page.finish_operation(&operation, Err(refused())));
-    assert!(controller.page.pending.is_none());
-    assert!(controller.page.notice.is_none());
+    assert_eq!(
+        controller.page.pending().count(),
+        0,
+        "the replaced host's install is not shown as saving on the new one"
+    );
+    assert_eq!(
+        controller
+            .page
+            .notices()
+            .map(editor_aqua::core::Problem::headline)
+            .collect::<Vec<_>>(),
+        [
+            "The change to skill may not have been saved: the Forge connection was replaced while it was sent."
+        ],
+        "the install that was in flight when the host was replaced says it may be lost"
+    );
     assert!(
         controller
             .page
@@ -452,7 +506,7 @@ fn enter_installs_the_skill_that_is_painted_selected_after_the_catalog_shrinks()
 
     let mut page = Marketplace::default();
     page.set_shown(true);
-    page.sync_host(Some(HostId("host".into())), &[], &[]);
+    page.sync_host(Some(HostId("host".into())), &[], None, &[]);
     page.items = vec![
         discovered("pdf-a"),
         discovered("pdf-b"),
@@ -488,7 +542,7 @@ fn enter_installs_the_skill_that_is_painted_selected_after_the_catalog_shrinks()
 fn an_mcp_server_does_not_hide_a_skills_sh_skill_with_the_same_name() {
     let mut page = Marketplace::default();
     page.set_shown(true);
-    page.sync_host(Some(HostId("host".into())), &[], &[]);
+    page.sync_host(Some(HostId("host".into())), &[], None, &[]);
     page.items = vec![Item::Server(ServerRow {
         name: "github".into(),
         target: "npx github-mcp".into(),
@@ -537,7 +591,6 @@ fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
 
     show_on(&mut core, &second.id);
     controller.sync(&mut core);
-    assert_eq!(controller.page.host.as_ref(), Some(&second.id));
     let on_second = second_forge.take("GET", "/marketplace/search");
     assert!(
         on_second.query().is_some_and(|query| query.contains("pdf")),
@@ -819,5 +872,885 @@ fn arrow_keys_move_focus_and_the_kind_through_the_kind_tabs() {
     assert_eq!(
         focused,
         ["Skills 0", "MCP servers 0", "All", "MCP servers 0"]
+    );
+}
+
+fn user_skill(id: &str, enabled: bool) -> artisan_api::CatalogSkill {
+    artisan_api::CatalogSkill {
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        origin: artisan_api::SkillOrigin::User,
+        enabled,
+        file_count: 1,
+        byte_count: 10,
+        engines: Vec::new(),
+    }
+}
+
+fn shown_enabled(
+    controller: &editor_aqua::marketplace::controller::MarketplaceController,
+) -> Vec<(String, bool)> {
+    controller
+        .page
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Skill(row) => Some((row.id.clone(), row.enabled)),
+            Item::Server(_) | Item::Listing(_) => None,
+        })
+        .collect()
+}
+
+type Controller = editor_aqua::marketplace::controller::MarketplaceController;
+
+fn pump(controller: &mut Controller, core: &mut editor_aqua::core::Core) {
+    core.drain_with(|core, event| controller.core_event(core, &event));
+    controller.drain(core);
+}
+
+fn operate(
+    controller: &mut Controller,
+    core: &mut editor_aqua::core::Core,
+    operation: editor_aqua::marketplace::Operation,
+) {
+    use editor_aqua::marketplace::view::{self, ViewAction};
+    view::dispatch(controller, core, ViewAction::Operate(operation));
+}
+
+fn disable(id: &str) -> editor_aqua::marketplace::Operation {
+    editor_aqua::marketplace::Operation::Skill {
+        id: id.into(),
+        action: artisan_api::SkillAction::Disable,
+    }
+}
+
+fn next_request(
+    controller: &mut Controller,
+    core: &mut editor_aqua::core::Core,
+    forge: &test_support::editor::forge::StubForge,
+    method: &str,
+    path: &str,
+) -> test_support::editor::forge::HeldRequest {
+    test_support::wait::wait_for(&format!("{method} {path}"), Duration::from_secs(10), || {
+        pump(controller, core);
+        forge.try_take(method, path)
+    })
+}
+
+fn no_catalog_read(controller: &mut Controller, core: &mut editor_aqua::core::Core) {
+    pump(controller, core);
+    assert!(
+        !core
+            .active_host()
+            .is_some_and(|host| host.catalog_load().loading),
+        "the Editor started reading the catalog"
+    );
+}
+
+fn read_landed(
+    controller: &mut Controller,
+    core: &mut editor_aqua::core::Core,
+    before: Option<editor_aqua::core::CatalogRead>,
+) {
+    test_support::wait::wait_until(
+        "a newer catalog read to land",
+        Duration::from_secs(10),
+        || {
+            pump(controller, core);
+            core.active_host()
+                .is_some_and(|host| host.fresh_catalog_read() > before)
+        },
+    );
+}
+
+fn fresh_read(core: &editor_aqua::core::Core) -> Option<editor_aqua::core::CatalogRead> {
+    core.active_host()
+        .and_then(editor_aqua::core::HostData::fresh_catalog_read)
+}
+
+fn notice_applied(
+    controller: &mut Controller,
+    core: &mut editor_aqua::core::Core,
+    forge: &test_support::editor::forge::StubForge,
+    disabled: &[&str],
+) {
+    let value = serde_json::json!(disabled);
+    forge.publish(artisan_api::Event::Setting {
+        key: "disabled_skills".into(),
+        value: value.clone(),
+    });
+    test_support::wait::wait_until(
+        "Forge's change notice to apply",
+        Duration::from_secs(10),
+        || {
+            pump(controller, core);
+            core.active_host()
+                .and_then(|host| host.setting("disabled_skills"))
+                == Some(&value)
+        },
+    );
+}
+
+fn settled(controller: &mut Controller, core: &mut editor_aqua::core::Core, saving: usize) {
+    test_support::wait::wait_until(
+        &format!("{saving} saves left"),
+        Duration::from_secs(10),
+        || {
+            pump(controller, core);
+            controller.page.pending().count() == saving
+        },
+    );
+}
+
+fn loaded_catalog(
+    core: &mut editor_aqua::core::Core,
+    skills: Vec<artisan_api::CatalogSkill>,
+) -> (Controller, test_support::editor::forge::StubForge) {
+    let (mut controller, forge) = marketplace_host(core);
+    let count = skills.len();
+    forge.take("GET", "/skills/catalog").respond(skills);
+    test_support::wait::wait_until("the catalog to show", Duration::from_secs(10), || {
+        pump(&mut controller, core);
+        controller.page.items.len() == count
+    });
+    (controller, forge)
+}
+
+fn switches(ids: &[&str], on: &[&str]) -> Vec<(String, bool)> {
+    ids.iter()
+        .map(|id| ((*id).to_owned(), on.contains(id)))
+        .collect()
+}
+
+fn toggled_alpha_then_beta() -> (
+    tempfile::TempDir,
+    editor_aqua::core::Core,
+    Controller,
+    test_support::editor::forge::StubForge,
+    test_support::editor::forge::HeldRequest,
+) {
+    let directory = tempfile::tempdir().expect("a test data folder");
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(
+        &mut core,
+        vec![user_skill("alpha", true), user_skill("beta", true)],
+    );
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(&mut controller, &mut core, disable("beta"));
+    assert_eq!(
+        controller.page.pending().count(),
+        2,
+        "both toggles are saving"
+    );
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha", "beta"], &[]),
+        "both switches show the choice before Forge answers"
+    );
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    pump(&mut controller, &mut core);
+    assert!(
+        forge.try_take("POST", "/skills/beta/disable").is_none(),
+        "beta waits for alpha's save"
+    );
+    (directory, core, controller, forge, alpha)
+}
+
+#[test]
+fn a_toggle_answered_after_its_change_notice_holds_until_a_read_issued_after_the_answer() {
+    let (_directory, mut core, mut controller, forge, alpha) = toggled_alpha_then_beta();
+    let both_off = switches(&["alpha", "beta"], &[]);
+
+    notice_applied(&mut controller, &mut core, &forge, &["alpha"]);
+    let early = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    assert_eq!(
+        shown_enabled(&controller),
+        both_off,
+        "Forge's change notice keeps the list and the choices on screen while it reloads"
+    );
+    alpha.respond(vec![user_skill("alpha", false), user_skill("beta", true)]);
+    let beta = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/beta/disable",
+    );
+    let reread = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    early.respond(vec![user_skill("alpha", true), user_skill("beta", true)]);
+    pump(&mut controller, &mut core);
+    assert_eq!(
+        shown_enabled(&controller),
+        both_off,
+        "a read issued before alpha's answer cannot turn alpha back on"
+    );
+    reread.respond(vec![user_skill("alpha", false), user_skill("beta", true)]);
+    read_landed(&mut controller, &mut core, None);
+    assert_eq!(shown_enabled(&controller), both_off);
+    no_catalog_read(&mut controller, &mut core);
+
+    let before = fresh_read(&core);
+    beta.respond(vec![user_skill("alpha", false), user_skill("beta", false)]);
+    settled(&mut controller, &mut core, 0);
+    next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog")
+        .respond(vec![user_skill("alpha", false), user_skill("beta", false)]);
+    read_landed(&mut controller, &mut core, before);
+    assert_eq!(
+        shown_enabled(&controller),
+        both_off,
+        "beta's answer, older than the read alpha's answer started, waits for one more read"
+    );
+    no_catalog_read(&mut controller, &mut core);
+}
+
+#[test]
+fn a_later_toggle_answered_before_its_notice_holds_through_the_earlier_toggles_read() {
+    let (_directory, mut core, mut controller, forge, alpha) = toggled_alpha_then_beta();
+    let both_off = switches(&["alpha", "beta"], &[]);
+
+    alpha.respond(vec![user_skill("alpha", false), user_skill("beta", true)]);
+    let beta = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/beta/disable",
+    );
+    notice_applied(&mut controller, &mut core, &forge, &["alpha"]);
+    let alphas_read = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    beta.respond(vec![user_skill("alpha", false), user_skill("beta", false)]);
+    let reread = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    alphas_read.respond(vec![user_skill("alpha", false), user_skill("beta", true)]);
+    pump(&mut controller, &mut core);
+    assert_eq!(
+        shown_enabled(&controller),
+        both_off,
+        "the read alpha's notice started, before beta was saved, cannot turn beta back on"
+    );
+    reread.respond(vec![user_skill("alpha", false), user_skill("beta", false)]);
+    read_landed(&mut controller, &mut core, None);
+    assert_eq!(shown_enabled(&controller), both_off);
+
+    let before = fresh_read(&core);
+    notice_applied(&mut controller, &mut core, &forge, &["alpha", "beta"]);
+    next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog")
+        .respond(vec![user_skill("alpha", false), user_skill("beta", false)]);
+    read_landed(&mut controller, &mut core, before);
+    assert_eq!(shown_enabled(&controller), both_off);
+}
+
+#[test]
+fn a_saved_toggle_keeps_its_value_when_both_rereads_fail_until_the_user_tries_again() {
+    use axum::http::StatusCode;
+    use editor_aqua::marketplace::view::{self, ViewAction};
+    let (_directory, mut core, mut controller, forge, alpha) = toggled_alpha_then_beta();
+    let both_off = switches(&["alpha", "beta"], &[]);
+
+    notice_applied(&mut controller, &mut core, &forge, &["alpha"]);
+    let early = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    alpha.respond(vec![user_skill("alpha", false), user_skill("beta", true)]);
+    let _beta = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/beta/disable",
+    );
+    let reread = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    early.fail(StatusCode::SERVICE_UNAVAILABLE, "internal", "busy");
+    reread.fail(StatusCode::SERVICE_UNAVAILABLE, "internal", "busy");
+    let retry = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    assert_eq!(
+        shown_enabled(&controller),
+        both_off,
+        "a failed read keeps alpha's saved choice and reads once more"
+    );
+    retry.fail(StatusCode::SERVICE_UNAVAILABLE, "internal", "busy");
+    test_support::wait::wait_until(
+        "the second failure to show",
+        Duration::from_secs(10),
+        || {
+            pump(&mut controller, &mut core);
+            core.active_host()
+                .is_some_and(|host| host.catalog_load().error.is_some())
+        },
+    );
+    no_catalog_read(&mut controller, &mut core);
+    assert_eq!(
+        shown_enabled(&controller),
+        both_off,
+        "after the last automatic read fails, alpha still shows what Forge accepted"
+    );
+    view::dispatch(&mut controller, &mut core, ViewAction::Retry);
+    let manual = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    manual.respond(vec![user_skill("alpha", false), user_skill("beta", true)]);
+    read_landed(&mut controller, &mut core, None);
+    assert_eq!(shown_enabled(&controller), both_off);
+}
+
+#[test]
+fn a_refused_second_toggle_shows_the_first_one_forge_accepted() {
+    use axum::http::StatusCode;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(&mut core, vec![user_skill("alpha", true)]);
+    operate(&mut controller, &mut core, disable("alpha"));
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    notice_applied(&mut controller, &mut core, &forge, &["alpha"]);
+    let early = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    alpha.respond(vec![user_skill("alpha", false)]);
+    let reread = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    settled(&mut controller, &mut core, 0);
+    assert_eq!(shown_enabled(&controller), switches(&["alpha"], &[]));
+
+    operate(
+        &mut controller,
+        &mut core,
+        editor_aqua::marketplace::Operation::Skill {
+            id: "alpha".into(),
+            action: artisan_api::SkillAction::Enable,
+        },
+    );
+    assert_eq!(shown_enabled(&controller), switches(&["alpha"], &["alpha"]));
+    next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/enable",
+    )
+    .fail(StatusCode::BAD_REQUEST, "bad_request", "not now");
+    settled(&mut controller, &mut core, 0);
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha"], &[]),
+        "the refused enable falls back to the disable Forge accepted, not the stale catalog"
+    );
+    early.respond(vec![user_skill("alpha", true)]);
+    reread.respond(vec![user_skill("alpha", false)]);
+    read_landed(&mut controller, &mut core, None);
+    assert_eq!(shown_enabled(&controller), switches(&["alpha"], &[]));
+}
+
+#[test]
+fn an_install_reply_read_before_a_newer_catalog_is_not_adopted() {
+    use editor_aqua::marketplace::Operation;
+    use editor_aqua::marketplace::view::{self, ViewAction};
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(&mut core, vec![user_skill("alpha", true)]);
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(
+        &mut controller,
+        &mut core,
+        Operation::Listing("pdf-tools".into()),
+    );
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    let install = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/marketplace/install",
+    );
+    alpha.respond(vec![user_skill("alpha", false)]);
+    settled(&mut controller, &mut core, 1);
+    let before = fresh_read(&core);
+    view::dispatch(&mut controller, &mut core, ViewAction::Retry);
+    next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog")
+        .respond(vec![user_skill("alpha", false)]);
+    read_landed(&mut controller, &mut core, before);
+    let newer = fresh_read(&core);
+    install.respond(vec![user_skill("alpha", true)]);
+    settled(&mut controller, &mut core, 0);
+    assert_eq!(
+        fresh_read(&core),
+        None,
+        "the install's catalog, read before the newer one, is not adopted and a reread starts"
+    );
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha"], &[]),
+        "the install's older catalog does not replace the newer one that confirmed alpha"
+    );
+    next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog")
+        .respond(vec![user_skill("alpha", false)]);
+    read_landed(&mut controller, &mut core, newer);
+    assert_eq!(shown_enabled(&controller), switches(&["alpha"], &[]));
+}
+
+#[test]
+fn an_install_answered_first_with_an_older_catalog_leaves_the_saving_toggle_shown() {
+    use editor_aqua::marketplace::Operation;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(&mut core, vec![user_skill("alpha", true)]);
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(
+        &mut controller,
+        &mut core,
+        Operation::Listing("pdf-tools".into()),
+    );
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/marketplace/install",
+    )
+    .respond(vec![user_skill("alpha", true)]);
+    settled(&mut controller, &mut core, 1);
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha"], &[]),
+        "the install's catalog does not undo the toggle still saving"
+    );
+    alpha.respond(vec![user_skill("alpha", false)]);
+    settled(&mut controller, &mut core, 0);
+    assert_eq!(shown_enabled(&controller), switches(&["alpha"], &[]));
+}
+
+#[test]
+fn a_removed_host_drops_its_unsaved_changes_instead_of_keeping_notices() {
+    use editor_aqua::core::Screen;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(
+        &mut core,
+        vec![user_skill("alpha", true), user_skill("beta", true)],
+    );
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(&mut controller, &mut core, disable("beta"));
+    let _alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    let config = test_support::editor::core::stub_host("state-host", "Forge", &forge);
+    core.remove_host(&config.id).unwrap();
+    controller.sync(&mut core);
+    connect_live(&mut core, &config);
+    core.navigate(Screen::Marketplace);
+    controller.sync(&mut core);
+    assert_eq!(controller.page.pending().count(), 0);
+    assert_eq!(
+        controller.page.notices().count(),
+        0,
+        "a host the user removed brings back no notices about it"
+    );
+    assert!(
+        controller.page.begin_operation(disable("beta")).is_some(),
+        "the paired host is the one on screen"
+    );
+}
+
+#[test]
+fn an_overlapping_reply_read_before_a_save_does_not_undo_it() {
+    use editor_aqua::marketplace::Operation;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(&mut core, vec![user_skill("alpha", true)]);
+
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(
+        &mut controller,
+        &mut core,
+        Operation::Listing("pdf-tools".into()),
+    );
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    let install = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/marketplace/install",
+    );
+    alpha.respond(vec![user_skill("alpha", false)]);
+    settled(&mut controller, &mut core, 1);
+    no_catalog_read(&mut controller, &mut core);
+    install.respond(vec![user_skill("alpha", true)]);
+    settled(&mut controller, &mut core, 0);
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha"], &[]),
+        "the install's catalog, read before alpha's save, does not turn alpha back on"
+    );
+    let reload = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    reload.respond(vec![user_skill("alpha", false)]);
+    test_support::wait::wait_until("the reload to land", Duration::from_secs(10), || {
+        pump(&mut controller, &mut core);
+        core.active_host()
+            .is_some_and(|host| host.fresh_catalog_read().is_some())
+    });
+    no_catalog_read(&mut controller, &mut core);
+    assert_eq!(shown_enabled(&controller), switches(&["alpha"], &[]));
+}
+
+#[test]
+fn overlapping_saves_reload_the_catalog_once_even_when_the_last_one_fails() {
+    use axum::http::StatusCode;
+    use editor_aqua::marketplace::Operation;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(&mut core, vec![user_skill("alpha", true)]);
+
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(
+        &mut controller,
+        &mut core,
+        Operation::Listing("pdf-tools".into()),
+    );
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    let install = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/marketplace/install",
+    );
+    alpha.respond(vec![user_skill("alpha", false)]);
+    settled(&mut controller, &mut core, 1);
+    no_catalog_read(&mut controller, &mut core);
+    install.fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "disk full");
+    let reload = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    assert_eq!(
+        controller.page.notices().count(),
+        1,
+        "the failed install says so"
+    );
+    reload.respond(vec![user_skill("alpha", false)]);
+    test_support::wait::wait_until("the reload to land", Duration::from_secs(10), || {
+        pump(&mut controller, &mut core);
+        core.active_host()
+            .is_some_and(|host| host.fresh_catalog_read().is_some())
+    });
+    no_catalog_read(&mut controller, &mut core);
+    assert_eq!(shown_enabled(&controller), switches(&["alpha"], &[]));
+}
+
+#[test]
+fn two_failures_answered_together_both_say_so() {
+    use axum::http::StatusCode;
+    use editor_aqua::marketplace::Operation;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(&mut core, vec![user_skill("alpha", true)]);
+
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(
+        &mut controller,
+        &mut core,
+        Operation::Listing("pdf-tools".into()),
+    );
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    let install = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/marketplace/install",
+    );
+    alpha.fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "disk full");
+    install.fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "disk full");
+    settled(&mut controller, &mut core, 0);
+    let mut notices: Vec<&str> = controller
+        .page
+        .notices()
+        .map(editor_aqua::core::Problem::headline)
+        .collect();
+    notices.sort_unstable();
+    assert_eq!(
+        notices,
+        ["Couldn't disable alpha.", "Couldn't install pdf-tools."],
+        "each failed change keeps its own notice"
+    );
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha"], &["alpha"]),
+        "the refused toggle shows what Forge holds"
+    );
+}
+
+#[test]
+fn a_toggle_waiting_on_one_host_is_still_sent_after_switching_to_another() {
+    use editor_aqua::core::{Core, Screen};
+    use test_support::editor::core::stub_host;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let first_forge = stub_forge();
+    let second_forge = stub_forge();
+    let first = stub_host("first", "first", &first_forge);
+    let second = stub_host("second", "second", &second_forge);
+    connect_live(&mut core, &first);
+    connect_live(&mut core, &second);
+    let show_on = |core: &mut Core, host: &HostId| {
+        core.navigate(Screen::NewThread {
+            host: host.clone(),
+            project: None,
+        });
+        core.navigate(Screen::Marketplace);
+    };
+    show_on(&mut core, &first.id);
+    let mut controller = Controller::default();
+    controller.sync(&mut core);
+    first_forge
+        .take("GET", "/skills/catalog")
+        .respond(vec![user_skill("alpha", true), user_skill("beta", true)]);
+    test_support::wait::wait_until("the catalog to show", Duration::from_secs(10), || {
+        pump(&mut controller, &mut core);
+        controller.page.items.len() == 2
+    });
+    operate(&mut controller, &mut core, disable("alpha"));
+    operate(&mut controller, &mut core, disable("beta"));
+    let alpha = next_request(
+        &mut controller,
+        &mut core,
+        &first_forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+
+    show_on(&mut core, &second.id);
+    controller.sync(&mut core);
+    alpha.respond(vec![user_skill("alpha", false), user_skill("beta", true)]);
+    let beta = next_request(
+        &mut controller,
+        &mut core,
+        &first_forge,
+        "POST",
+        "/skills/beta/disable",
+    );
+    beta.respond(vec![user_skill("alpha", false), user_skill("beta", false)]);
+
+    show_on(&mut core, &first.id);
+    controller.sync(&mut core);
+    settled(&mut controller, &mut core, 0);
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha", "beta"], &[])
+    );
+}
+
+#[test]
+fn two_refused_toggles_each_name_their_skill() {
+    use axum::http::StatusCode;
+    let (_directory, mut core, mut controller, forge, alpha) = toggled_alpha_then_beta();
+    alpha.fail(StatusCode::BAD_REQUEST, "bad_request", "not now");
+    next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/beta/disable",
+    )
+    .fail(StatusCode::BAD_REQUEST, "bad_request", "not now");
+    settled(&mut controller, &mut core, 0);
+    assert_eq!(
+        controller
+            .page
+            .notices()
+            .map(editor_aqua::core::Problem::headline)
+            .collect::<Vec<_>>(),
+        ["Couldn't disable alpha.", "Couldn't disable beta."]
+    );
+}
+
+#[test]
+fn a_replaced_host_keeps_the_notices_it_already_showed() {
+    let host = HostId("same-host".into());
+    let mut page = Marketplace::default();
+    page.set_shown(true);
+    page.sync_host(Some(host.clone()), &[], None, &[]);
+    let alpha = page.begin_operation(disable("alpha")).unwrap();
+    assert!(matches!(
+        page.finish_operation(
+            &alpha,
+            Err(refused()),
+            editor_aqua::core::CatalogRead::default()
+        ),
+        Settled::Done { .. }
+    ));
+    let _beta = page.begin_operation(disable("beta")).unwrap();
+    page.replace_host(&host);
+    assert_eq!(
+        page.notices()
+            .map(editor_aqua::core::Problem::headline)
+            .collect::<Vec<_>>(),
+        [
+            "Couldn't disable alpha.",
+            "The change to beta may not have been saved: the Forge connection was replaced while it was sent."
+        ],
+        "the refusal shown before the replacement stays beside the change it may have lost"
+    );
+}
+
+#[test]
+fn a_replaced_host_that_is_then_removed_leaves_no_notices_when_paired_again() {
+    use editor_aqua::core::Screen;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(&mut core, vec![user_skill("alpha", true)]);
+    operate(&mut controller, &mut core, disable("alpha"));
+    let _alpha = next_request(
+        &mut controller,
+        &mut core,
+        &forge,
+        "POST",
+        "/skills/alpha/disable",
+    );
+    let config = test_support::editor::core::stub_host("state-host", "Forge", &forge);
+    core.remove_host(&config.id).unwrap();
+    connect_live(&mut core, &config);
+    core.navigate(Screen::Marketplace);
+    controller.sync(&mut core);
+    assert_eq!(
+        controller.page.notices().count(),
+        1,
+        "the replacement says the change in flight may be lost"
+    );
+    core.remove_host(&config.id).unwrap();
+    controller.sync(&mut core);
+    connect_live(&mut core, &config);
+    core.navigate(Screen::Marketplace);
+    controller.sync(&mut core);
+    assert_eq!(
+        controller.page.notices().count(),
+        0,
+        "removing the replacement forgets its notices"
+    );
+    assert!(
+        controller.page.begin_operation(disable("alpha")).is_some(),
+        "the paired host is the one on screen"
+    );
+}
+
+#[test]
+fn a_failed_skills_sh_install_names_the_listing_as_shown() {
+    use editor_aqua::marketplace::Operation;
+    let mut page = Marketplace::default();
+    page.set_shown(true);
+    page.sync_host(Some(HostId("forge".into())), &[], None, &[]);
+    let now = Instant::now();
+    page.set_query("pdf".into(), now);
+    let search = page.take_search(now + Duration::from_millis(250)).unwrap();
+    page.finish_search(
+        &search,
+        Ok(vec![listing("anthropics/skills/pdf", "pdf-tools", 10)]),
+    );
+    let install = page
+        .begin_operation(Operation::Listing("anthropics/skills/pdf".into()))
+        .unwrap();
+    page.finish_operation(
+        &install,
+        Err(refused()),
+        editor_aqua::core::CatalogRead::default(),
+    );
+    assert_eq!(
+        page.notices()
+            .map(editor_aqua::core::Problem::headline)
+            .collect::<Vec<_>>(),
+        ["Couldn't install pdf-tools."]
+    );
+}
+
+#[test]
+fn a_repeated_answer_never_settles_a_later_change_to_the_same_skill() {
+    use editor_aqua::marketplace::{Operation, Reply};
+    let mut page = Marketplace::default();
+    page.set_shown(true);
+    page.sync_host(Some(HostId("forge".into())), &[], None, &[]);
+    let first = page.begin_operation(disable("alpha")).unwrap();
+    let reads = editor_aqua::core::CatalogRead::default();
+    assert!(matches!(
+        page.finish_operation(&first, Ok(Reply::Adopted), reads),
+        Settled::Done { .. }
+    ));
+    let _second = page
+        .begin_operation(Operation::Skill {
+            id: "alpha".into(),
+            action: artisan_api::SkillAction::Enable,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            page.finish_operation(&first, Ok(Reply::Adopted), reads),
+            Settled::Stale
+        ),
+        "the first send's answer arriving twice is ignored"
+    );
+    assert_eq!(
+        page.pending().count(),
+        1,
+        "the enable that followed is still saving"
+    );
+}
+
+#[test]
+fn a_reconnect_that_resnapshots_keeps_the_list_on_screen_while_it_reloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(&directory.path().join("editor"));
+    let (mut controller, forge) = loaded_catalog(
+        &mut core,
+        vec![user_skill("alpha", true), user_skill("beta", false)],
+    );
+    forge.publish(artisan_api::Event::Reset);
+    let reload = next_request(&mut controller, &mut core, &forge, "GET", "/skills/catalog");
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha", "beta"], &["alpha"]),
+        "the skills stay listed while the catalog reloads"
+    );
+    reload.respond(vec![user_skill("alpha", true), user_skill("beta", false)]);
+    read_landed(&mut controller, &mut core, None);
+    assert_eq!(
+        shown_enabled(&controller),
+        switches(&["alpha", "beta"], &["alpha"])
     );
 }

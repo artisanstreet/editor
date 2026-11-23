@@ -116,10 +116,10 @@ impl Notices {
                         false,
                     )
                 }),
-                page.notice.clone().map(|problem| (problem, false)),
             ]
             .into_iter()
             .flatten()
+            .chain(page.notices().cloned().map(|problem| (problem, false)))
             .collect(),
             loading: controller
                 .loading_started()
@@ -152,7 +152,7 @@ pub fn build(
             .filter(|item| item.managed() && kind.admits(item))
             .count()
     });
-    let pending = page.pending.clone();
+    let pending: Vec<Operation> = page.pending().cloned().collect();
     let search = controller.search.clone();
     let list = List::new()
         .items(rows)
@@ -186,7 +186,13 @@ pub fn build(
                     .build(
                         &theme,
                         *selected,
-                        item_row(&theme, item, *selected, pending.as_ref(), Rc::clone(&emit)),
+                        item_row(
+                            &theme,
+                            item,
+                            *selected,
+                            pending.iter().find(|operation| operation.targets(item)),
+                            Rc::clone(&emit),
+                        ),
                     )
                     .debug_selector(item.selector()),
             };
