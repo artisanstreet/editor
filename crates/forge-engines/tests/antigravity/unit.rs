@@ -430,67 +430,209 @@ fn a_session_offering_only_orchestrators_says_so_instead_of_listing_nothing() {
     ));
 }
 
+struct Replayed {
+    dir: tempfile::TempDir,
+    running: tokio::task::JoinHandle<crate::Outcome>,
+    received: tokio::sync::mpsc::Receiver<EngineEvent>,
+}
+
+impl Replayed {
+    fn start(case: &str, model: &str, effort: &str, gates: &[&str]) -> (Self, Vec<std::fs::File>) {
+        use crate::{Harness as _, RunIo, Turn, UserInput};
+        use artisan_api::{EngineConfig, EngineId, ThreadId};
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir
+            .path()
+            .join(format!("agy{}", std::env::consts::EXE_SUFFIX));
+        test_support::executable::install(&crate::fake_engine::binary(), &engine);
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("transcripts/replay/antigravity")
+                .join(format!("{case}.jsonl")),
+            dir.path().join("transcript.jsonl"),
+        )
+        .unwrap();
+        let held = gates
+            .iter()
+            .map(|name| {
+                let file = std::fs::File::create(dir.path().join(format!("{name}.gate"))).unwrap();
+                file.lock().unwrap();
+                file
+            })
+            .collect();
+        let turn = Turn {
+            thread_id: ThreadId::new(),
+            engine: EngineId::Antigravity,
+            binary: engine,
+            home: dir.path().join("home"),
+            cwd: dir.path().to_owned(),
+            config: EngineConfig {
+                model: Some(model.to_owned()),
+                effort: Some(effort.to_owned()),
+                permissions: Permissions::Full,
+                ..EngineConfig::new(EngineId::Antigravity)
+            },
+            session_id: None,
+            input: UserInput {
+                text: "Reply with the single word: pong".to_owned(),
+                ..UserInput::default()
+            },
+            launch: crate::Launch::default(),
+            trace_dir: None,
+        };
+        let (_inputs, inbox) = tokio::sync::mpsc::channel(8);
+        let (events, received) = tokio::sync::mpsc::channel(256);
+        let running = tokio::spawn(super::AntigravityHarness.run(
+            turn,
+            RunIo {
+                inbox,
+                events,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        ));
+        (
+            Self {
+                dir,
+                running,
+                received,
+            },
+            held,
+        )
+    }
+
+    async fn until(
+        &mut self,
+        what: &str,
+        seen: impl Fn(&EngineEvent) -> bool + Send,
+    ) -> Vec<EngineEvent> {
+        let received = &mut self.received;
+        test_support::wait::within(what, test_support::wait::LIVENESS, async move {
+            let mut events = Vec::new();
+            while let Some(event) = received.recv().await {
+                let found = seen(&event);
+                events.push(event);
+                if found {
+                    return events;
+                }
+            }
+            panic!("the run ended before {what}: {events:#?}");
+        })
+        .await
+    }
+
+    async fn finish(self) -> (crate::Outcome, Vec<EngineEvent>) {
+        let Self {
+            dir,
+            running,
+            mut received,
+        } = self;
+        let drain = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = received.recv().await {
+                events.push(event);
+            }
+            events
+        });
+        let outcome = test_support::wait::within(
+            "the replayed turn ends",
+            test_support::wait::LIVENESS,
+            running,
+        )
+        .await
+        .unwrap();
+        let events = drain.await.unwrap();
+        let log = std::fs::read_to_string(dir.path().join("replay.log"))
+            .unwrap_or_else(|error| format!("no replay log: {error}"));
+        assert_eq!(
+            outcome.status(),
+            artisan_api::RunStatus::Done,
+            "{:?}\n{log}",
+            outcome.error()
+        );
+        (outcome, events)
+    }
+}
+
 async fn replayed_turn(case: &str, model: &str, effort: &str) {
-    use crate::{Harness as _, RunIo, Turn, UserInput};
-    use artisan_api::{EngineConfig, EngineId, ThreadId};
-    let dir = tempfile::tempdir().unwrap();
-    let engine = dir
-        .path()
-        .join(format!("agy{}", std::env::consts::EXE_SUFFIX));
-    test_support::executable::install(&crate::fake_engine::binary(), &engine);
-    std::fs::copy(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("transcripts/replay/antigravity")
-            .join(format!("{case}.jsonl")),
-        dir.path().join("transcript.jsonl"),
-    )
-    .unwrap();
-    let turn = Turn {
-        thread_id: ThreadId::new(),
-        engine: EngineId::Antigravity,
-        binary: engine,
-        home: dir.path().join("home"),
-        cwd: dir.path().to_owned(),
-        config: EngineConfig {
-            model: Some(model.to_owned()),
-            effort: Some(effort.to_owned()),
-            permissions: Permissions::Full,
-            ..EngineConfig::new(EngineId::Antigravity)
-        },
-        session_id: None,
-        input: UserInput {
-            text: "Reply with the single word: pong".to_owned(),
-            ..UserInput::default()
-        },
-        launch: crate::Launch::default(),
-        trace_dir: None,
-    };
-    let (_inputs, inbox) = tokio::sync::mpsc::channel(8);
-    let (events, mut received) = tokio::sync::mpsc::channel(256);
-    let running = tokio::spawn(super::AntigravityHarness.run(
-        turn,
-        RunIo {
-            inbox,
-            events,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        },
-    ));
-    let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
-    let outcome = test_support::wait::within(
-        "the replayed turn ends",
-        test_support::wait::LIVENESS,
-        running,
-    )
-    .await
-    .unwrap();
-    drain.await.unwrap();
-    let log = std::fs::read_to_string(dir.path().join("replay.log"))
-        .unwrap_or_else(|error| format!("no replay log: {error}"));
+    let (replayed, _gates) = Replayed::start(case, model, effort, &[]);
+    replayed.finish().await;
+}
+
+fn waiting_status(event: &EngineEvent) -> Option<&str> {
+    if let EngineEvent::Live {
+        target: crate::harness::LiveKind::Status,
+        text,
+        ..
+    } = event
+    {
+        Some(text)
+    } else {
+        None
+    }
+}
+
+#[tokio::test]
+async fn a_command_left_running_holds_the_run_until_the_woken_reply_is_the_answer() {
+    use artisan_api::{ItemKind, Phase, Status};
+    let (mut replayed, gates) =
+        Replayed::start("background-wake", "gemini-3.8-flash", "low", &["job"]);
+    let mut events = replayed
+        .until("Antigravity waits on its background command", |event| {
+            waiting_status(event).is_some_and(|text| !text.is_empty())
+        })
+        .await;
+    assert!(
+        !replayed.running.is_finished(),
+        "the run ended while the command still ran"
+    );
+    for gate in gates {
+        gate.unlock().unwrap();
+    }
+    let (_outcome, rest) = replayed.finish().await;
+    events.extend(rest);
+    let mut items: Vec<(String, Status, ItemKind)> = Vec::new();
+    for event in &events {
+        if let EngineEvent::Item {
+            key, status, kind, ..
+        } = event
+        {
+            items.retain(|(seen, ..)| seen != key);
+            items.push((key.clone(), *status, kind.clone()));
+        }
+    }
+    let messages: Vec<(String, Phase)> = items
+        .iter()
+        .filter_map(|(_, _, kind)| {
+            if let ItemKind::AssistantMessage { text, phase } = kind {
+                Some((text.inline().unwrap_or_default().to_owned(), *phase))
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(
-        outcome.status(),
-        artisan_api::RunStatus::Done,
-        "{:?}\n{log}",
-        outcome.error()
+        messages,
+        vec![
+            (
+                "I have launched the command in the background and will report back once it finishes."
+                    .to_owned(),
+                Phase::Commentary
+            ),
+            (
+                "The background command has finished with output: BGDONE".to_owned(),
+                Phase::Final
+            ),
+        ]
+    );
+    let command = items
+        .iter()
+        .find(|(key, ..)| key == "call_10289241707886692278")
+        .expect("the command is a row");
+    assert_eq!(command.1, Status::Done);
+    assert_eq!(
+        events.iter().filter_map(waiting_status).next_back(),
+        Some(""),
+        "the waiting status is cleared once the command finishes"
     );
 }
 
@@ -502,4 +644,91 @@ async fn a_turn_on_a_fixed_effort_model_never_sets_the_thought_level() {
 #[tokio::test]
 async fn a_turn_on_an_adjustable_model_sets_the_model_then_the_thought_level() {
     replayed_turn("adjustable-effort", "gemini-3.8-flash", "low").await;
+}
+
+fn change(update: Value) -> super::protocol::Change {
+    serde_json::from_value(update).expect("invariant: the test writes a valid session update")
+}
+
+fn command(id: &str, status: &str, daemon: bool) -> super::protocol::Change {
+    change(serde_json::json!({
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": id,
+        "status": status,
+        "kind": "execute",
+        "rawInput": { "CommandLine": "cargo test", "IsDaemon": daemon },
+    }))
+}
+
+fn say(text: &str) -> super::protocol::Change {
+    change(serde_json::json!({
+        "sessionUpdate": "agent_message_chunk",
+        "content": { "type": "text", "text": text },
+    }))
+}
+
+fn step_ended() -> super::protocol::Change {
+    change(serde_json::json!({ "sessionUpdate": "usage_update", "used": 1, "size": 2 }))
+}
+
+fn end_turn() -> Prompted {
+    serde_json::from_value(serde_json::json!({ "stopReason": "end_turn" }))
+        .expect("invariant: the test writes a valid prompt result")
+}
+
+fn prompted_with_a_job(daemon: bool) -> Decoder {
+    let mut decoder = Decoder::default();
+    decoder.prompted();
+    decoder.update(command("job", "in_progress", daemon));
+    decoder.update(say("Started it."));
+    decoder.ended(&end_turn(), false);
+    decoder
+}
+
+#[test]
+fn a_daemon_left_running_ends_the_run_like_before() {
+    let decoder = prompted_with_a_job(true);
+    assert_eq!(decoder.wake(), super::wake::Wake::Quiet);
+}
+
+#[test]
+fn a_job_that_finishes_without_a_woken_reply_ends_the_run_after_the_grace() {
+    let mut decoder = prompted_with_a_job(false);
+    assert_eq!(decoder.wake(), super::wake::Wake::Jobs);
+    decoder.update(command("job", "completed", false));
+    assert_eq!(decoder.wake(), super::wake::Wake::Waking);
+    decoder.lapse();
+    assert_eq!(decoder.wake(), super::wake::Wake::Quiet);
+}
+
+#[test]
+fn a_woken_reply_that_starts_another_job_keeps_waiting_on_it() {
+    let mut decoder = prompted_with_a_job(false);
+    decoder.update(command("job", "completed", false));
+    decoder.update(command("next", "in_progress", false));
+    decoder.update(say("Tests passed; now building."));
+    decoder.update(step_ended());
+    assert_eq!(decoder.wake(), super::wake::Wake::Replied);
+    let events = decoder.lapse();
+    assert_eq!(decoder.wake(), super::wake::Wake::Jobs);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Item {
+            kind: artisan_api::ItemKind::AssistantMessage {
+                phase: artisan_api::Phase::Commentary,
+                ..
+            },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_woken_tool_call_right_after_its_step_is_still_the_reply_working() {
+    let mut decoder = prompted_with_a_job(false);
+    decoder.update(command("job", "completed", false));
+    decoder.update(say("Checking the output."));
+    decoder.update(step_ended());
+    decoder.update(command("read", "in_progress", false));
+    assert_eq!(decoder.wake(), super::wake::Wake::Replying);
 }

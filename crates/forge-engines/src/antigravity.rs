@@ -3,6 +3,7 @@ mod protocol;
 #[cfg(test)]
 #[path = "../tests/antigravity/unit.rs"]
 mod tests;
+mod wake;
 
 pub use protocol::FrameError;
 
@@ -18,12 +19,15 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use wake::Wake;
 
 pub(crate) const GEMINI_DIR: &str = ".gemini";
 pub(crate) const LOGIN_ARGS: &[&str] = &["acp", "--login"];
 const SERVE: &str = "acp";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(90);
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
+const WAKE_GRACE: Duration = Duration::from_secs(180);
+const REPLY_SETTLE: Duration = Duration::from_secs(3);
 const AUTO_MODE: &str = "auto";
 const ASKING_MODE: &str = "default";
 const QUOTA_MARKERS: [&str; 3] = ["QUOTA_EXHAUSTED", "RESOURCE_EXHAUSTED", "quota"];
@@ -414,18 +418,29 @@ async fn drive(
         permissions: turn.config.permissions,
         outcome: Outcome::Done,
     };
-    prompt(connection, &session, &mut state, io, &turn.input).await?;
+    prompt(connection, &session, &mut state, decoder, io, &turn.input).await?;
     let cancel = io.cancel.clone();
     loop {
-        if state.prompts.is_empty() && !decoder.waiting() {
-            match io.inbox.try_recv() {
+        let settled = state.prompts.is_empty() && !decoder.waiting();
+        let quiet_for = match decoder.wake() {
+            _ if !settled => None,
+            Wake::Quiet => match io.inbox.try_recv() {
                 Ok(input) => {
                     input_arrived(connection, &mut session, &mut state, decoder, io, input).await?;
                     continue;
                 }
                 Err(_) => return Ok(state.outcome),
+            },
+            Wake::Waking => Some(WAKE_GRACE),
+            Wake::Replied => Some(REPLY_SETTLE),
+            Wake::Prompted | Wake::Jobs | Wake::Replying => None,
+        };
+        let lull = async {
+            match quiet_for {
+                Some(duration) => tokio::time::sleep(duration).await,
+                None => std::future::pending().await,
             }
-        }
+        };
         tokio::select! {
             biased;
             () = cancel.cancelled() => return stop(connection, &session, &mut state, decoder, io).await,
@@ -435,6 +450,7 @@ async fn drive(
             frame = connection.frame() => {
                 frame_arrived(connection, &mut state, decoder, io, frame?).await?;
             }
+            () = lull => emit_all(io, decoder.lapse()).await,
         }
     }
 }
@@ -443,6 +459,7 @@ async fn prompt(
     connection: &mut Connection,
     session: &Session,
     state: &mut Turnstile,
+    decoder: &mut Decoder,
     io: &RunIo,
     input: &UserInput,
 ) -> Result<(), RunError> {
@@ -454,6 +471,7 @@ async fn prompt(
         )
         .await?;
     state.prompts.insert(id, input.id.clone());
+    emit_all(io, decoder.prompted()).await;
     io.emit(EngineEvent::InputAccepted {
         id: input.id.clone(),
     })
@@ -502,7 +520,7 @@ async fn input_arrived(
     input: Input,
 ) -> Result<(), RunError> {
     match input {
-        Input::Steer(input) => prompt(connection, session, state, io, &input).await?,
+        Input::Steer(input) => prompt(connection, session, state, decoder, io, &input).await?,
         Input::Answer { key, answer } => match decoder.answer(&key, &answer) {
             Answered::Reply {
                 rpc,
@@ -571,6 +589,9 @@ async fn frame_arrived(
                         source,
                     };
                     state.outcome = refused(&failure);
+                    if state.prompts.is_empty() {
+                        emit_all(io, decoder.abandoned()).await;
+                    }
                 }
             }
         }
@@ -868,7 +889,33 @@ fn models(opened: &Opened) -> Lineup {
                 }
             };
             let id = &choice.value;
+            let observed_at = artisan_api::now();
+            let mut sources = vec![
+                artisan_api::FieldSource {
+                    field: "id".into(),
+                    source: "antigravity.session/new".into(),
+                    observed_at,
+                },
+                artisan_api::FieldSource {
+                    field: "name".into(),
+                    source: "antigravity.session/new".into(),
+                    observed_at,
+                },
+                artisan_api::FieldSource {
+                    field: "images".into(),
+                    source: "antigravity.session/new".into(),
+                    observed_at,
+                },
+            ];
+            if !efforts.is_empty() {
+                sources.push(artisan_api::FieldSource {
+                    field: "efforts".into(),
+                    source: "antigravity.session/new".into(),
+                    observed_at,
+                });
+            }
             Some(artisan_api::Model {
+                evidence: artisan_api::ModelEvidence { sources },
                 name,
                 id: choice.value.clone(),
                 description: choice.description,
