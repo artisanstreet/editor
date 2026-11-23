@@ -59,7 +59,7 @@ pub fn resolve<'a>(
 }
 
 #[must_use]
-pub fn dollars(cost_usd: f64) -> String {
+pub(crate) fn dollars(cost_usd: f64) -> String {
     format!("${cost_usd:.2}")
 }
 

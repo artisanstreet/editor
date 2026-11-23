@@ -27,12 +27,11 @@ Group "Artisan Editor"
   Label "No messages yet."
   ComboBox "No model" [collapsed]
     Label "No model"
-  Group [focused]
-    Label "Couldn't save the draft. Forge couldn't be reached."
-    Button "Try again"
-      Label "Try again"
-    Label "Details"
+  Label "Couldn't save the draft. Forge couldn't be reached."
+  Button "Try again"
+    Label "Try again"
+  Label "Details"
   ScrollView
-    TextInput "Message" value="Say hello"
+    TextInput "Message" value="Say hello" [focused]
   Button "Send message"
   Label "Lost the connection to Forge. Reconnecting…"

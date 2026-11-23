@@ -16,7 +16,7 @@ Group "Artisan Editor" [focused]
   Button "Close window"
   ComboBox "Opus 5.5" [collapsed]
     Label "Opus 5.5"
-    Label "1M"
+    Label "1M Medium"
   ComboBox "Project" [collapsed]
     Label "Project"
   ScrollView

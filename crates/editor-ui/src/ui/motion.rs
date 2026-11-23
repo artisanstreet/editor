@@ -56,7 +56,7 @@ impl WorkingPulse {
     }
 }
 
-pub fn pulsing(
+pub(crate) fn pulsing(
     child: aqua_ui::element::Element,
     pulse: aqua_core::scene::GpuiQuadPulse,
     reduced_motion: bool,
