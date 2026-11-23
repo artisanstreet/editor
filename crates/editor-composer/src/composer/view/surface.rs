@@ -38,7 +38,7 @@ impl ComposerOwner {
         let items = model_menu_items(host, picker, current.clone());
         let pane = picker
             .axis
-            .filter(|axis| items.iter().any(|item| item.pane == Some(*axis)));
+            .filter(|axis| items.iter().any(|item| item.pane == Some(*axis) && !item.locked));
         let opening = self.model_menu_serial.replace(picker.open_serial) != picker.open_serial;
         let max = layout.max_scroll(MODEL_LIST_HEIGHT);
         let mut scrolling = self.model_scroll.borrow_mut();

@@ -447,3 +447,28 @@ fn light_has_one_native_binding_and_preserves_an_existing_minimal_selection() {
         Some("minimal")
     );
 }
+
+#[test]
+fn token_labels_format_binary_and_decimal_windows_and_fallback_from_single_window() {
+    assert_eq!(token_label(1_048_576), "1M");
+    assert_eq!(token_label(1_000_000), "1M");
+    assert_eq!(token_label(500_000), "500K");
+    assert_eq!(token_label(262_144), "256K");
+    assert_eq!(token_label(131_072), "128K");
+    let model = Model {
+        id: "gemini-4-neon".into(),
+        context_window: Some(1_048_576),
+        ..Model::default()
+    };
+    let config = config(EngineId::Antigravity, &model.id);
+    let choices = model
+        .specification(EngineId::Antigravity, &[])
+        .visible_choices(ModelAxis::Context, &config, false);
+    assert_eq!(
+        choices
+            .iter()
+            .map(|choice| choice.label.as_str())
+            .collect::<Vec<_>>(),
+        ["1M"]
+    );
+}

@@ -494,3 +494,117 @@ fn a_long_project_list_scrolls_to_the_projects_below_the_fold() {
         "scrolling to the end shows the oldest project inside the list, it sits at {last:?} in a list at {bounds:?}"
     );
 }
+
+#[test]
+fn model_trigger_shows_context_and_default_or_fixed_effort() {
+    let model = artisan_api::Model {
+        id: "gpt-oss-120b-medium".into(),
+        name: "GPT-OSS 120B".into(),
+        efforts: vec!["medium".into()],
+        default_effort: Some("medium".into()),
+        context_window: Some(131_072),
+        context_windows: vec![artisan_api::ContextWindow {
+            tokens: 131_072,
+            override_tokens: None,
+        }],
+        ..artisan_api::Model::default()
+    };
+    let config = artisan_api::EngineConfig {
+        model: Some(model.id.clone()),
+        ..artisan_api::EngineConfig::new(artisan_api::EngineId::Antigravity)
+    };
+    assert_eq!(super::model_details(&config, Some(&model)), ["128K", "Medium"]);
+}
+
+#[test]
+fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
+    use crate::composer::picker::{Axis, PickerState};
+    use artisan_api::tls::{Identity, fingerprint};
+    use editor_core::{ForgeClient, HostConfig, HostId, HostKind};
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    let forge = test_support::net::SilentListener::bind();
+    let identity = Identity::generate("models").unwrap();
+    let host_config = HostConfig {
+        id: HostId("models".into()),
+        name: "Forge".into(),
+        address: forge.address().to_string(),
+        fingerprint: fingerprint(identity.certificate_der().unwrap().as_ref()),
+        kind: HostKind::Local,
+    };
+    let client = ForgeClient::new(&host_config.address, &host_config.fingerprint, &identity).unwrap();
+    test_support::editor::core::connect_client(&mut core, &host_config, client);
+    let host = core.host_mut(&host_config.id).unwrap();
+    host.engines.insert(
+        artisan_api::EngineId::Antigravity,
+        artisan_api::EngineStatus {
+            discovery: artisan_api::DiscoveryState::Fresh { observed_at: 0 },
+            engine: artisan_api::EngineId::Antigravity,
+            install: artisan_api::InstallState::Installed {
+                version: "1.5.14".into(),
+                update: None,
+            },
+            sign_in: artisan_api::SignInState::SignedIn { account: None },
+            models: std::sync::Arc::from([
+                artisan_api::Model {
+                    id: "gpt-oss-120b-medium".into(),
+                    name: "GPT-OSS 120B".into(),
+                    efforts: vec!["medium".into()],
+                    default_effort: Some("medium".into()),
+                    context_window: Some(131_072),
+                    context_windows: vec![artisan_api::ContextWindow {
+                        tokens: 131_072,
+                        override_tokens: None,
+                    }],
+                    ..artisan_api::Model::default()
+                },
+                artisan_api::Model {
+                    id: "gemini-4-argon".into(),
+                    name: "Gemini 4 Argon".into(),
+                    efforts: vec!["low".into(), "medium".into(), "high".into()],
+                    default_effort: None,
+                    context_window: Some(1_048_576),
+                    context_windows: vec![artisan_api::ContextWindow {
+                        tokens: 1_048_576,
+                        override_tokens: None,
+                    }],
+                    ..artisan_api::Model::default()
+                },
+            ]),
+            default_model: Some("gpt-oss-120b-medium".into()),
+            commands: std::sync::Arc::from([]),
+            usage: None,
+            integrity: None,
+            versions: std::sync::Arc::from([]),
+            claude_ai: None,
+        },
+    );
+    let host = core.host(&host_config.id).unwrap();
+    let picker = PickerState::default();
+    let gpt = artisan_api::EngineConfig {
+        model: Some("gpt-oss-120b-medium".into()),
+        ..artisan_api::EngineConfig::new(artisan_api::EngineId::Antigravity)
+    };
+    let gpt_items = super::model_menu::model_menu_items(host, &picker, Some(gpt));
+    let effort = gpt_items.iter().find(|item| item.pane == Some(Axis::Thinking)).unwrap();
+    assert_eq!(effort.value, "Medium");
+    assert!(effort.locked);
+    let context = gpt_items.iter().find(|item| item.pane == Some(Axis::Context)).unwrap();
+    assert_eq!(context.value, "128K");
+    assert!(context.locked);
+    let permission = gpt_items.iter().find(|item| item.pane == Some(Axis::Permission)).unwrap();
+    assert!(!permission.locked);
+
+    let argon = artisan_api::EngineConfig {
+        model: Some("gemini-4-argon".into()),
+        ..artisan_api::EngineConfig::new(artisan_api::EngineId::Antigravity)
+    };
+    let argon_items = super::model_menu::model_menu_items(host, &picker, Some(argon));
+    let effort = argon_items.iter().find(|item| item.pane == Some(Axis::Thinking)).unwrap();
+    assert_eq!(effort.value, "Default");
+    assert!(!effort.locked);
+    let context = argon_items.iter().find(|item| item.pane == Some(Axis::Context)).unwrap();
+    assert_eq!(context.value, "1M");
+    assert!(context.locked);
+}

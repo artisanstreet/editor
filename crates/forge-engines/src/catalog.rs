@@ -93,7 +93,7 @@ pub(crate) async fn list(
         }
         ModelSource::CodexAppServer => codex(&program).await?,
         ModelSource::OpenCodeCli => opencode(&program, http).await?,
-        ModelSource::AntigravityAcp => antigravity(&program).await?,
+        ModelSource::AntigravityAcp => antigravity(&program, http).await?,
     };
     Ok(finish(engine, listing))
 }
@@ -938,14 +938,81 @@ const MODELS_DEV: &str = "https://models.dev/api.json";
 const MODELS_DEV_MAX_BYTES: usize = 32 * 1024 * 1024;
 const MODELS_DEV_FRESH: Duration = Duration::from_hours(12);
 
-async fn antigravity(program: &Program<'_>) -> Result<Listing, ListModelsError> {
+async fn antigravity(
+    program: &Program<'_>,
+    http: &reqwest::Client,
+) -> Result<Listing, ListModelsError> {
     let command = command(program).map_err(ListModelsError::NotInstalled)?;
-    let probed = crate::antigravity::probe(command, program.home)
-        .await
-        .map_err(ListModelsError::AntigravityProbe)?;
+    let (probed, digest) = tokio::join!(
+        crate::antigravity::probe(command, program.home),
+        models_dev(http, program.home),
+    );
+    let probed = probed.map_err(ListModelsError::AntigravityProbe)?;
+    let digest = match digest {
+        Ok(digest) => digest,
+        Err(error) => {
+            tracing::debug!(
+                error = diagnostics::chain(&error),
+                "models.dev cache unavailable for Antigravity"
+            );
+            None
+        }
+    };
     match probed {
         crate::antigravity::Probed::SignedOut => Err(ListModelsError::AntigravitySignedOut),
-        crate::antigravity::Probed::SignedIn(lineup) => listed_antigravity(lineup),
+        crate::antigravity::Probed::SignedIn(lineup) => {
+            let mut listing = listed_antigravity(lineup)?;
+            enrich_antigravity(&mut listing, digest.as_ref());
+            Ok(listing)
+        }
+    }
+}
+
+fn enrich_antigravity(listing: &mut Listing, digest: Option<&Value>) {
+    let Some(digest) = digest else {
+        return;
+    };
+    let contexts = digest.get("contexts").and_then(Value::as_object);
+    for model in &mut listing.models {
+        if model.context_window.is_some() {
+            continue;
+        }
+        let base_id = match model.efforts.as_slice() {
+            [effort] => model
+                .id
+                .strip_suffix(effort.as_str())
+                .and_then(|prefix| prefix.strip_suffix('-'))
+                .unwrap_or(&model.id),
+            _ => &model.id,
+        };
+        let lab_key = match model.lab.as_deref() {
+            Some("Google") => Some("google"),
+            Some("Anthropic") => Some("anthropic"),
+            Some("OpenAI") => Some("openai"),
+            _ => None,
+        };
+        let context = lab_key.and_then(|lab| {
+            let canonical = format!("{lab}/{base_id}");
+            contexts
+                .and_then(|map| map.get(&canonical))
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    digest
+                        .get("models")?
+                        .get(&canonical)?
+                        .get("context")?
+                        .as_u64()
+                })
+        });
+        if let Some(context) = context {
+            model.context_window = Some(context);
+            model.context_windows = context_choices(EngineId::Antigravity, context, context);
+            model.evidence.sources.push(artisan_api::FieldSource {
+                field: "context_capacity".into(),
+                source: "models.dev.digest".into(),
+                observed_at: artisan_api::now(),
+            });
+        }
     }
 }
 
@@ -1238,6 +1305,7 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Result<Option<Value>
     };
     if let Some((digest, Some(age))) = &cached
         && *age < MODELS_DEV_FRESH
+        && digest.get("contexts").is_some()
     {
         return Ok(Some(digest.clone()));
     }
@@ -1278,6 +1346,7 @@ fn models_dev_digest(catalog: &Value) -> Value {
     let mut labs = serde_json::Map::new();
     let mut models = serde_json::Map::new();
     let mut credits: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut contexts: HashMap<String, (bool, u64)> = HashMap::new();
     for (provider, entry) in catalog.as_object().into_iter().flatten() {
         if let Some(name) = entry.get("name").and_then(Value::as_str) {
             labs.insert(provider.clone(), json!(name));
@@ -1288,9 +1357,11 @@ fn models_dev_digest(catalog: &Value) -> Value {
             .into_iter()
             .flatten()
         {
-            let lab = model
+            let canonical = model
                 .get("canonical_model_id")
                 .and_then(Value::as_str)
+                .filter(|canonical| !canonical.is_empty());
+            let lab = canonical
                 .and_then(|canonical| canonical.split_once('/'))
                 .map(|(lab, _)| lab.to_ascii_lowercase())
                 .filter(|lab| !lab.is_empty());
@@ -1302,6 +1373,29 @@ fn models_dev_digest(catalog: &Value) -> Value {
                     .entry(lab.clone())
                     .or_default() += 1;
             }
+            let context = model
+                .pointer("/limit/context")
+                .and_then(Value::as_u64)
+                .filter(|tokens| (1..=100_000_000).contains(tokens));
+            if let Some(context) = context {
+                let key = canonical
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_else(|| format!("{provider}/{id}").to_ascii_lowercase());
+                let first_party = key
+                    .split_once('/')
+                    .is_some_and(|(owner, _)| owner == provider.as_str());
+                contexts
+                    .entry(key)
+                    .and_modify(|(existing_first_party, existing)| match (*existing_first_party, first_party) {
+                        (false, true) => {
+                            *existing_first_party = true;
+                            *existing = context;
+                        }
+                        (true, false) => {}
+                        _ => *existing = (*existing).max(context),
+                    })
+                    .or_insert((first_party, context));
+            }
             let mut known = serde_json::Map::new();
             if let Some(description) = model.get("description").and_then(Value::as_str) {
                 known.insert("description".into(), json!(description));
@@ -1311,6 +1405,9 @@ fn models_dev_digest(catalog: &Value) -> Value {
             }
             if let Some(family) = family {
                 known.insert("family".into(), json!(family));
+            }
+            if let Some(context) = context {
+                known.insert("context".into(), json!(context));
             }
             if !known.is_empty() {
                 models.insert(format!("{provider}/{id}"), Value::Object(known));
@@ -1327,7 +1424,11 @@ fn models_dev_digest(catalog: &Value) -> Value {
             Some((family, json!(lab)))
         })
         .collect();
-    json!({ "labs": labs, "models": models, "families": families })
+    let contexts: serde_json::Map<String, Value> = contexts
+        .into_iter()
+        .map(|(canonical, (_, context))| (canonical, json!(context)))
+        .collect();
+    json!({ "labs": labs, "models": models, "families": families, "contexts": contexts })
 }
 
 fn variant_label(id: &str) -> String {

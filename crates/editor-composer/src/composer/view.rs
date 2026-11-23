@@ -232,19 +232,21 @@ fn model_details(
 ) -> Vec<String> {
     let context = model
         .and_then(|model| config.context_window_override().or(model.context_window))
-        .map(|context| {
-            if context >= 1_000_000 && context.is_multiple_of(1_000_000) {
-                format!("{}M", context / 1_000_000)
-            } else {
-                format!("{}K", context / 1_000)
-            }
-        });
+        .map(artisan_api::token_label);
     let compaction = config
         .compaction_window_override()
-        .map(|compaction| format!("{}K compact", compaction / 1_000));
+        .map(|compaction| format!("{} compact", artisan_api::token_label(compaction)));
     let effort = config
         .effort
         .as_ref()
+        .or_else(|| {
+            model.and_then(|model| {
+                model
+                    .default_effort
+                    .as_ref()
+                    .or_else(|| (model.efforts.len() == 1).then(|| &model.efforts[0]))
+            })
+        })
         .filter(|_| config.engine != artisan_api::EngineId::OpenCode)
         .map(|effort| {
             artisan_api::ThinkingLevel::from_native(effort)
@@ -1107,6 +1109,7 @@ pub struct ModelMenuItem {
     pane: Option<super::picker::Axis>,
     label: &'static str,
     value: String,
+    locked: bool,
 }
 
 impl ModelMenuItem {
