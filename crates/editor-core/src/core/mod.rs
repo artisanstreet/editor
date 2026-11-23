@@ -32,11 +32,12 @@ pub use clock::{Clock, TimeSource};
 pub use completion::{CompletionKey, CompletionScope, CompletionSlot};
 pub use connection::ConnectionStatus;
 pub use host::{
-    Attention, BlobImage, DEFAULT_ENGINE_CONFIG_KEY, EditReport, EditThreadError, HandBack,
-    HostData, HostEvent, HostInstance, HostSettingError, HostSettings, HostSwitch, LiveSnapshot,
-    LoadThreadError, LocalSend, MCP_SERVERS_KEY, McpServersError, NewThread, PostGate,
-    ProjectionLoad, Restaged, SendAttempt, SendReceipt, SendSettlement, Staging, ThreadEdit,
-    ThreadPage, ThreadPageDirection, ThreadSummary, ThreadUnavailable, WslStatus,
+    Adoption, Attention, BlobImage, CatalogMark, CatalogRead, DEFAULT_ENGINE_CONFIG_KEY,
+    EditReport, EditThreadError, HandBack, HostData, HostEvent, HostInstance, HostSettingError,
+    HostSettings, HostSwitch, LiveSnapshot, LoadThreadError, LocalSend, MCP_SERVERS_KEY,
+    McpServersError, NewThread, PostGate, ProjectionLoad, Restaged, SendAttempt, SendReceipt,
+    SendSettlement, Staging, ThreadEdit, ThreadPage, ThreadPageDirection, ThreadSummary,
+    ThreadUnavailable, WslStatus,
 };
 pub use hosts::{
     DataDirError, EditorFiles, EditorSettings, HostConfig, HostId, HostKind, IdentityError,

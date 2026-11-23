@@ -3,8 +3,11 @@ pub mod presentation;
 pub mod view;
 
 use artisan_api::{CatalogSkill, Listing, McpServer, SkillAction};
-use editor_core::{ForgeClient, HostId, Problem, Screen, SettingsPage, client::CallError};
+use editor_core::{
+    CatalogRead, ForgeClient, HostId, Problem, Screen, SettingsPage, client::CallError,
+};
 use presentation::{Item, ItemKey, Kind};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 const REMOTE_SEARCH_DELAY: Duration = Duration::from_millis(250);
@@ -46,6 +49,151 @@ pub enum Operation {
     Skill { id: String, action: SkillAction },
 }
 
+impl Operation {
+    #[must_use]
+    fn targets(&self, item: &Item) -> bool {
+        item.key() == self.target()
+    }
+
+    fn target(&self) -> ItemKey {
+        match self {
+            Self::Listing(id) => ItemKey::Listing(id.clone()),
+            Self::Skill { id, .. } => ItemKey::Skill(id.clone()),
+        }
+    }
+
+    const fn toggles(&self) -> bool {
+        matches!(
+            self,
+            Self::Skill {
+                action: SkillAction::Enable | SkillAction::Disable,
+                ..
+            }
+        )
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            Self::Listing(id) | Self::Skill { id, .. } => id,
+        }
+    }
+
+    fn verb(&self) -> &'static str {
+        match self {
+            Self::Listing(_)
+            | Self::Skill {
+                action: SkillAction::Adopt,
+                ..
+            } => "install",
+            Self::Skill { action, .. } => action.as_str(),
+        }
+    }
+
+    fn overlay(&self, item: &mut Item) {
+        if !self.targets(item) {
+            return;
+        }
+        if let (
+            Self::Skill {
+                action: action @ (SkillAction::Enable | SkillAction::Disable),
+                ..
+            },
+            Item::Skill(row),
+        ) = (self, item)
+        {
+            row.enabled = *action == SkillAction::Enable;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Overlap {
+    #[default]
+    Alone,
+    Overlapped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reread {
+    Due,
+    Retried,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SendId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Queued,
+    Sending(SendId),
+    Settling { after: CatalogRead, reread: Reread },
+}
+
+impl Stage {
+    const fn active(self) -> bool {
+        matches!(self, Self::Queued | Self::Sending(_))
+    }
+
+    const fn sending(self) -> bool {
+        matches!(self, Self::Sending(_))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Pending {
+    operation: Operation,
+    name: String,
+    stage: Stage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Notice {
+    target: ItemKey,
+    problem: Problem,
+}
+
+#[derive(Debug, Default)]
+struct Writes {
+    generation: u64,
+    pending: Vec<Pending>,
+    overlap: Overlap,
+    notices: Vec<Notice>,
+}
+
+impl Writes {
+    fn sending(&self) -> impl Iterator<Item = &Pending> {
+        self.pending
+            .iter()
+            .filter(|pending| pending.stage.sending())
+    }
+
+    fn notify(&mut self, target: ItemKey, problem: Problem) {
+        self.notices.retain(|notice| notice.target != target);
+        self.notices.push(Notice { target, problem });
+    }
+}
+
+#[derive(Debug)]
+pub enum Reply {
+    Adopted,
+    Unconfirmed { after: CatalogRead },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CatalogAfter {
+    Kept,
+    Reload,
+}
+
+#[derive(Debug)]
+pub enum Settled {
+    Stale,
+    Done {
+        next: Option<OperationRequest>,
+        catalog: CatalogAfter,
+    },
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
     #[error("install listing {listing}")]
@@ -65,8 +213,10 @@ pub enum OperationError {
 
 #[derive(Clone, Debug)]
 pub struct OperationRequest {
+    host: HostId,
     operation: Operation,
     generation: u64,
+    send: SendId,
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +235,7 @@ pub enum ListKey {
 
 #[derive(Debug, Default)]
 pub struct Marketplace {
-    pub host: Option<HostId>,
+    host: Option<HostId>,
     generation: u64,
     pub query: String,
     kind: Kind,
@@ -94,8 +244,8 @@ pub struct Marketplace {
     focus_search: bool,
     pub items: Vec<Item>,
     pub listings: Remote,
-    pub pending: Option<Operation>,
-    pub notice: Option<Problem>,
+    writes: HashMap<HostId, Writes>,
+    sends: u64,
     shown: bool,
     search_serial: u64,
     search_due: Option<Instant>,
@@ -111,6 +261,7 @@ impl Marketplace {
         &mut self,
         host: Option<HostId>,
         catalog: &[CatalogSkill],
+        fresh: Option<CatalogRead>,
         servers: &[McpServer],
     ) {
         if !self.shown {
@@ -118,14 +269,79 @@ impl Marketplace {
         }
         if self.host != host {
             self.host = host;
-            self.generation += 1;
             self.items.clear();
-            self.pending = None;
-            self.notice = None;
         }
-        if self.host.is_some() {
-            self.items = presentation::items(catalog, servers);
+        let Some(writes) = self
+            .host
+            .as_ref()
+            .and_then(|host| self.writes.get_mut(host))
+        else {
+            if self.host.is_some() {
+                self.items = presentation::items(catalog, servers);
+            }
+            return;
+        };
+        writes.pending.retain(|pending| match pending.stage {
+            Stage::Settling { after, .. } => fresh.is_none_or(|read| read <= after),
+            Stage::Queued | Stage::Sending(_) => true,
+        });
+        self.items = presentation::items(catalog, servers);
+        for pending in &writes.pending {
+            for item in &mut self.items {
+                pending.operation.overlay(item);
+            }
         }
+    }
+
+    fn reread_failed_catalog(&mut self) -> bool {
+        let Some(writes) = self
+            .host
+            .as_ref()
+            .and_then(|host| self.writes.get_mut(host))
+        else {
+            return false;
+        };
+        let mut due = false;
+        for pending in &mut writes.pending {
+            if let Stage::Settling { reread, .. } = &mut pending.stage
+                && *reread == Reread::Due
+            {
+                *reread = Reread::Retried;
+                due = true;
+            }
+        }
+        due
+    }
+
+    pub fn replace_host(&mut self, host: &HostId) {
+        let Some(old) = self.writes.remove(host) else {
+            return;
+        };
+        let writes = writes_entry(&mut self.writes, &mut self.generation, host);
+        writes.notices = old.notices;
+        for pending in old.pending {
+            let problem = match pending.stage {
+                Stage::Queued => Problem::new(format!(
+                    "Couldn't {} {}: the Forge connection was replaced before the change was sent.",
+                    pending.operation.verb(),
+                    pending.name
+                )),
+                Stage::Sending(_) => Problem::new(format!(
+                    "The change to {} may not have been saved: the Forge connection was replaced while it was sent.",
+                    pending.name
+                )),
+                Stage::Settling { .. } => continue,
+            };
+            writes.notify(pending.operation.target(), problem);
+        }
+    }
+
+    fn forget_host(&mut self, host: &HostId) {
+        self.writes.remove(host);
+    }
+
+    fn holds_writes(&self, host: &HostId) -> bool {
+        self.writes.contains_key(host)
     }
 
     pub fn set_query(&mut self, query: String, now: Instant) {
@@ -154,7 +370,7 @@ impl Marketplace {
         matches!(self.listings, Remote::Failed(_)) && self.restart_search(now)
     }
 
-    pub fn cancel_search(&mut self) {
+    fn cancel_search(&mut self) {
         self.search_serial = self.search_serial.wrapping_add(1);
         self.search_due = None;
         self.listings = Remote::Idle;
@@ -277,16 +493,93 @@ impl Marketplace {
         }
     }
 
+    fn shown_writes(&self) -> Option<&Writes> {
+        self.writes.get(self.host.as_ref()?)
+    }
+
+    pub fn pending(&self) -> impl Iterator<Item = &Operation> {
+        self.shown_writes()
+            .into_iter()
+            .flat_map(|writes| &writes.pending)
+            .filter(|pending| pending.stage.active())
+            .map(|pending| &pending.operation)
+    }
+
+    pub fn notices(&self) -> impl Iterator<Item = &Problem> {
+        self.shown_writes()
+            .into_iter()
+            .flat_map(|writes| &writes.notices)
+            .map(|notice| &notice.problem)
+    }
+
     pub fn begin_operation(&mut self, operation: Operation) -> Option<OperationRequest> {
-        if self.pending.is_some() || self.host.is_none() {
+        let host = self.host.clone()?;
+        let target = operation.target();
+        let name = self
+            .results()
+            .iter()
+            .find(|item| operation.targets(item))
+            .map_or_else(|| operation.id().to_owned(), |item| item.name().to_owned());
+        let send = self.next_send();
+        let writes = writes_entry(&mut self.writes, &mut self.generation, &host);
+        if writes
+            .pending
+            .iter()
+            .any(|pending| pending.stage.active() && pending.operation.target() == target)
+        {
             return None;
         }
-        self.pending = Some(operation.clone());
-        self.notice = None;
-        Some(OperationRequest {
+        writes.notices.retain(|notice| notice.target != target);
+        for item in &mut self.items {
+            operation.overlay(item);
+        }
+        let waits =
+            operation.toggles() && writes.sending().any(|pending| pending.operation.toggles());
+        if waits {
+            writes.pending.push(Pending {
+                operation,
+                name,
+                stage: Stage::Queued,
+            });
+            return None;
+        }
+        Some(Self::start(&host, writes, operation, name, send))
+    }
+
+    fn next_send(&mut self) -> SendId {
+        self.sends += 1;
+        SendId(self.sends)
+    }
+
+    fn start(
+        host: &HostId,
+        writes: &mut Writes,
+        operation: Operation,
+        name: String,
+        send: SendId,
+    ) -> OperationRequest {
+        if writes.sending().next().is_some() {
+            writes.overlap = Overlap::Overlapped;
+        }
+        let target = operation.target();
+        match writes
+            .pending
+            .iter_mut()
+            .find(|pending| pending.stage == Stage::Queued && pending.operation.target() == target)
+        {
+            Some(pending) => pending.stage = Stage::Sending(send),
+            None => writes.pending.push(Pending {
+                operation: operation.clone(),
+                name,
+                stage: Stage::Sending(send),
+            }),
+        }
+        OperationRequest {
+            host: host.clone(),
             operation,
-            generation: self.generation,
-        })
+            generation: writes.generation,
+            send,
+        }
     }
 
     async fn execute(
@@ -319,31 +612,96 @@ impl Marketplace {
     pub fn finish_operation(
         &mut self,
         request: &OperationRequest,
-        result: Result<Vec<CatalogSkill>, OperationError>,
-    ) -> bool {
-        if self.generation != request.generation {
-            return false;
-        }
-        self.pending = None;
+        result: Result<Reply, OperationError>,
+        reads: CatalogRead,
+    ) -> Settled {
+        let send = self.next_send();
+        let Some(writes) = self
+            .writes
+            .get_mut(&request.host)
+            .filter(|writes| writes.generation == request.generation)
+        else {
+            return Settled::Stale;
+        };
+        let Some(at) = writes
+            .pending
+            .iter()
+            .position(|pending| pending.stage == Stage::Sending(request.send))
+        else {
+            return Settled::Stale;
+        };
+        let target = request.operation.target();
+        let name = writes.pending.remove(at).name;
+        let mut reread = false;
         match result {
-            Ok(_) => true,
-            Err(error) => {
-                let verb = match &request.operation {
-                    Operation::Listing(_)
-                    | Operation::Skill {
-                        action: SkillAction::Adopt,
-                        ..
-                    } => "install",
-                    Operation::Skill { action, .. } => action.as_str(),
+            Ok(reply) => {
+                writes.pending.retain(|pending| {
+                    !(matches!(pending.stage, Stage::Settling { .. })
+                        && pending.operation.target() == target)
+                });
+                let others_sending = writes.sending().next().is_some();
+                let settle = match reply {
+                    Reply::Unconfirmed { after } => {
+                        reread = true;
+                        Some(after)
+                    }
+                    Reply::Adopted => others_sending.then_some(reads),
                 };
-                self.notice = Some(Problem::caused_by(
-                    format!("Couldn't {verb} the skill."),
-                    &error,
-                ));
-                false
+                if let Some(after) = settle.filter(|_| request.operation.toggles()) {
+                    writes.pending.push(Pending {
+                        operation: request.operation.clone(),
+                        name,
+                        stage: Stage::Settling {
+                            after,
+                            reread: Reread::Due,
+                        },
+                    });
+                }
             }
+            Err(error) => writes.notify(
+                target,
+                Problem::caused_by(
+                    format!("Couldn't {} {name}.", request.operation.verb()),
+                    &error,
+                ),
+            ),
         }
+        let queued = request
+            .operation
+            .toggles()
+            .then(|| {
+                writes
+                    .pending
+                    .iter()
+                    .find(|pending| pending.stage == Stage::Queued)
+                    .map(|pending| (pending.operation.clone(), pending.name.clone()))
+            })
+            .flatten();
+        let next = queued
+            .map(|(operation, name)| Self::start(&request.host, writes, operation, name, send));
+        let settled_overlap = writes.sending().next().is_none()
+            && std::mem::take(&mut writes.overlap) == Overlap::Overlapped;
+        let catalog = if reread || settled_overlap {
+            CatalogAfter::Reload
+        } else {
+            CatalogAfter::Kept
+        };
+        Settled::Done { next, catalog }
     }
+}
+
+fn writes_entry<'a>(
+    writes: &'a mut HashMap<HostId, Writes>,
+    generation: &mut u64,
+    host: &HostId,
+) -> &'a mut Writes {
+    writes.entry(host.clone()).or_insert_with(|| {
+        *generation += 1;
+        Writes {
+            generation: *generation,
+            ..Writes::default()
+        }
+    })
 }
 
 pub fn entries(page: &Marketplace) -> Vec<Entry> {

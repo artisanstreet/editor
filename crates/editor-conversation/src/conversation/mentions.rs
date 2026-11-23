@@ -44,7 +44,7 @@ impl MentionSources {
     }
 
     pub(crate) fn sync(&mut self, host: &HostData, own: &ThreadId, now: Instant) -> bool {
-        let same_skills = match (&self.skills, &host.skill_catalog) {
+        let same_skills = match (&self.skills, host.skill_catalog()) {
             (Some(known), Some(current)) => Arc::ptr_eq(known, current),
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
@@ -67,7 +67,7 @@ impl MentionSources {
         self.recheck = None;
         self.own = Some(own.clone());
         self.threads = host.threads.len();
-        self.skills.clone_from(&host.skill_catalog);
+        self.skills = host.skill_catalog().cloned();
         self.titles = mentionable_threads(host, own)
             .map(|(id, title)| (id.clone(), title.to_owned()))
             .collect();

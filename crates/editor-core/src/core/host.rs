@@ -313,6 +313,33 @@ impl HostEffects {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CatalogMark {
+    revision: u64,
+    read: CatalogRead,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CatalogRead(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Adoption {
+    Adopted,
+    Overtaken,
+    Older,
+}
+
+#[derive(Debug, Default)]
+enum SkillCatalog {
+    #[default]
+    Absent,
+    Fresh {
+        skills: Arc<[artisan_api::CatalogSkill]>,
+        read: CatalogRead,
+    },
+    Stale(Arc<[artisan_api::CatalogSkill]>),
+}
+
 pub struct HostData {
     instance: HostInstance,
     source_authority: RefCell<Rc<()>>,
@@ -337,7 +364,7 @@ pub struct HostData {
     pending_events: HostEffects,
     prompt_revision: u64,
     catalog_revision: u64,
-    pub skill_catalog: Option<Arc<[artisan_api::CatalogSkill]>>,
+    skill_catalog: SkillCatalog,
     waiting: HashMap<ThreadId, BTreeSet<ItemId>>,
     thread_pages: pages::ThreadPages,
     thread_overlay: overlay::ThreadOverlay,
@@ -440,7 +467,7 @@ impl HostData {
             pending_events,
             prompt_revision: 0,
             catalog_revision: 0,
-            skill_catalog: None,
+            skill_catalog: SkillCatalog::Absent,
             waiting: HashMap::new(),
             thread_pages: pages::ThreadPages::default(),
             thread_overlay: overlay::ThreadOverlay::default(),
@@ -628,10 +655,67 @@ impl HostData {
         self.runs.insert(thread, run);
         true
     }
-    pub fn invalidate_catalog(&mut self) {
+    #[must_use]
+    pub fn skill_catalog(&self) -> Option<&Arc<[artisan_api::CatalogSkill]>> {
+        match &self.skill_catalog {
+            SkillCatalog::Absent => None,
+            SkillCatalog::Fresh { skills, .. } | SkillCatalog::Stale(skills) => Some(skills),
+        }
+    }
+
+    #[must_use]
+    pub const fn fresh_catalog_read(&self) -> Option<CatalogRead> {
+        match &self.skill_catalog {
+            SkillCatalog::Fresh { read, .. } => Some(*read),
+            SkillCatalog::Absent | SkillCatalog::Stale(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn catalog_reads_issued(&self) -> CatalogRead {
+        CatalogRead(self.projection_generation)
+    }
+
+    #[must_use]
+    pub const fn catalog_mark(&self) -> CatalogMark {
+        CatalogMark {
+            revision: self.catalog_revision,
+            read: self.catalog_reads_issued(),
+        }
+    }
+
+    pub fn adopt_skill_catalog(
+        &mut self,
+        catalog: Vec<artisan_api::CatalogSkill>,
+        mark: CatalogMark,
+    ) -> Adoption {
+        if mark.revision != self.catalog_revision {
+            return Adoption::Overtaken;
+        }
+        if self
+            .fresh_catalog_read()
+            .is_some_and(|applied| applied > mark.read)
+        {
+            return Adoption::Older;
+        }
         self.catalog_load = Projection::default();
-        self.skill_catalog = None;
+        self.skill_catalog = SkillCatalog::Fresh {
+            skills: Arc::from(catalog),
+            read: mark.read,
+        };
+        self.pending_events.push(HostEvent::Changed);
+        Adoption::Adopted
+    }
+
+    pub fn refresh_skill_catalog(&mut self) {
+        self.catalog_load = Projection::default();
         self.catalog_revision = self.catalog_revision.saturating_add(1);
+        self.skill_catalog = match std::mem::take(&mut self.skill_catalog) {
+            SkillCatalog::Absent => SkillCatalog::Absent,
+            SkillCatalog::Fresh { skills, .. } | SkillCatalog::Stale(skills) => {
+                SkillCatalog::Stale(skills)
+            }
+        };
     }
     fn invalidate_prompt(&mut self) {
         self.prompt_load = Projection::default();
@@ -853,7 +937,9 @@ impl HostData {
     pub fn load_skill_catalog(&mut self, retry: bool) {
         if !self.is_live()
             || self.catalog_load.view.loading
-            || (!retry && (self.skill_catalog.is_some() || self.catalog_load.view.error.is_some()))
+            || (!retry
+                && (matches!(self.skill_catalog, SkillCatalog::Fresh { .. })
+                    || self.catalog_load.view.error.is_some()))
         {
             return;
         }
@@ -1001,7 +1087,7 @@ impl HostData {
         }
         self.settings.replace(state.settings, state.head);
         self.invalidate_prompt();
-        self.invalidate_catalog();
+        self.refresh_skill_catalog();
         self.learn_wsl_distro(
             state
                 .account
@@ -1230,7 +1316,12 @@ impl HostData {
         }
         self.catalog_load = Projection::default();
         match result {
-            Ok(catalog) => self.skill_catalog = Some(Arc::from(catalog)),
+            Ok(catalog) => {
+                self.skill_catalog = SkillCatalog::Fresh {
+                    skills: Arc::from(catalog),
+                    read: CatalogRead(generation),
+                };
+            }
             Err(error) => {
                 self.catalog_load.view.error = Some(crate::core::Problem::calling_forge(
                     "Couldn't list skills.",
@@ -1303,7 +1394,7 @@ impl HostData {
             self.invalidate_prompt();
         }
         if matches!(key, "disabled_skills" | "skills_revision") {
-            self.invalidate_catalog();
+            self.refresh_skill_catalog();
         }
         self.settings.streamed(
             key,
@@ -1360,7 +1451,7 @@ impl HostData {
                     .is_none_or(|previous| previous.install != status.install)
                 {
                     self.invalidate_prompt();
-                    self.invalidate_catalog();
+                    self.refresh_skill_catalog();
                 }
                 self.engines.insert(status.engine, status);
                 self.renew_claude_ai();
