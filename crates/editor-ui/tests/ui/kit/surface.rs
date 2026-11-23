@@ -76,3 +76,49 @@ fn a_banded_card_keeps_the_card_padding_outside_and_none_at_its_seams() {
         "a middle band is square"
     );
 }
+
+fn blurs_what_is_behind(surface: Surface) -> bool {
+    use aqua_core::DisplayItem;
+    use aqua_ui::element::Box as UiBox;
+    use aqua_ui::style::Length;
+    use editor_ui::theme::{ArtisanTheme, ThemeMode};
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let content = UiBox::new()
+        .width(Length::Px(160.0))
+        .height(Length::Px(80.0))
+        .build();
+    let element = surface.build(theme, vec![content]);
+    let mut app = aqua::UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
+    assert!(app.mount(move |_| element).is_ok(), "{surface:?} mounts");
+    app.set_viewport(400.0, 200.0, 1.0);
+    assert!(app.build_frame().is_ok(), "{surface:?} lays out");
+    app.tree_mut().emit_scene().into_iter().any(|(_, item)| {
+        matches!(
+            item,
+            DisplayItem::BackdropBlurRounded { .. }
+                | DisplayItem::BackdropBlurPath { .. }
+                | DisplayItem::BackdropBlur { .. }
+        )
+    })
+}
+
+#[test]
+fn cards_on_the_page_are_filled_and_only_floating_surfaces_are_glass() {
+    for surface in [Surface::Card, Surface::Inset] {
+        assert!(
+            !blurs_what_is_behind(surface),
+            "{surface:?} sits on the page and must paint a solid fill, not glass"
+        );
+    }
+    for surface in [
+        Surface::Menu,
+        Surface::Picker(Picker::List),
+        Surface::Tooltip(Tooltip::Brief),
+        Surface::Dialog,
+    ] {
+        assert!(
+            blurs_what_is_behind(surface),
+            "{surface:?} floats over content and keeps its glass"
+        );
+    }
+}

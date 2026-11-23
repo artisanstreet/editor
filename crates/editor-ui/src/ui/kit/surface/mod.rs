@@ -40,6 +40,7 @@ pub enum Tone {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Material {
     Glass(Shade),
+    Filled,
     Recessed,
     Sunken,
     Key,
@@ -107,13 +108,11 @@ impl Surface {
     #[must_use]
     const fn material(self) -> Material {
         match self {
-            Self::Menu
-            | Self::Tooltip(_)
-            | Self::Dialog
-            | Self::Pill(_)
-            | Self::Composer
-            | Self::Card => Material::Glass(Shade::Clear),
+            Self::Menu | Self::Tooltip(_) | Self::Dialog | Self::Pill(_) | Self::Composer => {
+                Material::Glass(Shade::Clear)
+            }
             Self::Picker(_) => Material::Glass(Shade::Dark),
+            Self::Card => Material::Filled,
             Self::Inset => Material::Recessed,
             Self::Code => Material::Sunken,
             Self::Field => Material::Key,
@@ -131,9 +130,10 @@ impl Surface {
             | Self::Tooltip(_)
             | Self::Dialog
             | Self::Pill(_)
-            | Self::Composer
-            | Self::Card => Elevation::Overlay,
-            Self::Inset | Self::Code | Self::Bubble | Self::Media(Media::Frame) => Elevation::Rest,
+            | Self::Composer => Elevation::Overlay,
+            Self::Card | Self::Inset | Self::Code | Self::Bubble | Self::Media(Media::Frame) => {
+                Elevation::Rest
+            }
             Self::Field => Elevation::Key,
             Self::Media(Media::Thumb) | Self::Callout(_) => Elevation::Flat,
         }
@@ -210,7 +210,7 @@ impl Surface {
             Material::Sunken => {
                 outlined(surfaces.ink, theme.colors.frame, radius, shadows, children).style(sized)
             }
-            Material::Key => {
+            Material::Filled | Material::Key => {
                 outlined(surfaces.ink, surfaces.bg, radius, shadows, children).style(sized)
             }
             Material::Raised => shell()
