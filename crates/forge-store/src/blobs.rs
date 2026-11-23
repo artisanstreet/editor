@@ -234,8 +234,9 @@ fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
             .open(&target)
             .and_then(|file| file.set_modified(SystemTime::now()))
             .map_err(io("refresh blob", &target))?;
-        return published(shard).map(|()| blob_ref);
+        return Ok(blob_ref);
     }
+    let new_shard = !shard.is_dir();
     fs::create_dir_all(shard).map_err(io("create blob shard", shard))?;
 
     let mut temporary =
@@ -249,15 +250,15 @@ fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(io("write blob", &target)(error.error)),
     }
-    published(shard).map(|()| blob_ref)
-}
-
-fn published(shard: &Path) -> Result<(), BlobFailure> {
-    let blobs = shard
-        .parent()
-        .expect("invariant: a blob shard sits in the blob folder");
     sync_folder(shard)?;
-    sync_folder(blobs)
+    if new_shard {
+        sync_folder(
+            shard
+                .parent()
+                .expect("invariant: a blob shard sits in the blob folder"),
+        )?;
+    }
+    Ok(blob_ref)
 }
 
 #[cfg(unix)]
@@ -395,11 +396,7 @@ impl Store {
             return Ok(0);
         }
         let inner = std::sync::Arc::clone(&self.inner);
-        let persisting = std::sync::Arc::clone(&self.inner.blob_lock)
-            .lock_owned()
-            .await;
         self.write(move |tx| {
-            let _persisting = persisting;
             let referenced = referenced_since(tx, seen)?;
             let _generation = inner.lock_blobs()?;
             Ok(remove_unreferenced(candidates, &referenced))

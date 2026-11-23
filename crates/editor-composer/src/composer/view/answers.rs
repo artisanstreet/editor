@@ -1,4 +1,6 @@
-use super::{AnswerCompletion, ComposerDrain, ComposerEffect, ComposerOwner, ComposerVisible};
+use super::{
+    AnswerCompletion, ComposerAction, ComposerDrain, ComposerEffect, ComposerOwner, ComposerVisible,
+};
 
 impl ComposerOwner {
     pub fn answer_wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
@@ -59,17 +61,24 @@ impl ComposerOwner {
 
     pub fn drain_async(
         &mut self,
-        core: &editor_core::Core,
+        core: &mut editor_core::Core,
         assets: &aqua::images::ImageAssets,
     ) -> ComposerDrain {
         let revision = self.controller.borrow().editor.borrow().paint_revision();
-        let events = {
+        let (events, landed) = {
             let mut composer = self.controller.borrow_mut();
             composer.drain_turn_actions(core);
             composer.drain_attachments(core, assets);
-            composer.sync(core)
+            let events = composer.sync(core);
+            (events, composer.images_landed_for_waiting_send())
         };
         let mut effects = self.drain_answers(core);
+        if landed {
+            effects.extend(
+                self.dispatch_with_change(core, ComposerAction::Send, None)
+                    .0,
+            );
+        }
         {
             let mut composer = self.controller.borrow_mut();
             let host = composer.target.host().clone();

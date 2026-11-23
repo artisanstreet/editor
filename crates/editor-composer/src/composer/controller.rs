@@ -113,6 +113,12 @@ fn open_draft(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendState {
+    Idle,
+    AwaitingImages,
+}
+
 pub struct Composer {
     pub target: ComposerTarget,
     pub editor: Rc<RefCell<Editor>>,
@@ -133,6 +139,7 @@ pub struct Composer {
     parked: Vec<DraftBody>,
     pub notice: Option<editor_core::Problem>,
     pub refused: Option<SendRefusal>,
+    send_state: SendState,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
     target_generation: u64,
@@ -200,6 +207,7 @@ impl Composer {
             parked: Vec::new(),
             notice,
             refused: None,
+            send_state: SendState::Idle,
             session,
             host_instance,
             target_generation: 0,
@@ -253,6 +261,7 @@ impl Composer {
         self.restore_revision = Some(0);
         self.notice = None;
         self.refused = None;
+        self.send_state = SendState::Idle;
         self.config = None;
         self.project = None;
         self.host_instance = core.host(self.target.host()).map(HostData::instance);
@@ -725,6 +734,7 @@ impl Composer {
     }
 
     pub fn edited(&mut self) {
+        self.send_state = SendState::Idle;
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.save();
     }
@@ -1049,12 +1059,6 @@ impl Composer {
         {
             return Some("Remove the images that failed");
         }
-        if items
-            .iter()
-            .any(|attachment| attachment.state.hash().is_none())
-        {
-            return Some("");
-        }
         if matches!(self.target, ComposerTarget::NewThread { .. }) && self.project(host).is_none() {
             return Some("Choose a project");
         }
@@ -1102,8 +1106,23 @@ impl Composer {
     }
 
     pub(crate) fn refuse(&mut self, refusal: SendRefusal) {
+        self.send_state = match refusal {
+            SendRefusal::ImageUploading => SendState::AwaitingImages,
+            SendRefusal::Empty
+            | SendRefusal::NoDraft
+            | SendRefusal::ForgeReconnected
+            | SendRefusal::DraftChanged
+            | SendRefusal::AnsweringQuestion
+            | SendRefusal::ThreadMissing
+            | SendRefusal::AlreadySending
+            | SendRefusal::ChoosingDraft
+            | SendRefusal::DraftLoading
+            | SendRefusal::ImageFailed
+            | SendRefusal::NoModel
+            | SendRefusal::NoProject => SendState::Idle,
+        };
         self.refused = match refusal {
-            SendRefusal::Empty => None,
+            SendRefusal::Empty | SendRefusal::ImageUploading => None,
             refusal @ (SendRefusal::NoDraft
             | SendRefusal::ForgeReconnected
             | SendRefusal::DraftChanged
@@ -1112,7 +1131,6 @@ impl Composer {
             | SendRefusal::AlreadySending
             | SendRefusal::ChoosingDraft
             | SendRefusal::DraftLoading
-            | SendRefusal::ImageUploading
             | SendRefusal::ImageFailed
             | SendRefusal::NoModel
             | SendRefusal::NoProject) => Some(refusal),
@@ -1166,9 +1184,30 @@ impl Composer {
         Ok((images, config))
     }
 
+    #[must_use]
+    pub fn send_waiting_on_images(&self) -> bool {
+        self.send_state == SendState::AwaitingImages
+    }
+
+    pub(crate) fn images_landed_for_waiting_send(&mut self) -> bool {
+        if self.send_state != SendState::AwaitingImages
+            || self
+                .attachments
+                .as_ref()
+                .is_some_and(Attachments::uploading)
+        {
+            return false;
+        }
+        self.send_state = SendState::Idle;
+        self.attachments
+            .as_ref()
+            .is_none_or(|attachments| attachments.ready_hashes().is_some())
+    }
+
     pub fn send(&mut self, host: &HostData) -> Result<LocalSend, SendRefusal> {
         let (images, config) = self.readiness(host)?;
         self.refused = None;
+        self.send_state = SendState::Idle;
         let (create, thread_config, settling, thread) = match &self.target {
             ComposerTarget::Thread { thread, .. } => (
                 None,
@@ -1264,7 +1303,7 @@ pub enum SendRefusal {
     DraftLoading,
     #[error("This message has nothing to send. Type it again, then send it.")]
     Empty,
-    #[error("This message can't be sent until its images finish uploading.")]
+    #[error("This message is sent once its images are ready.")]
     ImageUploading,
     #[error("An image couldn't be uploaded. Remove it or try it again.")]
     ImageFailed,

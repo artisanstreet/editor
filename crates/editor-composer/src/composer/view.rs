@@ -721,6 +721,7 @@ type AttachmentMark = (
     bool,
     bool,
     Option<std::time::Instant>,
+    bool,
 );
 
 type AttachmentsMark = (
@@ -807,6 +808,7 @@ impl ComposerVisible {
 
 impl ComposerRest {
     fn capture(composer: &super::controller::Composer) -> Self {
+        let now = std::time::Instant::now();
         let mut picker = composer.picker.clone();
         picker.axis_cursor = picker
             .axis_cursor
@@ -845,6 +847,7 @@ impl ComposerRest {
                                 item.shown,
                                 item.preview.is_some(),
                                 item.revealed,
+                                item.waiting(now),
                             )
                         })
                         .collect(),
@@ -992,7 +995,7 @@ pub fn attachments(
     reduced_motion: bool,
     dispatch: &Dispatch,
 ) -> Option<Element> {
-    use editor_ui::attachment_tile::AttachmentTile;
+    use editor_ui::attachment_tile::{AttachmentTile, Readiness};
     if controller.questionnaire.writing_answer() {
         return None;
     }
@@ -1026,10 +1029,13 @@ pub fn attachments(
                     .revealed
                     .map(|instant| now.saturating_duration_since(instant)),
             )
-            .preparing(matches!(
-                image.state,
-                super::attachment::State::Encoding | super::attachment::State::Uploading
-            ))
+            .readiness(if image.waiting(now) {
+                Readiness::Waiting
+            } else if image.preparing() {
+                Readiness::Preparing
+            } else {
+                Readiness::Ready
+            })
             .error(attachment_problem(image))
             .shaking(
                 images

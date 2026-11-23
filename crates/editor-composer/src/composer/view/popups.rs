@@ -67,6 +67,17 @@ impl ComposerOwner {
         self.tooltip.borrow().deadline()
     }
 
+    pub fn attachment_waiting_deadline(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<std::time::Instant> {
+        self.controller
+            .borrow()
+            .attachments
+            .as_ref()
+            .and_then(|attachments| attachments.waiting_deadline(now))
+    }
+
     pub fn advance_tooltip(&self, now: std::time::Instant) -> bool {
         self.tooltip.borrow_mut().show_due(now)
     }

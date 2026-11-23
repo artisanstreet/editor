@@ -152,6 +152,7 @@ pub struct Attachment {
     pub(crate) preview_error: Option<String>,
     pub(crate) revealed: Option<Instant>,
     pub(crate) shown: bool,
+    added: Instant,
     source: Option<(u64, usize)>,
     origin: Option<Arc<Source>>,
     task: Option<tokio::task::AbortHandle>,
@@ -210,6 +211,18 @@ pub(crate) async fn upload_image(
         .await
         .map(|blob| blob.hash)
         .map_err(UploadImageError::Put)
+}
+
+pub(crate) const WAIT_BEFORE_SPINNER: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl Attachment {
+    pub(crate) const fn preparing(&self) -> bool {
+        matches!(self.state, State::Encoding | State::Uploading)
+    }
+
+    pub(crate) fn waiting(&self, now: Instant) -> bool {
+        self.preparing() && now.saturating_duration_since(self.added) >= WAIT_BEFORE_SPINNER
+    }
 }
 
 impl Drop for Attachment {
@@ -318,6 +331,7 @@ impl Attachments {
             preview_error: None,
             revealed: None,
             shown: false,
+            added: Instant::now(),
             source: None,
             origin: Some(Arc::clone(&source)),
             task: None,
@@ -368,6 +382,7 @@ impl Attachments {
             preview_error: None,
             revealed: None,
             shown: true,
+            added: Instant::now(),
             source: None,
             origin: None,
             task: None,
@@ -403,6 +418,14 @@ impl Attachments {
             .iter()
             .any(|item| item.state.hash() == Some(hash))
     }
+    pub(crate) fn waiting_deadline(&self, now: Instant) -> Option<Instant> {
+        self.items
+            .iter()
+            .filter(|item| item.preparing())
+            .map(|item| item.added + WAIT_BEFORE_SPINNER)
+            .filter(|deadline| *deadline > now)
+            .min()
+    }
     pub(crate) fn uploading(&self) -> bool {
         self.items
             .iter()
@@ -435,6 +458,7 @@ impl Attachments {
             preview_error: None,
             revealed: None,
             shown: true,
+            added: Instant::now(),
             source: None,
             origin: None,
             task: None,

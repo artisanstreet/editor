@@ -134,3 +134,27 @@ fn pasting_an_image_again_after_its_upload_failed_uploads_it_again() {
         "the retried image replaces the failed one"
     );
 }
+
+#[test]
+fn an_image_still_converting_after_a_second_shows_it_is_waiting() {
+    let (_forge, mut attachments) = stub_forge();
+    let pasted = Instant::now();
+    assert!(attachments.add(Source::Bytes(noisy_png(64)), "pasted.png".into()));
+    let deadline = attachments
+        .waiting_deadline(Instant::now())
+        .expect("a frame is asked for when the spinner is due");
+    assert!(
+        !attachments.items[0].waiting(pasted),
+        "a fresh image is only blurred"
+    );
+    assert!(
+        attachments.items[0].waiting(deadline),
+        "the spinner shows once the image has waited a second"
+    );
+    assert!(deadline >= pasted + Duration::from_secs(1));
+    assert_eq!(
+        attachments.waiting_deadline(deadline),
+        None,
+        "no frame is asked for once the spinner shows"
+    );
+}

@@ -426,12 +426,14 @@ fn chat_thread() -> artisan_api::Thread {
     .unwrap()
 }
 
-fn thread_composer() -> ThreadComposer {
-    use super::{Composer, ComposerTarget};
-    use crate::composer::draft_session::DraftSession;
+fn chat_host() -> (
+    test_support::editor::core::StubbedHost,
+    crate::composer::persistence::DraftSessions,
+    tempfile::TempDir,
+) {
     use crate::composer::persistence::DraftSessions;
     use crate::composer::spool::{DraftSpool, LocalDisk};
-    use artisan_api::{DraftSnapshot, Event};
+    use artisan_api::Event;
     let mut forge = test_support::editor::core::StubbedHost::start(
         test_support::editor::forge::empty_state(),
         axum::Router::new(),
@@ -441,17 +443,25 @@ fn thread_composer() -> ThreadComposer {
     });
     forge.apply_published();
     let directory = tempfile::tempdir().unwrap();
-    let mut sessions =
+    let sessions =
         DraftSessions::with_spool(DraftSpool::new(directory.path(), LocalDisk::shared()));
-    let mut composer = Composer::new(
-        &forge.core,
-        &mut sessions,
-        ComposerTarget::Thread {
-            host: forge.host.clone(),
-            thread: ThreadId("chat".into()),
-        },
-    );
-    recovered(&mut composer, &forge.core);
+    (forge, sessions, directory)
+}
+
+fn chat_target(forge: &test_support::editor::core::StubbedHost) -> super::ComposerTarget {
+    super::ComposerTarget::Thread {
+        host: forge.host.clone(),
+        thread: ThreadId("chat".into()),
+    }
+}
+
+fn load_chat_draft(
+    forge: &mut test_support::editor::core::StubbedHost,
+    composer: &mut super::Composer,
+) {
+    use crate::composer::draft_session::DraftSession;
+    use artisan_api::DraftSnapshot;
+    recovered(composer, &forge.core);
     forge
         .take("GET", "/drafts/thread:chat")
         .respond(DraftSnapshot {
@@ -470,6 +480,12 @@ fn thread_composer() -> ThreadComposer {
         .expect("the draft loads");
     });
     composer.sync(&forge.core);
+}
+
+fn thread_composer() -> ThreadComposer {
+    let (mut forge, mut sessions, directory) = chat_host();
+    let mut composer = super::Composer::new(&forge.core, &mut sessions, chat_target(&forge));
+    load_chat_draft(&mut forge, &mut composer);
     ThreadComposer {
         forge,
         composer,
@@ -641,5 +657,146 @@ fn an_image_pasted_while_the_last_message_is_sending_joins_the_next_one() {
             .map(|attachments| attachments.items.len()),
         Some(1),
         "the image pasted during the send is in the composer for the next message"
+    );
+}
+
+#[test]
+fn sending_while_an_image_uploads_sends_the_message_once_the_image_lands() {
+    use crate::composer::attachment::Source;
+    use crate::composer::view::{ComposerAction, ComposerOwner};
+    use artisan_api::{BlobHash, BlobRef, SendMessage};
+    let (mut forge, mut sessions, _directory) = chat_host();
+    let mut owner = ComposerOwner::new(
+        &forge.core,
+        &mut sessions,
+        chat_target(&forge),
+        std::rc::Rc::new(|_| {}),
+    );
+    load_chat_draft(&mut forge, &mut owner.controller.borrow_mut());
+    {
+        let mut composer = owner.controller.borrow_mut();
+        composer.config = Some(chat_thread().config);
+        composer.add_image(
+            Source::Bytes(test_support::editor::forge::png(9)),
+            "Pasted image".into(),
+        );
+        composer.editor.borrow_mut().set_text("look at this");
+    }
+
+    owner.dispatch_with_change(&mut forge.core, ComposerAction::Send, None);
+
+    {
+        let composer = owner.controller.borrow();
+        assert_eq!(
+            composer.refused, None,
+            "sending while the image uploads shows no error"
+        );
+        assert!(
+            composer.send_waiting_on_images(),
+            "the message waits for its image"
+        );
+        assert_eq!(composer.editor.borrow().text(), "look at this");
+    }
+    let assets = aqua::images::ImageAssets::default();
+    let upload = test_support::wait::wait_for(
+        "the image reaches Forge",
+        std::time::Duration::from_secs(60),
+        || {
+            drain_draft_writes(&mut forge);
+            owner.drain_async(&mut forge.core, &assets);
+            assert!(
+                !forge.forge.asked("POST", "/threads/chat/messages"),
+                "nothing is sent before the image lands"
+            );
+            forge.forge.try_take("PUT", "/blobs")
+        },
+    );
+    upload.respond(BlobRef {
+        hash: BlobHash("c".repeat(64)),
+        bytes: 1,
+    });
+    let sent = test_support::wait::wait_for(
+        "the message goes out by itself once the image lands",
+        std::time::Duration::from_secs(10),
+        || {
+            drain_draft_writes(&mut forge);
+            owner.drain_async(&mut forge.core, &assets);
+            forge
+                .forge
+                .try_take("POST", "/threads/chat/messages")
+                .map(|post| post.json::<SendMessage>())
+        },
+    );
+    assert_eq!(sent.text, "look at this");
+    assert_eq!(sent.images, vec![BlobHash("c".repeat(64))]);
+}
+
+#[test]
+fn typing_after_sending_while_an_image_uploads_keeps_the_message_unsent() {
+    use crate::composer::attachment::Source;
+    use crate::composer::view::{ComposerAction, ComposerOwner};
+    use artisan_api::{BlobHash, BlobRef};
+    let (mut forge, mut sessions, _directory) = chat_host();
+    let mut owner = ComposerOwner::new(
+        &forge.core,
+        &mut sessions,
+        chat_target(&forge),
+        std::rc::Rc::new(|_| {}),
+    );
+    load_chat_draft(&mut forge, &mut owner.controller.borrow_mut());
+    {
+        let mut composer = owner.controller.borrow_mut();
+        composer.config = Some(chat_thread().config);
+        composer.add_image(
+            Source::Bytes(test_support::editor::forge::png(9)),
+            "Pasted image".into(),
+        );
+        composer.editor.borrow_mut().set_text("look at");
+    }
+    owner.dispatch_with_change(&mut forge.core, ComposerAction::Send, None);
+    owner
+        .controller
+        .borrow()
+        .editor
+        .borrow_mut()
+        .set_text("look at this, and");
+    owner.dispatch_with_change(
+        &mut forge.core,
+        ComposerAction::Editor(editor_ui::text::mount::EditorEvent::Changed),
+        None,
+    );
+    let assets = aqua::images::ImageAssets::default();
+    let upload = test_support::wait::wait_for(
+        "the image reaches Forge",
+        std::time::Duration::from_secs(60),
+        || {
+            drain_draft_writes(&mut forge);
+            owner.drain_async(&mut forge.core, &assets);
+            forge.forge.try_take("PUT", "/blobs")
+        },
+    );
+    upload.respond(BlobRef {
+        hash: BlobHash("c".repeat(64)),
+        bytes: 1,
+    });
+    test_support::wait::wait_until(
+        "the image lands",
+        std::time::Duration::from_secs(10),
+        || {
+            drain_draft_writes(&mut forge);
+            owner.drain_async(&mut forge.core, &assets);
+            owner
+                .controller
+                .borrow()
+                .attachments
+                .as_ref()
+                .is_some_and(|attachments| attachments.ready_hashes().is_some())
+        },
+    );
+    drain_draft_writes(&mut forge);
+    owner.drain_async(&mut forge.core, &assets);
+    assert!(
+        !forge.forge.asked("POST", "/threads/chat/messages"),
+        "a message still being written is not sent out from under the writer"
     );
 }
