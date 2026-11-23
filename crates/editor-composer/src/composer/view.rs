@@ -337,6 +337,7 @@ pub(crate) fn composer_card(theme: &ArtisanTheme, nested: bool, parts: CardParts
             }))
             .children(extras)
             .build()
+            .with_key("composer-extras")
     });
     let gutter = if nested { PROMPT_GUTTER } else { 0.0 };
     let entry = UiBox::new()
@@ -370,7 +371,8 @@ pub(crate) fn composer_card(theme: &ArtisanTheme, nested: bool, parts: CardParts
                 .with_key(super::swap::PROMPT),
         )
         .child(controls(parts.primary))
-        .build();
+        .build()
+        .with_key("composer-entry");
     let card = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
