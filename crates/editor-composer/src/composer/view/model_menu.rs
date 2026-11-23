@@ -67,8 +67,13 @@ pub(super) fn model_menu_items(
             },
             |model| model.name.clone(),
         ),
+        locked: false,
     }];
     if let Some(config) = &config {
+        let special_selected = picker
+            .axis_options(super::super::picker::Axis::Special, config, model)
+            .iter()
+            .any(|option| option.selected);
         for axis in super::super::picker::Axis::PICKER {
             let options = picker.axis_options(axis, config, model);
             if options.is_empty() {
@@ -78,7 +83,10 @@ pub(super) fn model_menu_items(
                 || match axis {
                     super::super::picker::Axis::Special => "None".into(),
                     super::super::picker::Axis::Activation => "On".into(),
-                    super::super::picker::Axis::Thinking => "Special mode".into(),
+                    super::super::picker::Axis::Thinking if special_selected => {
+                        "Special mode".into()
+                    }
+                    super::super::picker::Axis::Thinking => "Default".into(),
                     super::super::picker::Axis::Variant
                     | super::super::picker::Axis::Speed
                     | super::super::picker::Axis::Context
@@ -91,6 +99,7 @@ pub(super) fn model_menu_items(
                 pane: Some(axis),
                 label: axis.title(),
                 value,
+                locked: options.len() == 1,
             });
         }
     }
@@ -623,6 +632,7 @@ pub(crate) fn model_menu(
     });
     let item_height = model_item_height(theme);
     let panes: Vec<_> = items.iter().map(|item| item.pane).collect();
+    let locked: Vec<_> = items.iter().map(|item| item.locked).collect();
     let select = Rc::clone(dispatch);
     let mut buttons = TabList::new(
         "composer-panes",
@@ -633,7 +643,11 @@ pub(crate) fn model_menu(
             .width(MODEL_SIDE_WIDTH - MODEL_ITEM_GUTTER)
             .gap(MODEL_ITEM_GAP)
             .style(Style::new().flex_shrink(0.0)),
-        move |index| select(ComposerAction::SelectPane(panes[index])),
+        move |index| {
+            if !locked[index] {
+                select(ComposerAction::SelectPane(panes[index]));
+            }
+        },
     );
     for (position, item) in items.iter().enumerate() {
         let target = item.pane;
@@ -647,8 +661,16 @@ pub(crate) fn model_menu(
         )
         .detail(item.label)
         .nested(pane_radius, 0.0)
-        .hoverable(target != pane)
-        .on_activate(move || action(ComposerAction::SelectPane(target)));
+        .hoverable(!item.locked && target != pane)
+        .disabled(item.locked);
+        if item.locked {
+            side = side.trailing(IconSize::Sm.glyph(
+                AssetId::TABLER_LOCK,
+                theme.colors.text_muted.to_reference_paint(),
+            ));
+        } else {
+            side = side.on_activate(move || action(ComposerAction::SelectPane(target)));
+        }
         if let Some(icon) = model_icon.filter(|_| target.is_none()) {
             side = side.leading(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()));
         }
@@ -660,7 +682,7 @@ pub(crate) fn model_menu(
                         .flex_shrink(0.0),
                 )
                 .aria_label(item.name()),
-            target == pane,
+            !item.locked && target == pane,
         );
     }
     let mut pane_body = UiBox::new()

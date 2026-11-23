@@ -410,10 +410,12 @@ pub struct ResolvedModelConfig {
     pub changes: Vec<ResolutionChange>,
 }
 
-fn token_label(tokens: u64) -> String {
+pub fn token_label(tokens: u64) -> String {
     match tokens {
+        n if n >= 1_048_576 && n.is_multiple_of(1_048_576) => format!("{}M", n / 1_048_576),
         n if n >= 1_000_000 && n.is_multiple_of(1_000_000) => format!("{}M", n / 1_000_000),
-        n if n.is_multiple_of(1_000) => format!("{}K", n / 1_000),
+        n if n >= 1_000 && n.is_multiple_of(1_000) => format!("{}K", n / 1_000),
+        n if n >= 1_024 && n.is_multiple_of(1_024) => format!("{}K", n / 1_024),
         n => n.to_string(),
     }
 }

@@ -363,3 +363,75 @@ fn opencode_default_is_reported_or_unknown_never_guessed() {
         None
     );
 }
+
+#[test]
+fn antigravity_models_receive_context_windows_from_the_models_dev_digest() {
+    let digest = models_dev_digest(&json!({
+        "google": { "name": "Google", "models": {
+            "gemini-4-neon": { "limit": { "context": 1_048_576 } }
+        } },
+        "anthropic": { "name": "Anthropic", "models": {
+            "claude-opus-5-5": { "limit": { "context": 1_000_000 } }
+        } },
+        "deepinfra": { "name": "DeepInfra", "models": {
+            "openai/gpt-oss-120b": {
+                "canonical_model_id": "openai/gpt-oss-120b",
+                "limit": { "context": 131_072 }
+            }
+        } },
+        "venice": { "name": "Venice", "models": {
+            "openai-gpt-oss-120b": {
+                "canonical_model_id": "openai/gpt-oss-120b",
+                "limit": { "context": 128_000 }
+            }
+        } }
+    }));
+    let mut listing = Listing {
+        models: vec![
+            Model {
+                id: "gemini-4-neon".into(),
+                name: "Gemini 4 Neon".into(),
+                efforts: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                default_effort: Some("high".into()),
+                lab: Some("Google".into()),
+                ..Model::default()
+            },
+            Model {
+                id: "claude-opus-5-5".into(),
+                name: "Claude Opus 5.5".into(),
+                efforts: vec!["low".into(), "medium".into(), "high".into()],
+                lab: Some("Anthropic".into()),
+                ..Model::default()
+            },
+            Model {
+                id: "gpt-oss-120b-medium".into(),
+                name: "GPT-OSS 120B".into(),
+                efforts: vec!["medium".into()],
+                default_effort: Some("medium".into()),
+                lab: Some("OpenAI".into()),
+                ..Model::default()
+            },
+        ],
+        ..Listing::default()
+    };
+    enrich_antigravity(&mut listing, Some(&digest));
+    assert_eq!(
+        model(&listing, "gemini-4-neon").context_window,
+        Some(1_048_576)
+    );
+    assert_eq!(
+        model(&listing, "gemini-4-neon").context_windows,
+        [ContextWindow {
+            tokens: 1_048_576,
+            override_tokens: None
+        }]
+    );
+    assert_eq!(
+        model(&listing, "claude-opus-5-5").context_window,
+        Some(1_000_000)
+    );
+    assert_eq!(
+        model(&listing, "gpt-oss-120b-medium").context_window,
+        Some(131_072)
+    );
+}

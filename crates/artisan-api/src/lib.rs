@@ -55,7 +55,7 @@ pub use model::{
     HIDE_BAD_MODEL_OPTIONS_KEY, MODEL_CUSTOMIZATIONS_KEY, ModelAxis, ModelChoice, ModelControl,
     ModelCustomization, ModelCustomizationsError, ModelEvidence, ModelIdentity, ModelSpecification,
     OptionOrigin, ResolutionChange, ResolvedModelConfig, SpeedLevel, ThinkingLevel,
-    model_customizations,
+    model_customizations, token_label,
 };
 pub use reassembly::{Reassembly, ReassemblyError};
 pub use request::{

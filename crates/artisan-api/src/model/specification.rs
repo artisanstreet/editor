@@ -207,7 +207,16 @@ impl Model {
     }
 
     fn add_windows(&self, spec: &mut ModelSpecification) {
-        for window in &self.context_windows {
+        let fallback = self
+            .context_windows
+            .is_empty()
+            .then_some(self.context_window)
+            .flatten()
+            .map(|tokens| crate::ContextWindow {
+                tokens,
+                override_tokens: None,
+            });
+        for window in self.context_windows.iter().chain(&fallback) {
             if !(1..=100_000_000).contains(&window.tokens)
                 || window
                     .override_tokens
