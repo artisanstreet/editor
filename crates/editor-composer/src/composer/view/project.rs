@@ -71,15 +71,17 @@ pub fn project_menu(
                             .build()
                             .with_key(PROJECT_SCROLL),
                     )
-                    .child(picker.project_edges.band(
+                    .child(picker.project_edges.inset_band(
                         PROJECT_EDGE_TOP,
                         editor_ui::scroll_edge::Edge::Top,
-                        theme.colors.gray.step(7),
+                        theme.colors.background,
+                        0.0,
                     ))
-                    .child(picker.project_edges.band(
+                    .child(picker.project_edges.inset_band(
                         PROJECT_EDGE_BOTTOM,
                         editor_ui::scroll_edge::Edge::Bottom,
-                        theme.colors.gray.step(4),
+                        theme.colors.background,
+                        0.0,
                     ))
                     .build(),
             )

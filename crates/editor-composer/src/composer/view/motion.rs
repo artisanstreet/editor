@@ -68,9 +68,9 @@ impl ComposerOwner {
                 scroller: PROJECT_SCROLL,
                 top: PROJECT_EDGE_TOP,
                 bottom: PROJECT_EDGE_BOTTOM,
-                top_color: theme.colors.gray.step(7),
-                bottom_color: theme.colors.gray.step(4),
-                paint: editor_ui::scroll_edge::EdgePaint::Gradient,
+                top_color: theme.colors.background,
+                bottom_color: theme.colors.background,
+                paint: editor_ui::scroll_edge::EdgePaint::InsetShadow,
             }
             .advance(app, reduced, now),
             Some(super::super::picker::Menu::Model) if picker.axis.is_none() => {
