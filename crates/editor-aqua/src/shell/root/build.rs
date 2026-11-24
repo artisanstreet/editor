@@ -1,6 +1,8 @@
 use super::{ResizeKey, RootViews, overview_shown};
 use crate::core::Screen;
-use crate::shell::{application::BuildError, composer_glide::Route, host::Shell, layout, view};
+use crate::shell::{
+    application::BuildError, composer_glide::Route, host::Shell, layout, settings_frame, view,
+};
 use aqua::prelude::{AquaWindowId, ObservedWindowState};
 use aqua::{AppCtx, UiApp};
 use aqua_ui::element::Element;
@@ -284,7 +286,7 @@ impl RootViews {
                 let name = profile.display_name.trim();
                 (!name.is_empty()).then(|| name.to_owned())
             });
-            let title = view::settings_title(
+            let title = settings_frame::settings_title(
                 &theme,
                 current.label(),
                 account_name.as_deref(),
@@ -294,7 +296,7 @@ impl RootViews {
             let dismissed = Rc::clone(&self.dialogs.settings_dismissed);
             let dismiss: Rc<dyn Fn()> = Rc::new(move || dismissed.set(true));
             let panel =
-                view::settings_panel_with_title(&theme, viewport, nav, page, title, &dismiss);
+                settings_frame::settings_panel_with_title(&theme, viewport, nav, page, title, &dismiss);
             (panel, settings_layout.size.width)
         });
         aqua_core::checkpoint::reach();

@@ -32,7 +32,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
         true,
         Rc::new(|_| {}),
     );
-    let dialog = editor_aqua::shell::view::settings_dialog(
+    let dialog = editor_aqua::shell::settings_frame::settings_dialog(
         &ArtisanTheme::resolved(),
         dimensions,
         UiBox::new().build(),
@@ -73,7 +73,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
     let dismiss: Rc<dyn Fn()> = Rc::new(|| {});
     host.refresh_content(
         app,
-        editor_aqua::shell::view::settings_panel(
+        editor_aqua::shell::settings_frame::settings_panel(
             &ArtisanTheme::resolved(),
             dimensions,
             UiBox::new().build(),

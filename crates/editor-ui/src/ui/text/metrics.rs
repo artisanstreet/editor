@@ -37,6 +37,7 @@ impl EditorMetrics {
                     RadiusTokens::value(RadiusStep::Xl),
                 ),
                 Mode::Prompt => (16.0, 24.0, 1.0, 8.0, 4.0, 0.0),
+                Mode::Source => (13.76, 22.704, 8.0, 20.0, 18.0, 9.0),
             };
         if inset && mode == Mode::Document {
             padding_x = 12.0;
@@ -47,11 +48,22 @@ impl EditorMetrics {
         let source_color = colors.text.to_reference_text_color();
         Self {
             text_style: TextStyle {
-                families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
+                families: vec![FontFamily::Named(
+                    if mode == Mode::Source {
+                        theme.typography.mono.family
+                    } else {
+                        theme.typography.sans.family
+                    }
+                    .to_owned(),
+                )],
                 size_px: theme.typography.size(size),
                 line_height_px: theme.typography.size(line_height),
                 weight: ProseTypography::BODY_WEIGHT,
-                letter_spacing_em: Some(theme.typography.tracking_em),
+                letter_spacing_em: Some(if mode == Mode::Source {
+                    0.0
+                } else {
+                    theme.typography.tracking_em
+                }),
                 gpui_source_color: Some([
                     source_color.hue_degrees,
                     source_color.saturation,

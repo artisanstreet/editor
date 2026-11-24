@@ -22,6 +22,7 @@ pub mod refresh;
 pub mod repository;
 pub mod root;
 pub mod selection;
+pub mod settings_frame;
 pub mod source;
 pub(crate) mod stopwatch;
 pub mod thread_navigation;

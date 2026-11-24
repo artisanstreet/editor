@@ -33,6 +33,37 @@ impl BuildInfo {
         }
     }
 
+    pub(crate) fn official(&self) -> bool {
+        self.profile == "release"
+    }
+
+    pub(crate) fn description(&self) -> String {
+        let mut parts = self.target.split('-');
+        let arch = match parts.next() {
+            Some("x86_64") => "x86-64",
+            Some("aarch64") => "ARM64",
+            Some(other) => other,
+            None => "an unknown architecture",
+        };
+        let renderer = if self.target.contains("windows") {
+            "D3D11"
+        } else if self.target.contains("apple") {
+            "Metal"
+        } else {
+            "Vulkan"
+        };
+        let toolchain = if self.target.ends_with("msvc") {
+            "MSVC"
+        } else if self.target.ends_with("gnu") || self.target.ends_with("gnullvm") {
+            "GNU"
+        } else {
+            "LLVM"
+        };
+        format!(
+            "Artisan Editor is using the {renderer} renderer and was compiled using {toolchain} for {arch}."
+        )
+    }
+
     pub fn diagnostics(&self, host: Option<&editor_core::HostData>) -> String {
         use std::fmt::Write;
         let mut report = format!(

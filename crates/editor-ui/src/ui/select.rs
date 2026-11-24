@@ -2,9 +2,7 @@ use std::time::{Duration, Instant};
 
 use super::picker_motion::MenuMotion;
 
-const MENU_MIN_WIDTH: f32 = 160.0;
 const MENU: super::kit::Surface = super::kit::Surface::Menu;
-const FIELD: super::kit::Surface = super::kit::Surface::Field;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectEntry<V> {
@@ -313,8 +311,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{
-    chrome::account::MENU_GAP,
-    kit::{IconSize, Row, RowItem, Space, TextRole, control::focus_ring},
+    kit::{IconSize, Row, RowItem, control::focus_ring},
     theme::{ArtisanTheme, Opacity},
 };
 
@@ -395,8 +392,9 @@ impl<V: Clone + Eq + 'static> Select<V> {
             .find(|entry| self.selected.as_ref() == Some(&entry.value))
             .map_or_else(|| self.label.clone(), |entry| entry.label.clone());
         let theme = self.theme;
-        let label = TextRole::Label
-            .text(&theme, display.clone())
+        let carve = super::carved::Carve::of(&theme);
+        let label = super::carved::Type::sans(14.0, 21.0, 500)
+            .text(&theme, carve.ink, display.clone())
             .style(
                 Style::new()
                     .flex_grow(1.0)
@@ -404,29 +402,34 @@ impl<V: Clone + Eq + 'static> Select<V> {
                     .text_wrap(false),
             )
             .build();
-        let icon = IconSize::Sm.glyph(
-            AssetId::TABLER_SELECTOR,
-            theme.colors.text_muted.to_reference_paint(),
+        let icon = super::carved::glyph::glyph(
+            super::carved::glyph::Icon::Selector,
+            13.0,
+            carve.ink_dim,
         );
         let state = Rc::clone(&self.state);
         let open_change = self.open_change.clone();
-        let tone = |open_opacity, rest_opacity| {
-            theme
-                .colors
-                .text
-                .at(if open { open_opacity } else { rest_opacity })
-                .to_paint()
+        let well = if open {
+            carve.toward_ink(carve.well, 0.06)
+        } else {
+            carve.well
         };
         let mut button = Button::new()
             .width(Length::Pct(100.0))
-            .height(theme.density.control_default)
-            .gap(Space::S8.px())
-            .padding(FIELD.padding_px())
-            .radius(FIELD.radius_px())
-            .border((1.0, tone(Opacity::HoverRing, Opacity::GlassBorder)))
-            .fill(tone(Opacity::HoverBottom, Opacity::GlassBase))
+            .height(super::carved::button::HEIGHT)
+            .gap(10.0)
+            .radius(super::carved::RADIUS_MD)
+            .fill(well.to_paint())
             .style(
                 Style::new()
+                    .min_width(Length::Px(148.0))
+                    .padding_insets(aqua_core::Insets {
+                        left: 13.0,
+                        right: 11.0,
+                        top: 0.0,
+                        bottom: 0.0,
+                    })
+                    .shadows(carve.inset())
                     .align(aqua_ui::AlignItems::CENTER)
                     .justify(aqua_ui::JustifyContent::SPACE_BETWEEN),
             )
@@ -458,7 +461,8 @@ impl<V: Clone + Eq + 'static> Select<V> {
         if !disabled {
             trigger = trigger
                 .cursor(aqua_core::CursorIcon::Pointer)
-                .focus_visible_style(focus_ring(&theme));
+                .focus_visible_style(focus_ring(&theme))
+                .hover_style(Style::new().background(carve.toward_ink(carve.well, 0.04).to_paint()));
             let state = self.state;
             let entries = self.entries;
             let change = self.change;
@@ -590,8 +594,8 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
         let mut options = aqua_ui::popup::PopupOptions::menu();
         options.kind = aqua_ui::overlay::OverlayKind::Popover;
         options.focus = aqua_ui::popup::PopupFocus::Preserve;
-        options.placement.align = aqua_ui::overlay::Align::Start;
-        options.placement.gap = MENU_GAP;
+        options.placement.align = aqua_ui::overlay::Align::End;
+        options.placement.gap = 6.0;
         options.placement.flip = false;
         options.on_close = Some(Rc::new(move |_| {
             let mut state = state.borrow_mut();
@@ -698,7 +702,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             .build()
             .exclude_from_hit_testing();
         MENU.build(&theme, vec![scroll, reader])
-            .style(Style::new().width(Length::Px(self.trigger_width.max(MENU_MIN_WIDTH))))
+            .style(Style::new().min_width(Length::Px(self.trigger_width)))
             .role(Role::ListBox)
     }
 }

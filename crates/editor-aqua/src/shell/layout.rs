@@ -1,6 +1,5 @@
 pub use crate::ui::chrome::TITLEBAR_HEIGHT;
 const COLUMN_WIDTH: f32 = 327.0;
-const COLUMN_MIN_WIDTH: f32 = 240.0;
 const LAUNCH_CHAT_WIDTH: f32 = 864.0;
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 720.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 480.0;
@@ -23,9 +22,8 @@ pub(crate) fn launch_size(visible: Option<Size>) -> Size {
     size
 }
 
-fn settings_sidebar_width(window_width: f32) -> f32 {
-    (window_width - 520.0).clamp(COLUMN_MIN_WIDTH, COLUMN_WIDTH)
-}
+const SETTINGS_MARGIN: f32 = 20.0;
+const SETTINGS_RAIL_WIDTH: f32 = 276.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SettingsLayout {
@@ -34,20 +32,17 @@ pub struct SettingsLayout {
 }
 
 pub(crate) fn settings_layout(window: Size) -> SettingsLayout {
-    let scale = (2.0_f32.mul_add(-24.0, window.width) / window.width)
-        .min(2.0_f32.mul_add(-24.0, window.height) / window.height)
-        .min(1320.0 / window.width)
-        .min(880.0 / window.height)
-        .max(0.0);
     let size = Size {
-        width: (window.width * scale).max(1.0),
-        height: (window.height * scale).max(1.0),
+        width: 2.0f32
+            .mul_add(-SETTINGS_MARGIN, window.width)
+            .clamp(1.0, 1320.0),
+        height: 2.0f32
+            .mul_add(-SETTINGS_MARGIN, window.height)
+            .clamp(1.0, 880.0),
     };
     SettingsLayout {
         size,
-        navigation_width: settings_sidebar_width(size.width)
-            .min(276.0)
-            .min(size.width * 0.4),
+        navigation_width: SETTINGS_RAIL_WIDTH.min(size.width * 0.4),
     }
 }
 

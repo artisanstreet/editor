@@ -1,36 +1,32 @@
 use std::rc::Rc;
 
 use aqua_ui::{
-    AlignItems,
     collection::List,
-    element::{Box as UiBox, Element},
+    element::Element,
     style::{Length, Style},
 };
 use artisan_api::{THREAD_RETENTION_DAYS_KEY, ThreadId};
 
 use super::{
     controller::SettingsController,
-    ui::{self, Ink},
+    ui,
     view::ViewAction,
 };
 use editor_core::HostData;
 use editor_ui::{
-    kit::{
-        ButtonTone, Density, Finish, IconButton, IconButtonSize, IconSize, Row as KitRow, RowKind,
-        Space, Spaced, TextRole,
+    carved::{
+        Carve,
+        button::{Content, Tone},
+        glyph::{Icon, glyph},
     },
+    kit::{ButtonTone, Space},
     select::{Select, SelectEntry, SelectMenu},
     theme::ArtisanTheme,
 };
 
 const VISIBLE_ROWS: u8 = 8;
 
-fn row_height(theme: &ArtisanTheme) -> f32 {
-    2.0f32.mul_add(
-        RowKind::Form.pad().y.px(),
-        KitRow::ListItem(Density::Tall).lines(theme) + Space::S2.px(),
-    )
-}
+const ROW_HEIGHT: f32 = 14.0 + 20.0 + 3.0 + 18.0 + 14.0;
 
 fn entries() -> Vec<SelectEntry<Option<u32>>> {
     let choices = artisan_api::choice_values(THREAD_RETENTION_DAYS_KEY);
@@ -102,13 +98,8 @@ pub(crate) fn cleanup(
     .on_open_change(move |open| emit(ViewAction::RetentionMenu(open)))
     .build();
     let control = ui::fixed(select);
-    let row = ui::row(
-        theme,
-        "Delete inactive threads",
-        "Threads nothing has happened in for this long are deleted with their messages and images, archived or not. Working threads, threads waiting on you and threads whose agents are still active are kept.",
-        Some(control),
-    );
-    ui::section(theme, "Cleanup", None, None, ui::card(theme, vec![row]))
+    let row = ui::row(theme, "Delete inactive threads", "", Some(control));
+    ui::section(theme, "Cleanup", None, ui::card(theme, vec![row]))
 }
 
 fn span(millis: i64) -> String {
@@ -130,6 +121,7 @@ struct Row {
     icon: Option<std::sync::Arc<aqua::ImageHandle>>,
     detail: String,
     restoring: bool,
+    first: bool,
 }
 
 #[expect(
@@ -150,22 +142,23 @@ pub(crate) fn archived(
         .ids
         .iter()
         .filter_map(|id| host.threads.get(id))
-        .map(|thread| {
+        .enumerate()
+        .map(|(index, thread)| {
             let age = now.saturating_sub(thread.updated_at).max(0);
-            let age = format!("Last active {} ago", span(age));
-            let mut detail = host.projects.get(&thread.project_id).map_or_else(
-                || age.clone(),
-                |project| format!("{} · {age}", project.name),
+            let detail = retention.map_or_else(
+                || "Kept indefinitely".to_owned(),
+                |days| {
+                    let left = i64::from(days) * 86_400_000 - age;
+                    format!("Deleting in {}", span(left))
+                },
             );
-            if retention.is_none() {
-                detail.push_str(" · Kept indefinitely");
-            }
             Row {
                 id: thread.id.clone(),
                 title: thread.title.clone().unwrap_or_else(|| "New thread".into()),
                 icon: host.project_icon(&thread.project_id),
                 detail,
                 restoring: controller.archive.restoring.contains(&thread.id),
+                first: index == 0,
             }
         })
         .collect();
@@ -183,13 +176,14 @@ pub(crate) fn archived(
         )
     } else {
         let visible = u8::try_from(rows.len()).map_or(VISIBLE_ROWS, |rows| rows.min(VISIBLE_ROWS));
-        let height = f32::from(visible) * row_height(theme);
+        let height = f32::from(visible) * ROW_HEIGHT;
         let theme = *theme;
         let row_emit = Rc::clone(emit);
         let list = List::new()
             .items(rows)
             .key(|row| format!("archived-{}", row.id))
             .row(move |row| {
+                let carve = Carve::of(&theme);
                 let id = row.id.clone();
                 let send = Rc::clone(&row_emit);
                 let label = if row.restoring {
@@ -197,25 +191,19 @@ pub(crate) fn archived(
                 } else {
                     "Unarchive"
                 };
-                let button = IconButton::new(
+                let button = ui::carved(
+                    &theme,
                     format!("settings-archived-{}-unarchive", row.id),
-                    theme,
-                    editor_assets::AssetId::TABLER_ARCHIVE,
-                    label,
-                    IconButtonSize::Md,
-                    Finish::Glass,
-                )
-                .muted()
-                .disabled(row.restoring)
-                .on_activate(move |_| send(ViewAction::Unarchive(id.clone())))
-                .build();
+                    Tone::Secondary,
+                    Content::Icon(
+                        if row.restoring { Icon::Spinner } else { Icon::Unarchive },
+                        label.to_owned(),
+                    ),
+                    row.restoring,
+                    move || send(ViewAction::Unarchive(id.clone())),
+                );
                 let project = row.icon.as_ref().map_or_else(
-                    || {
-                        IconSize::Md.glyph(
-                            editor_assets::AssetId::TABLER_FOLDER,
-                            theme.colors.text_muted.to_reference_paint(),
-                        )
-                    },
+                    || glyph(Icon::FolderCode, 20.0, carve.ink_dim),
                     |image| {
                         aqua_ui::element::Media::new(aqua_core::ImageRef::from((**image).clone()))
                             .width(20.0)
@@ -224,37 +212,20 @@ pub(crate) fn archived(
                             .build()
                     },
                 );
-                UiBox::new()
-                    .width(Length::Pct(100.0))
-                    .spaced(Space::S16)
-                    .padded(RowKind::Form.pad().y)
-                    .style(Style::new().align(AlignItems::CENTER))
-                    .child(project)
-                    .child(ui::grow(
-                        ui::stack(Space::S2)
-                            .child(ui::line(
-                                &theme,
-                                TextRole::Label,
-                                Ink::Plain,
-                                row.title.clone(),
-                            ))
-                            .child(ui::line(
-                                &theme,
-                                TextRole::Caption,
-                                Ink::Muted,
-                                row.detail.clone(),
-                            ))
-                            .build(),
-                    ))
-                    .child(button)
-                    .build()
+                let line = ui::machine_row(
+                    Some(ui::tile(project)),
+                    ui::titled(&theme, ui::label(&theme, row.title.clone()), Some(&row.detail)),
+                    Some(button),
+                    true,
+                );
+                if row.first { line } else { ui::ruled(&theme, line) }
             })
             .style(
                 Style::new()
                     .width(Length::Pct(100.0))
                     .height(Length::Px(height)),
             )
-            .estimated_row_height(Length::Px(row_height(&theme)))
+            .estimated_row_height(Length::Px(ROW_HEIGHT))
             .build()
             .with_key("archived-threads");
         ui::card(&theme, vec![list])
@@ -292,13 +263,5 @@ pub(crate) fn archived(
     if let Some(problem) = &controller.archive.error {
         body = body.child(ui::problem(theme, "archived-restore-error", problem).build());
     }
-    ui::section(
-        theme,
-        "Archived",
-        Some(
-            "Archived threads leave the sidebar and stay here until you restore them, unless Cleanup deletes them first.",
-        ),
-        None,
-        body.build(),
-    )
+    ui::section(theme, "Archive", None, body.build())
 }

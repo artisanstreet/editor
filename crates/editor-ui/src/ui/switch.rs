@@ -1,6 +1,5 @@
 use aqua_core::{
-    CornerRadii, DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Insets,
-    Rect, Role,
+    CornerRadii, DisplayItem, GpuiBackground, Insets, Rect, Role,
 };
 use aqua_ui::{
     element::{Button, Canvas, Element, Key},
@@ -78,57 +77,25 @@ impl Switch {
     }
 
     fn track(&self) -> (f32, f32, Element) {
-        let recessed = self.finish == SwitchFinish::Recessed;
-        let (width, height, thumb, rim) = if recessed {
-            (62.0, 36.0, 28.0, 4.0)
-        } else {
-            let (width, height) = self.theme.density.switch_default;
-            (width, height, THUMB, 1.0)
-        };
+        let (width, height) = self.theme.density.switch_default;
+        let (thumb, rim) = (THUMB, 1.0);
         let colors = &self.theme.colors;
-        let track_color = if recessed {
-            colors.frame
-        } else if self.checked {
+        let track_color = if self.checked {
             colors.primary
         } else {
             colors.line_strong
         }
         .to_reference_paint();
-        let thumb_background = if recessed && self.checked {
-            GpuiBackground::LinearGradient {
-                angle: 180.0,
-                color_space: GpuiGradientColorSpace::Oklab,
-                stops: [
-                    GpuiGradientStop {
-                        percentage: 0.0,
-                        color: colors.action_top.to_reference_paint(),
-                    },
-                    GpuiGradientStop {
-                        percentage: 1.0,
-                        color: colors.action_bottom.to_reference_paint(),
-                    },
-                ],
-            }
-        } else {
-            let color = if recessed {
-                colors.text_muted
-            } else if self.checked {
+        let thumb_background = GpuiBackground::Solid(
+            if self.checked {
                 colors.primary_text
             } else {
                 colors.text
-            };
-            GpuiBackground::Solid(color.to_reference_paint())
-        };
-        let outer_radius = if recessed {
-            10.0
-        } else {
-            Corner::Full.resolve(height)
-        };
-        let thumb_radius = if recessed {
-            6.0
-        } else {
-            Corner::Full.resolve(thumb)
-        };
+            }
+            .to_reference_paint(),
+        );
+        let outer_radius = Corner::Full.resolve(height);
+        let thumb_radius = Corner::Full.resolve(thumb);
         let checked = self.checked;
         let track = Canvas::new()
             .width(width)
@@ -163,7 +130,16 @@ impl Switch {
     }
 
     pub fn build(self) -> Element {
-        let (width, height, track) = self.track();
+        let (width, height, track) = if self.finish == SwitchFinish::Recessed {
+            let carve = super::carved::Carve::of(&self.theme);
+            (
+                super::carved::well::SWITCH_WIDTH,
+                super::carved::well::SWITCH_HEIGHT,
+                super::carved::well::switch_track(&carve, self.checked),
+            )
+        } else {
+            self.track()
+        };
         let checked = self.checked;
         let reach = REACH.px();
         let mut style = Style::new()
@@ -190,7 +166,11 @@ impl Switch {
         let mut root = Button::new()
             .width(2.0f32.mul_add(reach, width))
             .height(outer)
-            .radius(Corner::Full.resolve(outer))
+            .radius(if self.finish == SwitchFinish::Recessed {
+                super::carved::RADIUS_MD + reach
+            } else {
+                Corner::Full.resolve(outer)
+            })
             .style(style)
             .child(track);
         if self.disabled {

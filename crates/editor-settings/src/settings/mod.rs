@@ -10,7 +10,6 @@ pub mod controller;
 mod engine_view;
 pub mod engines;
 mod mcp_view;
-pub(crate) mod page;
 pub mod preferences;
 pub mod ui;
 pub mod view;

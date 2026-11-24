@@ -38,7 +38,8 @@ impl SettingsPlatformEffect {
             | ViewAction::EngineEdited
             | ViewAction::EnginePresentationChanged
             | ViewAction::EngineAction(..)
-            | ViewAction::EngineVersions(_)
+            | ViewAction::VersionMenu(..)
+            | ViewAction::Gear(_)
             | ViewAction::EngineUse(..)
             | ViewAction::EngineCode(_)
             | ViewAction::OpenApiKey
@@ -1576,7 +1577,7 @@ impl Workspace {
                 .thread_visual_factory(theme, reduced_motion),
             &self.sidebar_emit(true),
         );
-        crate::shell::view::settings_rail(
+        crate::shell::settings_frame::settings_rail(
             theme,
             crate::settings::view::search_editor(&self.settings, theme, self.settings_emit()),
             navigation,

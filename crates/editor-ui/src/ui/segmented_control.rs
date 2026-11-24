@@ -20,6 +20,7 @@ pub struct Segment<T> {
     value: T,
     label: String,
     icon: Option<editor_assets::AssetId>,
+    glyph: Option<super::carved::glyph::Icon>,
 }
 impl<T> Segment<T> {
     pub fn new(value: T, label: impl Into<String>) -> Self {
@@ -27,7 +28,13 @@ impl<T> Segment<T> {
             value,
             label: label.into(),
             icon: None,
+            glyph: None,
         }
+    }
+    #[must_use]
+    pub const fn glyph(mut self, glyph: super::carved::glyph::Icon) -> Self {
+        self.glyph = Some(glyph);
+        self
     }
     #[must_use]
     pub fn icon(mut self, icon: editor_assets::AssetId) -> Self {
@@ -45,6 +52,7 @@ pub struct SegmentedControl<T: Clone + Eq + 'static> {
     selected: T,
     options: Vec<Segment<T>>,
     disabled: bool,
+    carved: bool,
     change: Option<Change<T>>,
 }
 
@@ -75,6 +83,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             selected,
             options: vec![first],
             disabled: false,
+            carved: false,
             change: None,
         }
     }
@@ -89,6 +98,11 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 self.options.push(option);
             }
         }
+        self
+    }
+    #[must_use]
+    pub const fn carved(mut self) -> Self {
+        self.carved = true;
         self
     }
     #[must_use]
@@ -120,11 +134,33 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .map(|option| option.value.clone())
                 .collect::<Vec<_>>(),
         );
+        let carve = super::carved::Carve::of(&theme);
         let mut root = UiBox::new()
             .spaced(Space::S2)
             .style(Style::new().align(aqua_ui::AlignItems::CENTER));
+        if self.carved {
+            root = root.style(super::carved::tabs::well(&carve));
+        }
         for (index, option) in self.options.into_iter().enumerate() {
             let chosen = index == selected;
+            if self.carved {
+                let change = (!self.disabled).then(|| self.change.clone()).flatten();
+                let value = option.value.clone();
+                let item = super::carved::tabs::tab(
+                    &theme,
+                    &carve,
+                    super::carved::tabs::Tab {
+                        index,
+                        label: option.label,
+                        glyph: option.glyph,
+                        chosen,
+                        disabled: self.disabled,
+                    },
+                    change.map(|change| -> Box<dyn Fn()> { Box::new(move || change(value.clone())) }),
+                );
+                root = root.child(item);
+                continue;
+            }
             let foreground = if chosen {
                 theme.colors.text
             } else {

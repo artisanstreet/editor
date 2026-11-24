@@ -13,6 +13,7 @@ const HISTORY_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mode {
     Document,
+    Source,
     SingleLine,
     Prompt,
 }
@@ -654,7 +655,9 @@ impl Editor {
             return CommandOutcome::List(ListKey::Accept);
         }
         match self.mode {
-            Mode::Document => CommandOutcome::Edit(self.replace_input(None, "\n", None)),
+            Mode::Document | Mode::Source => {
+                CommandOutcome::Edit(self.replace_input(None, "\n", None))
+            }
             Mode::SingleLine | Mode::Prompt => CommandOutcome::Submitted,
         }
     }
@@ -669,7 +672,9 @@ impl Editor {
             return CommandOutcome::Edit(self.replace_input(None, &suggestion, None));
         }
         match self.mode {
-            Mode::Document => CommandOutcome::Edit(self.replace_input(None, "  ", None)),
+            Mode::Document | Mode::Source => {
+                CommandOutcome::Edit(self.replace_input(None, "  ", None))
+            }
             Mode::SingleLine | Mode::Prompt => CommandOutcome::Propagate,
         }
     }

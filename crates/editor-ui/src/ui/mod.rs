@@ -44,6 +44,7 @@ pub mod slider;
 pub mod status_chip;
 pub mod sticker;
 pub mod switch;
+pub mod carved;
 pub mod tab_card;
 pub mod text;
 pub mod theme;

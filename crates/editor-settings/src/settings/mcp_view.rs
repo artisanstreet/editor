@@ -1,19 +1,23 @@
 use std::rc::Rc;
 
 use aqua_ui::{
-    element::{Box as UiBox, Element},
-    style::{Length, Style},
+    element::Element,
+    style::Length,
 };
 use artisan_api::{McpAuthStatus, McpServer};
 
 use super::{
-    controller::SettingsController,
-    ui::{self, Ink},
+    controller::{Gear, SettingsController},
+    ui,
     view::ViewAction,
 };
 use editor_core::{Core, HostData, McpSignIn, McpSignInPhase, Problem};
 use editor_ui::{
-    kit::{ButtonTone, Space, Spaced, TextRole},
+    carved::{
+        Carve,
+        glyph::{Icon, glyph},
+    },
+    kit::ButtonTone,
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
@@ -143,19 +147,16 @@ fn form(
 ) -> Element {
     let fields = [
         ("Name", "github"),
-        ("Program (literal path or executable name)", "npx"),
+        ("Program", "npx"),
         (
             "Arguments (JSON array)",
             "[\"-y\", \"@modelcontextprotocol/server-github\"]",
         ),
-        ("Or URL (HTTP server)", "https://example.com/mcp"),
+        ("Server URL (HTTP)", "https://example.com/mcp"),
         ("Environment (JSON object)", "{\"GITHUB_TOKEN\": \"…\"}"),
-        (
-            "Headers, HTTP only (JSON object; leave out Authorization to sign in instead)",
-            "{\"Authorization\": \"Bearer …\"}",
-        ),
+        ("Headers (JSON object, HTTP only)", "{\"Authorization\": \"Bearer …\"}"),
     ];
-    let mut body = ui::stack(Space::S12);
+    let mut cells: Vec<Element> = Vec::new();
     for (index, (label, placeholder)) in fields.into_iter().enumerate() {
         let send = Rc::clone(&emit);
         let editor = EditorController::from_shared(
@@ -169,41 +170,63 @@ fn form(
                 | EditorEvent::PastedFiles { .. } => {}
             },
         );
-        body = body.child(
-            ui::stack(Space::S4)
-                .child(ui::text(theme, TextRole::Label, Ink::Muted, label))
-                .child(editor.element_with_notice_keyed(
+        cells.push(ui::field(
+            theme,
+            label,
+            ui::input(
+                theme,
+                editor.element_with_notice_keyed(
                     format!("settings-mcp-field-{index}"),
                     Mode::SingleLine,
                     theme,
                     placeholder,
+                    true,
                     false,
-                    false,
-                ))
+                ),
+            ),
+        ));
+    }
+    let mut rows = vec![ui::label(
+        theme,
+        match controller.extensions.editing {
+            Some(super::extensions::McpEditing::Existing(_)) => "Edit MCP Server",
+            Some(super::extensions::McpEditing::New) | None => "New MCP Server",
+        },
+    )];
+    let mut cells = cells.into_iter();
+    while let Some(left) = cells.next() {
+        rows.push(
+            ui::inline(14.0)
+                .width(Length::Pct(100.0))
+                .child(left)
+                .children(cells.next())
                 .build(),
         );
     }
     let saving = controller.extensions.saving;
-    let actions = ui::actions()
-        .child(button(
-            theme,
-            "mcp-save".into(),
-            if saving { "Saving…" } else { "Save server" },
-            ButtonTone::Primary,
-            saving,
-            ViewAction::McpSave,
-            Rc::clone(&emit),
-        ))
-        .child(button(
-            theme,
-            "mcp-cancel".into(),
-            "Cancel",
-            ButtonTone::Quiet,
-            saving,
-            ViewAction::McpCancel,
-            emit,
-        ));
-    ui::block(body.child(actions.build()).build())
+    rows.push(
+        ui::actions()
+            .child(button(
+                theme,
+                "mcp-cancel".into(),
+                "Cancel",
+                ButtonTone::Quiet,
+                saving,
+                ViewAction::McpCancel,
+                Rc::clone(&emit),
+            ))
+            .child(button(
+                theme,
+                "mcp-save".into(),
+                if saving { "Saving…" } else { "Save" },
+                ButtonTone::Primary,
+                saving,
+                ViewAction::McpSave,
+                emit,
+            ))
+            .build(),
+    );
+    ui::form_block(theme, rows)
 }
 
 fn sign_in_failure(
@@ -241,10 +264,6 @@ pub(crate) fn toggle(
     .build()
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the MCP card renders the configured servers, operations, and inline form together"
-)]
 pub(crate) fn section(
     controller: &SettingsController,
     core: &Core,
@@ -273,88 +292,83 @@ pub(crate) fn section(
             .build(),
         ));
     }
+    let carve = Carve::of(theme);
     for server in servers.unwrap_or_default() {
         let status = match auth {
             Ok(auth) => auth.get(&server.name).copied(),
             Err(_shown_above) => None,
         };
         let sign_in = core.mcp_sign_in(&host.id, &server.name);
-        let mut actions = UiBox::new()
-            .spaced(Space::S8)
-            .style(Style::new().wrap(true))
-            .children(controls(theme, &server.name, status, sign_in, &emit));
-        actions = actions.child(button(
-            theme,
-            format!("mcp-edit-{}", server.name),
-            "Edit",
-            ButtonTone::Quiet,
-            false,
-            ViewAction::McpOpen(Some(server.clone())),
-            Rc::clone(&emit),
-        ));
-        actions = actions.child(button(
-            theme,
-            format!("mcp-remove-{}", server.name),
-            "Remove",
-            ButtonTone::Quiet,
-            controller.extensions.saving,
-            ViewAction::McpRemove(server.clone()),
-            Rc::clone(&emit),
-        ));
         let failure = sign_in_failure(theme, &server.name, sign_in);
-        let target = server.url.as_deref().map_or_else(
-            || server.command.clone(),
-            |url| url.split(['?', '#']).next().unwrap_or(url).to_owned(),
+        let mark = glyph(
+            if server.url.is_some() {
+                Icon::World
+            } else {
+                Icon::Terminal
+            },
+            20.0,
+            carve.ink_dim,
         );
-        let detail = if matches!(status, Some(McpAuthStatus::NeedsToken)) {
-            format!("{target} · Edit the server to add an Authorization header.")
-        } else {
-            target
-        };
-        let enabled = toggle(controller, host, &server, theme, &emit);
-        rows.push(ui::row(
-            theme,
-            server.name,
-            detail,
-            Some(actions.child(enabled).build()),
+        let gear = Gear::Mcp(server.clone());
+        let send = Rc::clone(&emit);
+        let open = gear.clone();
+        let controls = ui::actions()
+            .children(controls(theme, &server.name, status, sign_in, &emit))
+            .child(toggle(controller, host, &server, theme, &emit))
+            .child(ui::gear(
+                theme,
+                gear.key(),
+                format!("{} options", server.name),
+                move || send(ViewAction::Gear(Some(open.clone()))),
+            ))
+            .build();
+        rows.push(ui::machine_row(
+            Some(ui::tile(mark)),
+            ui::label(theme, server.name.clone()),
+            Some(controls),
+            false,
         ));
+        if matches!(status, Some(McpAuthStatus::NeedsToken)) {
+            rows.push(ui::note(
+                theme,
+                "Edit the server to add an Authorization header.",
+            ));
+        }
         rows.extend(failure);
     }
     if rows.is_empty() && controller.extensions.editing.is_none() {
-        rows.push(ui::row(
-            theme,
-            "No MCP servers",
-            "Servers added here are passed to every engine at launch.",
-            None,
-        ));
+        rows.push(ui::row(theme, "No MCP servers configured", "", None));
     }
     if controller.extensions.editing.is_some() {
         rows.push(form(controller, theme, Rc::clone(&emit)));
     }
-    let mut body = ui::stack(Space::S8).child(ui::card(theme, rows));
+    let mut body = ui::stack_gap(10.0)
+        .width(Length::Pct(100.0))
+        .child(ui::card(theme, rows));
     if let Some(problem) = &controller.extensions.error {
         body = body.child(ui::problem(theme, "mcp-error", problem).build());
     }
-    if controller.extensions.editing.is_none() {
-        body = body.child(
-            UiBox::new()
-                .child(button(
-                    theme,
-                    "mcp-add".into(),
-                    "Add new MCP server",
-                    ButtonTone::Primary,
-                    false,
-                    ViewAction::McpOpen(None),
-                    emit,
-                ))
-                .build(),
-        );
-    }
-    ui::section(
+    let editing = controller.extensions.editing.is_some();
+    let add = button(
         theme,
-        "MCP servers",
-        None,
-        None,
-        body.width(Length::Pct(100.0)).build(),
-    )
+        "mcp-add".into(),
+        if editing {
+            "Cancel"
+        } else {
+            "Add new MCP server"
+        },
+        if editing {
+            ButtonTone::Neutral
+        } else {
+            ButtonTone::Primary
+        },
+        controller.extensions.saving,
+        if editing {
+            ViewAction::McpCancel
+        } else {
+            ViewAction::McpOpen(None)
+        },
+        emit,
+    );
+    ui::section(theme, "MCP Servers", Some(add), body.build())
 }

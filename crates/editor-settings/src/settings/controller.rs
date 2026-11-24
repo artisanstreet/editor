@@ -58,8 +58,31 @@ pub enum ClaudeAiSignInError {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Gear {
+    Computer(String),
+    Mcp(artisan_api::McpServer),
+    Skill(String),
+    Account(EngineId),
+    AddAccount(EngineId),
+}
+
+impl Gear {
+    #[must_use]
+    pub fn key(&self) -> String {
+        match self {
+            Self::Computer(id) => format!("settings-gear-computer-{id}"),
+            Self::Mcp(server) => format!("settings-gear-mcp-{}", server.name),
+            Self::Skill(id) => format!("settings-gear-skill-{id}"),
+            Self::Account(engine) => format!("settings-gear-account-{engine}"),
+            Self::AddAccount(engine) => format!("settings-add-account-{engine}"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Menu {
+    Version,
     Font,
     Streaming,
     Retention,
@@ -89,6 +112,8 @@ pub struct SettingsController {
     pub streaming_select: Rc<RefCell<editor_ui::select::SelectState<&'static str>>>,
     pub text_size_select: Rc<RefCell<editor_ui::select::SelectState<Option<u32>>>>,
     pub contrast_select: Rc<RefCell<editor_ui::select::SelectState<Option<bool>>>>,
+    pub version_select: Rc<RefCell<editor_ui::select::SelectState<String>>>,
+    pub gear: Option<Gear>,
     pub sign_in: super::sign_in::SignInForm,
     pub(crate) forge_code: Rc<RefCell<Editor>>,
     pub(crate) archive: ArchiveForm,
@@ -133,13 +158,17 @@ impl Default for SettingsController {
             contrast_select: Rc::new(RefCell::new(editor_ui::select::SelectState::new(
                 std::time::Instant::now(),
             ))),
+            version_select: Rc::new(RefCell::new(editor_ui::select::SelectState::new(
+                std::time::Instant::now(),
+            ))),
+            gear: None,
             sign_in: super::sign_in::SignInForm::default(),
             forge_code: Rc::new(RefCell::new(Editor::new("", Mode::SingleLine))),
             archive: ArchiveForm::default(),
             engines: EnginesForm::default(),
             extensions: ExtensionsForm::default(),
             prompt: PromptForm::default(),
-            prompt_editor: Rc::new(RefCell::new(Editor::new("", Mode::Document))),
+            prompt_editor: Rc::new(RefCell::new(Editor::new("", Mode::Source))),
             search_editor: Rc::new(RefCell::new(Editor::new("", Mode::SingleLine))),
             scroll_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             open_licence: None,

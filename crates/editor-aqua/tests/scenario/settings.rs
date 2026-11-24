@@ -36,7 +36,7 @@ fn settings_move_between_pages_and_close_back_to_the_thread() {
         "the Computers page",
         Role::Dialog,
         Some("Settings"),
-        |view| view.shows("Enrollment"),
+        |view| view.shows("Enroll Computer"),
     ));
     editor.click(Role::Button, "Claude Code");
     drop(editor.settle_part(

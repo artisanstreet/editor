@@ -169,6 +169,9 @@ pub struct ShellApplication<V> {
     pub text_size_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     pub contrast_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     pub retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub version_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub gear_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub gear_anchor: Option<String>,
     pub usage_deadline: Option<Instant>,
     pub fit_launch: bool,
     #[cfg(feature = "capture")]
@@ -250,6 +253,8 @@ impl<V: SectionViews> ShellApplication<V> {
             &mut self.text_size_popup,
             &mut self.contrast_popup,
             &mut self.retention_popup,
+            &mut self.version_popup,
+            &mut self.gear_popup,
         ]
         .into_iter()
         .flatten()
@@ -332,6 +337,9 @@ impl<V: SectionViews> ShellApplication<V> {
             text_size_popup: None,
             contrast_popup: None,
             retention_popup: None,
+            version_popup: None,
+            gear_popup: None,
+            gear_anchor: None,
             usage_deadline: None,
             fit_launch: false,
             #[cfg(feature = "capture")]
@@ -695,6 +703,9 @@ impl<V: SectionViews> ShellApplication<V> {
             close_popup(self.ui.ui_mut(), &mut self.text_size_popup);
             close_popup(self.ui.ui_mut(), &mut self.contrast_popup);
             close_popup(self.ui.ui_mut(), &mut self.retention_popup);
+            close_popup(self.ui.ui_mut(), &mut self.version_popup);
+            close_popup(self.ui.ui_mut(), &mut self.gear_popup);
+            self.gear_anchor = None;
             return;
         };
         let settings_open = matches!(self.shell.core.screen(), crate::core::Screen::Settings(_));
@@ -778,6 +789,47 @@ impl<V: SectionViews> ShellApplication<V> {
         ] {
             sync_popup(ui, popup, key, content, now);
         }
+        self.sync_settings_menus(settings_open, now);
+    }
+
+    fn sync_settings_menus(&mut self, settings_open: bool, now: f64) {
+        let Some(workspace) = self.shell.entry.workspace() else {
+            return;
+        };
+        let theme = self.shell.preferences.theme();
+        let version = (settings_open && workspace.settings.version_select.borrow().is_open())
+            .then(|| {
+                crate::settings::view::engine_version_menu(
+                    &workspace.settings,
+                    &self.shell.core,
+                    &theme,
+                    workspace.settings_emit(),
+                )
+            })
+            .flatten()
+            .map(crate::ui::select::SelectMenu::into_parts);
+        let gear = settings_open
+            .then(|| {
+                crate::settings::view::gear_menu(
+                    &workspace.settings,
+                    &self.shell.core,
+                    &theme,
+                    workspace.settings_emit(),
+                )
+            })
+            .flatten()
+            .map(|(key, menu)| (key, menu.into_parts()));
+        let ui = self.ui.ui_mut();
+        sync_popup(ui, &mut self.version_popup, "settings-engine-version", version, now);
+        let anchor = gear.as_ref().map(|(key, _)| key.clone());
+        if anchor.is_some() && anchor != self.gear_anchor {
+            close_popup(ui, &mut self.gear_popup);
+        }
+        match gear {
+            Some((key, content)) => sync_popup(ui, &mut self.gear_popup, &key, Some(content), now),
+            None => sync_popup(ui, &mut self.gear_popup, "", None, now),
+        }
+        self.gear_anchor = anchor;
     }
 
     #[expect(
@@ -1223,6 +1275,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             &mut self.text_size_popup,
             &mut self.contrast_popup,
             &mut self.retention_popup,
+            &mut self.version_popup,
+            &mut self.gear_popup,
         ]
         .into_iter()
         .flatten()
