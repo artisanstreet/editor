@@ -264,7 +264,11 @@ fn machine_row(
             format!("forges-connect-{id}"),
             Tone::Horizon,
             Content::Icon(
-                if connecting { Icon::Spinner } else { Icon::Refresh },
+                if connecting {
+                    Icon::Spinner
+                } else {
+                    Icon::Refresh
+                },
                 format!("Reconnect {}", machine.label),
             ),
             connecting,
@@ -385,7 +389,9 @@ pub(crate) fn computers(
             .build(),
     ));
     if let Some(error) = account.last_error() {
-        enroll.push(ui::block(ui::problem(theme, "account-error", error).build()));
+        enroll.push(ui::block(
+            ui::problem(theme, "account-error", error).build(),
+        ));
     }
     vec![
         ui::section(theme, "Computers", None, ui::card(theme, machines)),
@@ -427,7 +433,11 @@ fn machines(
         } else {
             (
                 "connect",
-                if connecting { "Connecting…" } else { "Connect" },
+                if connecting {
+                    "Connecting…"
+                } else {
+                    "Connect"
+                },
                 ButtonTone::Primary,
                 ViewAction::ForgeConnect(id.clone()),
             )
@@ -486,8 +496,8 @@ fn machines(
     }
     rows = rows.child(
         line(theme, "This machine", detail)
-        .child(local_actions.build())
-        .build(),
+            .child(local_actions.build())
+            .build(),
     );
     rows = rows.child(
         ui::stack(Space::S4)
@@ -622,7 +632,12 @@ pub(crate) fn page(
         ))
         .build();
     ui::column()
-        .child(ui::section(theme, "Profile", None, ui::card(theme, vec![hero])))
+        .child(ui::section(
+            theme,
+            "Profile",
+            None,
+            ui::card(theme, vec![hero]),
+        ))
         .child(ui::section(
             theme,
             "Policies",

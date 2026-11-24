@@ -98,9 +98,10 @@ fn offset(page: SettingsPage, engines: &[SettingsPage]) -> Option<f32> {
         .position(|(tool, _)| highlighted(*tool, page))
         .map(at)
         .or_else(|| {
-            engines.iter().position(|engine| *engine == page).map(|index| {
-                at(tools) - ITEM_GAP + GROUP_GAP + at(index)
-            })
+            engines
+                .iter()
+                .position(|engine| *engine == page)
+                .map(|index| at(tools) - ITEM_GAP + GROUP_GAP + at(index))
         })
 }
 

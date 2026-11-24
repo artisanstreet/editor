@@ -295,8 +295,9 @@ impl RootViews {
             let page = workspace.settings_view(&shell.core, &theme, &shell.build, account.as_ref());
             let dismissed = Rc::clone(&self.dialogs.settings_dismissed);
             let dismiss: Rc<dyn Fn()> = Rc::new(move || dismissed.set(true));
-            let panel =
-                settings_frame::settings_panel_with_title(&theme, viewport, nav, page, title, &dismiss);
+            let panel = settings_frame::settings_panel_with_title(
+                &theme, viewport, nav, page, title, &dismiss,
+            );
             (panel, settings_layout.size.width)
         });
         aqua_core::checkpoint::reach();

@@ -14,7 +14,6 @@ use super::{
 };
 use editor_core::{Core, HostData, HostSwitch, Problem, Screen, SettingsPage, SettingsSection};
 use editor_ui::{
-    kit::{ButtonTone, Space, Spaced, TextRole, Tone},
     carved::{
         Carve, RADIUS_MD, Type,
         avatar::{Avatar, avatar},
@@ -22,6 +21,7 @@ use editor_ui::{
         glyph::Icon,
         menu::{ActionMenu, Entry, MenuItem},
     },
+    kit::{ButtonTone, Space, Spaced, TextRole, Tone},
     segmented_control::{Segment, SegmentedControl},
     select::{Select, SelectEntry, SelectMenu},
     switch::Switch,
@@ -119,7 +119,6 @@ pub enum ViewAction {
     RetryHostSetting(SettingKey),
     DismissHostSetting(SettingKey),
 }
-
 
 #[expect(
     clippy::too_many_lines,
@@ -440,7 +439,12 @@ pub fn build_with_account(
         .to_lowercase();
     if !search.is_empty() {
         let results = settings_search(controller, core, theme, &search, &emit);
-        return frame(controller, theme, results, "settings-search-results".to_owned());
+        return frame(
+            controller,
+            theme,
+            results,
+            "settings-search-results".to_owned(),
+        );
     }
     if page == SettingsPage::GlobalPrompt && core.active_host().is_some() {
         return prompt(controller, core, theme, emit);
@@ -477,8 +481,18 @@ pub fn build_with_account(
             let mut content = ui::column();
             if page == SettingsPage::Threads {
                 content = content
-                    .child(thread_section(theme, host, ThreadSection::Automation, &emit))
-                    .child(thread_section(theme, host, ThreadSection::Assistance, &emit));
+                    .child(thread_section(
+                        theme,
+                        host,
+                        ThreadSection::Automation,
+                        &emit,
+                    ))
+                    .child(thread_section(
+                        theme,
+                        host,
+                        ThreadSection::Assistance,
+                        &emit,
+                    ));
             }
             content
                 .child(super::archive_view::cleanup(
@@ -571,7 +585,12 @@ pub fn build_with_account(
         ) => ui::column().child(failures).child(content).build(),
         _ => content,
     };
-    frame(controller, theme, content, format!("settings-screen-{page:?}"))
+    frame(
+        controller,
+        theme,
+        content,
+        format!("settings-screen-{page:?}"),
+    )
 }
 
 fn frame(
@@ -593,11 +612,7 @@ fn frame(
                         .justify(JustifyContent::CENTER)
                         .flex_shrink(0.0),
                 )
-                .child(
-                    ui::page_body()
-                        .child(content)
-                        .build(),
-                )
+                .child(ui::page_body().child(content).build())
                 .build(),
         )
         .build()
@@ -755,7 +770,12 @@ fn settings_search(
             }
         }
         if !engines.is_empty() {
-            results.push(ui::section(theme, "Engines", None, ui::card(theme, engines)));
+            results.push(ui::section(
+                theme,
+                "Engines",
+                None,
+                ui::card(theme, engines),
+            ));
         }
     }
     if results.is_empty() {
@@ -922,9 +942,9 @@ fn about(
     if let Some(result) = &controller.diagnostics_result {
         build_rows.push(match result {
             Ok(()) => ui::note(theme, "Diagnostics exported."),
-            Err(problem) => ui::block(
-                ui::problem(theme, "settings-export-diagnostics-error", problem).build(),
-            ),
+            Err(problem) => {
+                ui::block(ui::problem(theme, "settings-export-diagnostics-error", problem).build())
+            }
         });
     }
     let mut licences = Vec::new();
@@ -953,8 +973,18 @@ fn about(
         )),
     ));
     ui::column()
-        .child(ui::section(theme, "Build", None, ui::card(theme, build_rows)))
-        .child(ui::section(theme, "Licences", None, ui::card(theme, licences)))
+        .child(ui::section(
+            theme,
+            "Build",
+            None,
+            ui::card(theme, build_rows),
+        ))
+        .child(ui::section(
+            theme,
+            "Licences",
+            None,
+            ui::card(theme, licences),
+        ))
         .build()
 }
 
@@ -999,20 +1029,21 @@ fn hosts(
         .collect();
     let mut content = ui::column()
         .child(relay)
-        .children(super::account_view::computers(controller, core, theme, emit));
+        .children(super::account_view::computers(
+            controller, core, theme, emit,
+        ));
     if !open.is_empty() {
-        content = content.child(ui::section(theme, "Open Forges", None,
+        content = content.child(ui::section(
+            theme,
+            "Open Forges",
+            None,
             ui::card(theme, open),
         ));
     }
     content.build()
 }
 
-fn notifications(
-    theme: &ArtisanTheme,
-    core: &Core,
-    emit: Rc<dyn Fn(ViewAction)>,
-) -> Element {
+fn notifications(theme: &ArtisanTheme, core: &Core, emit: Rc<dyn Fn(ViewAction)>) -> Element {
     let enabled = core.settings().preferences().notifications.on();
     let control = Switch::new("settings-switch-notify", *theme, enabled, "Notify me")
         .on_change(move |enabled| emit(ViewAction::SetNotifications(enabled)))
@@ -1023,9 +1054,7 @@ fn notifications(
         "Uses your system's notifications to tell you when a thread finishes, needs attention or fails.",
         Some(control),
     );
-    ui::section(theme, "Notifications", None,
-            ui::card(theme, vec![row]),
-        )
+    ui::section(theme, "Notifications", None, ui::card(theme, vec![row]))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1167,7 +1196,10 @@ fn search_host_controls(
             prompt_label,
             emit,
         );
-        sections.push(ui::section(theme, "Global Prompt", None,
+        sections.push(ui::section(
+            theme,
+            "Global Prompt",
+            None,
             ui::card(theme, vec![row]),
         ));
     }
@@ -1187,9 +1219,7 @@ fn search_host_controls(
             })
             .collect();
         if !rows.is_empty() {
-            sections.push(ui::section(theme, "MCPs", None,
-                ui::card(theme, rows),
-            ));
+            sections.push(ui::section(theme, "MCPs", None, ui::card(theme, rows)));
         }
     }
     if let Some(catalog) = host.skill_catalog() {
@@ -1202,9 +1232,7 @@ fn search_host_controls(
             .map(|skill| skill_row(controller, host, skill, theme, emit))
             .collect();
         if !rows.is_empty() {
-            sections.push(ui::section(theme, "Skills", None,
-                ui::card(theme, rows),
-            ));
+            sections.push(ui::section(theme, "Skills", None, ui::card(theme, rows)));
         }
     }
     sections
@@ -1332,12 +1360,9 @@ fn prompt(
     let setting_failures = core
         .active_host()
         .and_then(|host| host_setting_failures(controller, host, theme, &emit));
-    let page = ui::prompt_page()
-        .children(setting_failures)
-        .children(
-            built_in
-                .map(|row| ui::section(theme, "Built-in", None, ui::card(theme, vec![row]))),
-        );
+    let page = ui::prompt_page().children(setting_failures).children(
+        built_in.map(|row| ui::section(theme, "Built-in", None, ui::card(theme, vec![row]))),
+    );
     let field = Scroll::new()
         .width(Length::Pct(100.0))
         .style(
@@ -1412,8 +1437,8 @@ fn prompt(
             ui::row_of(theme, UiBox::new().build(), Some(actions.build()), true),
         ],
     )
-        .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0)))
-        .build();
+    .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0)))
+    .build();
     page.child(
         ui::section(theme, "Global Prompt", None, card)
             .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0))),
@@ -1554,20 +1579,19 @@ fn prompt_reconciliation(
     controls.build()
 }
 
-fn performance(
-    theme: &ArtisanTheme,
-    core: &Core,
-    emit: Rc<dyn Fn(ViewAction)>,
-) -> Element {
-    ui::section(theme, "Performance", None,
-            ui::card(
-                theme,
-                performance_rows(theme, core, emit)
-                    .into_iter()
-                    .map(|(_, row)| row)
-                    .collect(),
-            ),
-        )
+fn performance(theme: &ArtisanTheme, core: &Core, emit: Rc<dyn Fn(ViewAction)>) -> Element {
+    ui::section(
+        theme,
+        "Performance",
+        None,
+        ui::card(
+            theme,
+            performance_rows(theme, core, emit)
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect(),
+        ),
+    )
 }
 
 fn performance_rows(
@@ -1647,9 +1671,12 @@ fn streaming(
     core: &Core,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    ui::section(theme, "Text streaming", None,
-            ui::card(theme, vec![streaming_row(controller, theme, core, emit)]),
-        )
+    ui::section(
+        theme,
+        "Text streaming",
+        None,
+        ui::card(theme, vec![streaming_row(controller, theme, core, emit)]),
+    )
 }
 
 fn streaming_row(
@@ -1680,7 +1707,10 @@ fn interface(
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let rows = interface_rows(controller, theme, core, emit);
-    ui::section(theme, "Interface & Models", None,
+    ui::section(
+        theme,
+        "Interface & Models",
+        None,
         ui::card(theme, rows.into_iter().map(|(_, row)| row).collect()),
     )
 }
@@ -1769,9 +1799,12 @@ fn appearance(
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let rows = appearance_rows(controller, theme, core, emit);
-    ui::section(theme, "Appearance", None,
-            ui::card(theme, rows.into_iter().map(|(_, row)| row).collect()),
-        )
+    ui::section(
+        theme,
+        "Appearance",
+        None,
+        ui::card(theme, rows.into_iter().map(|(_, row)| row).collect()),
+    )
 }
 
 fn appearance_rows(
@@ -2195,9 +2228,9 @@ pub fn gear_menu(
         }
         Gear::Mcp(server) => {
             let signed_in = core.active_host().is_some_and(|host| {
-                host.settings
-                    .mcp_auth()
-                    .is_ok_and(|auth| auth.get(&server.name) == Some(&artisan_api::McpAuthStatus::SignedIn))
+                host.settings.mcp_auth().is_ok_and(|auth| {
+                    auth.get(&server.name) == Some(&artisan_api::McpAuthStatus::SignedIn)
+                })
             });
             let mut entries = Vec::new();
             if signed_in {

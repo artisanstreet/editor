@@ -268,7 +268,11 @@ fn account_copy(status: &EngineStatus) -> String {
         SignInState::Failed { .. } => "Couldn't read the account status.".into(),
     }
 }
-fn account_row(theme: &ArtisanTheme, status: &EngineStatus, emit: &Rc<dyn Fn(ViewAction)>) -> Element {
+fn account_row(
+    theme: &ArtisanTheme,
+    status: &EngineStatus,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
     let engine = status.engine;
     let (title, sub) = match &status.sign_in {
         SignInState::SignedIn {
@@ -296,16 +300,14 @@ fn account_row(theme: &ArtisanTheme, status: &EngineStatus, emit: &Rc<dyn Fn(Vie
     ui::machine_row(
         None,
         ui::titled(theme, heading, Some(&sub)),
-        Some(
-            ui::carved(
-                theme,
-                gear.key(),
-                Tone::Secondary,
-                Content::Icon(Icon::Gear, format!("{title} options")),
-                false,
-                move || send(ViewAction::Gear(Some(open.clone()))),
-            ),
-        ),
+        Some(ui::carved(
+            theme,
+            gear.key(),
+            Tone::Secondary,
+            Content::Icon(Icon::Gear, format!("{title} options")),
+            false,
+            move || send(ViewAction::Gear(Some(open.clone()))),
+        )),
         true,
     )
 }
@@ -391,7 +393,11 @@ fn logging_in(
     actions = actions.child(button(
         theme,
         format!("settings-engine-cancel-login-{engine}"),
-        if cancelling { "Cancelling…" } else { "Cancel" },
+        if cancelling {
+            "Cancelling…"
+        } else {
+            "Cancel"
+        },
         ButtonTone::Quiet,
         cancelling,
         ViewAction::EngineAction(engine, EngineCommand::CancelLogin {}),
@@ -571,20 +577,23 @@ pub(crate) fn page(
         && artisan_api::transport_of(host.setting(artisan_api::TRANSPORT_KEY))
             == artisan_api::CLAUDE_AI
     {
-        content = content.child(ui::card(theme, vec![ui::row(
+        content = content.child(ui::card(
             theme,
-            "Claude connection",
-            "This Forge still uses the retired claude.ai mode.",
-            Some(button(
+            vec![ui::row(
                 theme,
-                "settings-use-claude-code",
-                "Use Claude Code",
-                ButtonTone::Primary,
-                false,
-                ViewAction::ClaudeTransport(host.id.clone(), host.instance(), false),
-                Rc::clone(emit),
-            )),
-        )]));
+                "Claude connection",
+                "This Forge still uses the retired claude.ai mode.",
+                Some(button(
+                    theme,
+                    "settings-use-claude-code",
+                    "Use Claude Code",
+                    ButtonTone::Primary,
+                    false,
+                    ViewAction::ClaudeTransport(host.id.clone(), host.instance(), false),
+                    Rc::clone(emit),
+                )),
+            )],
+        ));
     }
     if selected.shows(SettingsSection::Installation(engine)) {
         content = content.child(installation(controller, host, status, theme, emit));

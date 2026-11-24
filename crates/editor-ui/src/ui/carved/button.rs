@@ -185,7 +185,11 @@ impl CarvedButton {
         match &self.content {
             Content::Label(name) => vec![words(name)],
             Content::IconLabel(icon, name) => vec![glyph(*icon, 15.0, ink), words(name)],
-            Content::Icon(icon, _) => vec![glyph(*icon, if self.height < 36.0 { 16.0 } else { 15.0 }, ink)],
+            Content::Icon(icon, _) => vec![glyph(
+                *icon,
+                if self.height < 36.0 { 16.0 } else { 15.0 },
+                ink,
+            )],
         }
     }
 

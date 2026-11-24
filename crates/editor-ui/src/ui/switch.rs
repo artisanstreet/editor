@@ -1,6 +1,4 @@
-use aqua_core::{
-    CornerRadii, DisplayItem, GpuiBackground, Insets, Rect, Role,
-};
+use aqua_core::{CornerRadii, DisplayItem, GpuiBackground, Insets, Rect, Role};
 use aqua_ui::{
     element::{Button, Canvas, Element, Key},
     style::{Length, Style},

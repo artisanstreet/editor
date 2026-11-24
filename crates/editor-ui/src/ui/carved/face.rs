@@ -356,7 +356,11 @@ impl Face {
 }
 
 fn paint_of(color: Oklch) -> String {
-    format!(r#"fill="{}" fill-opacity="{}""#, hex(color), color.to_paint().alpha)
+    format!(
+        r#"fill="{}" fill-opacity="{}""#,
+        hex(color),
+        color.to_paint().alpha
+    )
 }
 
 #[must_use]

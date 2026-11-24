@@ -402,11 +402,8 @@ impl<V: Clone + Eq + 'static> Select<V> {
                     .text_wrap(false),
             )
             .build();
-        let icon = super::carved::glyph::glyph(
-            super::carved::glyph::Icon::Selector,
-            13.0,
-            carve.ink_dim,
-        );
+        let icon =
+            super::carved::glyph::glyph(super::carved::glyph::Icon::Selector, 13.0, carve.ink_dim);
         let state = Rc::clone(&self.state);
         let open_change = self.open_change.clone();
         let well = if open {
@@ -462,7 +459,9 @@ impl<V: Clone + Eq + 'static> Select<V> {
             trigger = trigger
                 .cursor(aqua_core::CursorIcon::Pointer)
                 .focus_visible_style(focus_ring(&theme))
-                .hover_style(Style::new().background(carve.toward_ink(carve.well, 0.04).to_paint()));
+                .hover_style(
+                    Style::new().background(carve.toward_ink(carve.well, 0.04).to_paint()),
+                );
             let state = self.state;
             let entries = self.entries;
             let change = self.change;

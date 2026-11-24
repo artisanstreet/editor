@@ -15,7 +15,6 @@ use aqua_ui::{
     style::{Length, Style},
 };
 
-
 pub fn settings_dialog(
     theme: &ArtisanTheme,
     viewport: Size,
@@ -135,7 +134,14 @@ const FILLET: f32 = 10.0;
 fn fillet(carve: &Carve) -> Element {
     let source = {
         let (bg, line) = (hex(carve.bg), hex(carve.line));
-        let circle = |r: f32| format!("M{} 0A{r} {r} 0 1 0 {} 0A{r} {r} 0 1 0 {} 0Z", FILLET - r, FILLET + r, FILLET - r);
+        let circle = |r: f32| {
+            format!(
+                "M{} 0A{r} {r} 0 1 0 {} 0A{r} {r} 0 1 0 {} 0Z",
+                FILLET - r,
+                FILLET + r,
+                FILLET - r
+            )
+        };
         format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs><clipPath id="s"><rect width="10" height="10"/></clipPath></defs><path clip-path="url(#s)" fill-rule="evenodd" fill="{bg}" d="M0 0H10V10H0Z {}"/><path clip-path="url(#s)" fill-rule="evenodd" fill="{line}" d="{} {}"/></svg>"#,
             circle(10.2),

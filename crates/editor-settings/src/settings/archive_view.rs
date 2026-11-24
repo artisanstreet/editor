@@ -7,11 +7,7 @@ use aqua_ui::{
 };
 use artisan_api::{THREAD_RETENTION_DAYS_KEY, ThreadId};
 
-use super::{
-    controller::SettingsController,
-    ui,
-    view::ViewAction,
-};
+use super::{controller::SettingsController, ui, view::ViewAction};
 use editor_core::HostData;
 use editor_ui::{
     carved::{
@@ -196,7 +192,11 @@ pub(crate) fn archived(
                     format!("settings-archived-{}-unarchive", row.id),
                     Tone::Secondary,
                     Content::Icon(
-                        if row.restoring { Icon::Spinner } else { Icon::Unarchive },
+                        if row.restoring {
+                            Icon::Spinner
+                        } else {
+                            Icon::Unarchive
+                        },
                         label.to_owned(),
                     ),
                     row.restoring,
@@ -214,11 +214,19 @@ pub(crate) fn archived(
                 );
                 let line = ui::machine_row(
                     Some(ui::tile(project)),
-                    ui::titled(&theme, ui::label(&theme, row.title.clone()), Some(&row.detail)),
+                    ui::titled(
+                        &theme,
+                        ui::label(&theme, row.title.clone()),
+                        Some(&row.detail),
+                    ),
                     Some(button),
                     true,
                 );
-                if row.first { line } else { ui::ruled(&theme, line) }
+                if row.first {
+                    line
+                } else {
+                    ui::ruled(&theme, line)
+                }
             })
             .style(
                 Style::new()

@@ -820,7 +820,13 @@ impl<V: SectionViews> ShellApplication<V> {
             .flatten()
             .map(|(key, menu)| (key, menu.into_parts()));
         let ui = self.ui.ui_mut();
-        sync_popup(ui, &mut self.version_popup, "settings-engine-version", version, now);
+        sync_popup(
+            ui,
+            &mut self.version_popup,
+            "settings-engine-version",
+            version,
+            now,
+        );
         let anchor = gear.as_ref().map(|(key, _)| key.clone());
         if anchor.is_some() && anchor != self.gear_anchor {
             close_popup(ui, &mut self.gear_popup);

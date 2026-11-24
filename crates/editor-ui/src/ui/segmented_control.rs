@@ -156,7 +156,8 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                         chosen,
                         disabled: self.disabled,
                     },
-                    change.map(|change| -> Box<dyn Fn()> { Box::new(move || change(value.clone())) }),
+                    change
+                        .map(|change| -> Box<dyn Fn()> { Box::new(move || change(value.clone())) }),
                 );
                 root = root.child(item);
                 continue;

@@ -164,7 +164,10 @@ impl Icon {
                 r#"<circle cx="12" cy="12" r="8" opacity="0.22"/><path d="M12 4a8 8 0 0 1 8 8"/>"#,
                 Ink::Stroke(2.2),
             ),
-            Self::Plus => (r#"<path d="M12 5l0 14"/><path d="M5 12l14 0"/>"#, Ink::Stroke(1.8)),
+            Self::Plus => (
+                r#"<path d="M12 5l0 14"/><path d="M5 12l14 0"/>"#,
+                Ink::Stroke(1.8),
+            ),
         }
     }
 
@@ -177,7 +180,9 @@ impl Icon {
             ),
             Ink::Fill => r#"fill="currentColor""#.to_owned(),
         };
-        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" {paint}>{body}</svg>"#)
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" {paint}>{body}</svg>"#
+        )
     }
 }
 

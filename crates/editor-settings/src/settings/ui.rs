@@ -85,7 +85,12 @@ pub(crate) fn line(
     styled(theme, role, ink, value.into(), false)
 }
 
-pub(crate) fn typed(theme: &ArtisanTheme, kind: Type, ink: Ink, value: impl Into<String>) -> Element {
+pub(crate) fn typed(
+    theme: &ArtisanTheme,
+    kind: Type,
+    ink: Ink,
+    value: impl Into<String>,
+) -> Element {
     kind.text(theme, ink_color(theme, ink), value.into())
         .wrap(true)
         .build()
@@ -200,7 +205,6 @@ pub(crate) fn page_body() -> UiBox {
 pub(crate) fn stack(space: Space) -> UiBox {
     UiBox::new().layout("column").spaced(space)
 }
-
 
 pub(crate) fn actions() -> UiBox {
     UiBox::new().style(
@@ -338,10 +342,13 @@ pub(crate) fn ruled(theme: &ArtisanTheme, block: Element) -> Element {
 
 pub(crate) fn card_box(theme: &ArtisanTheme, blocks: Vec<Element>) -> UiBox {
     let carve = Carve::of(theme);
-    let rows = blocks
-        .into_iter()
-        .enumerate()
-        .map(|(index, block)| if index == 0 { block } else { ruled(theme, block) });
+    let rows = blocks.into_iter().enumerate().map(|(index, block)| {
+        if index == 0 {
+            block
+        } else {
+            ruled(theme, block)
+        }
+    });
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -641,7 +648,11 @@ pub(crate) fn licence(
         ))
         .child(label(theme, name))
         .child(editor_ui::carved::glyph::glyph(
-            if open { Icon::ChevronUp } else { Icon::ChevronDown },
+            if open {
+                Icon::ChevronUp
+            } else {
+                Icon::ChevronDown
+            },
             15.0,
             if open { carve.ink } else { carve.ink_dim },
         ))
@@ -774,7 +785,12 @@ pub(crate) fn machine_row(
     row.child(left)
         .children(control.map(|control| {
             UiBox::new()
-                .style(Style::new().gap(8.0).align(AlignItems::CENTER).flex_shrink(0.0))
+                .style(
+                    Style::new()
+                        .gap(8.0)
+                        .align(AlignItems::CENTER)
+                        .flex_shrink(0.0),
+                )
                 .child(control)
                 .build()
         }))

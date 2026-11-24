@@ -115,7 +115,11 @@ impl Carve {
 
     #[must_use]
     pub fn press(&self) -> Vec<ShadowLayer> {
-        let alphas = if self.dark { [0.16, 0.10] } else { [0.08, 0.05] };
+        let alphas = if self.dark {
+            [0.16, 0.10]
+        } else {
+            [0.08, 0.05]
+        };
         [(0.5, 1.0), (1.0, 2.0)]
             .into_iter()
             .zip(alphas)

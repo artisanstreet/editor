@@ -1,9 +1,6 @@
 use std::rc::Rc;
 
-use aqua_ui::{
-    element::Element,
-    style::Length,
-};
+use aqua_ui::{element::Element, style::Length};
 use artisan_api::{McpAuthStatus, McpServer};
 
 use super::{
@@ -154,7 +151,10 @@ fn form(
         ),
         ("Server URL (HTTP)", "https://example.com/mcp"),
         ("Environment (JSON object)", "{\"GITHUB_TOKEN\": \"…\"}"),
-        ("Headers (JSON object, HTTP only)", "{\"Authorization\": \"Bearer …\"}"),
+        (
+            "Headers (JSON object, HTTP only)",
+            "{\"Authorization\": \"Bearer …\"}",
+        ),
     ];
     let mut cells: Vec<Element> = Vec::new();
     for (index, (label, placeholder)) in fields.into_iter().enumerate() {
