@@ -62,6 +62,7 @@ expression: seen
             account: Some(
                 "user@example.com",
             ),
+            plan: None,
         },
         [],
     ),

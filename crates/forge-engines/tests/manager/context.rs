@@ -119,7 +119,10 @@ esac
     std::fs::write(home.join("model"), "old-model1").unwrap();
     assert_eq!(
         engines.check_sign_in(EngineId::Codex).await,
-        SignInState::SignedIn { account: None }
+        SignInState::SignedIn {
+            account: None,
+            plan: None,
+        }
     );
     let owner = engines.clone();
     let old = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
@@ -132,7 +135,11 @@ esac
     std::fs::write(home.join("model"), "new-model2").unwrap();
     engines.login(EngineId::Codex).unwrap();
     codex_until(&engines, "the new sign-in", |status| {
-        status.sign_in == SignInState::SignedIn { account: None }
+        status.sign_in
+            == SignInState::SignedIn {
+                account: None,
+                plan: None,
+            }
     })
     .await;
     std::fs::write(home.join("release"), "").unwrap();

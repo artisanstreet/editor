@@ -91,7 +91,16 @@ async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
         EngineId::Antigravity => return antigravity_sign_in(binary, home).await,
     };
     match run_short(engine, binary, home, args, CHECK_TIMEOUT).await {
-        Ok((success, stdout, stderr)) => parse_status(engine, success, &stdout, &stderr),
+        Ok((success, stdout, stderr)) => {
+            let state = parse_status(engine, success, &stdout, &stderr);
+            if engine == EngineId::Codex
+                && matches!(state, SignInState::SignedIn { account: None, .. })
+            {
+                codex_account(home)
+            } else {
+                state
+            }
+        }
         Err(error) => {
             let error = diagnostics::chain(&error);
             tracing::warn!(engine = %engine, home = %home.display(), error, "sign-in check failed");
@@ -100,6 +109,115 @@ async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
                     "Couldn't check the {} sign-in: {error}",
                     engine.display_name()
                 ),
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CodexAccountError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{} holds no ChatGPT identity token", path.display())]
+    NoIdentity { path: PathBuf },
+    #[error("decode the identity token in {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: CodexClaimsError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CodexClaimsError {
+    #[error("the token has no claims segment")]
+    Shape,
+    #[error("the claims are not base64url")]
+    Base64(#[source] base64::DecodeError),
+    #[error("the claims are not JSON")]
+    Json(#[source] serde_json::Error),
+    #[error("the claims carry no email")]
+    NoEmail,
+}
+
+struct Identity {
+    email: String,
+    plan: Option<String>,
+}
+
+fn plan_label(brand: &str, kind: &str) -> Option<String> {
+    let kind = kind.trim();
+    let mut letters = kind.chars();
+    let first = letters.next()?;
+    Some(format!(
+        "{brand} {}{}",
+        first.to_uppercase(),
+        letters.as_str().to_lowercase()
+    ))
+}
+
+fn identity(id_token: &str) -> Result<Identity, CodexClaimsError> {
+    use base64::Engine as _;
+    let claims = id_token.split('.').nth(1).ok_or(CodexClaimsError::Shape)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(claims.trim_end_matches('='))
+        .map_err(CodexClaimsError::Base64)?;
+    let claims: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(CodexClaimsError::Json)?;
+    let email = claims["email"]
+        .as_str()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_owned)
+        .ok_or(CodexClaimsError::NoEmail)?;
+    let plan = claims["https://api.openai.com/auth"]["chatgpt_plan_type"]
+        .as_str()
+        .and_then(|kind| plan_label("ChatGPT", kind));
+    Ok(Identity { email, plan })
+}
+
+fn read_codex_identity(home: &Path) -> Result<Identity, CodexAccountError> {
+    let path = home.join(".codex").join("auth.json");
+    let text = std::fs::read_to_string(&path).map_err(|source| CodexAccountError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let auth: serde_json::Value =
+        serde_json::from_str(&text).map_err(|source| CodexAccountError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+    let token = auth["tokens"]["id_token"]
+        .as_str()
+        .ok_or_else(|| CodexAccountError::NoIdentity { path: path.clone() })?;
+    identity(token).map_err(|source| CodexAccountError::Decode { path, source })
+}
+
+fn codex_account(home: &Path) -> SignInState {
+    match read_codex_identity(home) {
+        Ok(Identity { email, plan }) => SignInState::SignedIn {
+            account: Some(email),
+            plan,
+        },
+        Err(error) => {
+            tracing::warn!(
+                home = %home.display(),
+                error = %diagnostics::chain(&error),
+                "couldn't read the Codex account email"
+            );
+            SignInState::SignedIn {
+                account: None,
+                plan: None,
             }
         }
     }
@@ -117,7 +235,10 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
         if let Some(json) = json {
             return if json["loggedIn"].as_bool() == Some(true) {
                 let account = json["email"].as_str().map(str::to_owned);
-                SignInState::SignedIn { account }
+                let plan = json["subscriptionType"]
+                    .as_str()
+                    .and_then(|kind| plan_label("Claude", kind));
+                SignInState::SignedIn { account, plan }
             } else {
                 SignInState::SignedOut
             };
@@ -128,6 +249,7 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
         if engine == EngineId::Codex && lower.contains("logged in using an api key") {
             return SignInState::SignedIn {
                 account: Some("API Key".to_owned()),
+                plan: None,
             };
         }
         let account = text.lines().find_map(|line| {
@@ -136,7 +258,10 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
             let (_, account) = line.split_at(at + "logged in as ".len());
             Some(account.trim().to_owned()).filter(|account| !account.is_empty())
         });
-        return SignInState::SignedIn { account };
+        return SignInState::SignedIn {
+            account,
+            plan: None,
+        };
     }
     let detail = last_line(&text);
     SignInState::Failed {
@@ -188,6 +313,7 @@ async fn opencode_sign_in(binary: &Path, home: &Path) -> SignInState {
             } else {
                 SignInState::SignedIn {
                     account: Some(names.join(", ")),
+                    plan: None,
                 }
             }
         }
@@ -429,6 +555,7 @@ enum State {
     SignedOut {},
     SignedIn {
         account: Option<String>,
+        plan: Option<String>,
     },
     Failed {
         message: String,
@@ -487,10 +614,11 @@ impl Machine {
             ) => Some(State::Failed {
                 message: message.clone(),
             }),
-            (State::LoggingIn { .. }, Event::Checked(SignInState::SignedIn { account })) => {
+            (State::LoggingIn { .. }, Event::Checked(SignInState::SignedIn { account, plan })) => {
                 effects.push(Effect::StopLogin);
                 Some(State::SignedIn {
                     account: account.clone(),
+                    plan: plan.clone(),
                 })
             }
             (State::LoggingIn { .. } | State::SavingApiKey, Event::Cancel) => {
@@ -504,8 +632,9 @@ impl Machine {
                 Some(State::Unknown {})
             }
             (_, Event::Checked(probe)) => Some(match probe {
-                SignInState::SignedIn { account } => State::SignedIn {
+                SignInState::SignedIn { account, plan } => State::SignedIn {
                     account: account.clone(),
+                    plan: plan.clone(),
                 },
                 SignInState::SignedOut => State::SignedOut {},
                 SignInState::Failed { message } => State::Failed {
@@ -536,8 +665,9 @@ fn public_state(state: &State, engine: EngineId) -> SignInState {
     match state {
         State::Unknown {} => SignInState::Unknown,
         State::SignedOut {} => SignInState::SignedOut,
-        State::SignedIn { account } => SignInState::SignedIn {
+        State::SignedIn { account, plan } => SignInState::SignedIn {
             account: account.clone(),
+            plan: plan.clone(),
         },
         State::Failed { message } => SignInState::Failed {
             message: message.clone(),

@@ -284,7 +284,10 @@ fn every_setting_engine() -> artisan_api::EngineStatus {
             version: "1.0.0".into(),
             update: None,
         },
-        sign_in: SignInState::SignedIn { account: None },
+        sign_in: SignInState::SignedIn {
+            account: None,
+            plan: None,
+        },
         models: vec![model].into(),
         default_model: None,
         commands: Vec::new().into(),

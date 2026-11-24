@@ -246,6 +246,7 @@ fn band(theme: &ArtisanTheme, status: &EngineStatus, now: Timestamp) -> Element 
     let account = match &status.sign_in {
         SignInState::SignedIn {
             account: Some(account),
+            ..
         } => Some(account.clone()),
         SignInState::Unknown
         | SignInState::SignedOut

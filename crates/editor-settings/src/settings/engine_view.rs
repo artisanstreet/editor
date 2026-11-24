@@ -247,21 +247,23 @@ fn account_copy(status: &EngineStatus) -> String {
         match &status.sign_in {
             SignInState::SignedIn {
                 account: Some(gateways),
+                ..
             } => return format!("Signed in to {gateways}."),
             SignInState::SignedOut => {
                 return "No accounts connected".into();
             }
             SignInState::Unknown
             | SignInState::LoggingIn { .. }
-            | SignInState::SignedIn { account: None }
+            | SignInState::SignedIn { account: None, .. }
             | SignInState::Failed { .. } => {}
         }
     }
     match &status.sign_in {
         SignInState::SignedIn {
             account: Some(account),
+            ..
         } => format!("Signed in as {account}."),
-        SignInState::SignedIn { account: None } => "Signed in.".into(),
+        SignInState::SignedIn { account: None, .. } => "Signed in.".into(),
         SignInState::SignedOut => "No accounts connected".into(),
         SignInState::LoggingIn { .. } => "Signing in…".into(),
         SignInState::Unknown => "Checking accounts…".into(),
@@ -277,18 +279,24 @@ fn account_row(
     let (title, sub) = match &status.sign_in {
         SignInState::SignedIn {
             account: Some(account),
-        } if account == "API Key" => ("API Key".to_owned(), "API Key".to_owned()),
+            ..
+        } if account == "API Key" => ("API Key".to_owned(), Some("API Key".to_owned())),
         SignInState::SignedIn {
             account: Some(account),
-        } if engine == EngineId::OpenCode => (account.clone(), "Providers".to_owned()),
+            ..
+        } if engine == EngineId::OpenCode => (account.clone(), Some("Providers".to_owned())),
         SignInState::SignedIn {
             account: Some(account),
-        } => (account.clone(), "Subscription".to_owned()),
-        SignInState::SignedIn { account: None }
-        | SignInState::Unknown
+            plan,
+        } => (account.clone(), plan.clone()),
+        SignInState::SignedIn {
+            account: None,
+            plan,
+        } => ("Signed in".to_owned(), plan.clone()),
+        SignInState::Unknown
         | SignInState::SignedOut
         | SignInState::LoggingIn { .. }
-        | SignInState::Failed { .. } => ("Signed in".to_owned(), engine.display_name().to_owned()),
+        | SignInState::Failed { .. } => ("Signed in".to_owned(), None),
     };
     let heading = ui::inline(8.0)
         .child(ui::label(theme, title.clone()))
@@ -299,7 +307,7 @@ fn account_row(
     let open = gear.clone();
     ui::machine_row(
         None,
-        ui::titled(theme, heading, Some(&sub)),
+        ui::titled(theme, heading, sub.as_deref()),
         Some(ui::carved(
             theme,
             gear.key(),

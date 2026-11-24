@@ -299,6 +299,8 @@ pub enum SignInState {
     },
     SignedIn {
         account: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
     },
     Failed {
         message: String,

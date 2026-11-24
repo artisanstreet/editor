@@ -9,6 +9,9 @@ expression: results
             account: Some(
                 "user@example.com",
             ),
+            plan: Some(
+                "Claude Max",
+            ),
         },
     ),
     (
@@ -25,6 +28,7 @@ expression: results
         "codex",
         SignedIn {
             account: None,
+            plan: None,
         },
     ),
     (

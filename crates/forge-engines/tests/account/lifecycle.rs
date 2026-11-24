@@ -35,12 +35,13 @@ fn a_successful_probe_stops_an_active_login_before_publishing_the_account() {
     machine.handle_with_context(
         &Event::Checked(SignInState::SignedIn {
             account: Some("alice".into()),
+            plan: None,
         }),
         &mut effects,
     );
     assert_eq!(effects, [Effect::StopLogin]);
     assert!(
-        matches!(machine.state(), super::State::SignedIn { account: Some(account) } if account == "alice")
+        matches!(machine.state(), super::State::SignedIn { account: Some(account), .. } if account == "alice")
     );
 }
 
@@ -67,6 +68,7 @@ fn replacing_an_api_key_ignores_an_old_account_until_the_subprocess_exits() {
     machine.handle_with_context(
         &Event::Checked(SignInState::SignedIn {
             account: Some("old account".into()),
+            plan: None,
         }),
         &mut effects,
     );
