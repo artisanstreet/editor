@@ -1174,6 +1174,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             }
             WindowEvent::CloseRequested(_)
             | WindowEvent::Occluded(..)
+            | WindowEvent::DisplayChanged(..)
             | WindowEvent::RedrawRequested(_)
             | WindowEvent::Destroyed(_) => {}
         }
