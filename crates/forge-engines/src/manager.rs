@@ -306,7 +306,7 @@ impl Engines {
             discovery: lock(&slot.models).discovery.clone(),
             engine,
             install,
-            sign_in: slot.sign_in.state(),
+            sign_in: with_plan(slot.sign_in.state(), self.inner.usage.plan(engine)),
             models: listing.models,
             default_model: listing.default,
             commands: self.commands(engine),
@@ -842,3 +842,18 @@ mod lease_release_tests;
 #[cfg(test)]
 #[path = "../tests/manager/install.rs"]
 mod install_resolved;
+
+fn with_plan(
+    sign_in: artisan_api::SignInState,
+    plan: Option<&'static str>,
+) -> artisan_api::SignInState {
+    match (sign_in, plan) {
+        (artisan_api::SignInState::SignedIn { account, .. }, Some(plan)) => {
+            artisan_api::SignInState::SignedIn {
+                account,
+                plan: Some(plan.to_owned()),
+            }
+        }
+        (sign_in, _) => sign_in,
+    }
+}

@@ -10,7 +10,7 @@ expression: results
                 "user@example.com",
             ),
             plan: Some(
-                "Claude Max",
+                "Claude Ultra",
             ),
         },
     ),

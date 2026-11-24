@@ -21,6 +21,7 @@ pub mod mcp_oauth;
 mod mentions;
 mod native;
 pub mod opencode;
+mod plan;
 pub mod process;
 mod provider;
 mod question;

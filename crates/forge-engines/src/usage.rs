@@ -32,29 +32,39 @@ pub(crate) enum ReadUsageError {
     Antigravity(#[source] antigravity::ReadAntigravityUsageError),
 }
 
-async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<UsageLimits> {
+#[derive(Debug)]
+struct Reading {
+    limits: UsageLimits,
+    plan: Option<&'static str>,
+}
+
+async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<Reading> {
     let read = match engine {
         EngineId::Claude => read_claude(binary, home)
             .await
-            .map(|windows| (windows, None))
+            .map(|windows| (windows, None, None))
             .map_err(ReadUsageError::Claude),
         EngineId::Codex => read_codex(binary, home)
             .await
-            .map(|windows| (windows, None))
+            .map(|(windows, plan)| (windows, None, plan))
             .map_err(ReadUsageError::Codex),
         EngineId::OpenCode => read_opencode(binary, home)
             .await
+            .map(|(windows, spend)| (windows, spend, None))
             .map_err(ReadUsageError::OpenCode),
         EngineId::Antigravity => antigravity::read(binary, home)
             .await
-            .map(|windows| (windows, None))
+            .map(|windows| (windows, None, None))
             .map_err(ReadUsageError::Antigravity),
     };
     match read {
-        Ok((windows, spend)) if !windows.is_empty() || spend.is_some() => Some(UsageLimits {
-            windows,
-            spend: spend.map(Box::new),
-            read_at: artisan_api::now(),
+        Ok((windows, spend, plan)) if !windows.is_empty() || spend.is_some() => Some(Reading {
+            limits: UsageLimits {
+                windows,
+                spend: spend.map(Box::new),
+                read_at: artisan_api::now(),
+            },
+            plan,
         }),
         Ok(_) => None,
         Err(error) => {
@@ -80,7 +90,7 @@ struct Slot {
 
 #[derive(Debug, Default)]
 struct Last {
-    good: Option<UsageLimits>,
+    good: Option<Reading>,
     attempt: Option<(Instant, bool)>,
 }
 
@@ -102,7 +112,20 @@ impl UsageCache {
 
     #[must_use]
     pub(crate) fn cached(&self, engine: EngineId) -> Option<UsageLimits> {
-        self.slots.get(&engine)?.last().good.clone()
+        Some(
+            self.slots
+                .get(&engine)?
+                .last()
+                .good
+                .as_ref()?
+                .limits
+                .clone(),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn plan(&self, engine: EngineId) -> Option<&'static str> {
+        self.slots.get(&engine)?.last().good.as_ref()?.plan
     }
 
     pub(crate) async fn read(
@@ -124,7 +147,7 @@ impl UsageCache {
             let usage = read_usage(engine, binary, home).await;
             let mut last = slot.last();
             if slot.generation.load(Ordering::Acquire) != generation {
-                return last.good.clone();
+                return last.good.as_ref().map(|reading| reading.limits.clone());
             }
             slot.reads.fetch_add(1, Ordering::Release);
             last.attempt = Some((Instant::now(), usage.is_none()));
@@ -132,7 +155,10 @@ impl UsageCache {
                 last.good = usage;
             }
         }
-        slot.last().good.clone()
+        slot.last()
+            .good
+            .as_ref()
+            .map(|reading| reading.limits.clone())
     }
 
     #[must_use]
@@ -301,7 +327,10 @@ pub(crate) enum ReadCodexUsageError {
     SignedOut,
 }
 
-async fn read_codex(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>, ReadCodexUsageError> {
+async fn read_codex(
+    binary: &Path,
+    home: &Path,
+) -> Result<(Vec<UsageWindow>, Option<&'static str>), ReadCodexUsageError> {
     tokio::time::timeout(CODEX_TIMEOUT, read_codex_inner(binary, home))
         .await
         .map_err(|_elapsed| ReadCodexUsageError::TimedOut)?
@@ -310,7 +339,7 @@ async fn read_codex(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>, Read
 async fn read_codex_inner(
     binary: &Path,
     home: &Path,
-) -> Result<Vec<UsageWindow>, ReadCodexUsageError> {
+) -> Result<(Vec<UsageWindow>, Option<&'static str>), ReadCodexUsageError> {
     let command = engine_command(EngineId::Codex, binary, home);
     let mut session = crate::rpc::Session::codex(command)
         .await
@@ -326,7 +355,19 @@ async fn read_codex_inner(
         .call("account/rateLimits/read", json!({}))
         .await
         .map_err(ReadCodexUsageError::Call)?;
-    Ok(parse_codex_limits(&limits))
+    Ok((parse_codex_limits(&limits), parse_codex_plan(&limits)))
+}
+
+fn parse_codex_plan(result: &Value) -> Option<&'static str> {
+    let buckets = result["rateLimitsByLimitId"]
+        .as_object()
+        .into_iter()
+        .flat_map(|map| map.values());
+    result
+        .get("rateLimits")
+        .into_iter()
+        .chain(buckets)
+        .find_map(|bucket| bucket["planType"].as_str().and_then(crate::plan::chatgpt))
 }
 
 fn parse_codex_limits(result: &Value) -> Vec<UsageWindow> {

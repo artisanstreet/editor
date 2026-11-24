@@ -92,7 +92,10 @@ async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
     };
     match run_short(engine, binary, home, args, CHECK_TIMEOUT).await {
         Ok((success, stdout, stderr)) => {
-            let state = parse_status(engine, success, &stdout, &stderr);
+            let tier = (engine == EngineId::Claude)
+                .then(|| claude_tier(home))
+                .flatten();
+            let state = parse_status(engine, success, &stdout, &stderr, tier.as_deref());
             if engine == EngineId::Codex
                 && matches!(state, SignInState::SignedIn { account: None, .. })
             {
@@ -155,17 +158,6 @@ struct Identity {
     plan: Option<String>,
 }
 
-fn plan_label(brand: &str, kind: &str) -> Option<String> {
-    let kind = kind.trim();
-    let mut letters = kind.chars();
-    let first = letters.next()?;
-    Some(format!(
-        "{brand} {}{}",
-        first.to_uppercase(),
-        letters.as_str().to_lowercase()
-    ))
-}
-
 fn identity(id_token: &str) -> Result<Identity, CodexClaimsError> {
     use base64::Engine as _;
     let claims = id_token.split('.').nth(1).ok_or(CodexClaimsError::Shape)?;
@@ -182,7 +174,8 @@ fn identity(id_token: &str) -> Result<Identity, CodexClaimsError> {
         .ok_or(CodexClaimsError::NoEmail)?;
     let plan = claims["https://api.openai.com/auth"]["chatgpt_plan_type"]
         .as_str()
-        .and_then(|kind| plan_label("ChatGPT", kind));
+        .and_then(crate::plan::chatgpt)
+        .map(str::to_owned);
     Ok(Identity { email, plan })
 }
 
@@ -223,7 +216,54 @@ fn codex_account(home: &Path) -> SignInState {
     }
 }
 
-fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> SignInState {
+#[derive(Debug, thiserror::Error)]
+enum ClaudeTierError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn read_claude_tier(home: &Path) -> Result<Option<String>, ClaudeTierError> {
+    let path = home.join(".claude").join(".credentials.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(ClaudeTierError::Read { path, source }),
+    };
+    let credentials: serde_json::Value =
+        serde_json::from_str(&text).map_err(|source| ClaudeTierError::Parse { path, source })?;
+    Ok(credentials["claudeAiOauth"]["rateLimitTier"]
+        .as_str()
+        .map(str::to_owned))
+}
+
+fn claude_tier(home: &Path) -> Option<String> {
+    read_claude_tier(home).unwrap_or_else(|error| {
+        tracing::warn!(
+            home = %home.display(),
+            error = %diagnostics::chain(&error),
+            "couldn't read the Claude rate-limit tier"
+        );
+        None
+    })
+}
+
+fn parse_status(
+    engine: EngineId,
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+    claude_tier: Option<&str>,
+) -> SignInState {
     let text = strip_ansi(&format!("{stdout}\n{stderr}"));
     let lower = text.to_lowercase();
     if engine == EngineId::Claude {
@@ -237,7 +277,8 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
                 let account = json["email"].as_str().map(str::to_owned);
                 let plan = json["subscriptionType"]
                     .as_str()
-                    .and_then(|kind| plan_label("Claude", kind));
+                    .and_then(|kind| crate::plan::claude(kind, claude_tier))
+                    .map(str::to_owned);
                 SignInState::SignedIn { account, plan }
             } else {
                 SignInState::SignedOut

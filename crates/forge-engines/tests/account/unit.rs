@@ -33,7 +33,13 @@ fn status_probes_classify_recorded_output() {
         .map(|(engine, success, stdout, stderr)| {
             (
                 engine.as_str(),
-                parse_status(*engine, *success, stdout, stderr),
+                parse_status(
+                    *engine,
+                    *success,
+                    stdout,
+                    stderr,
+                    Some("default_claude_max_20x"),
+                ),
             )
         })
         .collect();
@@ -248,7 +254,7 @@ fn codex_sign_in_names_the_chatgpt_account_and_plan_from_its_identity_token() {
     use base64::Engine as _;
     let claims = serde_json::json!({
         "email": "sander@example.com",
-        "https://api.openai.com/auth": { "chatgpt_plan_type": "plus" },
+        "https://api.openai.com/auth": { "chatgpt_plan_type": "prolite" },
     });
     let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let token = format!(
@@ -270,7 +276,7 @@ fn codex_sign_in_names_the_chatgpt_account_and_plan_from_its_identity_token() {
     .expect("auth.json is written");
     let identity = read_codex_identity(home.path()).expect("the account identity is read");
     assert_eq!(identity.email, "sander@example.com");
-    assert_eq!(identity.plan.as_deref(), Some("ChatGPT Plus"));
+    assert_eq!(identity.plan.as_deref(), Some("ChatGPT Pro 100"));
     std::fs::write(
         home.path().join(".codex/auth.json"),
         serde_json::json!({ "auth_mode": "apikey", "OPENAI_API_KEY": "sk" }).to_string(),
