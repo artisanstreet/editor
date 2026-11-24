@@ -7,6 +7,7 @@ pub mod account_view;
 pub mod archive;
 pub mod archive_view;
 pub mod controller;
+pub mod display;
 mod engine_view;
 pub mod engines;
 mod mcp_view;

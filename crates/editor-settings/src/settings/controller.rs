@@ -133,6 +133,7 @@ pub struct SettingsController {
     completion: OwnedDelivery<HostCompletion>,
     tasks: Vec<tokio_util::task::AbortOnDropHandle<()>>,
     active_instance: Option<HostInstance>,
+    pub display_rate: super::display::DisplayRate,
 }
 
 impl Default for SettingsController {
@@ -184,6 +185,7 @@ impl Default for SettingsController {
             ),
             tasks: Vec::new(),
             active_instance: None,
+            display_rate: super::display::DisplayRate::Unknown,
         }
     }
 }

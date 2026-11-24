@@ -270,6 +270,15 @@ impl Entry {
         self.workspace.as_ref().map(|(account, _)| account.as_str())
     }
 
+    pub fn show_display_rate(&mut self, rate: crate::settings::display::DisplayRate) -> bool {
+        let changed = self.controller.display_rate != rate;
+        self.controller.display_rate = rate;
+        if let Some((_, workspace)) = &mut self.workspace {
+            workspace.settings.display_rate = rate;
+        }
+        changed
+    }
+
     pub fn workspace_mut(&mut self) -> Option<&mut Workspace> {
         self.workspace.as_mut().map(|(_, workspace)| workspace)
     }
@@ -289,8 +298,9 @@ impl Entry {
         });
         self.landed = false;
         let mounted = ready.map(|account| {
-            let (workspace, effects) =
+            let (mut workspace, effects) =
                 Workspace::new(core, self.failure.clone(), self.selections.workspace());
+            workspace.settings.display_rate = self.controller.display_rate;
             if let Some(held) = self.held_drafts.take() {
                 workspace.take_held_drafts(held);
             }

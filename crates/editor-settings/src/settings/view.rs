@@ -451,7 +451,7 @@ pub fn build_with_account(
         (SettingsPage::General, _) if page == SettingsPage::General => ui::column()
             .child(appearance(controller, theme, core, Rc::clone(&emit)))
             .child(interface(controller, theme, core, Rc::clone(&emit)))
-            .child(performance(theme, core, emit))
+            .child(performance(controller, theme, core, emit))
             .build(),
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Appearance) =>
@@ -464,7 +464,7 @@ pub fn build_with_account(
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Performance) =>
         {
-            performance(theme, core, emit)
+            performance(controller, theme, core, emit)
         }
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Notifications) =>
@@ -668,7 +668,7 @@ fn settings_search(
         ),
         (
             "Performance",
-            Vec::from(performance_rows(theme, core, Rc::clone(emit))),
+            Vec::from(performance_rows(controller, theme, core, Rc::clone(emit))),
         ),
     ] {
         let rows: Vec<_> = rows
@@ -1627,14 +1627,19 @@ fn prompt_reconciliation(
     controls.build()
 }
 
-fn performance(theme: &ArtisanTheme, core: &Core, emit: Rc<dyn Fn(ViewAction)>) -> Element {
+fn performance(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
     ui::section(
         theme,
         "Performance",
         None,
         ui::card(
             theme,
-            performance_rows(theme, core, emit)
+            performance_rows(controller, theme, core, emit)
                 .into_iter()
                 .map(|(_, row)| row)
                 .collect(),
@@ -1643,6 +1648,7 @@ fn performance(theme: &ArtisanTheme, core: &Core, emit: Rc<dyn Fn(ViewAction)>) 
 }
 
 fn performance_rows(
+    controller: &SettingsController,
     theme: &ArtisanTheme,
     core: &Core,
     emit: Rc<dyn Fn(ViewAction)>,
@@ -1654,7 +1660,7 @@ fn performance_rows(
         *theme,
         "Refresh rate",
         preferences.lower_refresh_rate.on(),
-        Segment::new(false, "Display"),
+        Segment::new(false, controller.display_rate.label()),
     )
     .options([Segment::new(true, "60 Hz")])
     .carved()

@@ -1,3 +1,4 @@
+mod display;
 mod licences;
 
 use editor_aqua::settings::{extensions, prompt};

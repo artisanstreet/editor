@@ -1261,6 +1261,12 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                     ctx.request_frame(id, FrameReason::ANIMATION);
                 }
             }
+            WindowEvent::DisplayChanged(_, display) => {
+                let rate = crate::settings::display::DisplayRate::of(display.refresh);
+                if self.shell.entry.show_display_rate(rate) {
+                    self.drain(ctx, id, true);
+                }
+            }
             WindowEvent::CloseRequested(_)
             | WindowEvent::Occluded(..)
             | WindowEvent::RedrawRequested(_)
