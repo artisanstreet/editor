@@ -613,13 +613,20 @@ fn frame(
                 .build(),
         )
         .build()
-        .with_key(key)
+        .with_key("settings-main-scroll")
         .debug_selector("settings-main-scroll");
     let edges = &controller.scroll_edges;
     UiBox::new()
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
-        .child(scroll)
+        .child(
+            UiBox::new()
+                .width(Length::Pct(100.0))
+                .height(Length::Pct(100.0))
+                .child(scroll)
+                .build()
+                .with_key(key),
+        )
         .child(edges.band(
             "settings-edge-top",
             editor_ui::scroll_edge::Edge::Top,

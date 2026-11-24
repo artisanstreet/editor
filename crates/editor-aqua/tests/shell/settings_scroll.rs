@@ -41,7 +41,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
     );
     let host = DialogHost::open(app, owner, dialog).unwrap();
     app.build_frame().unwrap();
-    let scroller = keyed_node(app, "settings-screen-General").unwrap();
+    let scroller = keyed_node(app, "settings-main-scroll").unwrap();
     let bounds = app.tree().visual_rect(scroller).unwrap();
     let content = app.tree().content_size(scroller).unwrap();
     assert!(
@@ -83,7 +83,7 @@ fn settings_scroll(viewport: Size, scale: f32) {
     )
     .unwrap();
     app.build_frame().unwrap();
-    let scroller = keyed_node(app, "settings-screen-General").unwrap();
+    let scroller = keyed_node(app, "settings-main-scroll").unwrap();
     assert_eq!(
         app.tree().scroll_offset(scroller).unwrap(),
         offset,
@@ -102,4 +102,81 @@ fn general_settings_scroll_inside_the_dialog_without_moving_its_header() {
             settings_scroll(viewport, scale);
         }
     }
+}
+
+#[test]
+fn one_wheel_notch_glides_the_settings_page_as_far_as_a_thread() {
+    use editor_aqua::shell::wheel::{Surface, WheelGlides};
+    let viewport = Size::new(1100.0, 760.0);
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(directory.path());
+    core.navigate(Screen::Settings(SettingsPage::General));
+    let controller = SettingsController::default();
+    let mut resources = ShellResources::new(1.0).unwrap();
+    let app = &mut resources.ui;
+    app.set_viewport(viewport.w, viewport.h, 1.0);
+    app.mount(|_| UiBox::new().width(viewport.w).height(viewport.h).build())
+        .unwrap();
+    app.build_frame().unwrap();
+    let owner = app.tree().root().unwrap();
+    let page = view::build(
+        &controller,
+        &core,
+        &ArtisanTheme::resolved(),
+        &BuildInfo::default(),
+        viewport,
+        true,
+        Rc::new(|_| {}),
+    );
+    let dialog = editor_aqua::shell::settings_frame::settings_dialog(
+        &ArtisanTheme::resolved(),
+        editor_aqua::shell::layout::Size {
+            width: viewport.w,
+            height: viewport.h,
+        },
+        UiBox::new().build(),
+        page,
+        Rc::new(|| {}),
+    );
+    let _host = DialogHost::open(app, owner, dialog).unwrap();
+    app.build_frame().unwrap();
+    let scroller = keyed_node(app, "settings-main-scroll").unwrap();
+    let bounds = app.tree().visual_rect(scroller).unwrap();
+    let mut glides = WheelGlides::default();
+    let mut now = aqua::Instant::ZERO;
+    assert_eq!(
+        glides.offer(
+            app,
+            &InputEvent::Scroll {
+                at: Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
+                delta: ScrollDelta { x: 0.0, y: 16.0 },
+            },
+            now,
+        ),
+        Some(Surface::SettingsPage)
+    );
+    let first = {
+        now += std::time::Duration::from_millis(16);
+        glides.advance(app, now);
+        app.build_frame().unwrap();
+        app.tree().scroll_offset(scroller).unwrap().y
+    };
+    for _ in 0..60 {
+        now += std::time::Duration::from_millis(16);
+        let advance = glides.advance(app, now);
+        app.build_frame().unwrap();
+        if !advance.active {
+            break;
+        }
+    }
+    let rested = app.tree().scroll_offset(scroller).unwrap().y;
+    assert!(
+        first > 0.0 && first < rested,
+        "the notch glides instead of jumping: {first} then {rested}"
+    );
+    assert!(
+        (rested - 77.665_63).abs() < 1.0,
+        "one notch scrolls three lines, got {rested}"
+    );
+    assert!(!glides.active());
 }
