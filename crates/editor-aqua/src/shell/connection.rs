@@ -155,7 +155,33 @@ pub struct ConnectionPresenter {
     phase: Option<(bool, Instant)>,
     mark: WordmarkLoader,
     commands: Commands,
-    last_failure: Option<crate::core::Problem>,
+    last_failure: Option<LastFailure>,
+}
+
+#[derive(Debug)]
+struct LastFailure {
+    reason: crate::core::Problem,
+    fault: Option<ForgeFault>,
+}
+
+enum Diagnosis<'host> {
+    WslStopped(&'host crate::core::WslStatus),
+    ForgeStopped(&'host crate::core::WslStatus),
+    Waiting,
+}
+
+impl ConnectionPresenter {
+    fn diagnose<'host>(&self, host: &'host HostData) -> Diagnosis<'host> {
+        let unreachable = self
+            .last_failure
+            .as_ref()
+            .is_some_and(|failure| failure.fault == Some(ForgeFault::Unreachable));
+        match &host.wsl {
+            Some(wsl) if !wsl.running => Diagnosis::WslStopped(wsl),
+            Some(wsl) if unreachable => Diagnosis::ForgeStopped(wsl),
+            Some(_) | None => Diagnosis::Waiting,
+        }
+    }
 }
 
 fn command_button(
@@ -258,7 +284,10 @@ impl ConnectionPresenter {
             }
             ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. } => None,
             ConnectionStatus::Offline { fault, reason, .. } => {
-                self.last_failure = Some(reason.clone());
+                self.last_failure = Some(LastFailure {
+                    reason: reason.clone(),
+                    fault: *fault,
+                });
                 *fault
             }
         };
@@ -331,29 +360,32 @@ impl ConnectionPresenter {
             .style(Style::new().align(AlignItems::CENTER))
             .child(mark);
         if now.saturating_duration_since(since) >= REASSURANCE_DELAY {
-            let (detail, action) = if let Some(wsl) = &host.wsl {
-                let (detail, label) = if wsl.running {
-                    (
-                        format!("Forge isn't running in {}.", wsl.distro),
-                        if wsl.starting {
-                            "Starting Forge…".to_owned()
-                        } else {
-                            "Start Forge".to_owned()
-                        },
-                    )
-                } else {
-                    (
-                        format!(
-                            "WSL isn't running, so Forge in {} can't be reached.",
-                            wsl.distro
-                        ),
-                        if wsl.starting {
-                            format!("Starting {}…", wsl.distro)
-                        } else {
-                            format!("Start {}", wsl.distro)
-                        },
-                    )
-                };
+            let diagnosis = self.diagnose(host);
+            let stopped = match diagnosis {
+                Diagnosis::ForgeStopped(wsl) => Some((
+                    wsl,
+                    format!("Forge isn't running in {}.", wsl.distro),
+                    if wsl.starting {
+                        "Starting Forge…".to_owned()
+                    } else {
+                        "Start Forge".to_owned()
+                    },
+                )),
+                Diagnosis::WslStopped(wsl) => Some((
+                    wsl,
+                    format!(
+                        "WSL isn't running, so Forge in {} can't be reached.",
+                        wsl.distro
+                    ),
+                    if wsl.starting {
+                        format!("Starting {}…", wsl.distro)
+                    } else {
+                        format!("Start {}", wsl.distro)
+                    },
+                )),
+                Diagnosis::Waiting => None,
+            };
+            let (detail, action) = if let Some((wsl, detail, label)) = stopped {
                 let action = command_button(
                     "start-wsl-forge",
                     theme,
@@ -425,8 +457,8 @@ impl ConnectionPresenter {
                     crate::ui::kit::ProblemNotice::new("wsl-start-problem", *theme, error).build(),
                 );
             }
-            if host.wsl.is_none()
-                && let Some(reason) = &self.last_failure
+            if matches!(diagnosis, Diagnosis::Waiting)
+                && let Some(LastFailure { reason, .. }) = &self.last_failure
             {
                 line = line.child(label(
                     theme,

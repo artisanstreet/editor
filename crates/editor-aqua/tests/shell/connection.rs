@@ -1,4 +1,6 @@
-use editor_aqua::core::{ConnectionStatus, HostConfig, HostId, HostKind, Screen, SettingsPage};
+use editor_aqua::core::{
+    ConnectionStatus, HostConfig, HostId, HostKind, Screen, SettingsPage, WslStatus,
+};
 use editor_aqua::shell::application::SectionViews as _;
 use editor_aqua::shell::connection::ConnectionPresenter;
 use editor_aqua::shell::root::RootViews;
@@ -66,6 +68,94 @@ fn an_offline_forge_shows_why_and_offers_retry_and_the_forges_page() {
     test_support::editor::ui::click(&mut app, "manage-forges");
     presenter.dispatch(&mut core);
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::Hosts));
+}
+
+fn forge_that_drops_every_connection() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = format!("https://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for connection in listener.incoming() {
+            drop(connection);
+        }
+    });
+    address
+}
+
+fn wsl_status_after_waiting(
+    address: String,
+    fingerprint: String,
+    settled: fn(&ConnectionStatus) -> bool,
+) -> Vec<String> {
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_core(directory.path());
+    let config = HostConfig {
+        id: HostId("wsl-forge".into()),
+        name: "Forge".into(),
+        address,
+        fingerprint,
+        kind: HostKind::Remote,
+    };
+    connect(&mut core, &config);
+    test_support::wait::wait_until("the connection to settle", Duration::from_secs(20), || {
+        core.drain_with(|_, _| {});
+        settled(&core.host(&config.id).unwrap().status)
+    });
+    core.host_mut(&config.id).unwrap().wsl = Some(WslStatus {
+        distro: "Ubuntu".into(),
+        running: true,
+        starting: false,
+        error: None,
+    });
+    let theme = ArtisanTheme::resolved();
+    let mut presenter = ConnectionPresenter::default();
+    let manual = test_support::clock::ManualClock::starting_at(1_700_000_000_000);
+    let clock = manual.clock();
+    let host = core.host(&config.id).unwrap();
+    assert!(presenter.build(host, &theme, &clock, true).is_some());
+    manual.advance(Duration::from_secs(6));
+    let status = presenter
+        .build(host, &theme, &clock, true)
+        .expect("a Forge that isn't live has a status");
+    test_support::editor::ui::painted_texts(&test_support::editor::ui::mounted(
+        900.0, 700.0, status,
+    ))
+}
+
+#[test]
+fn a_wsl_forge_that_is_slow_to_answer_is_not_called_stopped() {
+    let forge = forge_that_never_answers();
+    let texts = wsl_status_after_waiting(
+        forge.address().to_owned(),
+        forge.fingerprint().to_owned(),
+        |status| *status == ConnectionStatus::Connecting,
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.ends_with("Connecting to Artisan Forge…")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .all(|text| !text.contains("isn't running") && text != "Start Forge"),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn a_wsl_forge_that_cannot_be_reached_offers_to_start_it() {
+    let texts = wsl_status_after_waiting(
+        forge_that_drops_every_connection(),
+        "00".repeat(32),
+        |status| matches!(status, ConnectionStatus::Offline { .. }),
+    );
+    for expected in ["Forge isn't running in Ubuntu.", "Start Forge"] {
+        assert!(
+            texts.iter().any(|text| text.contains(expected)),
+            "{expected:?} in {texts:?}"
+        );
+    }
 }
 
 const LOST: &str = "Lost the connection to Forge. Reconnecting…";
