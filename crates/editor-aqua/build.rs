@@ -53,7 +53,8 @@ fn embed_notices() -> Result<(), Box<dyn Error>> {
         ]
         .map(|file| root.join(file)),
     );
-    artisan_payload::embed_notices("notices.gz", &root, &files)?;
+    let notices = artisan_payload::embed_notices("notices.gz", &root, &files)?;
+    artisan_payload::licences::embed("licences.rs", &notices)?;
     Ok(())
 }
 

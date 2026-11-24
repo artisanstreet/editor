@@ -1,42 +1,19 @@
 use std::collections::BTreeMap;
-
-pub use artisan_payload::UnpackPayloadError;
+use std::fmt::Write as _;
 
 const CARGO_RULE: &str =
     "\n================================================================================\n";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Licence {
-    pub name: String,
-    pub text: String,
+    pub name: &'static str,
+    pub text: &'static str,
 }
 
-pub type Loaded = Result<&'static [Licence], &'static UnpackPayloadError>;
-
-#[derive(Clone, Copy)]
-pub struct Licences(fn() -> Loaded);
-
-impl Licences {
-    #[must_use]
-    pub const fn new(load: fn() -> Loaded) -> Self {
-        Self(load)
-    }
-
-    pub(crate) fn load(self) -> Loaded {
-        (self.0)()
-    }
-}
-
-impl Default for Licences {
-    fn default() -> Self {
-        Self(|| Ok(&[]))
-    }
-}
-
-impl std::fmt::Debug for Licences {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Licences").finish_non_exhaustive()
-    }
+#[derive(Debug, PartialEq, Eq)]
+struct Entry {
+    name: String,
+    text: String,
 }
 
 enum Section<'a> {
@@ -133,8 +110,7 @@ fn crates(text: &str, into: &mut BTreeMap<String, Vec<(String, String)>>) {
     }
 }
 
-#[must_use]
-pub fn catalogue(notices: &str) -> Vec<Licence> {
+fn catalogue(notices: &str) -> Vec<Entry> {
     let mut bundled: BTreeMap<String, String> = BTreeMap::new();
     let mut cargo: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (label, text) in sections(notices) {
@@ -146,9 +122,9 @@ pub fn catalogue(notices: &str) -> Vec<Licence> {
             Section::Attestation => {}
         }
     }
-    let mut licences: Vec<Licence> = bundled
+    let mut licences: Vec<Entry> = bundled
         .into_iter()
-        .map(|(name, text)| Licence { name, text })
+        .map(|(name, text)| Entry { name, text })
         .collect();
     for (name, versions) in cargo {
         let mut texts: Vec<(Vec<String>, String)> = Vec::new();
@@ -159,7 +135,7 @@ pub fn catalogue(notices: &str) -> Vec<Licence> {
             }
         }
         let split = texts.len() > 1;
-        licences.extend(texts.into_iter().map(|(versions, text)| Licence {
+        licences.extend(texts.into_iter().map(|(versions, text)| Entry {
             name: if split {
                 format!("{name} {}", versions.join(", "))
             } else {
@@ -171,3 +147,68 @@ pub fn catalogue(notices: &str) -> Vec<Licence> {
     licences.sort_by_cached_key(|licence| licence.name.to_lowercase());
     licences
 }
+
+fn source(entries: &[Entry]) -> String {
+    let mut texts: Vec<&str> = Vec::new();
+    let mut rows = String::new();
+    for entry in entries {
+        let index = texts
+            .iter()
+            .position(|text| *text == entry.text)
+            .unwrap_or_else(|| {
+                texts.push(&entry.text);
+                texts.len() - 1
+            });
+        writeln!(
+            rows,
+            "        ::artisan_payload::licences::Licence {{ name: {:?}, text: TEXT_{index} }},",
+            entry.name
+        )
+        .expect("invariant: writing to a String cannot fail");
+    }
+    let mut source = String::from("{\n");
+    for (index, text) in texts.iter().enumerate() {
+        writeln!(source, "    const TEXT_{index}: &str = {text:?};")
+            .expect("invariant: writing to a String cannot fail");
+    }
+    source.push_str("    &[\n");
+    source.push_str(&rows);
+    source.push_str("    ]\n}\n");
+    source
+}
+
+fn compile(notices: &str) -> String {
+    source(&catalogue(notices))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EmbedLicencesError {
+    #[error("OUT_DIR is not set")]
+    OutDirUnset,
+    #[error("write the licence table {}", path.display())]
+    Write {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub fn embed(name: &str, notices: &str) -> Result<(), EmbedLicencesError> {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").ok_or(EmbedLicencesError::OutDirUnset)?,
+    )
+    .join(name);
+    std::fs::write(&path, compile(notices))
+        .map_err(|source| EmbedLicencesError::Write { path, source })
+}
+
+#[macro_export]
+macro_rules! licences {
+    ($name:literal) => {
+        include!(concat!(env!("OUT_DIR"), "/", $name))
+    };
+}
+
+#[cfg(test)]
+#[path = "../tests/payload/licences.rs"]
+mod tests;

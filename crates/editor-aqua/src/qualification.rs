@@ -12,6 +12,6 @@ pub(crate) fn build() -> crate::settings::about::BuildInfo {
         profile: "release".to_owned(),
         target: "x86_64-pc-windows-msvc".to_owned(),
         executable: Some(r"C:\Program Files\Artisan Street\Editor\Artisan Editor.exe".into()),
-        licences: crate::settings::licences::Licences::new(crate::setup::licences),
+        licences: crate::setup::LICENCES,
     }
 }

@@ -1,3 +1,5 @@
+pub mod licences;
+
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -26,14 +28,6 @@ pub enum WritePayloadError {
         #[source]
         source: std::io::Error,
     },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum UnpackPayloadError {
-    #[error("this build carries no payload to unpack")]
-    Absent,
-    #[error("unpack the payload as text")]
-    Unpack(#[source] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -104,16 +98,6 @@ impl<'a> Payload<'a> {
                 path: path.to_owned(),
                 source,
             })
-    }
-
-    pub fn unpack(&self) -> Result<String, UnpackPayloadError> {
-        if !self.present() {
-            return Err(UnpackPayloadError::Absent);
-        }
-        let mut text = String::new();
-        std::io::Read::read_to_string(&mut GzDecoder::new(self.0), &mut text)
-            .map_err(UnpackPayloadError::Unpack)?;
-        Ok(text)
     }
 
     pub fn write_program(&self, path: &Path) -> Result<(), WritePayloadError> {
@@ -199,8 +183,12 @@ pub enum EmbedNoticesError {
     },
 }
 
-pub fn embed_notices(name: &str, root: &Path, files: &[PathBuf]) -> Result<(), EmbedNoticesError> {
-    let mut notices = Vec::new();
+pub fn embed_notices(
+    name: &str,
+    root: &Path,
+    files: &[PathBuf],
+) -> Result<String, EmbedNoticesError> {
+    let mut notices = String::new();
     for file in files {
         cargo_directive(format_args!("rerun-if-changed={}", file.display()));
         let label = file
@@ -212,18 +200,21 @@ pub fn embed_notices(name: &str, root: &Path, files: &[PathBuf]) -> Result<(), E
             .display()
             .to_string()
             .replace('\\', "/");
-        let text = std::fs::read(file).map_err(|source| EmbedNoticesError::Read {
+        let text = std::fs::read_to_string(file).map_err(|source| EmbedNoticesError::Read {
             file: file.clone(),
             source,
         })?;
-        notices.extend_from_slice(format!("==== {label} ====\n\n").as_bytes());
-        notices.extend_from_slice(&text);
-        notices.extend_from_slice(b"\n\n");
+        notices.push_str("==== ");
+        notices.push_str(&label);
+        notices.push_str(" ====\n\n");
+        notices.push_str(&text);
+        notices.push_str("\n\n");
     }
     let path = PathBuf::from(std::env::var_os("OUT_DIR").ok_or(EmbedNoticesError::OutDirUnset)?)
         .join(name);
-    let packed = pack(&notices).map_err(EmbedNoticesError::Pack)?;
-    std::fs::write(&path, packed).map_err(|source| EmbedNoticesError::Write { path, source })
+    let packed = pack(notices.as_bytes()).map_err(EmbedNoticesError::Pack)?;
+    std::fs::write(&path, packed).map_err(|source| EmbedNoticesError::Write { path, source })?;
+    Ok(notices)
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ mod window;
 use artisan_paths::{App, RootError};
 pub use install::InstallError;
 use model::{Entry, Existing, Setup};
-pub(crate) use payload::licences;
+pub(crate) use payload::LICENCES;
 pub use payload::{StageError, WriteNoticesError};
 use std::path::PathBuf;
 pub use window::SetupWindowError;

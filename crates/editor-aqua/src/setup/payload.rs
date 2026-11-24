@@ -66,17 +66,8 @@ pub(super) fn write_notices() -> Result<(), WriteNoticesError> {
         .map_err(WriteNoticesError::Write)
 }
 
-static LICENCES: std::sync::LazyLock<
-    Result<Vec<crate::settings::licences::Licence>, artisan_payload::UnpackPayloadError>,
-> = std::sync::LazyLock::new(|| {
-    NOTICES
-        .unpack()
-        .map(|notices| crate::settings::licences::catalogue(&notices))
-});
-
-pub(crate) fn licences() -> crate::settings::licences::Loaded {
-    LICENCES.as_deref()
-}
+pub(crate) static LICENCES: &[artisan_payload::licences::Licence] =
+    artisan_payload::licences!("licences.rs");
 
 #[cfg(test)]
 #[path = "../../tests/setup/payload.rs"]

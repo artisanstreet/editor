@@ -15,7 +15,7 @@ pub struct BuildInfo {
     pub profile: String,
     pub target: String,
     pub executable: Option<PathBuf>,
-    pub licences: super::licences::Licences,
+    pub licences: &'static [artisan_payload::licences::Licence],
 }
 
 impl BuildInfo {

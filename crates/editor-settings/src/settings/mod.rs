@@ -9,7 +9,6 @@ pub mod archive_view;
 pub mod controller;
 mod engine_view;
 pub mod engines;
-pub mod licences;
 mod mcp_view;
 pub mod preferences;
 pub mod ui;

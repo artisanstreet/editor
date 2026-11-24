@@ -884,7 +884,7 @@ const LICENCE_ROWS: u8 = 10;
 #[derive(Clone)]
 struct LicenceRow {
     index: usize,
-    licence: &'static super::licences::Licence,
+    licence: &'static artisan_payload::licences::Licence,
     open: bool,
     edges: ui::Edges,
 }
@@ -895,22 +895,7 @@ fn licence_list(
     build: &BuildInfo,
     emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let licences = match build.licences.load() {
-        Ok(licences) => licences,
-        Err(error) => {
-            return ui::card(
-                theme,
-                vec![ui::block(
-                    ui::problem(
-                        theme,
-                        "settings-licences-error",
-                        &Problem::caused_by("Couldn't read the bundled licences.", error),
-                    )
-                    .build(),
-                )],
-            );
-        }
-    };
+    let licences = build.licences;
     if licences.is_empty() {
         return ui::card(
             theme,
@@ -943,8 +928,8 @@ fn licence_list(
             let item = ui::licence(
                 &theme,
                 format!("settings-licence-{index}"),
-                &row.licence.name,
-                row.open.then_some(row.licence.text.as_str()),
+                row.licence.name,
+                row.open.then_some(row.licence.text),
                 row.edges,
                 move || send(ViewAction::ToggleLicence(index)),
             );
