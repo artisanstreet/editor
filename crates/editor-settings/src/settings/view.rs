@@ -81,7 +81,6 @@ pub enum ViewAction {
     McpCancelSignIn(String),
     McpSignOut(String),
     OpenUrl(String),
-    OpenNotices,
     ToggleLicence(usize),
     ExportDiagnostics,
     DiagnosticsExported(Result<(), Problem>),
@@ -131,7 +130,6 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
             | ViewAction::AccountEdited
             | ViewAction::McpEdited
             | ViewAction::OpenUrl(_)
-            | ViewAction::OpenNotices
             | ViewAction::ExportDiagnostics
             | ViewAction::CopyText(_)
     ) {
@@ -298,7 +296,6 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         | ViewAction::PromptPresentationChanged
         | ViewAction::OpenUrl(_)
         | ViewAction::SearchChanged
-        | ViewAction::OpenNotices
         | ViewAction::ExportDiagnostics
         | ViewAction::CopyText(_) => {}
         ViewAction::McpSignIn(server) => controller.sign_in_mcp(core, &server),
@@ -543,7 +540,7 @@ pub fn build_with_account(
         (SettingsPage::Account, _) => {
             super::account_view::page(controller, core, theme, account, &emit)
         }
-        (SettingsPage::About, _) => about(controller, theme, build_info, emit),
+        (SettingsPage::About, _) => about(controller, theme, build_info, &emit),
         (SettingsPage::Hosts, _) => hosts(controller, theme, core, &emit),
         _ => ui::section(
             theme,
@@ -874,15 +871,102 @@ fn device_settings_error(
     )
 }
 
+const LICENCE_ROW: f32 = 56.0;
+const LICENCE_ROWS: u8 = 10;
+
+#[derive(Clone)]
+struct LicenceRow {
+    index: usize,
+    licence: &'static super::licences::Licence,
+    open: bool,
+    edges: ui::Edges,
+}
+
+fn licence_list(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    build: &BuildInfo,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let licences = match build.licences.load() {
+        Ok(licences) => licences,
+        Err(error) => {
+            return ui::card(
+                theme,
+                vec![ui::block(
+                    ui::problem(
+                        theme,
+                        "settings-licences-error",
+                        &Problem::caused_by("Couldn't read the bundled licences.", error),
+                    )
+                    .build(),
+                )],
+            );
+        }
+    };
+    if licences.is_empty() {
+        return ui::card(
+            theme,
+            vec![ui::note(theme, "This build carries no licences.")],
+        );
+    }
+    let final_row = licences.len() - 1;
+    let rows: Vec<LicenceRow> = licences
+        .iter()
+        .enumerate()
+        .map(|(index, licence)| LicenceRow {
+            index,
+            licence,
+            open: controller.open_licence == Some(index),
+            edges: ui::Edges {
+                first: index == 0,
+                last: index == final_row,
+            },
+        })
+        .collect();
+    let visible = u8::try_from(rows.len()).map_or(LICENCE_ROWS, |rows| rows.min(LICENCE_ROWS));
+    let theme = *theme;
+    let emit = Rc::clone(emit);
+    let list = aqua_ui::collection::List::new()
+        .items(rows)
+        .key(|row| format!("settings-licence-{}", row.index))
+        .row(move |row| {
+            let send = Rc::clone(&emit);
+            let index = row.index;
+            let item = ui::licence(
+                &theme,
+                format!("settings-licence-{index}"),
+                &row.licence.name,
+                row.open.then_some(row.licence.text.as_str()),
+                row.edges,
+                move || send(ViewAction::ToggleLicence(index)),
+            );
+            if row.edges.first {
+                item
+            } else {
+                ui::ruled(&theme, item)
+            }
+        })
+        .style(
+            Style::new()
+                .width(Length::Pct(100.0))
+                .height(Length::Px(f32::from(visible) * LICENCE_ROW)),
+        )
+        .estimated_row_height(Length::Px(LICENCE_ROW))
+        .build()
+        .with_key("settings-licences");
+    ui::card(&theme, vec![list])
+}
+
 const ABOUT_TITLE: Type = Type::sans(17.0, 22.0, 500);
 
 fn about(
     controller: &SettingsController,
     theme: &ArtisanTheme,
     build: &BuildInfo,
-    emit: Rc<dyn Fn(ViewAction)>,
+    emit: &Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let export = Rc::clone(&emit);
+    let export = Rc::clone(emit);
     let mark = ui::raised(
         avatar(
             theme,
@@ -947,31 +1031,7 @@ fn about(
             }
         });
     }
-    let mut licences = Vec::new();
-    for (index, (name, contents)) in super::about::LICENCES.into_iter().enumerate() {
-        let send = Rc::clone(&emit);
-        let open = controller.open_licence == Some(index);
-        licences.push(ui::licence(
-            theme,
-            format!("settings-licence-{index}"),
-            name,
-            open.then_some(contents),
-            move || send(ViewAction::ToggleLicence(index)),
-        ));
-    }
-    licences.push(ui::row(
-        theme,
-        "All third-party notices",
-        "",
-        Some(ui::button(
-            theme,
-            "about-open-notices",
-            "Open",
-            ButtonTone::Quiet,
-            false,
-            move || emit(ViewAction::OpenNotices),
-        )),
-    ));
+    let licences = licence_list(controller, theme, build, emit);
     ui::column()
         .child(ui::section(
             theme,
@@ -979,12 +1039,7 @@ fn about(
             None,
             ui::card(theme, build_rows),
         ))
-        .child(ui::section(
-            theme,
-            "Licences",
-            None,
-            ui::card(theme, licences),
-        ))
+        .child(ui::section(theme, "Licences", None, licences))
         .build()
 }
 

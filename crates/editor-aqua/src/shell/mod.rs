@@ -43,57 +43,12 @@ pub enum OpenUrlError {
     Unsupported,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum OpenPathError {
-    #[error("{} is not a file the Editor opens", path.display())]
-    Target {
-        path: std::path::PathBuf,
-        #[source]
-        source: aqua::prelude::OpenError,
-    },
-    #[cfg(windows)]
-    #[error("Windows could not open {}", path.display())]
-    Execute {
-        path: std::path::PathBuf,
-        #[source]
-        source: aqua::prelude::OpenError,
-    },
-    #[cfg(not(windows))]
-    #[error("the Aqua native shell opens files on Windows only, not {}", path.display())]
-    Unsupported { path: std::path::PathBuf },
-}
-
 #[cfg(windows)]
 fn open_url(url: &str) -> Result<(), OpenUrlError> {
     aqua::prelude::OpenTarget::url(url)
         .map_err(OpenUrlError::Target)?
         .execute()
         .map_err(OpenUrlError::Execute)
-}
-
-#[cfg(windows)]
-pub(crate) fn open_path(path: &std::path::Path) -> Result<(), OpenPathError> {
-    aqua::prelude::OpenTarget::path(path)
-        .map_err(|source| OpenPathError::Target {
-            path: path.to_owned(),
-            source,
-        })?
-        .execute()
-        .map_err(|source| OpenPathError::Execute {
-            path: path.to_owned(),
-            source,
-        })
-}
-
-#[cfg(not(windows))]
-pub(crate) fn open_path(path: &std::path::Path) -> Result<(), OpenPathError> {
-    aqua::prelude::OpenTarget::path(path).map_err(|source| OpenPathError::Target {
-        path: path.to_owned(),
-        source,
-    })?;
-    Err(OpenPathError::Unsupported {
-        path: path.to_owned(),
-    })
 }
 
 #[cfg(not(windows))]

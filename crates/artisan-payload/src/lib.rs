@@ -29,6 +29,14 @@ pub enum WritePayloadError {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum UnpackPayloadError {
+    #[error("this build carries no payload to unpack")]
+    Absent,
+    #[error("unpack the payload as text")]
+    Unpack(#[source] std::io::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
 #[error("compress the program")]
 pub struct PackError(#[source] std::io::Error);
 
@@ -96,6 +104,16 @@ impl<'a> Payload<'a> {
                 path: path.to_owned(),
                 source,
             })
+    }
+
+    pub fn unpack(&self) -> Result<String, UnpackPayloadError> {
+        if !self.present() {
+            return Err(UnpackPayloadError::Absent);
+        }
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut GzDecoder::new(self.0), &mut text)
+            .map_err(UnpackPayloadError::Unpack)?;
+        Ok(text)
     }
 
     pub fn write_program(&self, path: &Path) -> Result<(), WritePayloadError> {

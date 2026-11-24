@@ -388,12 +388,6 @@ impl<V: SectionViews> ShellApplication<V> {
                         failed = true;
                     }
                 }
-                crate::shell::workspace::SettingsPlatformEffect::OpenNotices => {
-                    if let Err(error) = crate::setup::open_notices() {
-                        self.shell.failures.notices(&error);
-                        failed = true;
-                    }
-                }
                 crate::shell::workspace::SettingsPlatformEffect::ExportDiagnostics => {
                     if let Some(workspace) = self.shell.entry.workspace() {
                         let emit = workspace.settings_emit();

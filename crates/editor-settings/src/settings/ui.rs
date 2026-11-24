@@ -616,15 +616,41 @@ pub(crate) fn about_hero(identity: Element, description: Element) -> Element {
         .build()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Edges {
+    pub(crate) first: bool,
+    pub(crate) last: bool,
+}
+
 pub(crate) fn licence(
     theme: &ArtisanTheme,
     key: String,
     name: &str,
     body: Option<&str>,
+    edges: Edges,
     on_toggle: impl Fn() + 'static,
 ) -> Element {
     let carve = Carve::of(theme);
     let open = body.is_some();
+    let rim = 1.0;
+    let top = if edges.first { RADIUS_MD - rim } else { 0.0 };
+    let bottom = if edges.last { RADIUS_MD - rim } else { 0.0 };
+    let fill = editor_ui::kit::live::layer(editor_ui::kit::Hover::Neutral, theme, 0.0, false)
+        .style(
+            Style::new()
+                .absolute_at(
+                    Some(rim),
+                    Some(if edges.first { rim } else { 0.0 }),
+                    Some(rim),
+                    Some(if edges.last { rim } else { 0.0 }),
+                )
+                .corners(aqua_core::CornerRadii {
+                    top_left: top,
+                    top_right: top,
+                    bottom_right: bottom,
+                    bottom_left: bottom,
+                }),
+        );
     let trigger = aqua_ui::element::Button::new()
         .width(Length::Pct(100.0))
         .height(56.0)
@@ -640,12 +666,6 @@ pub(crate) fn licence(
                     bottom: 0.0,
                 }),
         )
-        .child(editor_ui::kit::live::layer(
-            editor_ui::kit::Hover::Neutral,
-            theme,
-            0.0,
-            false,
-        ))
         .child(label(theme, name))
         .child(editor_ui::carved::glyph::glyph(
             if open {
@@ -656,17 +676,14 @@ pub(crate) fn licence(
             15.0,
             if open { carve.ink } else { carve.ink_dim },
         ))
-        .on_activate(on_toggle);
-    let trigger = editor_ui::kit::live::track(
-        trigger
-            .build()
-            .with_key(key)
-            .role(aqua_core::Role::Button)
-            .aria_label(format!("{name} licence"))
-            .aria_expanded(open)
-            .cursor(aqua_core::CursorIcon::Pointer)
-            .focus_visible_style(editor_ui::carved::button::focus(theme)),
-    );
+        .on_activate(on_toggle)
+        .build()
+        .with_key(key)
+        .role(aqua_core::Role::Button)
+        .aria_label(format!("{name} licence"))
+        .aria_expanded(open)
+        .cursor(aqua_core::CursorIcon::Pointer)
+        .focus_visible_style(editor_ui::carved::button::focus(theme));
     let well = body.map(|body| {
         UiBox::new()
             .width(Length::Pct(100.0))
@@ -702,12 +719,15 @@ pub(crate) fn licence(
             )
             .build()
     });
-    UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .child(trigger)
-        .children(well)
-        .build()
+    editor_ui::kit::live::track(
+        UiBox::new()
+            .layout("column")
+            .width(Length::Pct(100.0))
+            .child(fill)
+            .child(trigger)
+            .children(well)
+            .build(),
+    )
 }
 
 pub(crate) fn hero(identity: Element, actions: Element) -> Element {

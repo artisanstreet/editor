@@ -62,6 +62,7 @@ fn running_build() -> BuildInfo {
                 None
             }
         },
+        licences: crate::settings::licences::Licences::new(crate::setup::licences),
     }
 }
 

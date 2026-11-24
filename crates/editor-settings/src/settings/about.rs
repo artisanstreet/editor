@@ -8,13 +8,14 @@ pub struct WriteDiagnosticsError {
     pub source: std::io::Error,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct BuildInfo {
     pub version: String,
     pub commit: String,
     pub profile: String,
     pub target: String,
     pub executable: Option<PathBuf>,
+    pub licences: super::licences::Licences,
 }
 
 impl BuildInfo {
@@ -88,38 +89,3 @@ impl BuildInfo {
         report
     }
 }
-
-pub(crate) const LICENCES: [(&str, &str); 8] = [
-    (
-        "Aqua",
-        include_str!("../../../editor-assets/licenses/aqua-BSD.txt"),
-    ),
-    (
-        "Taffy",
-        include_str!("../../../editor-assets/licenses/aqua-taffy-MIT.txt"),
-    ),
-    (
-        "Spline Sans",
-        include_str!("../../../editor-assets/licenses/spline-sans-OFL.txt"),
-    ),
-    (
-        "Spline Sans Mono",
-        include_str!("../../../editor-assets/licenses/spline-sans-mono-OFL.txt"),
-    ),
-    (
-        "Tabler Icons",
-        include_str!("../../../editor-assets/licenses/tabler-MIT.txt"),
-    ),
-    (
-        "Simple Icons",
-        include_str!("../../../editor-assets/licenses/simple-icons-CC0.txt"),
-    ),
-    (
-        "Lobe Icons",
-        include_str!("../../../editor-assets/licenses/lobe-icons-MIT.txt"),
-    ),
-    (
-        "SVGL",
-        include_str!("../../../editor-assets/licenses/svgl-svelte-LICENSE.txt"),
-    ),
-];

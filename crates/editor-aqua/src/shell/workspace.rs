@@ -18,7 +18,6 @@ pub struct NotificationEffects {
 #[derive(Debug)]
 pub enum SettingsPlatformEffect {
     OpenUrl(String),
-    OpenNotices,
     ExportDiagnostics,
     CopyText(String),
 }
@@ -28,7 +27,6 @@ impl SettingsPlatformEffect {
         use crate::settings::view::ViewAction;
         match action {
             ViewAction::OpenUrl(url) => Some(Self::OpenUrl(url.clone())),
-            ViewAction::OpenNotices => Some(Self::OpenNotices),
             ViewAction::ExportDiagnostics => Some(Self::ExportDiagnostics),
             ViewAction::CopyText(text) => Some(Self::CopyText(text.clone())),
             ViewAction::Navigate(_)
