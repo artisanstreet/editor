@@ -936,7 +936,7 @@ fn licence_list(
     let emit = Rc::clone(emit);
     let list = aqua_ui::collection::List::new()
         .items(rows)
-        .key(|row| format!("settings-licence-{}", row.index))
+        .key(|row| format!("settings-licence-row-{}", row.index))
         .row(move |row| {
             let send = Rc::clone(&emit);
             let index = row.index;
@@ -960,6 +960,7 @@ fn licence_list(
                 .height(Length::Px(f32::from(visible) * LICENCE_ROW)),
         )
         .estimated_row_height(Length::Px(LICENCE_ROW))
+        .virtualize()
         .build()
         .with_key("settings-licences");
     ui::card(&theme, vec![list])

@@ -234,6 +234,7 @@ pub(crate) fn archived(
                     .height(Length::Px(height)),
             )
             .estimated_row_height(Length::Px(ROW_HEIGHT))
+            .virtualize()
             .build()
             .with_key("archived-threads");
         ui::card(&theme, vec![list])
