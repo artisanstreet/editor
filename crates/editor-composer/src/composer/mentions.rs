@@ -483,10 +483,15 @@ impl Mentions {
                     font_weight: Some(strong),
                 });
             }
-            if let Some(range) = artisan_mentions::special_command(text) {
+            if let Some(range) = artisan_mentions::leading_command(text) {
+                let glyph = if text.get(range.start + 1..range.end) == Some("goal") {
+                    editor_assets::AssetId::TABLER_TARGET_ARROW
+                } else {
+                    editor_assets::AssetId::TABLER_TERMINAL_2
+                };
                 tokens.push(StyledToken {
                     range,
-                    glyph: Some(editor_assets::AssetId::TABLER_TARGET_ARROW),
+                    glyph: Some(glyph),
                     color: Some(colors.mention_command),
                     font_weight: Some(strong),
                 });

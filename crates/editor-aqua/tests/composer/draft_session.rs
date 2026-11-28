@@ -559,6 +559,11 @@ fn special_command_token_is_atomic_and_only_recognized_at_start() {
         ))("see /goal later")
         .is_empty()
     );
+    let compact_tokens = mentions.tokenizer(ArtisanTheme::for_mode(
+        editor_aqua::ui::theme::ThemeMode::Dark,
+    ))("/compact\n\nkeep going");
+    assert_eq!(compact_tokens.len(), 1);
+    assert_eq!(compact_tokens[0].range, 0..8);
 }
 
 #[test]

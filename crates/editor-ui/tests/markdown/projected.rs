@@ -148,6 +148,21 @@ fn two_mentions_after_a_command_are_both_marked() {
 }
 
 #[test]
+fn any_leading_slash_command_is_marked_but_paths_stay_plain() {
+    assert_eq!(
+        projected("/compact\n\nAnd use the real color token values"),
+        [
+            vec![Piece::Command("/compact".to_owned())],
+            vec![plain("And use the real color token values")],
+        ]
+    );
+    assert_eq!(
+        projected("/home/sander is full"),
+        [vec![plain("/home/sander is full")]]
+    );
+}
+
+#[test]
 fn a_sigil_counts_only_after_whitespace_in_the_source_as_in_the_composer() {
     for source in [
         "foo**$review**",
