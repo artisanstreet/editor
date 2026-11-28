@@ -1,34 +1,9 @@
 use crate::ui::theme::{ArtisanTheme, Elevation};
-use aqua_core::{GpuiBackground, Insets};
+use aqua_core::GpuiBackground;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{GpuiShadowLayer, Length, Style};
 
 const LINE: f32 = 1.0;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Seam {
-    Around,
-    TopLeft,
-}
-
-impl Seam {
-    #[must_use]
-    fn insets(self) -> Insets {
-        match self {
-            Self::Around => Insets::uniform(LINE),
-            Self::TopLeft => Insets {
-                top: LINE,
-                left: LINE,
-                ..Insets::default()
-            },
-        }
-    }
-
-    #[must_use]
-    pub fn style(self, theme: &ArtisanTheme) -> Style {
-        Style::new().gpui_border(self.insets(), theme.colors.line.to_reference_paint(), false)
-    }
-}
 
 #[must_use]
 pub fn sheet(theme: &ArtisanTheme) -> Style {

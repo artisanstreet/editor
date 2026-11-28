@@ -541,7 +541,9 @@ fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String,
     use aqua::UiApp;
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::tree::NodeKind;
-    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = UiApp::new(fonts, SharedRuns::new());
     let mut element = Some(element);
     app.mount(move |_| element.take().expect("the element mounts once"))
         .expect("the test view mounts");

@@ -23,12 +23,12 @@ use editor_ui::{
 };
 
 pub(crate) const CONTROL_WIDTH: f32 = 148.0;
-pub(crate) const ROW_HEIGHT: f32 = 64.0;
-pub(crate) const PAD_X: f32 = 20.0;
-pub(crate) const SECTION_TITLE: Type = Type::heading(15.2, 19.0, 500);
+const ROW_HEIGHT: f32 = 64.0;
+const PAD_X: f32 = 20.0;
+const SECTION_TITLE: Type = Type::heading(15.2, 19.0, 500);
 pub(crate) const LABEL: Type = Type::sans(15.0, 20.0, 400);
 pub(crate) const DESC: Type = Type::sans(13.44, 19.0, 400);
-pub(crate) const META: Type = Type::sans(13.0, 18.0, 400);
+const META: Type = Type::sans(13.0, 18.0, 400);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Ink {
@@ -110,7 +110,7 @@ pub(crate) fn desc(theme: &ArtisanTheme, value: impl Into<String>) -> Element {
         .build()
 }
 
-pub(crate) fn meta(theme: &ArtisanTheme, value: impl Into<String>) -> Element {
+fn meta(theme: &ArtisanTheme, value: impl Into<String>) -> Element {
     META.text(theme, ink_color(theme, Ink::Muted), value.into())
         .wrap(false)
         .build()

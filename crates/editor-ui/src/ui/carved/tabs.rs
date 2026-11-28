@@ -15,7 +15,7 @@ const PAD_X: f32 = 12.0;
 const LABEL: Type = Type::sans(13.0, 20.0, 500);
 
 #[must_use]
-pub fn well(carve: &Carve) -> Style {
+pub(crate) fn well(carve: &Carve) -> Style {
     Style::new()
         .padding(Length::Px(3.0))
         .radius(Length::Px(RADIUS_MD))
@@ -25,15 +25,15 @@ pub fn well(carve: &Carve) -> Style {
 
 #[derive(Debug)]
 pub struct Tab {
-    pub index: usize,
-    pub label: String,
-    pub glyph: Option<Icon>,
-    pub chosen: bool,
-    pub disabled: bool,
+    pub(crate) index: usize,
+    pub(crate) label: String,
+    pub(crate) glyph: Option<Icon>,
+    pub(crate) chosen: bool,
+    pub(crate) disabled: bool,
 }
 
 #[must_use]
-pub fn tab(
+pub(crate) fn tab(
     theme: &ArtisanTheme,
     carve: &Carve,
     tab: Tab,

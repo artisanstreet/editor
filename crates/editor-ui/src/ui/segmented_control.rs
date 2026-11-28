@@ -19,7 +19,6 @@ const SEGMENT_TEXT: TextRole = TextRole::Caption;
 pub struct Segment<T> {
     value: T,
     label: String,
-    icon: Option<editor_assets::AssetId>,
     glyph: Option<super::carved::glyph::Icon>,
 }
 impl<T> Segment<T> {
@@ -27,18 +26,12 @@ impl<T> Segment<T> {
         Self {
             value,
             label: label.into(),
-            icon: None,
             glyph: None,
         }
     }
     #[must_use]
     pub const fn glyph(mut self, glyph: super::carved::glyph::Icon) -> Self {
         self.glyph = Some(glyph);
-        self
-    }
-    #[must_use]
-    pub fn icon(mut self, icon: editor_assets::AssetId) -> Self {
-        self.icon = Some(icon);
         self
     }
 }
@@ -177,9 +170,6 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .gpui_source_color(foreground.to_reference_text_color())
                 .style(Style::new().text_wrap(false))
                 .build();
-            let text = option.icon.map_or(text, |icon| {
-                super::kit::IconSize::Md.glyph(icon, foreground.to_reference_paint())
-            });
             let style = Style::new()
                 .align(aqua_ui::AlignItems::CENTER)
                 .justify(aqua_ui::JustifyContent::CENTER)

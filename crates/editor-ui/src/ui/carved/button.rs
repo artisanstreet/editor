@@ -11,7 +11,7 @@ use crate::ui::kit::control::{Activation, activatable, pressable};
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 
-pub const HEIGHT: f32 = 36.0;
+pub(crate) const HEIGHT: f32 = 36.0;
 const PAD_X: f32 = 14.0;
 const QUIET_PAD_X: f32 = 12.0;
 const PRESS: f32 = 1.5;
@@ -109,12 +109,6 @@ impl CarvedButton {
     #[must_use]
     pub const fn lift(mut self, top: f32) -> Self {
         self.lift = top;
-        self
-    }
-
-    #[must_use]
-    pub const fn radius(mut self, radius: f32) -> Self {
-        self.radius = radius;
         self
     }
 

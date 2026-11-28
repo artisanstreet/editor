@@ -69,7 +69,7 @@ pub enum Gear {
 
 impl Gear {
     #[must_use]
-    pub fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         match self {
             Self::Computer(id) => format!("settings-gear-computer-{id}"),
             Self::Mcp(server) => format!("settings-gear-mcp-{}", server.name),
@@ -113,7 +113,7 @@ pub struct SettingsController {
     pub text_size_select: Rc<RefCell<editor_ui::select::SelectState<Option<u32>>>>,
     pub contrast_select: Rc<RefCell<editor_ui::select::SelectState<Option<bool>>>>,
     pub version_select: Rc<RefCell<editor_ui::select::SelectState<String>>>,
-    pub gear: Option<Gear>,
+    pub(crate) gear: Option<Gear>,
     pub sign_in: super::sign_in::SignInForm,
     pub(crate) forge_code: Rc<RefCell<Editor>>,
     pub(crate) archive: ArchiveForm,

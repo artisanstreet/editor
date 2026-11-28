@@ -270,7 +270,7 @@ impl Entry {
         self.workspace.as_ref().map(|(account, _)| account.as_str())
     }
 
-    pub fn show_display_rate(&mut self, rate: crate::settings::display::DisplayRate) -> bool {
+    pub(crate) fn show_display_rate(&mut self, rate: crate::settings::display::DisplayRate) -> bool {
         let changed = self.controller.display_rate != rate;
         self.controller.display_rate = rate;
         if let Some((_, workspace)) = &mut self.workspace {

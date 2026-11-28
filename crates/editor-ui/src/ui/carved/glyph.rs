@@ -70,7 +70,7 @@ impl Icon {
     }
 
     #[must_use]
-    pub fn source(self) -> String {
+    pub(crate) fn source(self) -> String {
         let (id, stroke) = self.tabler();
         editor_assets::get(id).source.replacen(
             r#"stroke-width="2""#,

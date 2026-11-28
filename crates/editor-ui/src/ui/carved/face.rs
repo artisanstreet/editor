@@ -10,12 +10,12 @@ use crate::ui::theme::Oklch;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stop {
-    pub at: f32,
-    pub color: Oklch,
+    pub(crate) at: f32,
+    pub(crate) color: Oklch,
 }
 
 #[must_use]
-pub const fn stop(at: f32, color: Oklch) -> Stop {
+pub(crate) const fn stop(at: f32, color: Oklch) -> Stop {
     Stop { at, color }
 }
 
@@ -33,26 +33,26 @@ pub enum Fill {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Line {
-    pub dx: f32,
-    pub dy: f32,
-    pub color: Oklch,
+    pub(crate) dx: f32,
+    pub(crate) dy: f32,
+    pub(crate) color: Oklch,
 }
 
 #[must_use]
-pub const fn line(dx: f32, dy: f32, color: Oklch) -> Line {
+pub(crate) const fn line(dx: f32, dy: f32, color: Oklch) -> Line {
     Line { dx, dy, color }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Face {
-    pub fill: Fill,
-    pub border: Option<Oklch>,
-    pub radius: f32,
-    pub lines: Vec<Line>,
+    pub(crate) fill: Fill,
+    pub(crate) border: Option<Oklch>,
+    pub(crate) radius: f32,
+    pub(crate) lines: Vec<Line>,
 }
 
 #[must_use]
-pub fn rgb(red: u8, green: u8, blue: u8) -> Oklch {
+pub(crate) fn rgb(red: u8, green: u8, blue: u8) -> Oklch {
     let [lightness, chroma, hue, _] = color::AlphaColor::<color::Srgb>::new([
         f32::from(red) / 255.0,
         f32::from(green) / 255.0,
@@ -65,7 +65,7 @@ pub fn rgb(red: u8, green: u8, blue: u8) -> Oklch {
 }
 
 #[must_use]
-pub fn horizon() -> Vec<Stop> {
+pub(crate) fn horizon() -> Vec<Stop> {
     vec![
         stop(0.0, rgb(0xc6, 0xdb, 0xf0)),
         stop(0.25, rgb(0x6f, 0x9b, 0xcb)),
@@ -75,7 +75,7 @@ pub fn horizon() -> Vec<Stop> {
 }
 
 #[must_use]
-pub fn pill() -> Vec<Stop> {
+pub(crate) fn pill() -> Vec<Stop> {
     vec![
         stop(0.0, rgb(0xc6, 0xdb, 0xf0)),
         stop(0.26, rgb(0x6f, 0x9b, 0xcb)),
@@ -85,17 +85,7 @@ pub fn pill() -> Vec<Stop> {
 }
 
 #[must_use]
-pub fn quota() -> Vec<Stop> {
-    vec![
-        stop(0.0, rgb(0xc6, 0xdb, 0xf0)),
-        stop(0.28, rgb(0x74, 0xa0, 0xd1)),
-        stop(0.64, rgb(0x3c, 0x65, 0xaa)),
-        stop(1.0, rgb(0x2b, 0x4a, 0x8e)),
-    ]
-}
-
-#[must_use]
-pub fn ember() -> Vec<Stop> {
+pub(crate) fn ember() -> Vec<Stop> {
     vec![
         stop(0.0, Oklch::new(0.86, 0.07, 20.0)),
         stop(0.25, Oklch::new(0.68, 0.16, 22.0)),
@@ -105,12 +95,12 @@ pub fn ember() -> Vec<Stop> {
 }
 
 #[must_use]
-pub fn navy_edge() -> Oklch {
+pub(crate) fn navy_edge() -> Oklch {
     rgb(0x0b, 0x16, 0x40)
 }
 
 #[must_use]
-pub fn sky_glint(alpha: f32) -> Oklch {
+pub(crate) fn sky_glint(alpha: f32) -> Oklch {
     rgb(220, 236, 255).with_alpha(alpha)
 }
 
@@ -118,7 +108,7 @@ const EMBER_EDGE: Oklch = Oklch::new(0.25, 0.09, 25.0);
 
 impl Face {
     #[must_use]
-    pub fn horizon(radius: f32) -> Self {
+    pub(crate) fn horizon(radius: f32) -> Self {
         Self {
             fill: Fill::Radial {
                 rx: 1.3,
@@ -137,7 +127,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn pill(radius: f32, glint: f32, shade: f32) -> Self {
+    pub(crate) fn pill(radius: f32, glint: f32, shade: f32) -> Self {
         Self {
             fill: Fill::Radial {
                 rx: 1.4,
@@ -156,7 +146,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn ember(radius: f32) -> Self {
+    pub(crate) fn ember(radius: f32) -> Self {
         Self {
             fill: Fill::Radial {
                 rx: 1.3,
@@ -175,7 +165,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn secondary(carve: &Carve, radius: f32, hovered: bool) -> Self {
+    pub(crate) fn secondary(carve: &Carve, radius: f32, hovered: bool) -> Self {
         let (center, outer, reach) = if hovered {
             (carve.toward_ink(carve.bg, 0.11), carve.bg_raised, 0.75)
         } else {
@@ -199,7 +189,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn thumb(carve: &Carve, radius: f32) -> Self {
+    pub(crate) fn thumb(carve: &Carve, radius: f32) -> Self {
         if carve.dark {
             Self {
                 fill: Fill::Radial {
@@ -242,7 +232,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn avatar(radius: f32) -> Self {
+    pub(crate) fn avatar(radius: f32) -> Self {
         Self {
             fill: Fill::Radial {
                 rx: 1.3,
@@ -267,7 +257,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn svg(&self, w: f32, h: f32) -> String {
+    pub(crate) fn svg(&self, w: f32, h: f32) -> String {
         let w = w.max(1.0);
         let h = h.max(1.0);
         let r = self.radius.min(w / 2.0).min(h / 2.0);
@@ -335,7 +325,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn item(&self, bounds: Rect) -> DisplayItem {
+    pub(crate) fn item(&self, bounds: Rect) -> DisplayItem {
         DisplayItem::GpuiSvg {
             bounds,
             source: Arc::<str>::from(self.svg(bounds.w, bounds.h)),
@@ -345,7 +335,7 @@ impl Face {
     }
 
     #[must_use]
-    pub fn layer(self) -> Element {
+    pub(crate) fn layer(self) -> Element {
         Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .scroll_stable()
@@ -364,7 +354,7 @@ fn paint_of(color: Oklch) -> String {
 }
 
 #[must_use]
-pub fn rounded(left: f32, top: f32, width: f32, height: f32, radius: f32) -> String {
+pub(crate) fn rounded(left: f32, top: f32, width: f32, height: f32, radius: f32) -> String {
     let r = radius.min(width / 2.0).min(height / 2.0).max(0.0);
     let (right, bottom) = (left + width, top + height);
     format!(
@@ -377,7 +367,7 @@ pub fn rounded(left: f32, top: f32, width: f32, height: f32, radius: f32) -> Str
 }
 
 #[must_use]
-pub fn outline(carve: &Carve, w: f32, h: f32, radius: f32) -> String {
+pub(crate) fn outline(carve: &Carve, w: f32, h: f32, radius: f32) -> String {
     let (rim_top, rim_bottom, glint_top, glint_bottom) = if carve.dark {
         (
             super::black(0.52),

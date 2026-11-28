@@ -114,7 +114,7 @@ impl Carve {
     }
 
     #[must_use]
-    pub fn press(&self) -> Vec<ShadowLayer> {
+    pub(crate) fn press(&self) -> Vec<ShadowLayer> {
         let alphas = if self.dark {
             [0.16, 0.10]
         } else {
@@ -167,37 +167,23 @@ impl Carve {
     }
 
     #[must_use]
-    pub fn hover_fill(&self) -> (Oklch, Oklch) {
-        if self.dark {
-            (self.ink.with_alpha(0.09), self.ink.with_alpha(0.03))
-        } else {
-            (self.ink.with_alpha(0.02), self.ink.with_alpha(0.06))
-        }
-    }
-
-    #[must_use]
-    pub fn hover_edge(&self) -> Oklch {
-        self.ink.with_alpha(if self.dark { 0.07 } else { 0.06 })
-    }
-
-    #[must_use]
-    pub fn toward_ink(&self, base: Oklch, amount: f32) -> Oklch {
+    pub(crate) fn toward_ink(&self, base: Oklch, amount: f32) -> Oklch {
         mix(base, self.ink, amount)
     }
 }
 
 #[must_use]
-pub fn mix(from: Oklch, to: Oklch, amount: f32) -> Oklch {
+pub(crate) fn mix(from: Oklch, to: Oklch, amount: f32) -> Oklch {
     from.animate_to(to, amount)
 }
 
 #[must_use]
-pub fn black(alpha: f32) -> Oklch {
+pub(crate) fn black(alpha: f32) -> Oklch {
     BLACK.with_alpha(alpha)
 }
 
 #[must_use]
-pub fn white(alpha: f32) -> Oklch {
+pub(crate) fn white(alpha: f32) -> Oklch {
     WHITE.with_alpha(alpha)
 }
 
@@ -213,22 +199,22 @@ fn layer(dx: f32, dy: f32, blur: f32, spread: f32, inset: bool, color: Oklch) ->
 }
 
 #[must_use]
-pub fn drop_shadow(dy: f32, blur: f32, spread: f32, color: Oklch) -> ShadowLayer {
+pub(crate) fn drop_shadow(dy: f32, blur: f32, spread: f32, color: Oklch) -> ShadowLayer {
     layer(0.0, dy, blur, spread, false, color)
 }
 
 #[must_use]
-pub fn inner_shadow(dx: f32, dy: f32, blur: f32, spread: f32, color: Oklch) -> ShadowLayer {
+pub(crate) fn inner_shadow(dx: f32, dy: f32, blur: f32, spread: f32, color: Oklch) -> ShadowLayer {
     layer(dx, dy, blur, spread, true, color)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Type {
-    pub size: f32,
-    pub line: f32,
-    pub weight: FontWeight,
-    pub tracking: f32,
-    pub mono: bool,
+    pub(crate) size: f32,
+    pub(crate) line: f32,
+    pub(crate) weight: FontWeight,
+    pub(crate) tracking: f32,
+    pub(crate) mono: bool,
 }
 
 impl Type {

@@ -4,8 +4,8 @@ use aqua_ui::style::{Length, Style};
 use super::face::Face;
 use super::{Carve, RADIUS_MD};
 
-pub const SWITCH_WIDTH: f32 = 62.0;
-pub const SWITCH_HEIGHT: f32 = 36.0;
+pub(crate) const SWITCH_WIDTH: f32 = 62.0;
+pub(crate) const SWITCH_HEIGHT: f32 = 36.0;
 const THUMB: f32 = 30.0;
 const THUMB_INSET: f32 = 3.0;
 const TRAVEL: f32 = 26.0;
@@ -19,7 +19,7 @@ pub fn sunken(carve: &Carve, radius: f32) -> Style {
 }
 
 #[must_use]
-pub fn switch_track(carve: &Carve, checked: bool) -> Element {
+pub(crate) fn switch_track(carve: &Carve, checked: bool) -> Element {
     let radius = RADIUS_MD - THUMB_INSET;
     let (face, shadows) = if checked {
         let mut shadows = carve.rest();

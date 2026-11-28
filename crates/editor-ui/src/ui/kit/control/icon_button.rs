@@ -139,12 +139,6 @@ impl IconButton {
     }
 
     #[must_use]
-    pub const fn destructive(mut self) -> Self {
-        self.hover = Hover::Destructive;
-        self
-    }
-
-    #[must_use]
     pub const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self

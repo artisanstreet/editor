@@ -27,7 +27,7 @@ pub mod source;
 pub(crate) mod stopwatch;
 pub mod thread_navigation;
 pub mod titlebar;
-pub mod view;
+pub(crate) mod view;
 pub mod wheel;
 pub mod workspace;
 

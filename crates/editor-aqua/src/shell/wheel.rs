@@ -7,7 +7,7 @@ use aqua_core::{InputEvent, NodeId, Point};
 pub(crate) const THREADS: &str = "sidebar-threads";
 pub use crate::ui::scroll::MODEL_MENU;
 const PROJECT_TREE: &str = "artisan-project-tree";
-pub(crate) const SETTINGS_PAGE: &str = "settings-main-scroll";
+const SETTINGS_PAGE: &str = "settings-main-scroll";
 const SETTINGS_NAV: &str = "settings-dialog-nav";
 const SETTINGS_LICENCES: &str = "settings-licences";
 const SETTINGS_ARCHIVE: &str = "archived-threads";

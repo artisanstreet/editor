@@ -17,10 +17,10 @@ const LABEL: Type = Type::sans(14.0, 21.0, 400);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuItem<V> {
-    pub value: V,
-    pub label: String,
-    pub icon: Icon,
-    pub danger: bool,
+    pub(crate) value: V,
+    pub(crate) label: String,
+    pub(crate) icon: Icon,
+    pub(crate) danger: bool,
 }
 
 impl<V> MenuItem<V> {
