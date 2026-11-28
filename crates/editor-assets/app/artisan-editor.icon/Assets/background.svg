@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="face" gradientUnits="userSpaceOnUse" cx="512" cy="1280" r="1331" gradientTransform="translate(512 1280) scale(1 1.0781) translate(-512 -1280)">
+      <stop offset="0" stop-color="#c6dbf0"/>
+      <stop offset="0.25" stop-color="#6f9bcb"/>
+      <stop offset="0.58" stop-color="#33599a"/>
+      <stop offset="0.92" stop-color="#1d3270"/>
+    </radialGradient>
+    <linearGradient id="topglint" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#dcecff" stop-opacity="0.28"/>
+      <stop offset="0.16" stop-color="#dcecff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="botshade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.84" stop-color="#050c2b" stop-opacity="0"/>
+      <stop offset="1" stop-color="#050c2b" stop-opacity="0.32"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#face)"/>
+  <rect width="1024" height="1024" fill="url(#topglint)"/>
+  <rect width="1024" height="1024" fill="url(#botshade)"/>
+</svg>
