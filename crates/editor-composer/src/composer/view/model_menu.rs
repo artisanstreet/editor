@@ -617,19 +617,6 @@ pub(crate) fn model_menu(
     let sheet = Surface::Picker(Picker::Sheet);
     let pane_radius = Radius::Panel.px();
     let engines = super::super::picker::offered_engines(host);
-    let model_icon = picker.pane_config(host, current.cloned()).map(|config| {
-        host.engines
-            .get(&config.engine)
-            .and_then(|status| {
-                status
-                    .models
-                    .iter()
-                    .find(|model| config.model.as_ref() == Some(&model.id))
-            })
-            .and_then(|model| model.lab.as_deref())
-            .and_then(lab_icon)
-            .unwrap_or_else(|| engine_icon(theme, config.engine))
-    });
     let item_height = model_item_height(theme);
     let panes: Vec<_> = items.iter().map(|item| item.pane).collect();
     let locked: Vec<_> = items.iter().map(|item| item.locked).collect();
@@ -661,29 +648,23 @@ pub(crate) fn model_menu(
         )
         .detail(item.label)
         .nested(pane_radius, 0.0)
-        .hoverable(!item.locked && target != pane)
-        .disabled(item.locked);
-        if item.locked {
-            side = side.trailing(IconSize::Sm.glyph(
-                AssetId::TABLER_LOCK,
-                theme.colors.text_muted.to_reference_paint(),
-            ));
-        } else {
+        .hoverable(!item.locked && target != pane);
+        if !item.locked {
             side = side.on_activate(move || action(ComposerAction::SelectPane(target)));
         }
-        if let Some(icon) = model_icon.filter(|_| target.is_none()) {
-            side = side.leading(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()));
+        let mut element = side
+            .build()
+            .style(
+                Style::new()
+                    .height(Length::Px(item_height))
+                    .flex_shrink(0.0),
+            )
+            .aria_label(item.name())
+            .disabled(item.locked);
+        if item.locked {
+            element = element.cursor(aqua_core::CursorIcon::Default);
         }
-        buttons = buttons.tab(
-            side.build()
-                .style(
-                    Style::new()
-                        .height(Length::Px(item_height))
-                        .flex_shrink(0.0),
-                )
-                .aria_label(item.name()),
-            !item.locked && target == pane,
-        );
+        buttons = buttons.tab(element, !item.locked && target == pane);
     }
     let mut pane_body = UiBox::new()
         .layout("column")
