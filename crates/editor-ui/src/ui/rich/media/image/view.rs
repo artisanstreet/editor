@@ -93,6 +93,12 @@ impl ImageState {
         self.wake.drain();
         let mut changed = false;
         for (index, source) in self.sources.iter().enumerate() {
+            match &self.loaded[index] {
+                Loaded::Ready(_) | Loaded::Failed(ImageError::Load(_) | ImageError::Decode) => {
+                    continue;
+                }
+                Loaded::Loading | Loaded::Failed(ImageError::NeedsConsent) => {}
+            }
             let wake = crate::ui::media::wake_on(&self.wake);
             let next = match self.loader.request(
                 &self.fetcher,

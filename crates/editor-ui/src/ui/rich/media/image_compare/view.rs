@@ -173,6 +173,23 @@ impl CompareState {
         let mut changed = false;
         for side in [Side::Before, Side::After] {
             let index = Self::index(side);
+            match &self.images[index] {
+                ImageState::Decoding(image) => {
+                    let status = Some(image.status());
+                    if self.observed[index] != status {
+                        self.observed[index] = status;
+                        changed = true;
+                    }
+                    continue;
+                }
+                ImageState::Failed(
+                    Failure::Invalid
+                    | Failure::Fetch(_)
+                    | Failure::Undecodable
+                    | Failure::TooLarge,
+                ) => continue,
+                ImageState::Loading | ImageState::Failed(Failure::NeedsConsent) => {}
+            }
             let source = match side {
                 Side::Before => &self.before,
                 Side::After => &self.after,
