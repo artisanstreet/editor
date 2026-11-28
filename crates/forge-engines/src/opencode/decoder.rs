@@ -127,6 +127,9 @@ pub(super) struct Decoder {
     step_texts: HashMap<String, Vec<(String, String)>>,
     open_texts: std::collections::BTreeSet<String>,
     compactions: HashMap<String, usize>,
+    pending_compactions: HashSet<String>,
+    root_compaction: RootCompaction,
+    after_compaction: std::collections::VecDeque<crate::UserInput>,
     steers: HashMap<String, ItemId>,
     admitted: HashSet<String>,
     delivered: HashSet<String>,
@@ -141,6 +144,13 @@ pub(super) struct Decoder {
     cancelled: bool,
     goals: HashMap<String, Goal>,
     awaiting_goal: Option<GoalChange>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RootCompaction {
+    #[default]
+    Idle,
+    Running,
 }
 
 enum GoalChange {
@@ -245,6 +255,8 @@ impl Decoder {
 
     pub(super) fn idle(&self) -> bool {
         !self.turn_open
+            && self.root_compaction == RootCompaction::Idle
+            && (self.after_compaction.is_empty() || self.error.is_some() || self.cancelled)
             && self.awaiting_goal.is_none()
             && (self.error.is_some()
                 || self.cancelled
@@ -258,6 +270,63 @@ impl Decoder {
                 .admitted
                 .iter()
                 .all(|message| self.delivered.contains(message))
+    }
+
+    pub(super) fn queue_after_compaction(&mut self, input: crate::UserInput) {
+        self.after_compaction.push_back(input);
+    }
+
+    pub(super) fn take_after_compaction(&mut self) -> Option<crate::UserInput> {
+        if self.root_compaction == RootCompaction::Running || self.error.is_some() || self.cancelled
+        {
+            return None;
+        }
+        self.after_compaction.pop_front()
+    }
+
+    pub(super) fn start_compaction(&mut self, session: &str) -> Vec<EngineEvent> {
+        if self.root.as_deref() == Some(session) {
+            self.root_compaction = RootCompaction::Running;
+        }
+        if !self.pending_compactions.insert(session.to_owned()) {
+            return Vec::new();
+        }
+        let count = self.compactions.entry(session.to_owned()).or_default();
+        *count += 1;
+        let parent = self.sessions.get(session).cloned().flatten();
+        vec![EngineEvent::Item {
+            key: format!("compaction:{session}:{count}"),
+            parent,
+            status: Status::Running,
+            kind: ItemKind::Compaction {
+                summary: None,
+                tokens_before: None,
+                tokens_after: None,
+                switch: None,
+            },
+        }]
+    }
+
+    pub(super) fn fail_compaction(&mut self, session: &str) -> Vec<EngineEvent> {
+        if self.root.as_deref() == Some(session) {
+            self.root_compaction = RootCompaction::Idle;
+        }
+        if !self.pending_compactions.remove(session) {
+            return Vec::new();
+        }
+        let count = self.compactions.get(session).copied().unwrap_or(1);
+        let parent = self.sessions.get(session).cloned().flatten();
+        vec![EngineEvent::Item {
+            key: format!("compaction:{session}:{count}"),
+            parent,
+            status: Status::Failed,
+            kind: ItemKind::Compaction {
+                summary: None,
+                tokens_before: None,
+                tokens_after: None,
+                switch: None,
+            },
+        }]
     }
 
     pub(super) fn await_goal_change(&mut self, goal: Option<Goal>) {
@@ -298,7 +367,22 @@ impl Decoder {
 
     pub(super) fn cancel(&mut self) -> Vec<EngineEvent> {
         self.cancelled = true;
+        if std::mem::replace(&mut self.root_compaction, RootCompaction::Idle)
+            == RootCompaction::Running
+            && let Some(root) = &self.root
+        {
+            self.pending_compactions.insert(root.clone());
+        }
         let mut out = Vec::new();
+        let mut sessions: Vec<String> = self.pending_compactions.drain().collect();
+        sessions.sort();
+        for session in sessions {
+            let count = self.compactions.get(&session).copied().unwrap_or(1);
+            out.push(EngineEvent::Status {
+                key: format!("compaction:{session}:{count}"),
+                status: Status::Cancelled,
+            });
+        }
         for key in std::mem::take(&mut self.open_texts) {
             out.push(EngineEvent::Status {
                 key,
@@ -564,11 +648,29 @@ impl Decoder {
                 let count = self.compactions.entry(session.to_owned()).or_default();
                 let status = match kind {
                     "session.compaction.started" => {
+                        if root {
+                            self.root_compaction = RootCompaction::Running;
+                        }
+                        if self.pending_compactions.remove(session) {
+                            return out;
+                        }
                         *count += 1;
                         Status::Running
                     }
-                    "session.compaction.ended" => Status::Done,
-                    _ => Status::Failed,
+                    "session.compaction.ended" => {
+                        if root {
+                            self.root_compaction = RootCompaction::Idle;
+                        }
+                        self.pending_compactions.remove(session);
+                        Status::Done
+                    }
+                    _ => {
+                        if root {
+                            self.root_compaction = RootCompaction::Idle;
+                        }
+                        self.pending_compactions.remove(session);
+                        Status::Failed
+                    }
                 };
                 out.push(EngineEvent::Item {
                     key: format!("compaction:{session}:{count}"),

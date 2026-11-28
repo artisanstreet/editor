@@ -123,3 +123,35 @@ fn a_shell_exit_without_a_code_waits_for_its_result() {
     );
     assert_eq!(status_of(&reported, call), Some(Status::Failed));
 }
+
+#[test]
+fn manual_compaction_keeps_the_run_busy_and_reuses_one_item_key() {
+    let mut decoder = Decoder::new(Some(ROOT.to_owned()));
+    let started = decoder.start_compaction(ROOT);
+    assert_eq!(
+        status_of(&started, "compaction:ses_root:1"),
+        Some(Status::Running)
+    );
+    assert!(!decoder.idle());
+    let native_started = feed(
+        &mut decoder,
+        1,
+        "session.compaction.started",
+        &json!({ "sessionID": ROOT }),
+    );
+    assert!(
+        native_started.is_empty(),
+        "session.compaction.started must not emit a duplicate compaction item: {native_started:?}"
+    );
+    let ended = feed(
+        &mut decoder,
+        2,
+        "session.compaction.ended",
+        &json!({ "sessionID": ROOT }),
+    );
+    assert_eq!(
+        status_of(&ended, "compaction:ses_root:1"),
+        Some(Status::Done)
+    );
+    assert!(decoder.idle());
+}

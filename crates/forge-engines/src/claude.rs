@@ -299,7 +299,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo, grace: &dyn InputGrace) 
         };
         let mut delivered = 0;
         while let Some((input, steer)) = next.pop_front() {
-            if let Err(failure) = deliver(&mut engine, &mut decoder, &input, steer).await {
+            if let Err(failure) = deliver(&mut engine, &mut decoder, &io, &input, steer).await {
                 let error: &dyn std::error::Error = &failure;
                 tracing::error!(thread = %turn.thread_id, item = %input.id, error, "Claude did not take a message");
                 return Outcome::failed(format!(
@@ -481,7 +481,7 @@ async fn drive(
             input = io.inbox.recv(), if *inbox_open && !cancelling => match input {
                 Some(Input::Steer(steer)) => {
                     let delivered = door.takes_input()
-                        && deliver(engine, decoder, &steer, true).await.is_ok();
+                        && deliver(engine, decoder, io, &steer, true).await.is_ok();
                     if !delivered {
                         next.push_back((steer, true));
                     }
@@ -602,6 +602,7 @@ fn move_door(
 async fn deliver(
     engine: &mut EngineProcess,
     decoder: &mut ClaudeDecoder,
+    io: &RunIo,
     input: &UserInput,
     _steer: bool,
 ) -> Result<(), DeliverError> {
@@ -614,6 +615,11 @@ async fn deliver(
             source,
         })?;
     decoder.expect_replay(Some(input.id.clone()), &line);
+    if crate::commands::compact_argument(&input.text).is_some()
+        && let Some(event) = decoder.start_compaction()
+    {
+        io.emit(event).await;
+    }
     Ok(())
 }
 

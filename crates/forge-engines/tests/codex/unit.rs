@@ -747,3 +747,66 @@ async fn codex_reads_a_line_that_echoes_a_message_over_the_default_line_limit() 
     let line = process.next_line().await.unwrap().unwrap();
     assert_eq!(line.len(), long);
 }
+
+#[test]
+fn pending_compaction_reuses_the_same_item_key_when_codex_reports_context_compaction() {
+    let mut decoder = Decoder::default();
+    let req = decoder.request("thread/start", json!({}));
+    decoder
+        .feed(&json!({ "id": req, "result": { "thread": { "id": "thr_1" } } }).to_string())
+        .unwrap();
+    let started = decoder.start_compaction().expect("starts compaction");
+    let EngineEvent::Item {
+        key,
+        status: artisan_api::Status::Running,
+        kind: artisan_api::ItemKind::Compaction { .. },
+        ..
+    } = started
+    else {
+        panic!("expected a running compaction");
+    };
+    let native_started = decoder
+        .feed(
+            &json!({
+                "method": "item/started",
+                "params": {
+                    "threadId": "thr_1",
+                    "turnId": "turn_1",
+                    "item": { "type": "contextCompaction", "id": "cmp_native" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    assert!(matches!(
+        native_started.as_slice(),
+        [EngineEvent::Item {
+            key: same,
+            status: artisan_api::Status::Running,
+            kind: artisan_api::ItemKind::Compaction { .. },
+            ..
+        }] if *same == key
+    ));
+    let native_done = decoder
+        .feed(
+            &json!({
+                "method": "item/completed",
+                "params": {
+                    "threadId": "thr_1",
+                    "turnId": "turn_1",
+                    "item": { "type": "contextCompaction", "id": "cmp_native" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    assert!(matches!(
+        native_done.as_slice(),
+        [EngineEvent::Item {
+            key: same,
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::Compaction { .. },
+            ..
+        }] if *same == key
+    ));
+}

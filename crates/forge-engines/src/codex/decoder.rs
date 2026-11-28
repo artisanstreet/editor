@@ -60,6 +60,9 @@ pub(super) struct Decoder {
     last_error: Option<String>,
     last_retry: Option<crate::Retry>,
     notices: u32,
+    compactions: u64,
+    pending_compaction: Option<String>,
+    compaction_keys: HashMap<String, String>,
     messages: Vec<String>,
 }
 
@@ -114,6 +117,30 @@ impl Decoder {
 
     pub(super) fn active_turn(&self) -> Option<&str> {
         self.turn.as_deref()
+    }
+
+    pub(super) fn start_compaction(&mut self) -> Option<EngineEvent> {
+        if self.pending_compaction.is_some() {
+            return None;
+        }
+        self.compactions += 1;
+        let key = format!("compaction:{}", self.compactions);
+        let kind = ItemKind::Compaction {
+            summary: None,
+            tokens_before: self.usage.context_used,
+            tokens_after: None,
+            switch: None,
+        };
+        self.pending_compaction = Some(key.clone());
+        self.track(key.clone(), None, Status::Running, kind);
+        Some(self.event(&key))
+    }
+
+    pub(super) fn fail_compaction(&mut self) -> Option<EngineEvent> {
+        let key = self.pending_compaction.take()?;
+        let tracked = self.items.get_mut(&key)?;
+        tracked.status = Status::Failed;
+        Some(self.event(&key))
     }
 
     pub(super) fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
@@ -539,6 +566,16 @@ impl Decoder {
         self.open_messages.remove(&scope);
         let Some(agent) = scope else {
             self.turn = None;
+            if let Some(key) = self.pending_compaction.take()
+                && let Some(tracked) = self.items.get_mut(&key)
+            {
+                tracked.status = match turn.status {
+                    TurnStatus::Interrupted => Status::Cancelled,
+                    TurnStatus::Failed => Status::Failed,
+                    TurnStatus::Completed => Status::Done,
+                };
+                out.push(self.event(&key));
+            }
             let outcome = match turn.status {
                 TurnStatus::Interrupted => Outcome::cancelled(),
                 TurnStatus::Failed => {
@@ -886,7 +923,19 @@ impl Decoder {
                 return;
             }
             Item::ContextCompaction { id } => {
-                let tokens_before = match self.items.get(&id).map(|tracked| &tracked.kind) {
+                let key = if scope.is_none() {
+                    if let Some(mapped) = self.compaction_keys.get(&id) {
+                        mapped.clone()
+                    } else if let Some(pending) = self.pending_compaction.take() {
+                        self.compaction_keys.insert(id, pending.clone());
+                        pending
+                    } else {
+                        id
+                    }
+                } else {
+                    id
+                };
+                let tokens_before = match self.items.get(&key).map(|tracked| &tracked.kind) {
                     Some(ItemKind::Compaction { tokens_before, .. }) => *tokens_before,
                     _ => self.usage.context_used,
                 };
@@ -896,7 +945,7 @@ impl Decoder {
                     tokens_after: None,
                     switch: None,
                 };
-                (id, settled, kind)
+                (key, settled, kind)
             }
             Item::CollabAgentToolCall(call) => return self.collab(scope, call, completed, out),
             Item::SubAgentActivity(activity) => {

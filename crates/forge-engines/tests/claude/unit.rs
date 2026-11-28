@@ -476,3 +476,41 @@ fn an_agent_waiting_on_its_own_shell_keeps_the_session_open_and_reports_at_the_e
         "the agent never shows finished while it waits: {results:?}"
     );
 }
+
+#[test]
+fn starting_a_compact_command_reuses_one_compaction_item_through_boundary() {
+    let mut decoder = ClaudeDecoder::default();
+    let started = decoder.start_compaction().expect("starts compaction");
+    let crate::EngineEvent::Item {
+        key,
+        status: artisan_api::Status::Running,
+        kind: artisan_api::ItemKind::Compaction { .. },
+        ..
+    } = started
+    else {
+        panic!("expected a running compaction");
+    };
+    let status = decoder
+        .feed(r#"{"type":"system","subtype":"status","status":"compacting"}"#)
+        .unwrap();
+    assert!(
+        status.is_empty(),
+        "status=compacting must not duplicate: {status:?}"
+    );
+    let boundary = decoder
+        .feed(r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"pre_tokens":50000,"post_tokens":4000}}"#)
+        .unwrap();
+    assert!(matches!(
+        boundary.as_slice(),
+        [crate::EngineEvent::Item {
+            key: done_key,
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::Compaction {
+                tokens_before: Some(50000),
+                tokens_after: Some(4000),
+                ..
+            },
+            ..
+        }] if *done_key == key
+    ));
+}

@@ -3,20 +3,37 @@ use artisan_api::{EngineId, SlashCommand};
 const MAX_COMMANDS: usize = 1024;
 
 pub(crate) fn own(engine: EngineId) -> Vec<SlashCommand> {
-    if engine != EngineId::Claude {
-        return Vec::new();
-    }
-    [
-        ("ultracode", "Ultracode for this message"),
-        ("ultrathink", "Think hardest about this message"),
-    ]
-    .into_iter()
-    .map(|(name, description)| SlashCommand {
-        name: name.to_owned(),
-        description: description.to_owned(),
-        hint: Some("<prompt>".to_owned()),
-    })
-    .collect()
+    let entries: &[(&str, &str, Option<&str>)] = match engine {
+        EngineId::Claude => &[
+            ("ultracode", "Ultracode for this message", Some("<prompt>")),
+            (
+                "ultrathink",
+                "Think hardest about this message",
+                Some("<prompt>"),
+            ),
+        ],
+        EngineId::Codex | EngineId::OpenCode => &[(
+            "compact",
+            "Compact the conversation to free up context",
+            None,
+        )],
+        EngineId::Antigravity => &[],
+    };
+    entries
+        .iter()
+        .map(|(name, description, hint)| SlashCommand {
+            name: (*name).to_owned(),
+            description: (*description).to_owned(),
+            hint: hint.map(str::to_owned),
+        })
+        .collect()
+}
+
+#[must_use]
+pub(crate) fn compact_argument(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    let (name, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    (name == "/compact").then(|| rest.trim())
 }
 
 pub(crate) fn reported(commands: Vec<SlashCommand>) -> Vec<SlashCommand> {

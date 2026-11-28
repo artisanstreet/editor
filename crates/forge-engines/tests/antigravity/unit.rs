@@ -101,7 +101,7 @@ impl Sent {
     fn track(&mut self, client: &Value, decoder: &mut Decoder, now: Instant) {
         match client["method"].as_str() {
             Some("session/prompt") => {
-                decoder.prompted(now);
+                decoder.prompted(false, now);
                 self.prompts.insert(client["id"].clone());
                 self.open_prompts.insert(client["id"].clone());
             }
@@ -721,7 +721,7 @@ impl Turn {
     fn prompt() -> Self {
         let start = Instant::now();
         let mut decoder = Decoder::default();
-        let events = decoder.prompted(start);
+        let events = decoder.prompted(false, start);
         Self {
             decoder,
             start,
@@ -1075,4 +1075,37 @@ async fn a_task_message_dequeued_without_a_reply_yet_is_a_queued_wake() {
 #[tokio::test]
 async fn a_session_agy_never_recorded_has_nothing_queued() {
     assert!(!Brain::new().pending().await);
+}
+
+#[test]
+fn a_compact_prompt_emits_running_compaction_and_settles_before_output() {
+    let start = Instant::now();
+    let mut decoder = Decoder::default();
+    let started = decoder.prompted(true, start);
+    assert!(matches!(
+        started.as_slice(),
+        [EngineEvent::Item {
+            key,
+            status: artisan_api::Status::Running,
+            kind: artisan_api::ItemKind::Compaction { .. },
+            ..
+        }] if key == "compaction:1"
+    ));
+    let events = decoder.update(
+        super::protocol::Change::AgentThoughtChunk {
+            content: super::protocol::Block::Text {
+                text: "Checking theme tokens".to_owned(),
+            },
+        },
+        start + Duration::from_secs(15),
+    );
+    assert!(matches!(
+        events.first(),
+        Some(EngineEvent::Item {
+            key,
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::Compaction { .. },
+            ..
+        }) if key == "compaction:1"
+    ));
 }
