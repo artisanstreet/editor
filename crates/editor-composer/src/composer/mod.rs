@@ -8,6 +8,7 @@ pub mod goal_strip;
 pub mod mentions;
 pub mod model_line;
 pub mod model_list;
+pub mod model_switch;
 pub mod persistence;
 pub mod picker;
 mod placeholder;

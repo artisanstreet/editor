@@ -140,6 +140,7 @@ impl ComposerOwner {
         if let Some(popup) = self.project_popup.take() {
             popup.dispose(app);
         }
+        self.dispose_switch_dialog(app);
     }
 
     pub fn open_popup_content(

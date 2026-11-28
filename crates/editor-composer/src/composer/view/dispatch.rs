@@ -205,16 +205,19 @@ impl ComposerOwner {
                     composer.open_picker(super::super::picker::Menu::Project, host);
                 }
             }
+            ComposerAction::ResolveSwitch(choice) => {
+                let config = composer.resolve_switch(host, choice);
+                if let Some(config) = config {
+                    let (host_id, instance) = (host.id.clone(), host.instance());
+                    adopt_config(core, &composer, &host_id, instance, config);
+                }
+            }
             ComposerAction::ChooseModel { engine, id } => {
                 self.tooltip.borrow_mut().clear();
                 let config = composer.choose_model(host, engine, &id);
-                let host_id = host.id.clone();
-                let instance = host.instance();
-                if let (Some(config), Some(host)) =
-                    (config, core.host_mut_if_instance(&host_id, instance))
-                {
-                    composer.apply_permissions(host, config.permissions);
-                    host.remember_model_config(config);
+                if let Some(config) = config {
+                    let (host_id, instance) = (host.id.clone(), host.instance());
+                    adopt_config(core, &composer, &host_id, instance, config);
                 }
             }
             ComposerAction::OpenEngineSettings(engine) => {
@@ -472,5 +475,18 @@ fn begin_send(
             thread,
             replaced,
         });
+    }
+}
+
+fn adopt_config(
+    core: &mut editor_core::Core,
+    composer: &super::super::controller::Composer,
+    host_id: &editor_core::HostId,
+    instance: editor_core::HostInstance,
+    config: artisan_api::EngineConfig,
+) {
+    if let Some(host) = core.host_mut_if_instance(host_id, instance) {
+        composer.apply_permissions(host, config.permissions);
+        host.remember_model_config(config);
     }
 }

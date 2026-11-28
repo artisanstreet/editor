@@ -734,6 +734,16 @@ impl Workspace {
         std::mem::take(&mut self.code_frame_pending) || due
     }
 
+    pub(crate) fn sync_composer_dialog(
+        &mut self,
+        ui: &mut aqua::UiApp,
+        theme: &crate::ui::theme::ArtisanTheme,
+    ) {
+        if let Some(owner) = &mut self.composer {
+            owner.sync_switch_dialog(ui, theme);
+        }
+    }
+
     pub(crate) fn sync_composer_popups(
         &mut self,
         core: &Core,
@@ -928,6 +938,9 @@ impl Workspace {
     }
 
     pub(crate) fn sync_terminal_input(&mut self, ui: &mut aqua::UiApp) -> bool {
+        if let Some(owner) = &self.composer {
+            owner.sync_switch_dialog_input(ui);
+        }
         if let Some(dialog) = &self.terminal_dialog {
             dialog.sync(ui);
         }
