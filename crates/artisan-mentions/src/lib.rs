@@ -299,7 +299,7 @@ pub fn exclusive(mut found: Vec<MessageMention>) -> Vec<MessageMention> {
 }
 
 #[must_use]
-fn leading_command(text: &str) -> Option<Range<usize>> {
+pub fn leading_command(text: &str) -> Option<Range<usize>> {
     let trimmed = text.trim_start();
     let start = text.len() - trimmed.len();
     let rest = trimmed.strip_prefix('/')?;
@@ -309,16 +309,6 @@ fn leading_command(text: &str) -> Option<Range<usize>> {
     let (command, after) = rest.split_at(name);
     let ends = after.chars().next().is_none_or(char::is_whitespace);
     (!command.is_empty() && ends).then(|| start..start + 1 + name)
-}
-
-const SPECIAL_COMMANDS: &[&str] = &["goal", "ultracode", "ultrathink"];
-
-#[must_use]
-pub fn special_command(text: &str) -> Option<Range<usize>> {
-    leading_command(text).filter(|range| {
-        text.get(range.start + 1..range.end)
-            .is_some_and(|name| SPECIAL_COMMANDS.contains(&name))
-    })
 }
 
 #[cfg(test)]

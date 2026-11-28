@@ -159,7 +159,7 @@ impl Projections {
                 let text = source.text();
                 let command = source
                     .message
-                    .then(|| artisan_mentions::special_command(&text))
+                    .then(|| artisan_mentions::leading_command(&text))
                     .flatten()
                     .and_then(|range| text.get(range));
                 match streaming {

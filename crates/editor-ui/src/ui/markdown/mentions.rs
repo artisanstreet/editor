@@ -23,7 +23,7 @@ impl MessageMarks {
     #[must_use]
     pub(crate) fn new(source: &str, vocabulary: &Arc<MessageVocabulary>) -> Self {
         Self {
-            command: artisan_mentions::special_command(source)
+            command: artisan_mentions::leading_command(source)
                 .and_then(|range| source.get(range))
                 .map(str::to_owned),
             vocabulary: Arc::clone(vocabulary),
