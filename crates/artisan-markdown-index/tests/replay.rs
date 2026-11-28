@@ -78,3 +78,87 @@ fn exact_table_membership_survives_sparse_record_replay() {
     assert_eq!(decoded.context, last.context);
     assert!(!decoded.table_continues);
 }
+
+fn assert_balanced(events: &[(Event<'_>, std::ops::Range<usize>)]) {
+    let mut open = Vec::new();
+    for (event, _) in events {
+        match event {
+            Event::Start(tag) => open.push(tag.to_end()),
+            Event::End(end) => {
+                assert_eq!(
+                    open.pop(),
+                    Some(*end),
+                    "closing tag {end:?} did not match last opened tag"
+                );
+            }
+            Event::Text(_)
+            | Event::Code(_)
+            | Event::InlineMath(_)
+            | Event::DisplayMath(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::FootnoteReference(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Rule
+            | Event::TaskListMarker(_) => {}
+        }
+    }
+    assert!(open.is_empty(), "unclosed tags: {open:?}");
+}
+
+#[test]
+fn tight_list_item_followed_by_blockquote_table_or_rule_stays_balanced() {
+    let source = concat!(
+        "1. Outer\n",
+        "   - Intro:\n",
+        "     > Quoted line\n",
+        "   - Table:\n",
+        "     | A | B |\n",
+        "     | --- | --- |\n",
+        "     | 1 | 2 |\n",
+        "   - Before rule\n",
+        "     ***\n",
+        "     After rule\n",
+    );
+    let index = MarkdownIndex::build(source).unwrap();
+    for ordinal in 0..index.leaves().len() {
+        let record = index.record(ordinal).unwrap();
+        let events = record.replay(0, source).unwrap();
+        assert_balanced(&events);
+    }
+    let quoted = (0..index.leaves().len())
+        .map(|ordinal| index.record(ordinal).unwrap())
+        .find(|record| {
+            record
+                .exact_source(0, source)
+                .unwrap()
+                .contains("Quoted line")
+        })
+        .expect("blockquote leaf exists");
+    assert_eq!(quoted.context.quote_depth, 1);
+    assert_eq!(quoted.context.lists.len(), 2);
+    assert!(!quoted.context.lists[1].first);
+
+    let table_header = (0..index.leaves().len())
+        .map(|ordinal| index.record(ordinal).unwrap())
+        .find(|record| record.is_table_header() == Some(true))
+        .expect("table header leaf exists");
+    assert_eq!(table_header.context.table_alignments.len(), 2);
+    assert!(table_header.context.table_source.is_some());
+
+    let prefix = "### Two Ways\n\n1. **First step**\n   - Intro copy:\n";
+    let full = concat!(
+        "### Two Ways\n\n",
+        "1. **First step**\n",
+        "   - Intro copy:\n",
+        "     > **Help improve Artisan Editor**\n",
+        "     > Zero code ever leaves your machine.\n",
+        "   - Bonus item.\n",
+    );
+    let (streamed, _) = MarkdownIndex::build(prefix).unwrap().append(full).unwrap();
+    for ordinal in 0..streamed.leaves().len() {
+        let events = streamed.record(ordinal).unwrap().replay(0, full).unwrap();
+        assert_balanced(&events);
+    }
+}

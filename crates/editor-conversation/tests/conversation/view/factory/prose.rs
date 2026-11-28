@@ -239,3 +239,42 @@ fn a_reply_that_shrinks_through_blank_lines_renders_its_one_remaining_block() {
     );
     assert!(!sync.pending, "{}", sync.reason);
 }
+
+#[test]
+fn a_streamed_tight_list_item_followed_by_a_blockquote_renders_without_error() {
+    let mut streaming = Streaming::start();
+    let mut transcript = Transcript::open(&streaming.conversation, &streaming.core);
+    let prefix = "### Two Ways\n\n1. **First step**\n   - Intro copy:\n";
+    let full = concat!(
+        "### Two Ways\n\n",
+        "1. **First step**\n",
+        "   - Intro copy:\n",
+        "     > **Help improve Artisan Editor**\n",
+        "     > Zero code ever leaves your machine.\n",
+        "   - Bonus item.\n",
+    );
+    streaming.stream(prefix);
+    transcript.render(&mut streaming.conversation, &streaming.core);
+
+    streaming.stream(full);
+    transcript.render(&mut streaming.conversation, &streaming.core);
+    transcript.render(&mut streaming.conversation, &streaming.core);
+
+    let painted = transcript.texts();
+    assert!(
+        painted
+            .iter()
+            .any(|text| text.contains("Help improve Artisan Editor")),
+        "the nested blockquote renders: {painted:?}"
+    );
+    assert!(
+        painted.iter().any(|text| text.contains("Bonus item.")),
+        "items after the nested blockquote render: {painted:?}"
+    );
+    assert!(
+        !painted
+            .iter()
+            .any(|text| text.contains("present conversation body")),
+        "no body presentation error is shown: {painted:?}"
+    );
+}
