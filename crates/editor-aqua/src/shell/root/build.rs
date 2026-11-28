@@ -515,10 +515,17 @@ impl RootViews {
             .retain(|export| Self::source_export_is_current(shell, export));
         self.bind_row_sources(ui, ctx, window);
         (|| {
-            let Some((panel, width)) = self.dialogs.settings_panel.take() else {
+            if !matches!(shell.core.screen(), Screen::Settings(_))
+                || shell.entry.workspace().is_none()
+            {
+                self.dialogs.settings_panel = None;
+                self.dialogs.settings_dismissed.set(false);
                 if let Some(dialog) = self.dialogs.settings.take() {
                     dialog.dispose(ui);
                 }
+                return;
+            }
+            let Some((panel, width)) = self.dialogs.settings_panel.take() else {
                 return;
             };
             if let Some(dialog) = &self.dialogs.settings {
@@ -532,6 +539,7 @@ impl RootViews {
                 self.dialogs.settings = None;
             }
             let Some(owner) = ui.find_debug_selector("workspace-root") else {
+                self.dialogs.settings_panel = Some((panel, width));
                 return;
             };
             let dismissed = Rc::clone(&self.dialogs.settings_dismissed);

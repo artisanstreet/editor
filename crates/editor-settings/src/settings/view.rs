@@ -444,7 +444,12 @@ pub fn build_with_account(
         );
     }
     if page == SettingsPage::GlobalPrompt && core.active_host().is_some() {
-        return prompt(controller, core, theme, emit);
+        return frame(
+            controller,
+            theme,
+            prompt(controller, core, theme, emit),
+            format!("settings-screen-{page:?}"),
+        );
     }
     let emit_for_error = Rc::clone(&emit);
     let content = match (page.parent(), core.active_host()) {
@@ -1408,17 +1413,14 @@ fn prompt(
     let setting_failures = core
         .active_host()
         .and_then(|host| host_setting_failures(controller, host, theme, &emit));
-    let page = ui::prompt_page().children(setting_failures).children(
+    let page = ui::column().children(setting_failures).children(
         built_in.map(|row| ui::section(theme, "Built-in", None, ui::card(theme, vec![row]))),
     );
     let field = Scroll::new()
+        .preserve_offset(true)
         .width(Length::Pct(100.0))
-        .style(
-            Style::new()
-                .axis(aqua_ui::style::Axis::Column)
-                .flex_grow(1.0)
-                .min_height(Length::Pct(0.0)),
-        )
+        .height(Length::Pct(100.0))
+        .style(Style::new().axis(aqua_ui::style::Axis::Column))
         .child(editor.element_with_notice_keyed(
             "settings-global-prompt-editor",
             Mode::Source,
@@ -1478,20 +1480,28 @@ fn prompt(
         !form.loaded || !dirty || form.pending || form.newer,
         move || emit(ViewAction::SavePrompt),
     ));
-    let card = ui::card_box(
+    let card = ui::card(
         theme,
         vec![
             body,
             ui::row_of(theme, UiBox::new().build(), Some(actions.build()), true),
         ],
-    )
-    .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0)))
-    .build();
-    page.child(
-        ui::section(theme, "Global Prompt", None, card)
-            .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0))),
-    )
-    .build()
+    );
+    page.child(ui::section(theme, "Global Prompt", None, card))
+        .build()
+}
+
+fn prompt_preview(theme: &ArtisanTheme, text: String) -> Element {
+    Scroll::new()
+        .preserve_offset(true)
+        .width(Length::Pct(100.0))
+        .style(
+            Style::new()
+                .axis(aqua_ui::style::Axis::Column)
+                .max_height(Length::Px(160.0)),
+        )
+        .child(ui::callout(theme, Tone::Neutral, text))
+        .build()
 }
 
 #[expect(
@@ -1530,7 +1540,7 @@ fn prompt_reconciliation(
                     Tone::Info,
                     format!("Prompt found in {engines}"),
                 ))
-                .child(ui::callout(theme, Tone::Neutral, candidate.text.clone()))
+                .child(prompt_preview(theme, candidate.text.clone()))
                 .child(
                     UiBox::new()
                         .child(ui::button(
@@ -1567,7 +1577,7 @@ fn prompt_reconciliation(
                     ),
                 ));
                 if let Some(text) = &engine.external_text {
-                    row = row.child(ui::callout(theme, Tone::Neutral, text.clone()));
+                    row = row.child(prompt_preview(theme, text.clone()));
                 }
                 controls = controls.child(
                     row.child(

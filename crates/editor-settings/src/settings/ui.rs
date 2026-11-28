@@ -126,25 +126,6 @@ pub(crate) fn column() -> UiBox {
 const PAGE_PAD_X: f32 = 36.0;
 const PAGE_WIDTH: f32 = 880.0 + 2.0 * PAGE_PAD_X;
 
-pub(crate) fn prompt_page() -> UiBox {
-    UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .style(
-            Style::new()
-                .gap(16.0)
-                .max_width(Length::Px(PAGE_WIDTH))
-                .min_height(Length::Pct(0.0))
-                .padding_insets(aqua_core::Insets {
-                    left: PAGE_PAD_X,
-                    right: PAGE_PAD_X,
-                    top: 24.0,
-                    bottom: 28.0,
-                }),
-        )
-}
-
 pub(crate) fn prompt_body(theme: &ArtisanTheme, above: Element, editor: Element) -> Element {
     let carve = Carve::of(theme);
     UiBox::new()
@@ -153,8 +134,6 @@ pub(crate) fn prompt_body(theme: &ArtisanTheme, above: Element, editor: Element)
         .style(
             Style::new()
                 .gap(12.0)
-                .flex_grow(1.0)
-                .min_height(Length::Pct(0.0))
                 .padding_insets(aqua_core::Insets {
                     left: PAD_X,
                     right: PAD_X,
@@ -167,10 +146,9 @@ pub(crate) fn prompt_body(theme: &ArtisanTheme, above: Element, editor: Element)
             UiBox::new()
                 .layout("column")
                 .width(Length::Pct(100.0))
+                .height(Length::Px(320.0))
                 .style(
                     Style::new()
-                        .flex_grow(1.0)
-                        .min_height(Length::Px(220.0))
                         .radius(Length::Px(RADIUS_MD))
                         .background(carve.well.to_paint())
                         .shadows(carve.inset()),

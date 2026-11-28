@@ -176,6 +176,38 @@ fn under(ui: &UiApp, hit: Option<NodeId>, surface: NodeId) -> bool {
     false
 }
 
+fn can_scroll(metrics: Metrics, delta_y: f32) -> bool {
+    const EPSILON: f32 = 0.5;
+    if metrics.max <= EPSILON {
+        return false;
+    }
+    if delta_y > 0.0 {
+        metrics.offset < metrics.max - EPSILON
+    } else if delta_y < 0.0 {
+        metrics.offset > EPSILON
+    } else {
+        false
+    }
+}
+
+fn closer_scroller(ui: &UiApp, hit: Option<NodeId>, surface: NodeId, delta_y: f32) -> bool {
+    let mut cursor = hit;
+    while let Some(node) = cursor {
+        if node == surface {
+            return false;
+        }
+        if matches!(
+            ui.tree().get(node).map(|record| &record.kind),
+            Some(aqua_ui::tree::NodeKind::Scroll(_))
+        ) && Surface::metrics(ui, node).is_some_and(|metrics| can_scroll(metrics, delta_y))
+        {
+            return true;
+        }
+        cursor = ui.tree().get(node).and_then(|record| record.parent);
+    }
+    false
+}
+
 impl WheelGlides {
     fn glide(&mut self, surface: Surface) -> &mut WheelGlide {
         &mut self.glides[surface.index()]
@@ -189,12 +221,30 @@ impl WheelGlides {
             let _tm = crate::shell::application::Tm::new("wheel.hit");
             aqua_ui::events::hit_test(ui.tree(), *at)
         };
-        let surface = Surface::ALL
-            .into_iter()
-            .find(|surface| surface.node(ui).is_some_and(|node| under(ui, hit, node)))?;
-        let _tm = crate::shell::application::Tm::new("wheel.metrics");
-        let node = surface.node(ui)?;
-        let metrics = Surface::metrics(ui, node)?;
+        let mut fallback = None;
+        let mut chosen = None;
+        for surface in Surface::ALL {
+            let Some(node) = surface.node(ui) else {
+                continue;
+            };
+            if !under(ui, hit, node) {
+                continue;
+            }
+            if closer_scroller(ui, hit, node, delta.y) {
+                return None;
+            }
+            let Some(metrics) = Surface::metrics(ui, node) else {
+                continue;
+            };
+            if fallback.is_none() {
+                fallback = Some((surface, metrics));
+            }
+            if can_scroll(metrics, delta.y) {
+                chosen = Some((surface, metrics));
+                break;
+            }
+        }
+        let (surface, metrics) = chosen.or(fallback)?;
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let glide = self.glide(surface);
         match WheelInput::classify(delta.y) {
