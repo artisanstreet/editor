@@ -32,6 +32,14 @@ path = "LICENSE"
 license = "BSD-3-Clause"
 checksum = "cca0bd3c4fcdba74145ef9d49c62337e2c9fbf9368288f11d0547f1b0273219f"
 
+[rfd.clarify]
+license = "MIT"
+
+[[rfd.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "65fc947f4bac882a2cd104ef73c246b1b037059df9f2b3a58b7f77f0b9e56071"
+
 [libwebp-sys.clarify]
 license = "MIT AND BSD-3-Clause"
 
