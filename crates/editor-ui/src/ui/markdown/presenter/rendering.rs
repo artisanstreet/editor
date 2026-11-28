@@ -88,6 +88,7 @@ impl MarkdownPresenter {
             };
             column = column.child(
                 ui::Box::new()
+                    .layout("column")
                     .width(Length::Pct(100.0))
                     .style(Style::new().padding_insets(Insets {
                         top: gap,

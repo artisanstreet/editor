@@ -722,6 +722,7 @@ fn render_leaf(
         IndexedLeafContent::Block(Block::Code(_))
     ));
     let mut frame = ui::Box::new()
+        .layout("column")
         .width(Length::Pct(100.0))
         .style(Style::new().max_width(measure).padding_insets(Insets {
             left: crate::ui::rich::charts::scale::f32_of_count(indent)

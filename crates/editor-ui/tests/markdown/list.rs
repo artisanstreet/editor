@@ -138,3 +138,76 @@ fn streamed_list_rows_expose_items_and_task_state() {
             .any(|node| node.label == "☑" || node.label == "☐")
     );
 }
+
+fn text_width(element: Element, needle: &str, viewport_width: f32) -> f32 {
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(move |_| element).unwrap();
+    app.set_viewport(viewport_width, 400.0, 1.0);
+    app.build_frame().unwrap();
+    app.tree()
+        .traverse()
+        .into_iter()
+        .find_map(|id| {
+            let node = app.tree().get(id)?;
+            match &node.kind {
+                aqua_ui::tree::NodeKind::Text(text) if text.text() == needle => {
+                    Some(app.tree().rect(id)?.w)
+                }
+                aqua_ui::tree::NodeKind::Text(_)
+                | aqua_ui::tree::NodeKind::Box(_)
+                | aqua_ui::tree::NodeKind::Media(_)
+                | aqua_ui::tree::NodeKind::Scroll(_)
+                | aqua_ui::tree::NodeKind::Canvas(_)
+                | aqua_ui::tree::NodeKind::Viewport3D(_) => None,
+            }
+        })
+        .expect("list item text node")
+}
+
+#[test]
+fn list_item_text_fills_available_width_instead_of_shrinking_to_content() {
+    let path = r"D:\malachite\variants\09_bold_wide_bands";
+    let source = format!("- `{path}`\n");
+    let presenter = prepared(&source);
+    let viewport_width = 600.0;
+    let expected = viewport_width - ProseTypography::LIST_INDENT_PX;
+    let projected = presenter
+        .render_projected(
+            0,
+            BodyContext::plain(&ArtisanTheme::resolved(), BodyTone::Foreground),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[0],
+            },
+            |index| SelectionSourceId(index as u64 + 1),
+        )
+        .unwrap();
+    assert!(
+        (text_width(projected.element, path, viewport_width) - expected).abs() < 1.0,
+        "projected list item text must fill its frame width"
+    );
+    let glyph: crate::ui::rich::narrative::callout::GlyphFactory =
+        Rc::new(|_, _, _| ui::Box::new().build());
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
+    let full = presenter
+        .render(
+            "answer",
+            BodyContext::plain(&ArtisanTheme::resolved(), BodyTone::Foreground),
+            SelectionPlace {
+                document: SelectionDocumentId(1),
+                order: &[0],
+            },
+            |index| SelectionSourceId(index as u64 + 1),
+            BodyServices {
+                glyph: &glyph,
+                invalidate: &invalidate,
+                charts: None,
+                code: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        (text_width(full.element, path, viewport_width) - expected).abs() < 1.0,
+        "rendered list item text must fill its frame width"
+    );
+}
