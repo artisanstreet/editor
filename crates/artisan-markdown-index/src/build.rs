@@ -118,7 +118,10 @@ pub(crate) fn build_from(
                     | Tag::CodeBlock(_)
                     | Tag::HtmlBlock
                     | Tag::List(_)
+                    | Tag::BlockQuote(_)
+                    | Tag::Table(_)
             ) | Event::End(TagEnd::Item)
+                | Event::Rule
         );
         if boundary && let Some(implicit) = active.take_if(|a| a.implicit) {
             let mut leaf = implicit.leaf;
