@@ -141,6 +141,8 @@ pub enum InputError {
     NoMessageId,
     #[error("run /goal")]
     Goal(#[source] GoalError),
+    #[error("run /compact")]
+    Compact(#[source] ApiError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -441,6 +443,17 @@ async fn drive(
             }
             send_input(api, &session, &turn.input, &mut decoder, io).await?;
             loop {
+                if let Some(follow_up) = decoder.take_after_compaction() {
+                    let failed = |source| RunError::Input {
+                        session: session.clone(),
+                        item: follow_up.id.clone(),
+                        source: Box::new(source),
+                    };
+                    let message = send_prompt(api, &session, &follow_up)
+                        .await
+                        .map_err(failed)?;
+                    emit_all(io, decoder.prompt_sent(&message, None)).await;
+                }
                 if decoder.idle() {
                     match io.inbox.try_recv() {
                         Ok(input) => {
@@ -586,6 +599,28 @@ async fn send_input(
         item: input.id.clone(),
         source: Box::new(source),
     };
+    if let Some(rest) = crate::commands::compact_argument(&input.text) {
+        emit_all(io, decoder.start_compaction(session)).await;
+        if let Err(source) = api
+            .post(&format!("/api/session/{session}/compact"), Some(&json!({})))
+            .await
+        {
+            emit_all(io, decoder.fail_compaction(session)).await;
+            return Err(failed(InputError::Compact(source)));
+        }
+        io.emit(EngineEvent::InputAccepted {
+            id: input.id.clone(),
+        })
+        .await;
+        if !rest.is_empty() || !input.images.is_empty() {
+            decoder.queue_after_compaction(UserInput {
+                id: input.id.clone(),
+                text: rest.to_owned(),
+                images: input.images.clone(),
+            });
+        }
+        return Ok(());
+    }
     if let Some(text) = goal::argument(&input.text) {
         let files = input_files(input).await.map_err(failed)?;
         goal::command(api, session, text, &files)

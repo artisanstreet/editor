@@ -496,6 +496,7 @@ async fn prompt(
     input: &UserInput,
 ) -> Result<(), RunError> {
     let blocks = blocks(input).await?;
+    let compacting = crate::commands::compact_argument(&input.text).is_some();
     let id = connection
         .request(
             "session/prompt",
@@ -503,7 +504,7 @@ async fn prompt(
         )
         .await?;
     state.prompts.insert(id, input.id.clone());
-    emit_all(io, decoder.prompted(Instant::now())).await;
+    emit_all(io, decoder.prompted(compacting, Instant::now())).await;
     io.emit(EngineEvent::InputAccepted {
         id: input.id.clone(),
     })

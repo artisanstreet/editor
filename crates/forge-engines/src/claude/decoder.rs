@@ -493,6 +493,20 @@ impl ClaudeDecoder {
         }
     }
 
+    pub(crate) fn start_compaction(&mut self) -> Option<EngineEvent> {
+        if self.compacting.is_some() {
+            return None;
+        }
+        let key = self.next_key("compaction");
+        self.compacting = Some(key.clone());
+        Some(compaction(
+            &key,
+            Status::Running,
+            self.usage.context_used,
+            None,
+        ))
+    }
+
     pub(crate) fn finish(&mut self) -> Vec<EngineEvent> {
         let mut out = Vec::new();
         self.settle_open_texts(Status::Cancelled, &mut out);
@@ -1175,6 +1189,16 @@ impl ClaudeDecoder {
             },
             out,
         );
+        if let Some(key) = self.compacting.take() {
+            let status = if aborted {
+                Status::Cancelled
+            } else if failed {
+                Status::Failed
+            } else {
+                Status::Done
+            };
+            out.push(compaction(&key, status, None, None));
+        }
         self.pending.clear();
         let outcome = if aborted {
             Outcome::cancelled()

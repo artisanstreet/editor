@@ -21,3 +21,15 @@ fn ultra_commands_are_keywords_of_the_turn_they_start() {
         assert!(normalize_command(engine, text).unwrap().is_none(), "{text}");
     }
 }
+
+#[test]
+fn compact_command_parses_only_leading_compact_with_optional_follow_up() {
+    assert_eq!(compact_argument("/compact"), Some(""));
+    assert_eq!(compact_argument("  /compact  "), Some(""));
+    assert_eq!(
+        compact_argument("/compact\n\nAnd use the real color token values"),
+        Some("And use the real color token values")
+    );
+    assert_eq!(compact_argument("/compacting"), None);
+    assert_eq!(compact_argument("please /compact"), None);
+}

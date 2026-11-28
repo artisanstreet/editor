@@ -47,9 +47,11 @@ const SCHEDULE_TITLES: [&str; 2] = ["Run schedule", "Running schedule"];
 pub(super) struct Decoder {
     texts: u64,
     plans: u64,
+    compactions: u64,
     text: Option<Text>,
     thinking: bool,
     plan: Option<String>,
+    compacting: Option<Compacting>,
     tools: BTreeMap<String, Tool>,
     pending: HashMap<String, Pending>,
     model: Option<String>,
@@ -57,6 +59,12 @@ pub(super) struct Decoder {
     usage: Usage,
     wake: Wake,
     waiting_on_hold: bool,
+}
+
+#[derive(Debug)]
+struct Compacting {
+    key: String,
+    tokens_before: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -157,6 +165,7 @@ impl Decoder {
         match update {
             Change::AgentMessageChunk { content } => {
                 if let Some(text) = content.text() {
+                    self.finish_compaction(Status::Done, None, &mut out);
                     if self.wake.reply_closed() {
                         self.close_text(&mut out);
                     }
@@ -166,12 +175,14 @@ impl Decoder {
             }
             Change::AgentThoughtChunk { content } => {
                 if let Some(text) = content.text() {
+                    self.finish_compaction(Status::Done, None, &mut out);
                     self.see(Seen::Output, now, &mut out);
                     self.think(text, &mut out);
                 }
             }
             Change::Call(call) | Change::ToolCallUpdate(call) => self.call(&call, now, &mut out),
             Change::Plan { entries } => {
+                self.finish_compaction(Status::Done, None, &mut out);
                 self.see(Seen::Output, now, &mut out);
                 let key = self.plan.get_or_insert_with(|| {
                     self.plans += 1;
@@ -223,6 +234,13 @@ impl Decoder {
                 }) {
                     self.usage.cost_usd = Some(cost.amount);
                 }
+                if let Some(after) = used
+                    && self.compacting.as_ref().is_some_and(|active| {
+                        active.tokens_before.is_some_and(|before| after < before)
+                    })
+                {
+                    self.finish_compaction(Status::Done, Some(after), &mut out);
+                }
                 out.push(EngineEvent::Usage(self.usage.clone()));
                 self.step_ended(now, &mut out);
             }
@@ -260,6 +278,7 @@ impl Decoder {
         } = request;
         let key = tool_call.tool_call_id.clone();
         let mut out = Vec::new();
+        self.finish_compaction(Status::Done, None, &mut out);
         self.see(Seen::Output, now, &mut out);
         self.close_text(&mut out);
         self.thinking = false;
@@ -301,6 +320,7 @@ impl Decoder {
 
     pub(super) fn form(&mut self, rpc: Value, request: FormRequest, now: Instant) -> Formed {
         let mut out = Vec::new();
+        self.finish_compaction(Status::Done, None, &mut out);
         self.see(Seen::Output, now, &mut out);
         self.close_text(&mut out);
         self.thinking = false;
@@ -440,6 +460,8 @@ impl Decoder {
         let cancelled = prompted.stop_reason == StopReason::Cancelled;
         if cancelled {
             out.extend(self.settle_open(Status::Cancelled));
+        } else {
+            self.finish_compaction(Status::Done, self.usage.context_used, &mut out);
         }
         let hold = self.hold();
         if let Some(text) = self.text.take() {
@@ -463,16 +485,43 @@ impl Decoder {
         out
     }
 
-    pub(super) fn prompted(&mut self, now: Instant) -> Vec<EngineEvent> {
+    pub(super) fn prompted(&mut self, compacting: bool, now: Instant) -> Vec<EngineEvent> {
         let mut out = Vec::new();
         self.see(Seen::PromptSent, now, &mut out);
+        if compacting && self.compacting.is_none() {
+            self.compactions += 1;
+            let key = format!("compaction:{}", self.compactions);
+            let tokens_before = self.usage.context_used;
+            self.compacting = Some(Compacting {
+                key: key.clone(),
+                tokens_before,
+            });
+            out.push(compaction_item(&key, Status::Running, tokens_before, None));
+        }
         out
     }
 
     pub(super) fn abandoned(&mut self) -> Vec<EngineEvent> {
         let mut out = Vec::new();
+        self.finish_compaction(Status::Cancelled, None, &mut out);
         self.stopped(&mut out);
         out
+    }
+
+    fn finish_compaction(
+        &mut self,
+        status: Status,
+        tokens_after: Option<u64>,
+        out: &mut Vec<EngineEvent>,
+    ) {
+        if let Some(active) = self.compacting.take() {
+            out.push(compaction_item(
+                &active.key,
+                status,
+                active.tokens_before,
+                tokens_after,
+            ));
+        }
     }
 
     pub(super) const fn wake(&self) -> Wake {
@@ -503,6 +552,7 @@ impl Decoder {
     }
 
     fn call(&mut self, call: &Call, now: Instant, out: &mut Vec<EngineEvent>) {
+        self.finish_compaction(Status::Done, None, out);
         let held = self
             .tools
             .get(&call.tool_call_id)
@@ -600,17 +650,21 @@ impl Decoder {
 
     fn settle_open(&mut self, status: Status) -> Vec<EngineEvent> {
         self.pending.clear();
-        self.tools
-            .iter_mut()
-            .filter(|(_, tool)| !tool.status.is_terminal())
-            .map(|(key, tool)| {
-                tool.status = status;
-                EngineEvent::Status {
-                    key: key.clone(),
-                    status,
-                }
-            })
-            .collect()
+        let mut out = Vec::new();
+        self.finish_compaction(status, None, &mut out);
+        out.extend(
+            self.tools
+                .iter_mut()
+                .filter(|(_, tool)| !tool.status.is_terminal())
+                .map(|(key, tool)| {
+                    tool.status = status;
+                    EngineEvent::Status {
+                        key: key.clone(),
+                        status,
+                    }
+                }),
+        );
+        out
     }
 
     fn add_usage(&mut self, usage: &TurnUsage) {
@@ -1094,6 +1148,25 @@ fn changes(call: &Call) -> Vec<FileChange> {
 fn command_output(text: &str) -> &str {
     text.split_once(COMMAND_OUTPUT)
         .map_or(text, |(_, output)| output)
+}
+
+fn compaction_item(
+    key: &str,
+    status: Status,
+    tokens_before: Option<u64>,
+    tokens_after: Option<u64>,
+) -> EngineEvent {
+    EngineEvent::Item {
+        key: key.to_owned(),
+        parent: None,
+        status,
+        kind: ItemKind::Compaction {
+            summary: None,
+            tokens_before,
+            tokens_after,
+            switch: None,
+        },
+    }
 }
 
 fn output_text(call: &Call) -> Option<String> {

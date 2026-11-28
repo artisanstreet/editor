@@ -82,6 +82,8 @@ pub enum RunError {
     Write(#[source] Ended),
     #[error("Codex refused turn/start")]
     TurnStart(#[source] crate::rpc::RpcError),
+    #[error("Codex refused thread/compact/start")]
+    CompactStart(#[source] crate::rpc::RpcError),
     #[error("Codex answered turn/start without a turn id")]
     NoTurn,
     #[error("Codex has no thread for this run")]
@@ -317,6 +319,7 @@ struct Starting {
 enum Phase {
     Idle,
     Starting(Starting),
+    Compacting(Starting),
     Active {
         turn: String,
     },
@@ -427,6 +430,7 @@ impl Run {
                 Phase::Stopping { deadline, .. } => Some(*deadline),
                 Phase::Idle
                 | Phase::Starting(_)
+                | Phase::Compacting(_)
                 | Phase::Active { .. }
                 | Phase::Finished { .. } => None,
             };
@@ -476,7 +480,9 @@ impl Run {
             if matches!(self.phase, Phase::Stopping { .. }) {
                 return Ok(Step::End(Outcome::Cancelled));
             }
-            if let Phase::Starting(starting) = std::mem::replace(&mut self.phase, Phase::Idle) {
+            if let Phase::Starting(starting) | Phase::Compacting(starting) =
+                std::mem::replace(&mut self.phase, Phase::Idle)
+            {
                 self.acknowledge(starting.acknowledges).await;
             }
             let nudge = self.decoder.take_stranded();
@@ -543,8 +549,18 @@ impl Run {
                     turn: running.to_owned(),
                 };
             }
+            Phase::Compacting(starting)
+                if starting.acknowledges.is_empty() && starting.request == 0 =>
+            {
+                self.phase = Phase::Active {
+                    turn: running.to_owned(),
+                };
+            }
             Phase::Active { turn } if turn != running => running.clone_into(turn),
-            Phase::Active { .. } | Phase::Starting(_) | Phase::Stopping { .. } => {}
+            Phase::Active { .. }
+            | Phase::Starting(_)
+            | Phase::Compacting(_)
+            | Phase::Stopping { .. } => {}
         }
     }
 
@@ -552,7 +568,7 @@ impl Run {
         let deadline = Instant::now() + INTERRUPT_GRACE;
         let interrupt_sent = self.interrupt()?;
         let starting = match std::mem::replace(&mut self.phase, Phase::Idle) {
-            Phase::Starting(starting) => Some(starting),
+            Phase::Starting(starting) | Phase::Compacting(starting) => Some(starting),
             Phase::Idle
             | Phase::Active { .. }
             | Phase::Finished { .. }
@@ -650,7 +666,7 @@ impl Run {
 
     async fn pump(&mut self, turn: &Turn) -> Result<(), RunError> {
         let nudge = match &self.phase {
-            Phase::Starting(_) | Phase::Stopping { .. } => return Ok(()),
+            Phase::Starting(_) | Phase::Compacting(_) | Phase::Stopping { .. } => return Ok(()),
             Phase::Finished { nudge, .. } => *nudge,
             Phase::Idle | Phase::Active { .. } => false,
         };
@@ -670,6 +686,46 @@ impl Run {
             }
             self.flush()
         } else if self.steering.is_empty() {
+            if let Some(rest) = self
+                .queued
+                .first()
+                .and_then(|queued| crate::commands::compact_argument(&queued.input.text))
+                .map(str::to_owned)
+            {
+                let first = self.queued.remove(0);
+                if !rest.is_empty() || !first.input.images.is_empty() {
+                    self.queued.insert(
+                        0,
+                        Queued {
+                            admission: first.admission,
+                            input: UserInput {
+                                id: first.input.id.clone(),
+                                text: rest,
+                                images: first.input.images,
+                            },
+                            image_bytes: first.image_bytes,
+                            reserved: first.reserved,
+                            acknowledge: false,
+                        },
+                    );
+                }
+                if let Some(event) = self.decoder.start_compaction() {
+                    self.io.emit(event).await;
+                }
+                let request = self
+                    .decoder
+                    .request("thread/compact/start", json!({ "threadId": thread }));
+                let acknowledges = first
+                    .acknowledge
+                    .then_some(first.input.id)
+                    .into_iter()
+                    .collect();
+                self.phase = Phase::Compacting(Starting {
+                    request,
+                    acknowledges,
+                });
+                return self.flush();
+            }
             let later = self.queued.split_off(within_turn_images(&self.queued));
             let queued = std::mem::replace(&mut self.queued, later);
             let inputs: Vec<UserInput> = queued.iter().map(|queued| queued.input.clone()).collect();
@@ -705,6 +761,48 @@ impl Run {
         }
     }
 
+    async fn compact_started(&mut self, response: decoder::Response) -> Result<(), RunError> {
+        let compacting = match &mut self.phase {
+            Phase::Compacting(starting) if starting.request == response.id => {
+                starting.request = 0;
+                Some(std::mem::take(&mut starting.acknowledges))
+            }
+            Phase::Stopping {
+                starting: starting @ Some(_),
+                ..
+            } if starting
+                .as_ref()
+                .is_some_and(|starting| starting.request == response.id) =>
+            {
+                starting.take().map(|starting| starting.acknowledges)
+            }
+            Phase::Idle
+            | Phase::Starting(_)
+            | Phase::Compacting(_)
+            | Phase::Active { .. }
+            | Phase::Finished { .. }
+            | Phase::Stopping { .. } => None,
+        };
+        let Some(acknowledges) = compacting else {
+            return Ok(());
+        };
+        if let Err(source) = response.result {
+            if let Some(event) = self.decoder.fail_compaction() {
+                self.io.emit(event).await;
+            }
+            return Err(RunError::CompactStart(source));
+        }
+        if matches!(self.phase, Phase::Compacting(_))
+            && let Some(turn) = self.decoder.active_turn()
+        {
+            self.phase = Phase::Active {
+                turn: turn.to_owned(),
+            };
+        }
+        self.acknowledge(acknowledges).await;
+        Ok(())
+    }
+
     async fn responded(&mut self, response: decoder::Response) -> Result<(), RunError> {
         match response.method.as_str() {
             "turn/start" => {
@@ -723,6 +821,7 @@ impl Run {
                     }
                     Phase::Idle
                     | Phase::Starting(_)
+                    | Phase::Compacting(_)
                     | Phase::Active { .. }
                     | Phase::Finished { .. }
                     | Phase::Stopping { .. } => None,
@@ -741,6 +840,7 @@ impl Run {
                 }
                 self.acknowledge(acknowledges).await;
             }
+            "thread/compact/start" => self.compact_started(response).await?,
             "turn/steer" => {
                 let Some(queued) = self.steering.remove(&response.id) else {
                     return Ok(());
