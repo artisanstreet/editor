@@ -182,6 +182,7 @@ pub(super) fn render(
         };
         sources.collected.push(leaf.source);
         let mut frame = ui::Box::new()
+            .layout("column")
             .width(Length::Pct(100.0))
             .style(Style::new().padding_insets(Insets {
                 left: super::super::rich::charts::scale::f32_of_count(row.indent)
