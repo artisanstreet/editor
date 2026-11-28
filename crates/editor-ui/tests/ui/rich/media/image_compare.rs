@@ -309,3 +309,54 @@ fn the_comparison_frame_is_a_named_slider_or_switch_that_assistive_tech_operates
     let switch = frame(&app, Role::Switch, "Show New instead of Old");
     assert_eq!(switch.checked, Some(true));
 }
+
+#[test]
+fn evicted_compare_images_stay_ready_without_refetching() {
+    use std::sync::atomic::AtomicUsize;
+
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 1)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let bytes: Arc<[u8]> = encoded.into_inner().into();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&calls);
+    let fetcher = MediaFetcher::new("test", move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        let bytes = Arc::clone(&bytes);
+        Box::pin(async move { Ok(bytes) })
+    })
+    .owned_by(&[1], 1);
+    let model: ImageCompare = serde_json::from_str(
+        r#"{"before":{"src":"before.png"},"after":{"src":"after.png"},"mode":"side-by-side"}"#,
+    )
+    .unwrap();
+    let loader = Images::new();
+    let assets = ImageAssets::new(aqua::images::ImageAssetBudget::editor());
+    let mut state = CompareState::new(&model, fetcher.clone(), loader.clone());
+    test_support::wait::wait_until(
+        "both comparison images to load",
+        test_support::wait::LIVENESS,
+        || {
+            loader.drain(&assets);
+            state.refresh();
+            state
+                .images
+                .iter()
+                .all(|image| matches!(image, ImageState::Decoding(handle) if matches!(handle.status(), ImageStatus::Ready { .. })))
+        },
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    for side in [Side::Before, Side::After] {
+        let key = cache_key(&fetcher, state.source(side), CompareState::part(side));
+        fetcher.resources().forget::<ImageLoader>(&key);
+    }
+    assert!(!state.refresh());
+    assert!(
+        state
+            .images
+            .iter()
+            .all(|image| matches!(image, ImageState::Decoding(handle) if matches!(handle.status(), ImageStatus::Ready { .. })))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}

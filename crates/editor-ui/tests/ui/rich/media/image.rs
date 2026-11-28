@@ -207,3 +207,51 @@ fn the_copy_path_menu_opens_from_the_keyboard_and_assistive_tech() {
     assert_eq!(copies(&actions), 3);
     assert_eq!(actions.borrow().len(), 3);
 }
+
+#[test]
+fn evicted_gallery_images_stay_ready_without_refetching() {
+    use std::sync::atomic::AtomicUsize;
+
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 1)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let bytes: Arc<[u8]> = encoded.into_inner().into();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&calls);
+    let fetcher = MediaFetcher::new("test", move |_| {
+        count.fetch_add(1, Ordering::SeqCst);
+        let bytes = Arc::clone(&bytes);
+        Box::pin(async move { Ok(bytes) })
+    })
+    .owned_by(&[1], 1);
+    let images: Vec<_> = (0..12)
+        .map(|index| serde_json::json!({ "src": format!("variant-{index:02}.png") }))
+        .collect();
+    let block: ImageBlock =
+        serde_json::from_value(serde_json::json!({ "images": images })).unwrap();
+    let loader = Images::new();
+    let assets = aqua::images::ImageAssets::new(aqua::images::ImageAssetBudget::editor());
+    let mut state = ImageState::new(&block, fetcher.clone(), loader.clone());
+    wait_until("all 12 gallery images to load", LIVENESS, || {
+        loader.drain(&assets);
+        state.refresh();
+        state
+            .loaded
+            .iter()
+            .all(|slot| matches!(slot, Loaded::Ready(_)))
+    });
+    let fetched_before_refresh = calls.load(Ordering::SeqCst);
+    for index in 0..4 {
+        let key = cache_key(&fetcher, &state.sources[index], &format!("image-{index}"));
+        fetcher.resources().forget::<ImageLoader>(&key);
+    }
+    assert!(!state.refresh());
+    assert!(
+        state
+            .loaded
+            .iter()
+            .all(|slot| matches!(slot, Loaded::Ready(_)))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), fetched_before_refresh);
+}
