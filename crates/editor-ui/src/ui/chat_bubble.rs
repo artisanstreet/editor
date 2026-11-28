@@ -46,6 +46,7 @@ pub struct ChatBubbleSegment {
     position: SegmentPosition,
     content: Element,
     answer: bool,
+    cancelled: bool,
     tint: Option<Oklch>,
     selector: Option<String>,
     sticker: Option<Sticker>,
@@ -64,6 +65,7 @@ impl ChatBubbleSegment {
             position,
             content,
             answer: false,
+            cancelled: false,
             tint: None,
             selector: None,
             sticker: None,
@@ -73,6 +75,12 @@ impl ChatBubbleSegment {
     #[must_use]
     pub const fn answer(mut self) -> Self {
         self.answer = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn cancelled(mut self, cancelled: bool) -> Self {
+        self.cancelled = cancelled;
         self
     }
 
@@ -174,6 +182,9 @@ impl ChatBubbleSegment {
                     self.theme.colors.gray.step(8).to_reference_paint(),
                     true,
                 );
+        }
+        if self.cancelled {
+            style = style.opacity(Opacity::Disabled.alpha());
         }
         let mut frame = UiBox::new().style(style);
         if let Some(tint) = self.tint {

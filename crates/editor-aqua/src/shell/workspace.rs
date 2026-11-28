@@ -382,6 +382,19 @@ impl Workspace {
         }
     }
 
+    fn reclaim_cancelled(&mut self, host: &crate::core::HostId, item: &artisan_api::Item) {
+        if let Some(owner) = &self.composer
+            && owner
+                .controller
+                .borrow_mut()
+                .reclaim_cancelled_item(host, item)
+        {
+            self.composer_editor_dirty = true;
+            self.composer_focus_pending = true;
+            self.composer_mentions_dirty = true;
+        }
+    }
+
     pub fn handle_event(
         &mut self,
         core: &Core,
@@ -422,11 +435,11 @@ impl Workspace {
                             self.notifications.sync_connection(host);
                             effects.badge = Some(Self::attention(core));
                         }
+                        HostEvent::Item(item) => self.reclaim_cancelled(id, item),
                         HostEvent::ImagesChanged
                         | HostEvent::EngineInstall { .. }
                         | HostEvent::ThreadSummaryChanged { .. }
                         | HostEvent::WslDistro { .. }
-                        | HostEvent::Item(_)
                         | HostEvent::Live { .. }
                         | HostEvent::EditorCall { .. } => {}
                     }

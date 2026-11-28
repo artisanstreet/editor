@@ -524,6 +524,7 @@ impl RowFactory {
                     },
                     bubble_sender(item, row.model.author),
                     sticker,
+                    item.status == Status::Cancelled,
                     &self.theme,
                 )
             } else {
@@ -550,13 +551,17 @@ impl RowFactory {
                 .items
                 .get(id)
                 .ok_or(RealizeRowError::Unavailable(Part::Item))?;
+            let cancelled = item.status == Status::Cancelled;
             let mut root = UiBox::new()
                 .layout("column")
                 .width(Length::Pct(100.0))
                 .spaced(Space::S8)
                 .style(Style::new().align(aqua_ui::AlignItems::END));
             if let Some(attachments) = self.user_attachments(row_owner, item) {
-                root = root.child(attachments);
+                root = root.child(super::bubbles::dim_cancelled(attachments, cancelled));
+            }
+            if cancelled {
+                root = root.child(super::bubbles::cancelled_note(&self.theme));
             }
             Some(root.build())
         })

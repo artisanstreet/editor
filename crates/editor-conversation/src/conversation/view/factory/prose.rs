@@ -212,6 +212,7 @@ impl RowFactory {
                 },
                 bubble_sender(item, row.model.author),
                 self.bubble_sticker(row_owner, key, fresh),
+                item.status == Status::Cancelled,
                 &self.theme,
             )
         } else if let Some(notice) = preview_notice {
