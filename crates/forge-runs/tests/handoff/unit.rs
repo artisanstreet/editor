@@ -54,29 +54,72 @@ impl forge_engines::Harness for Rejecting {
     }
 }
 
-async fn summarized_against(
-    rejection: fn(&forge_engines::Turn) -> SideQueryError,
-) -> (Result<String, ContextError>, Vec<usize>) {
-    let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().to_path_buf();
-    let engine_dir = data.join("engines").join(EngineId::Codex.to_string());
+struct Summarizing {
+    prompts: Arc<Mutex<Vec<usize>>>,
+}
+
+impl forge_engines::Harness for Summarizing {
+    fn run(
+        &self,
+        _turn: forge_engines::Turn,
+        _io: forge_engines::RunIo,
+    ) -> BoxFuture<'static, forge_engines::Outcome> {
+        Box::pin(async { forge_engines::Outcome::done() })
+    }
+
+    fn compact(
+        &self,
+        turn: forge_engines::Turn,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'static, Result<forge_engines::SideReply, SideQueryError>> {
+        self.prompts.lock().unwrap().push(turn.input.text.len());
+        Box::pin(async {
+            Ok(forge_engines::SideReply {
+                text: "## Objective\n- finish the parser".to_owned(),
+                usage: forge_engines::SideUsage::default(),
+            })
+        })
+    }
+}
+
+fn install(data: &std::path::Path, engine: EngineId) {
+    let engine_dir = data.join("engines").join(engine.to_string());
     let entry = engine_dir
         .join("versions")
         .join("1.0.0")
-        .join(forge_engines::host_entry(EngineId::Codex).unwrap());
+        .join(forge_engines::host_entry(engine).unwrap());
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     std::fs::write(entry, "").unwrap();
     std::fs::write(engine_dir.join("current"), "1.0.0").unwrap();
+}
+
+async fn summarized_against(
+    rejection: fn(&forge_engines::Turn) -> SideQueryError,
+) -> (Result<String, ContextError>, Vec<usize>) {
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let harness: Arc<dyn forge_engines::Harness> = Arc::new(Rejecting {
         prompts: Arc::clone(&prompts),
         rejection,
     });
+    let (summary, _dir) =
+        summarized_on(Arc::new(move |_| Arc::clone(&harness)), EngineId::Codex).await;
+    let prompts = prompts.lock().unwrap().clone();
+    (summary, prompts)
+}
+
+async fn summarized_on(
+    harness_for: crate::HarnessFor,
+    target: EngineId,
+) -> (Result<String, ContextError>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_path_buf();
+    install(&data, EngineId::Codex);
+    install(&data, target);
     let hub = Hub::build(
         forge_store::Store::open(&data.join("forge")).unwrap(),
         forge_engines::Engines::new(&data),
         data.clone(),
-        Arc::new(move |_| Arc::clone(&harness)),
+        harness_for,
         crate::Surroundings {
             disk: crate::disk::Probe::system(),
             stop_deadline: crate::STOP_DEADLINE,
@@ -121,19 +164,47 @@ async fn summarized_against(
             .collect(),
         omitted: false,
     };
-    let summary = summarize(
+    let mut switched = thread.clone();
+    switched.config = EngineConfig::new(target);
+    let summary = summarize_or_fall_back(
         &hub,
         &Source {
             thread,
             session: None,
         },
+        switched,
         &transcript,
         true,
         CancellationToken::new(),
     )
     .await;
-    let prompts = prompts.lock().unwrap().clone();
-    (summary, prompts)
+    (summary, dir)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_away_from_an_engine_without_side_queries_summarizes_on_the_new_engine() {
+    let summarized = Arc::new(Mutex::new(Vec::new()));
+    let unsupported: Arc<dyn forge_engines::Harness> = Arc::new(Rejecting {
+        prompts: Arc::new(Mutex::new(Vec::new())),
+        rejection: |turn| SideQueryError::Unsupported {
+            engine: turn.engine,
+        },
+    });
+    let summarizing: Arc<dyn forge_engines::Harness> = Arc::new(Summarizing {
+        prompts: Arc::clone(&summarized),
+    });
+    let (summary, _dir) = summarized_on(
+        Arc::new(move |engine| match engine {
+            EngineId::Claude => Arc::clone(&summarizing),
+            EngineId::Codex | EngineId::OpenCode | EngineId::Antigravity => {
+                Arc::clone(&unsupported)
+            }
+        }),
+        EngineId::Claude,
+    )
+    .await;
+    assert_eq!(summary.unwrap(), "## Objective\n- finish the parser");
+    assert_eq!(summarized.lock().unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

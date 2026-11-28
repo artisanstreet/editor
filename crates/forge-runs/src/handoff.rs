@@ -167,9 +167,10 @@ pub(crate) async fn context(
         return Ok(None);
     }
     compaction.start().await?;
-    let summary = summarize(
+    let summary = summarize_or_fall_back(
         hub,
         &source,
+        target(thread, compaction.run),
         &transcript,
         source.thread.id == thread.id,
         compaction.cancel(),
@@ -385,6 +386,76 @@ fn serialized(transcript: &Transcript, budget: usize) -> String {
     text
 }
 
+fn target(thread: &Thread, run: &Run) -> Thread {
+    let mut target = thread.clone();
+    target.config = run.config.clone().unwrap_or_else(|| EngineConfig {
+        permissions: thread.config.permissions,
+        ..EngineConfig::new(run.engine)
+    });
+    target.config.engine = run.engine;
+    target.config.model.clone_from(&run.model);
+    target
+}
+
+async fn summarize_or_fall_back(
+    hub: &Hub,
+    source: &Source,
+    target: Thread,
+    transcript: &Transcript,
+    native_branch_allowed: bool,
+    cancel: CancellationToken,
+) -> Result<String, ContextError> {
+    let from = source.engine();
+    let to = target.config.engine;
+    let failure = match summarize(
+        hub,
+        source,
+        transcript,
+        native_branch_allowed,
+        cancel.clone(),
+    )
+    .await
+    {
+        Ok(summary) => return Ok(summary),
+        Err(failure) if from == to => return Err(failure),
+        Err(failure @ ContextError::Cancelled { .. }) => return Err(failure),
+        Err(
+            failure @ (ContextError::Prepare { .. }
+            | ContextError::Summarize { .. }
+            | ContextError::Template { .. }
+            | ContextError::Exhausted { .. }
+            | ContextError::Transcript { .. }
+            | ContextError::Collections { .. }
+            | ContextError::Text { .. }
+            | ContextError::Encode { .. }
+            | ContextError::ReadParent { .. }
+            | ContextError::NoParent { .. }
+            | ContextError::ParentRun { .. }
+            | ContextError::StoreCompaction { .. }),
+        ) => failure,
+    };
+    tracing::warn!(thread = %target.id, %from, %to, "summarize the handoff on {to} instead: {}", diagnostics::chain(&failure));
+    summarize(
+        hub,
+        &Source {
+            thread: target,
+            session: None,
+        },
+        transcript,
+        false,
+        cancel,
+    )
+    .await
+}
+
+impl Source {
+    fn engine(&self) -> EngineId {
+        self.session
+            .as_ref()
+            .map_or(self.thread.config.engine, |run| run.engine)
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one compaction attempt state machine with native and canonical fallbacks"
@@ -396,10 +467,7 @@ async fn summarize(
     native_branch_allowed: bool,
     cancel: CancellationToken,
 ) -> Result<String, ContextError> {
-    let engine = source
-        .session
-        .as_ref()
-        .map_or(source.thread.config.engine, |run| run.engine);
+    let engine = source.engine();
     let model = source
         .session
         .as_ref()
