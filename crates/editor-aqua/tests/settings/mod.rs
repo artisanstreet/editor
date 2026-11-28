@@ -1,3 +1,6 @@
+mod display;
+mod licences;
+
 use editor_aqua::settings::{extensions, prompt};
 
 use artisan_api::{GlobalPrompt, McpServer};
@@ -505,21 +508,28 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
         assert!(
             texts
                 .iter()
-                .any(|text| text.contains("Pair a Forge on the Account page")),
+                .any(|text| text.contains("Connect a computer first")),
             "{page:?} without a host"
         );
     }
     test_support::editor::core::connect_client(&mut core, &config, client);
-    for page in host_pages {
+    for (page, expected) in [
+        (SettingsPage::Threads, "Continue after a restart"),
+        (SettingsPage::Extensions, "MCP servers"),
+        (
+            SettingsPage::Engine(EngineId::ALL[0]),
+            "Waiting for the Forge to connect…",
+        ),
+    ] {
         let texts = render(&mut core, page);
         assert!(
-            texts.iter().any(|text| text == page.label()),
-            "{page:?} header"
+            texts.iter().any(|text| text.contains(expected)),
+            "{page:?} is missing {expected:?}: {texts:?}"
         );
         assert!(
             !texts
                 .iter()
-                .any(|text| text.contains("Pair a Forge on the Account page")),
+                .any(|text| text.contains("Connect a computer first")),
             "{page:?} with a host"
         );
     }
@@ -531,7 +541,9 @@ fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String,
     use aqua::UiApp;
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::tree::NodeKind;
-    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = UiApp::new(fonts, SharedRuns::new());
     let mut element = Some(element);
     app.mount(move |_| element.take().expect("the element mounts once"))
         .expect("the test view mounts");
@@ -915,65 +927,6 @@ fn an_mcp_form_that_is_saving_keeps_its_fields_and_cannot_be_dismissed() {
     );
 }
 
-#[test]
-fn about_page_opens_the_third_party_notices() {
-    use aqua::UiApp;
-    use aqua_core::{InputEvent, Point, PointerButton, PointerEvent, PointerKind};
-    use aqua_text::{SharedFonts, SharedRuns};
-    use editor_aqua::core::{Screen, SettingsPage};
-    use editor_aqua::settings::{
-        about::BuildInfo,
-        controller::SettingsController,
-        view::{ViewAction, build},
-    };
-    use editor_aqua::ui::theme::ArtisanTheme;
-    use std::{cell::RefCell, rc::Rc};
-    let dir = tempfile::tempdir().unwrap();
-    let mut core = test_support::editor::core::test_core(dir.path());
-    core.navigate(Screen::Settings(SettingsPage::About));
-    let controller = SettingsController::default();
-    let emitted = Rc::new(RefCell::new(Vec::new()));
-    let sink = Rc::clone(&emitted);
-    let page = build(
-        &controller,
-        &core,
-        &ArtisanTheme::resolved(),
-        &BuildInfo::default(),
-        aqua_core::Size::new(900.0, 700.0),
-        true,
-        Rc::new(move |action| sink.borrow_mut().push(action)),
-    );
-    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
-    let mut page = Some(page);
-    app.mount(move |_| page.take().unwrap()).unwrap();
-    app.set_viewport(900.0, 700.0, 1.0);
-    app.build_frame().unwrap();
-    let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("about-open-notices"));
-    let button = app
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|id| {
-            app.tree()
-                .get(*id)
-                .is_some_and(|node| node.key == Some(key))
-        })
-        .expect("the About page offers the third-party notices");
-    let bounds = app.tree().rect(button).unwrap();
-    let pointer = PointerEvent {
-        contact: 0,
-        kind: PointerKind::Mouse,
-        position: Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
-        buttons: 1,
-    };
-    app.handle_input(&InputEvent::PointerDown(pointer, PointerButton::Primary));
-    app.handle_input(&InputEvent::PointerUp(pointer, PointerButton::Primary));
-    assert!(matches!(
-        emitted.borrow().as_slice(),
-        [ViewAction::OpenNotices]
-    ));
-}
-
 fn silent_host(
     core: &mut editor_aqua::core::Core,
     id: &str,
@@ -1318,24 +1271,17 @@ fn settings_pages_expose_their_title_and_sections_as_headings() {
     assert_eq!(
         headings(SettingsPage::General),
         [
-            (1, "General".to_owned()),
             (2, "Appearance".to_owned()),
-            (2, "Text Streaming".to_owned()),
-            (2, "Notifications".to_owned()),
+            (2, "Interface & Models".to_owned()),
             (2, "Performance".to_owned()),
         ]
     );
-    for page in [
-        SettingsPage::About,
-        SettingsPage::Account,
-        SettingsPage::Hosts,
+    for (page, title) in [
+        (SettingsPage::About, "Build"),
+        (SettingsPage::Account, "Profile"),
+        (SettingsPage::Hosts, "Computers"),
     ] {
-        let titles: Vec<_> = headings(page)
-            .into_iter()
-            .filter(|(level, _)| *level == 1)
-            .map(|(_, title)| title)
-            .collect();
-        assert_eq!(titles, [page.label()], "{page:?} has one page title");
+        assert!(headings(page).contains(&(2, title.to_owned())));
     }
 }
 
@@ -1343,13 +1289,14 @@ fn settings_pages_expose_their_title_and_sections_as_headings() {
 fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
     use editor_aqua::core::{Screen, SettingsPage};
     use editor_aqua::settings::{
+        about::BuildInfo,
         controller::SettingsController,
-        view::{ViewAction, dispatch, high_contrast_menu, text_size_menu},
+        view::{ViewAction, build, dispatch, text_size_menu},
     };
     use editor_aqua::ui::preferences::{Preferences, SystemAccess};
-    use editor_aqua::ui::theme::{ArtisanTheme, Contrast};
+    use editor_aqua::ui::theme::Contrast;
     use std::{cell::RefCell, rc::Rc};
-    use test_support::editor::ui::{click_text, mounted};
+    use test_support::editor::ui::{click, click_text, mounted};
     let dir = tempfile::tempdir().unwrap();
     let mut core = test_support::editor::core::test_core(dir.path());
     core.navigate(Screen::Settings(SettingsPage::General));
@@ -1358,16 +1305,25 @@ fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
         reduced_motion: false,
         high_contrast: true,
         text_scale: 1.25,
+        ..SystemAccess::default()
     };
-    let mut choose = |size: &str, contrast: &str| {
+    let mut choose = |size: &str, contrast_control: &str| {
         let actions = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&actions);
         let emit: Rc<dyn Fn(ViewAction)> = Rc::new(move |action| sink.borrow_mut().push(action));
-        let theme = ArtisanTheme::resolved();
+        let theme = Preferences::from_core(&core, system).theme();
         let (menu, _) = text_size_menu(&settings, &core, &theme, Rc::clone(&emit)).into_parts();
         click_text(&mut mounted(400.0, 600.0, menu), size);
-        let (menu, _) = high_contrast_menu(&settings, &core, &theme, emit).into_parts();
-        click_text(&mut mounted(400.0, 600.0, menu), contrast);
+        let page = build(
+            &settings,
+            &core,
+            &theme,
+            &BuildInfo::default(),
+            aqua_core::Size::new(900.0, 900.0),
+            true,
+            emit,
+        );
+        click(&mut mounted(900.0, 900.0, page), contrast_control);
         for action in actions.take() {
             assert!(matches!(
                 action,
@@ -1380,10 +1336,10 @@ fn general_settings_choose_text_size_and_high_contrast_or_follow_the_system() {
         }
         Preferences::from_core(&core, system).theme()
     };
-    let chosen = choose("150%", "Off");
+    let chosen = choose("Biggest", "settings-higher-contrast");
     assert!((chosen.typography.scale - 1.5).abs() < f32::EPSILON);
     assert_eq!(chosen.colors.contrast, Contrast::Standard);
-    let followed = choose("Match system", "Match system");
+    let followed = choose("Match system", "settings-contrast-follow-system");
     assert!((followed.typography.scale - 1.25).abs() < f32::EPSILON);
     assert_eq!(followed.colors.contrast, Contrast::High);
 }
@@ -1715,4 +1671,35 @@ fn a_second_writer_staging_the_same_setting_hands_over_instead_of_crashing() {
         "the first writer sends its newest choice next"
     );
     assert_eq!(host.setting(key), Some(&json!(30)));
+}
+
+#[test]
+fn curated_models_overrides_both_legacy_choices_with_one_setting() {
+    use editor_aqua::settings::{
+        controller::SettingsController,
+        view::{ViewAction, dispatch},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = test_support::editor::core::test_core(dir.path());
+    core.set_setting(artisan_api::SHOW_ALL_MODELS_KEY, true.into())
+        .unwrap();
+    core.set_setting(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY, false.into())
+        .unwrap();
+    let mut controller = SettingsController::default();
+    assert!(dispatch(
+        &mut controller,
+        &mut core,
+        ViewAction::SetCuratedModels(true)
+    ));
+    let preferences = core.settings().preferences();
+    assert!(!preferences.show_all_models.on());
+    assert!(preferences.hide_bad_model_options.on());
+    assert!(dispatch(
+        &mut controller,
+        &mut core,
+        ViewAction::SetCuratedModels(false)
+    ));
+    let preferences = core.settings().preferences();
+    assert!(preferences.show_all_models.on());
+    assert!(!preferences.hide_bad_model_options.on());
 }

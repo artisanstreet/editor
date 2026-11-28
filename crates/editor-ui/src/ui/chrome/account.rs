@@ -480,7 +480,7 @@ fn limit_row(
 }
 
 #[must_use]
-fn portrait(account: &Account, edge: f32, radius: f32, fallback: f32) -> Element {
+pub(crate) fn portrait(account: &Account, edge: f32, radius: f32, fallback: f32) -> Element {
     let frame = Aqua::Box().styles([Aqua::Style()
         .width(px(edge))
         .height(px(edge))

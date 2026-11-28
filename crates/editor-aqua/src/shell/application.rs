@@ -169,6 +169,9 @@ pub struct ShellApplication<V> {
     pub text_size_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     pub contrast_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     pub retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub version_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub gear_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    pub gear_anchor: Option<String>,
     pub usage_deadline: Option<Instant>,
     pub fit_launch: bool,
     #[cfg(feature = "capture")]
@@ -250,6 +253,8 @@ impl<V: SectionViews> ShellApplication<V> {
             &mut self.text_size_popup,
             &mut self.contrast_popup,
             &mut self.retention_popup,
+            &mut self.version_popup,
+            &mut self.gear_popup,
         ]
         .into_iter()
         .flatten()
@@ -332,6 +337,9 @@ impl<V: SectionViews> ShellApplication<V> {
             text_size_popup: None,
             contrast_popup: None,
             retention_popup: None,
+            version_popup: None,
+            gear_popup: None,
+            gear_anchor: None,
             usage_deadline: None,
             fit_launch: false,
             #[cfg(feature = "capture")]
@@ -380,10 +388,37 @@ impl<V: SectionViews> ShellApplication<V> {
                         failed = true;
                     }
                 }
-                crate::shell::workspace::SettingsPlatformEffect::OpenNotices => {
-                    if let Err(error) = crate::setup::open_notices() {
-                        self.shell.failures.notices(&error);
-                        failed = true;
+                crate::shell::workspace::SettingsPlatformEffect::ExportDiagnostics => {
+                    if let Some(workspace) = self.shell.entry.workspace() {
+                        let emit = workspace.settings_emit();
+                        let report = self.shell.build.diagnostics(self.shell.core.active_host());
+                        let request = ctx.dialog(
+                            id,
+                            crate::ui::dialogs::save_file_spec("artisan-diagnostics.txt"),
+                        );
+                        self.shell.dialogs.route(request, move |outcome| {
+                            use crate::settings::view::ViewAction;
+                            let result = match crate::ui::dialogs::chosen_path(outcome) {
+                                Ok(Some(path)) => {
+                                    std::fs::write(&path, report.as_bytes()).map_err(|source| {
+                                        let error = crate::settings::about::WriteDiagnosticsError {
+                                            path,
+                                            source,
+                                        };
+                                        crate::core::Problem::caused_by(
+                                            "Couldn't save the diagnostics file.",
+                                            &error,
+                                        )
+                                    })
+                                }
+                                Ok(None) => return,
+                                Err(error) => Err(crate::core::Problem::detailed(
+                                    "Couldn't choose where to save diagnostics.",
+                                    error,
+                                )),
+                            };
+                            emit(ViewAction::DiagnosticsExported(result));
+                        });
                     }
                 }
                 crate::shell::workspace::SettingsPlatformEffect::CopyText(text) => {
@@ -662,6 +697,9 @@ impl<V: SectionViews> ShellApplication<V> {
             close_popup(self.ui.ui_mut(), &mut self.text_size_popup);
             close_popup(self.ui.ui_mut(), &mut self.contrast_popup);
             close_popup(self.ui.ui_mut(), &mut self.retention_popup);
+            close_popup(self.ui.ui_mut(), &mut self.version_popup);
+            close_popup(self.ui.ui_mut(), &mut self.gear_popup);
+            self.gear_anchor = None;
             return;
         };
         let settings_open = matches!(self.shell.core.screen(), crate::core::Screen::Settings(_));
@@ -702,7 +740,7 @@ impl<V: SectionViews> ShellApplication<V> {
             .into_parts()
         });
         let contrast = contrast_open.then(|| {
-            crate::settings::view::high_contrast_menu(
+            crate::settings::view::text_rendering_menu(
                 &workspace.settings,
                 &self.shell.core,
                 &theme,
@@ -732,7 +770,11 @@ impl<V: SectionViews> ShellApplication<V> {
                 streaming,
             ),
             (&mut self.text_size_popup, "settings-text-size", text_size),
-            (&mut self.contrast_popup, "settings-high-contrast", contrast),
+            (
+                &mut self.contrast_popup,
+                "settings-text-rendering",
+                contrast,
+            ),
             (
                 &mut self.retention_popup,
                 "settings-thread-retention",
@@ -741,6 +783,53 @@ impl<V: SectionViews> ShellApplication<V> {
         ] {
             sync_popup(ui, popup, key, content, now);
         }
+        self.sync_settings_menus(settings_open, now);
+    }
+
+    fn sync_settings_menus(&mut self, settings_open: bool, now: f64) {
+        let Some(workspace) = self.shell.entry.workspace() else {
+            return;
+        };
+        let theme = self.shell.preferences.theme();
+        let version = (settings_open && workspace.settings.version_select.borrow().is_open())
+            .then(|| {
+                crate::settings::view::engine_version_menu(
+                    &workspace.settings,
+                    &self.shell.core,
+                    &theme,
+                    workspace.settings_emit(),
+                )
+            })
+            .flatten()
+            .map(crate::ui::select::SelectMenu::into_parts);
+        let gear = settings_open
+            .then(|| {
+                crate::settings::view::gear_menu(
+                    &workspace.settings,
+                    &self.shell.core,
+                    &theme,
+                    workspace.settings_emit(),
+                )
+            })
+            .flatten()
+            .map(|(key, menu)| (key, menu.into_parts()));
+        let ui = self.ui.ui_mut();
+        sync_popup(
+            ui,
+            &mut self.version_popup,
+            "settings-engine-version",
+            version,
+            now,
+        );
+        let anchor = gear.as_ref().map(|(key, _)| key.clone());
+        if anchor.is_some() && anchor != self.gear_anchor {
+            close_popup(ui, &mut self.gear_popup);
+        }
+        match gear {
+            Some((key, content)) => sync_popup(ui, &mut self.gear_popup, &key, Some(content), now),
+            None => sync_popup(ui, &mut self.gear_popup, "", None, now),
+        }
+        self.gear_anchor = anchor;
     }
 
     #[expect(
@@ -1172,9 +1261,14 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                     ctx.request_frame(id, FrameReason::ANIMATION);
                 }
             }
+            WindowEvent::DisplayChanged(_, display) => {
+                let rate = crate::settings::display::DisplayRate::of(display.refresh);
+                if self.shell.entry.show_display_rate(rate) {
+                    self.drain(ctx, id, true);
+                }
+            }
             WindowEvent::CloseRequested(_)
             | WindowEvent::Occluded(..)
-            | WindowEvent::DisplayChanged(..)
             | WindowEvent::RedrawRequested(_)
             | WindowEvent::Destroyed(_) => {}
         }
@@ -1187,6 +1281,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             &mut self.text_size_popup,
             &mut self.contrast_popup,
             &mut self.retention_popup,
+            &mut self.version_popup,
+            &mut self.gear_popup,
         ]
         .into_iter()
         .flatten()

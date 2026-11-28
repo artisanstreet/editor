@@ -26,6 +26,20 @@ fn codex_rate_limits_become_windows() {
 }
 
 #[test]
+fn codex_rate_limits_name_the_chatgpt_plan_from_the_backend() {
+    let pro = json!({
+        "rateLimits": { "limitId": "codex", "planType": "prolite", "primary": null },
+        "rateLimitsByLimitId": { "codex": { "limitId": "codex", "planType": "prolite" } }
+    });
+    let bucketed = json!({ "rateLimitsByLimitId": { "codex": { "planType": "promax" } } });
+    let unknown = json!({ "rateLimits": { "planType": "unknown" } });
+    assert_eq!(
+        [&pro, &bucketed, &unknown].map(parse_codex_plan),
+        [Some("ChatGPT Pro 100"), Some("ChatGPT Pro 500"), None]
+    );
+}
+
+#[test]
 fn opencode_go_usage_becomes_three_windows() {
     let recorded = json!({"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"2026-10-21T12:51:10.000Z"},"weekly":{"status":"ok","percent":0,"resetsAt":"2026-10-26T00:00:00.000Z"},"monthly":{"status":"ok","percent":25,"resetsAt":"2026-11-02T21:57:01.000Z"}}});
     let windows = parse_go_usage(&recorded);

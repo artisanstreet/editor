@@ -98,6 +98,15 @@ impl TextRole {
     }
 
     #[must_use]
+    pub fn tracked(self, theme: &ArtisanTheme, words: impl TextSource) -> Text {
+        let mut style = self.style(theme);
+        if self != Self::Code {
+            style.letter_spacing_em = Some(theme.typography.tracking_em);
+        }
+        self.text(theme, words).text_style(style)
+    }
+
+    #[must_use]
     pub fn inherit(self, theme: &ArtisanTheme) -> Style {
         Style::new()
             .text_style(self.style(theme))

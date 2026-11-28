@@ -26,6 +26,16 @@ impl EngineId {
     }
 
     #[must_use]
+    pub const fn enabled_setting(self) -> &'static str {
+        match self {
+            Self::Claude => "claude_enabled",
+            Self::Codex => "codex_enabled",
+            Self::OpenCode => "opencode_enabled",
+            Self::Antigravity => "antigravity_enabled",
+        }
+    }
+
+    #[must_use]
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
@@ -289,6 +299,8 @@ pub enum SignInState {
     },
     SignedIn {
         account: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
     },
     Failed {
         message: String,

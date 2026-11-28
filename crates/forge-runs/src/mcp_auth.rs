@@ -564,6 +564,9 @@ impl Mcp {
     async fn check_auth_inner(&self) -> Result<(), McpStoreError> {
         let mut observed = Vec::new();
         for server in self.servers().await? {
+            if server.disabled {
+                continue;
+            }
             let Some(url) = http_url(&server).map(str::to_owned) else {
                 continue;
             };
@@ -584,6 +587,9 @@ impl Mcp {
         let mut statuses = recorded.clone();
         statuses.retain(|name, _| servers.iter().any(|server| &server.name == name));
         for server in &servers {
+            if server.disabled {
+                continue;
+            }
             let Some(url) = http_url(server) else {
                 statuses.remove(&server.name);
                 continue;

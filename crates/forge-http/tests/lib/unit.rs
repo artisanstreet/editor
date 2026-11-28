@@ -212,6 +212,49 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
         images: Vec::new(),
         config: None,
     };
+    let engine_setting = editor.url(&format!("/settings/{}", EngineId::Claude.enabled_setting()));
+    let messages = editor.url(&format!("/threads/{}/messages", thread.id));
+    assert!(
+        editor
+            .http
+            .put(&engine_setting)
+            .json(&false)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let refused = editor
+        .http
+        .post(&messages)
+        .json(&message)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    assert_eq!(
+        refused
+            .json::<artisan_api::ApiError>()
+            .await
+            .unwrap()
+            .failure,
+        artisan_api::Failure::Engine(artisan_api::EngineFailure::Disabled {
+            engine: EngineId::Claude,
+        }),
+    );
+    assert!(store.item(&message.id).await.unwrap().is_none());
+    assert!(
+        editor
+            .http
+            .put(&engine_setting)
+            .json(&true)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     let sent = editor
         .http
         .post(editor.url(&format!("/threads/{}/messages", thread.id)))

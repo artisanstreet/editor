@@ -10,6 +10,12 @@ use super::theme::{ArtisanTheme, Opacity};
 const THUMB: f32 = 16.0;
 const REACH: Space = Space::S8;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitchFinish {
+    Standard,
+    Recessed,
+}
+
 pub struct Switch {
     id: Key,
     theme: ArtisanTheme,
@@ -17,6 +23,7 @@ pub struct Switch {
     label: String,
     disabled: bool,
     focus_visible: bool,
+    finish: SwitchFinish,
     on_change: Option<Box<dyn Fn(bool)>>,
 }
 
@@ -44,8 +51,15 @@ impl Switch {
             label: label.into(),
             disabled: false,
             focus_visible: false,
+            finish: SwitchFinish::Standard,
             on_change: None,
         }
+    }
+
+    #[must_use]
+    pub const fn recessed(mut self) -> Self {
+        self.finish = SwitchFinish::Recessed;
+        self
     }
 
     #[must_use]
@@ -60,21 +74,26 @@ impl Switch {
         self
     }
 
-    pub fn build(self) -> Element {
+    fn track(&self) -> (f32, f32, Element) {
         let (width, height) = self.theme.density.switch_default;
-        let thumb = THUMB;
+        let (thumb, rim) = (THUMB, 1.0);
+        let colors = &self.theme.colors;
         let track_color = if self.checked {
-            self.theme.colors.primary
+            colors.primary
         } else {
-            self.theme.colors.line_strong
+            colors.line_strong
         }
         .to_reference_paint();
-        let thumb_color = if self.checked {
-            self.theme.colors.primary_text
-        } else {
-            self.theme.colors.text
-        }
-        .to_reference_paint();
+        let thumb_background = GpuiBackground::Solid(
+            if self.checked {
+                colors.primary_text
+            } else {
+                colors.text
+            }
+            .to_reference_paint(),
+        );
+        let outer_radius = Corner::Full.resolve(height);
+        let thumb_radius = Corner::Full.resolve(thumb);
         let checked = self.checked;
         let track = Canvas::new()
             .width(width)
@@ -82,23 +101,44 @@ impl Switch {
             .on_paint(move |bounds| {
                 let track = DisplayItem::GpuiBackground {
                     bounds,
-                    corners: CornerRadii::uniform(Corner::Full.resolve(height)),
+                    corners: CornerRadii::uniform(outer_radius),
                     background: GpuiBackground::Solid(track_color),
                 };
                 let thumb_bounds = Rect {
-                    x: bounds.x + 1.0 + if checked { width - thumb - 2.0 } else { 0.0 },
+                    x: bounds.x
+                        + rim
+                        + if checked {
+                            rim.mul_add(-2.0, width - thumb)
+                        } else {
+                            0.0
+                        },
                     y: bounds.y + (height - thumb) / 2.0,
                     w: thumb,
                     h: thumb,
                 };
                 let knob = DisplayItem::GpuiBackground {
                     bounds: thumb_bounds,
-                    corners: CornerRadii::uniform(Corner::Full.resolve(thumb)),
-                    background: GpuiBackground::Solid(thumb_color),
+                    corners: CornerRadii::uniform(thumb_radius),
+                    background: thumb_background,
                 };
                 vec![track, knob]
             })
             .build();
+        (width, height, track)
+    }
+
+    pub fn build(self) -> Element {
+        let (width, height, track) = if self.finish == SwitchFinish::Recessed {
+            let carve = super::carved::Carve::of(&self.theme);
+            (
+                super::carved::well::SWITCH_WIDTH,
+                super::carved::well::SWITCH_HEIGHT,
+                super::carved::well::switch_track(&carve, self.checked),
+            )
+        } else {
+            self.track()
+        };
+        let checked = self.checked;
         let reach = REACH.px();
         let mut style = Style::new()
             .flex_shrink(0.0)
@@ -124,7 +164,11 @@ impl Switch {
         let mut root = Button::new()
             .width(2.0f32.mul_add(reach, width))
             .height(outer)
-            .radius(Corner::Full.resolve(outer))
+            .radius(if self.finish == SwitchFinish::Recessed {
+                super::carved::RADIUS_MD + reach
+            } else {
+                Corner::Full.resolve(outer)
+            })
             .style(style)
             .child(track);
         if self.disabled {

@@ -75,6 +75,7 @@ impl ServerFields {
             url: (!url.is_empty()).then_some(url),
             headers,
             sse: previous.is_some_and(|server| server.sse),
+            disabled: previous.is_some_and(|server| server.disabled),
         })
     }
 }
@@ -219,6 +220,23 @@ impl ExtensionsForm {
                 None
             }
         }
+    }
+
+    pub(crate) fn toggle(&mut self, previous: McpServer, enabled: bool) -> Option<MutationRequest> {
+        if self.saving || self.editing.is_some() {
+            return None;
+        }
+        let server = McpServer {
+            disabled: !enabled,
+            ..previous.clone()
+        };
+        self.begin(
+            McpMutation::Upsert {
+                previous: Some(previous),
+                server,
+            },
+            false,
+        )
     }
 
     pub(crate) fn remove(&mut self, previous: McpServer) -> Option<MutationRequest> {

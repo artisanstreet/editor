@@ -57,7 +57,7 @@ impl RootViews {
                 Effect::FlipTheme => {
                     let dark = !shell.preferences.theme().colors.mode.is_dark();
                     crate::shell::application::begin_theme_transition(ctx, window, dark, reduced);
-                    if let Err(error) = shell.core.set_setting("dark_mode", dark.into()) {
+                    if let Err(error) = shell.core.set_setting("theme", dark.into()) {
                         tracing::error!(
                             error = %::diagnostics::chain(&error),
                             "saving the theme"

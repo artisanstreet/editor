@@ -527,7 +527,10 @@ fn antigravity_with_two_models() -> artisan_api::EngineStatus {
             version: "1.5.14".into(),
             update: None,
         },
-        sign_in: artisan_api::SignInState::SignedIn { account: None },
+        sign_in: artisan_api::SignInState::SignedIn {
+            account: None,
+            plan: None,
+        },
         models: std::sync::Arc::from([
             artisan_api::Model {
                 id: "gpt-oss-120b-medium".into(),

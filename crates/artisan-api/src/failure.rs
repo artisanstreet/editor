@@ -348,6 +348,8 @@ pub enum ExtensionFailure {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EngineFailure {
+    #[error("{engine} is turned off. Turn it on in Settings to use it.")]
+    Disabled { engine: EngineId },
     #[error("{engine} isn't installed.")]
     NotInstalled { engine: EngineId },
     #[error("{engine} has no build for this host.")]
@@ -366,6 +368,10 @@ pub enum EngineFailure {
     NoSignIn { engine: EngineId },
     #[error("The {engine} sign-in no longer accepts input.")]
     SignInClosed { engine: EngineId },
+    #[error("{engine} does not support API key sign-in here.")]
+    ApiKeyUnsupported { engine: EngineId },
+    #[error("Enter an API key for {engine}.")]
+    ApiKeyInvalid { engine: EngineId },
     #[error("Only Claude signs in to claude.ai, not {engine}.")]
     ClaudeAiEngine { engine: EngineId },
     #[error("That browser isn't signed in to claude.ai.")]
@@ -554,13 +560,16 @@ impl ExtensionFailure {
 impl EngineFailure {
     const fn code(&self) -> ErrorCode {
         match self {
-            Self::NotInstalled { .. }
+            Self::Disabled { .. }
+            | Self::NotInstalled { .. }
             | Self::NoBuild { .. }
             | Self::UnusableVersion { .. }
             | Self::VersionTooOld { .. }
             | Self::Versions { .. }
             | Self::NoSignIn { .. }
             | Self::SignInClosed { .. }
+            | Self::ApiKeyUnsupported { .. }
+            | Self::ApiKeyInvalid { .. }
             | Self::ClaudeAiEngine { .. }
             | Self::ClaudeAiSignedOut
             | Self::ClaudeAiNoUserAgent

@@ -8,16 +8,21 @@ use aqua_ui::{
 
 use super::{
     about::BuildInfo,
-    controller::{Menu, OpenMenus, SettingsController},
-    page,
+    controller::{Gear, Menu, OpenMenus, SettingsController},
     preferences::SettingKey,
     ui::{self, Ink},
 };
-use editor_core::{
-    ConnectionStatus, Core, HostData, HostSwitch, Problem, Screen, SettingsPage, SettingsSection,
-};
+use editor_core::{Core, HostData, HostSwitch, Problem, Screen, SettingsPage, SettingsSection};
 use editor_ui::{
+    carved::{
+        Carve, RADIUS_MD, Type,
+        avatar::{Avatar, avatar},
+        button::{Content, Tone as CarvedTone},
+        glyph::Icon,
+        menu::{ActionMenu, Entry, MenuItem},
+    },
     kit::{ButtonTone, Space, Spaced, TextRole, Tone},
+    segmented_control::{Segment, SegmentedControl},
     select::{Select, SelectEntry, SelectMenu},
     switch::Switch,
     text::{
@@ -30,12 +35,17 @@ use editor_ui::{
 #[derive(Clone, Debug)]
 pub enum ViewAction {
     Navigate(Screen),
+    SearchChanged,
     EngineEdited,
     EnginePresentationChanged,
     EngineAction(artisan_api::EngineId, artisan_api::EngineCommand),
-    EngineVersions(artisan_api::EngineId),
+    VersionMenu(artisan_api::EngineId, bool),
+    Gear(Option<Gear>),
     EngineUse(artisan_api::EngineId, String),
     EngineCode(artisan_api::EngineId),
+    OpenApiKey,
+    CancelApiKey,
+    SaveApiKey,
     ClaudeTransport(editor_core::HostId, editor_core::HostInstance, bool),
     ClaudeSignIn,
     AccountEdited,
@@ -60,6 +70,9 @@ pub enum ViewAction {
     Unarchive(artisan_api::ThreadId),
     McpOpen(Option<artisan_api::McpServer>),
     McpRemove(artisan_api::McpServer),
+    McpToggle(editor_core::HostInstance, artisan_api::McpServer, bool),
+    SkillToggle(editor_core::HostInstance, String, bool),
+    ReloadSkills,
     McpSave,
     McpCancel,
     McpEdited,
@@ -68,7 +81,9 @@ pub enum ViewAction {
     McpCancelSignIn(String),
     McpSignOut(String),
     OpenUrl(String),
-    OpenNotices,
+    ToggleLicence(usize),
+    ExportDiagnostics,
+    DiagnosticsExported(Result<(), Problem>),
     CopyText(String),
     PromptChanged,
     PromptPresentationChanged,
@@ -79,9 +94,11 @@ pub enum ViewAction {
     FontMenu(bool),
     SetFont(&'static str),
     SetDarkMode(bool),
+    SetTheme(editor_core::ThemePreference),
     SetOutlineText(bool),
     SetShowAllModels(bool),
     SetHideBadModelOptions(bool),
+    SetCuratedModels(bool),
     SetHighContrast(Option<bool>),
     TextSizeMenu(bool),
     ContrastMenu(bool),
@@ -102,9 +119,6 @@ pub enum ViewAction {
     DismissHostSetting(SettingKey),
 }
 
-const PAGE_WIDTH: f32 = 680.0;
-const STATUS_WIDTH: f32 = 240.0;
-
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per settings action; splitting the match would only move arms elsewhere"
@@ -116,10 +130,19 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
             | ViewAction::AccountEdited
             | ViewAction::McpEdited
             | ViewAction::OpenUrl(_)
-            | ViewAction::OpenNotices
+            | ViewAction::ExportDiagnostics
             | ViewAction::CopyText(_)
     ) {
         return false;
+    }
+    if matches!(action, ViewAction::SearchChanged) {
+        if !controller.search_editor.borrow().text().trim().is_empty()
+            && let Some(host) = core.active_host().map(|host| host.id.clone())
+            && let Some(host) = core.host_mut(&host)
+        {
+            host.load_skill_catalog(false);
+        }
+        return true;
     }
     if matches!(
         action,
@@ -139,17 +162,51 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
     }
     let before = ViewSnapshot::capture(controller, core);
     match action {
-        ViewAction::Navigate(screen) => core.navigate(screen),
+        ViewAction::Navigate(screen) => {
+            let cleared = controller.clear_search();
+            core.navigate(screen);
+            if cleared {
+                return true;
+            }
+        }
         ViewAction::EngineAction(engine, action) => controller.engine_action(core, engine, action),
-        ViewAction::EngineVersions(engine) => {
-            if !controller.engines.choosing_version.remove(&engine) {
-                controller.engines.choosing_version.insert(engine);
+        ViewAction::VersionMenu(engine, open) => {
+            controller.reported_menus.report(Menu::Version, open);
+            if open && controller.engines.choosing_version.insert(engine) {
                 controller.engine_action(core, engine, artisan_api::EngineCommand::Versions {});
             }
+            if !open {
+                controller.engines.choosing_version.remove(&engine);
+            }
+        }
+        ViewAction::Gear(gear) => {
+            controller.gear = match (&controller.gear, gear) {
+                (Some(open), Some(next)) if *open == next => None,
+                (_, next) => next,
+            };
         }
         ViewAction::EngineUse(engine, version) => {
             controller.engines.choosing_version.remove(&engine);
             controller.engine_action(core, engine, artisan_api::EngineCommand::Use { version });
+        }
+        ViewAction::ToggleLicence(index) => {
+            controller.open_licence = (controller.open_licence != Some(index)).then_some(index);
+            return true;
+        }
+        ViewAction::DiagnosticsExported(result) => {
+            controller.diagnostics_result = Some(result);
+            return true;
+        }
+        ViewAction::OpenApiKey => controller.engines.open_api_key(),
+        ViewAction::CancelApiKey => controller.engines.api_key = None,
+        ViewAction::SaveApiKey => {
+            if let Some(key) = controller.engines.take_api_key() {
+                controller.engine_action(
+                    core,
+                    artisan_api::EngineId::Codex,
+                    artisan_api::EngineCommand::LoginApiKey { key },
+                );
+            }
         }
         ViewAction::EngineCode(engine) => {
             if let Some(code) = controller.engines.login_code(engine) {
@@ -211,6 +268,21 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         }
         ViewAction::Unarchive(thread) => controller.unarchive(core, thread),
         ViewAction::McpOpen(server) => controller.open_mcp(server),
+        ViewAction::SkillToggle(instance, skill, enabled) => {
+            controller.toggle_skill(core, instance, skill, enabled);
+        }
+        ViewAction::ReloadSkills => {
+            if let Some(host) = core
+                .active_host()
+                .map(|host| host.id.clone())
+                .and_then(|id| core.host_mut(&id))
+            {
+                host.load_skill_catalog(true);
+            }
+        }
+        ViewAction::McpToggle(instance, server, enabled) => {
+            controller.toggle_mcp(core, instance, server, enabled);
+        }
         ViewAction::McpRemove(server) => controller.remove_mcp(core, server),
         ViewAction::McpSave => controller.save_mcp(core),
         ViewAction::McpCancel => controller.cancel_mcp(),
@@ -223,7 +295,8 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
         | ViewAction::PromptChanged
         | ViewAction::PromptPresentationChanged
         | ViewAction::OpenUrl(_)
-        | ViewAction::OpenNotices
+        | ViewAction::SearchChanged
+        | ViewAction::ExportDiagnostics
         | ViewAction::CopyText(_) => {}
         ViewAction::McpSignIn(server) => controller.sign_in_mcp(core, &server),
         ViewAction::McpCancelSignIn(server) => controller.cancel_mcp_sign_in(core, &server),
@@ -257,6 +330,12 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
                 artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY,
                 enabled.into(),
             );
+        }
+        ViewAction::SetTheme(choice) => {
+            controller.set_editor_setting(core, "theme", choice.as_str().into());
+        }
+        ViewAction::SetCuratedModels(curated) => {
+            controller.set_editor_setting(core, "curated_models", curated.into());
         }
         ViewAction::SetHighContrast(choice) => {
             controller.set_editor_setting(
@@ -296,10 +375,27 @@ pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: Vi
     before != ViewSnapshot::capture(controller, core)
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "routes every settings page and wraps it in the shared frame"
-)]
+pub fn search_editor(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    EditorController::from_shared(
+        Rc::clone(&controller.search_editor),
+        move |event| match event {
+            EditorEvent::Changed | EditorEvent::PresentationChanged => {
+                emit(ViewAction::SearchChanged);
+            }
+            EditorEvent::Submitted
+            | EditorEvent::SelectionChanged { .. }
+            | EditorEvent::List(_)
+            | EditorEvent::PastedFiles { .. } => {}
+        },
+    )
+    .element_with_chrome(Mode::SingleLine, theme, "Search settings…", true, false)
+    .with_key("settings-search")
+}
+
 pub fn build(
     controller: &SettingsController,
     core: &Core,
@@ -307,6 +403,21 @@ pub fn build(
     build_info: &BuildInfo,
     _viewport: aqua_core::Size,
     _visible: bool,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    build_with_account(controller, core, theme, build_info, None, emit)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "routes every settings page and wraps it in the shared frame"
+)]
+pub fn build_with_account(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    build_info: &BuildInfo,
+    account: Option<&editor_ui::chrome::account::Account>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let page = match core.screen() {
@@ -317,42 +428,59 @@ pub fn build(
         | Screen::Marketplace
         | Screen::Usage => SettingsPage::General,
     };
+    let search = controller
+        .search_editor
+        .borrow()
+        .text()
+        .trim()
+        .to_lowercase();
+    if !search.is_empty() {
+        let results = settings_search(controller, core, theme, &search, &emit);
+        return frame(
+            controller,
+            theme,
+            results,
+            "settings-search-results".to_owned(),
+        );
+    }
     if page == SettingsPage::GlobalPrompt && core.active_host().is_some() {
-        return prompt(controller, core, theme, emit);
+        return frame(
+            controller,
+            theme,
+            prompt(controller, core, theme, emit),
+            format!("settings-screen-{page:?}"),
+        );
     }
     let emit_for_error = Rc::clone(&emit);
     let content = match (page.parent(), core.active_host()) {
         (SettingsPage::General, _) if page == SettingsPage::General => ui::column()
-            .child(ui::header(theme, page.label(), page::description(page)))
-            .child(appearance(controller, theme, core, Rc::clone(&emit), false))
-            .child(streaming(controller, theme, core, Rc::clone(&emit), false))
-            .child(notifications(theme, core, Rc::clone(&emit), false))
-            .child(performance(theme, core, emit, false))
+            .child(appearance(controller, theme, core, Rc::clone(&emit)))
+            .child(interface(controller, theme, core, Rc::clone(&emit)))
+            .child(performance(controller, theme, core, emit))
             .build(),
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Appearance) =>
         {
-            appearance(controller, theme, core, emit, true)
+            appearance(controller, theme, core, emit)
         }
         (SettingsPage::General, _) if page == SettingsPage::Section(SettingsSection::Streaming) => {
-            streaming(controller, theme, core, emit, true)
+            streaming(controller, theme, core, emit)
         }
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Performance) =>
         {
-            performance(theme, core, emit, true)
+            performance(controller, theme, core, emit)
         }
         (SettingsPage::General, _)
             if page == SettingsPage::Section(SettingsSection::Notifications) =>
         {
-            notifications(theme, core, emit, true)
+            notifications(theme, core, emit)
         }
         (SettingsPage::Threads, Some(host))
             if page == SettingsPage::Threads
                 || page == SettingsPage::Section(SettingsSection::Archive) =>
         {
-            let mut content =
-                ui::column().child(ui::header(theme, page.label(), page::description(page)));
+            let mut content = ui::column();
             if page == SettingsPage::Threads {
                 content = content
                     .child(thread_section(
@@ -360,14 +488,12 @@ pub fn build(
                         host,
                         ThreadSection::Automation,
                         &emit,
-                        false,
                     ))
                     .child(thread_section(
                         theme,
                         host,
                         ThreadSection::Assistance,
                         &emit,
-                        false,
                     ));
             }
             content
@@ -385,63 +511,65 @@ pub fn build(
         (SettingsPage::Threads, Some(host))
             if page == SettingsPage::Section(SettingsSection::Automation) =>
         {
-            thread_section(theme, host, ThreadSection::Automation, &emit, true)
+            thread_section(theme, host, ThreadSection::Automation, &emit)
         }
         (SettingsPage::Threads, Some(host))
             if page == SettingsPage::Section(SettingsSection::Assistance) =>
         {
-            thread_section(theme, host, ThreadSection::Assistance, &emit, true)
+            thread_section(theme, host, ThreadSection::Assistance, &emit)
         }
         (SettingsPage::Extensions, Some(host))
             if page == SettingsPage::Extensions
                 || page == SettingsPage::Section(SettingsSection::McpServers) =>
         {
-            let mut content = ui::column()
-                .child(ui::header(theme, page.label(), page::description(page)))
-                .child(super::mcp_view::section(
-                    controller,
-                    core,
-                    host,
-                    theme,
-                    Rc::clone(&emit),
-                ));
+            let mut content = ui::column().child(super::mcp_view::section(
+                controller,
+                core,
+                host,
+                theme,
+                Rc::clone(&emit),
+            ));
             if page == SettingsPage::Extensions {
-                content = content.child(skills_section(theme, emit));
+                content = content.child(skills_section(controller, host, theme, &emit));
             }
             content.build()
         }
-        (SettingsPage::Extensions, Some(_))
+        (SettingsPage::Extensions, Some(host))
             if page == SettingsPage::Section(SettingsSection::Skills) =>
         {
-            skills(theme, emit)
+            skills_section(controller, host, theme, &emit)
         }
         (SettingsPage::Engine(engine), Some(host)) => {
-            super::engine_view::page(controller, host, engine, page, theme, emit)
+            super::engine_view::page(controller, host, engine, page, theme, &emit)
         }
-        (SettingsPage::Account, _) => super::account_view::page(controller, core, theme, &emit),
-        (SettingsPage::About, _) => about(theme, build_info, emit),
-        (SettingsPage::Hosts, _) => hosts(theme, core),
-        _ => ui::column()
-            .child(ui::header(theme, page.label(), page::description(page)))
-            .child(ui::text(
+        (SettingsPage::Account, _) => {
+            super::account_view::page(controller, core, theme, account, &emit)
+        }
+        (SettingsPage::About, _) => about(controller, theme, build_info, &emit),
+        (SettingsPage::Hosts, _) => hosts(controller, theme, core, &emit),
+        _ => ui::section(
+            theme,
+            page.label(),
+            None,
+            ui::card(
                 theme,
-                TextRole::Label,
-                Ink::Muted,
-                "Pair a Forge on the Account page first.",
-            ))
-            .child(ui::button(
-                theme,
-                "settings-open-account",
-                "Open Account",
-                ButtonTone::Neutral,
-                false,
-                move || {
-                    emit(ViewAction::Navigate(Screen::Settings(
-                        SettingsPage::Account,
-                    )));
-                },
-            ))
-            .build(),
+                vec![ui::row_of(
+                    theme,
+                    ui::desc(theme, "Connect a computer first."),
+                    Some(ui::button(
+                        theme,
+                        "settings-open-account",
+                        "Open Computers",
+                        ButtonTone::Neutral,
+                        false,
+                        move || {
+                            emit(ViewAction::Navigate(Screen::Settings(SettingsPage::Hosts)));
+                        },
+                    )),
+                    false,
+                )],
+            ),
+        ),
     };
     let host_failures = core
         .active_host()
@@ -459,7 +587,21 @@ pub fn build(
         ) => ui::column().child(failures).child(content).build(),
         _ => content,
     };
-    Scroll::new()
+    frame(
+        controller,
+        theme,
+        content,
+        format!("settings-screen-{page:?}"),
+    )
+}
+
+fn frame(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    content: Element,
+    key: String,
+) -> Element {
+    let scroll = Scroll::new()
         .preserve_offset(true)
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
@@ -472,19 +614,189 @@ pub fn build(
                         .justify(JustifyContent::CENTER)
                         .flex_shrink(0.0),
                 )
-                .child(
-                    UiBox::new()
-                        .layout("column")
-                        .width(Length::Pct(100.0))
-                        .padded(Space::S32)
-                        .style(Style::new().max_width(Length::Px(PAGE_WIDTH)))
-                        .child(content)
-                        .build(),
-                )
+                .child(ui::page_body().child(content).build())
                 .build(),
         )
         .build()
-        .with_key(format!("settings-screen-{page:?}"))
+        .with_key("settings-main-scroll")
+        .debug_selector("settings-main-scroll");
+    let edges = &controller.scroll_edges;
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .height(Length::Pct(100.0))
+        .child(
+            UiBox::new()
+                .width(Length::Pct(100.0))
+                .height(Length::Pct(100.0))
+                .child(scroll)
+                .build()
+                .with_key(key),
+        )
+        .child(edges.band(
+            "settings-edge-top",
+            editor_ui::scroll_edge::Edge::Top,
+            theme.colors.background,
+        ))
+        .child(edges.band(
+            "settings-edge-bottom",
+            editor_ui::scroll_edge::Edge::Bottom,
+            theme.colors.background,
+        ))
+        .build()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the search builds live controls and links from one settings catalog"
+)]
+fn settings_search(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    search: &str,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let matches = |terms: &str| {
+        search
+            .split_whitespace()
+            .all(|word| terms.to_lowercase().contains(word))
+    };
+    let mut results = Vec::new();
+    for (group, rows) in [
+        (
+            "Appearance",
+            Vec::from(appearance_rows(controller, theme, core, Rc::clone(emit))),
+        ),
+        (
+            "Interface & Models",
+            Vec::from(interface_rows(controller, theme, core, Rc::clone(emit))),
+        ),
+        (
+            "Performance",
+            Vec::from(performance_rows(controller, theme, core, Rc::clone(emit))),
+        ),
+    ] {
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter_map(|(terms, row)| matches(&format!("general {group} {terms}")).then_some(row))
+            .collect();
+        if !rows.is_empty() {
+            results.push(ui::section(theme, group, None, ui::card(theme, rows)));
+        }
+    }
+    if let Some(host) = core.active_host() {
+        results.extend(search_host_controls(
+            controller, host, theme, emit, &matches,
+        ));
+    }
+    let mut links = Vec::new();
+    for (terms, label, target) in [
+        (
+            "profile identity account avatar",
+            "Account",
+            SettingsPage::Account,
+        ),
+        (
+            "computers forges machines pairing relay",
+            "Computers",
+            SettingsPage::Hosts,
+        ),
+        (
+            "threads restore archive retention cleanup",
+            "Threads",
+            SettingsPage::Threads,
+        ),
+        (
+            "system global prompt instructions",
+            "Global Prompt",
+            SettingsPage::GlobalPrompt,
+        ),
+        (
+            "mcp servers tools extensions",
+            "MCPs",
+            SettingsPage::Section(SettingsSection::McpServers),
+        ),
+        (
+            "skills extensions marketplace",
+            "Skills",
+            SettingsPage::Section(SettingsSection::Skills),
+        ),
+        (
+            "about build version diagnostics licences licenses",
+            "About",
+            SettingsPage::About,
+        ),
+    ] {
+        if matches(terms) {
+            let send = Rc::clone(emit);
+            links.push(ui::row(
+                theme,
+                label,
+                "",
+                Some(ui::button(
+                    theme,
+                    format!("settings-search-{target:?}"),
+                    "Open",
+                    ButtonTone::Quiet,
+                    false,
+                    move || send(ViewAction::Navigate(Screen::Settings(target))),
+                )),
+            ));
+        }
+    }
+    if !links.is_empty() {
+        results.push(ui::section(theme, "Pages", None, ui::card(theme, links)));
+    }
+    if let Some(host) = core.active_host() {
+        let mut engines = Vec::new();
+        for status in host.engines.values() {
+            let name = status.engine.display_name();
+            let terms = if status.engine == artisan_api::EngineId::Codex {
+                format!("{name} engine account version install API key")
+            } else {
+                format!("{name} engine account version install")
+            };
+            if matches(&terms) {
+                let send = Rc::clone(emit);
+                let engine = status.engine;
+                engines.push(ui::row(
+                    theme,
+                    name,
+                    "",
+                    Some(ui::button(
+                        theme,
+                        format!("settings-search-{engine}"),
+                        "Open",
+                        ButtonTone::Quiet,
+                        false,
+                        move || {
+                            send(ViewAction::Navigate(Screen::Settings(
+                                SettingsPage::Engine(engine),
+                            )));
+                        },
+                    )),
+                ));
+            }
+        }
+        if !engines.is_empty() {
+            results.push(ui::section(
+                theme,
+                "Engines",
+                None,
+                ui::card(theme, engines),
+            ));
+        }
+    }
+    if results.is_empty() {
+        results.push(ui::card(
+            theme,
+            vec![ui::note(
+                theme,
+                &format!("No settings matching “{}”.", search.trim()),
+            )],
+        ));
+    }
+    ui::column().children(results).build()
 }
 
 fn setting_label(key: &'static str) -> &'static str {
@@ -571,103 +883,220 @@ fn device_settings_error(
     )
 }
 
-fn about(theme: &ArtisanTheme, build: &BuildInfo, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    let rows = super::about::rows(build)
-        .into_iter()
-        .map(|(title, value)| ui::row(theme, title, value, None))
-        .collect();
-    ui::column()
-        .child(ui::header(
+const LICENCE_ROW: f32 = 56.0;
+const LICENCE_ROWS: u8 = 10;
+
+#[derive(Clone)]
+struct LicenceRow {
+    index: usize,
+    licence: &'static artisan_payload::licences::Licence,
+    open: bool,
+    edges: ui::Edges,
+}
+
+fn licence_list(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    build: &BuildInfo,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let licences = build.licences;
+    if licences.is_empty() {
+        return ui::card(
             theme,
-            SettingsPage::About.label(),
-            page::description(SettingsPage::About),
-        ))
+            vec![ui::note(theme, "This build carries no licences.")],
+        );
+    }
+    let final_row = licences.len() - 1;
+    let rows: Vec<LicenceRow> = licences
+        .iter()
+        .enumerate()
+        .map(|(index, licence)| LicenceRow {
+            index,
+            licence,
+            open: controller.open_licence == Some(index),
+            edges: ui::Edges {
+                first: index == 0,
+                last: index == final_row,
+            },
+        })
+        .collect();
+    let visible = u8::try_from(rows.len()).map_or(LICENCE_ROWS, |rows| rows.min(LICENCE_ROWS));
+    let theme = *theme;
+    let emit = Rc::clone(emit);
+    let list = aqua_ui::collection::List::new()
+        .items(rows)
+        .key(|row| format!("settings-licence-row-{}", row.index))
+        .row(move |row| {
+            let send = Rc::clone(&emit);
+            let index = row.index;
+            let item = ui::licence(
+                &theme,
+                format!("settings-licence-{index}"),
+                row.licence.name,
+                row.open.then_some(row.licence.text),
+                row.edges,
+                move || send(ViewAction::ToggleLicence(index)),
+            );
+            if row.edges.first {
+                item
+            } else {
+                ui::ruled(&theme, item)
+            }
+        })
+        .style(
+            Style::new()
+                .width(Length::Pct(100.0))
+                .height(Length::Px(f32::from(visible) * LICENCE_ROW)),
+        )
+        .estimated_row_height(Length::Px(LICENCE_ROW))
+        .virtualize()
+        .build()
+        .with_key("settings-licences");
+    ui::card(&theme, vec![list])
+}
+
+const ABOUT_TITLE: Type = Type::sans(17.0, 22.0, 500);
+
+fn about(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    build: &BuildInfo,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let export = Rc::clone(emit);
+    let mark = ui::raised(
+        avatar(
+            theme,
+            None,
+            "A",
+            Avatar {
+                edge: 44.0,
+                radius: RADIUS_MD,
+                initial: Type::sans(18.4, 22.0, 600),
+                ring: false,
+            },
+        ),
+        RADIUS_MD,
+        theme,
+    );
+    let carve = Carve::of(theme);
+    let heading = ui::stack_gap(3.0)
+        .child(
+            ui::inline(8.0)
+                .child(ui::typed(theme, ABOUT_TITLE, Ink::Plain, "Artisan Editor"))
+                .child(ui::inset_tag(
+                    theme,
+                    if build.official() {
+                        "Built by Artisan Street"
+                    } else {
+                        "Local build"
+                    },
+                ))
+                .build(),
+        )
+        .child(
+            Type::mono(13.0, 19.0, 400)
+                .text(theme, carve.ink_dim, build.identifier())
+                .wrap(false)
+                .build(),
+        )
+        .build();
+    let identity = ui::inline(14.0).child(mark).child(heading).build();
+    let hero = ui::about_hero(
+        identity,
+        ui::typed(theme, ui::DESC, Ink::Muted, build.description()),
+    );
+    let footer = ui::row_of(
+        theme,
+        ui::carved(
+            theme,
+            "settings-export-diagnostics",
+            CarvedTone::Horizon,
+            Content::IconLabel(Icon::Download, "Export diagnostics".to_owned()),
+            false,
+            move || export(ViewAction::ExportDiagnostics),
+        ),
+        None,
+        true,
+    );
+    let mut build_rows = vec![hero, footer];
+    if let Some(result) = &controller.diagnostics_result {
+        build_rows.push(match result {
+            Ok(()) => ui::note(theme, "Diagnostics exported."),
+            Err(problem) => {
+                ui::block(ui::problem(theme, "settings-export-diagnostics-error", problem).build())
+            }
+        });
+    }
+    let licences = licence_list(controller, theme, build, emit);
+    ui::column()
         .child(ui::section(
             theme,
             "Build",
             None,
-            None,
-            ui::card(theme, rows),
+            ui::card(theme, build_rows),
         ))
-        .child(ui::section(
-            theme,
-            "Licences",
-            None,
-            None,
-            ui::card(
-                theme,
-                vec![ui::row(
-                    theme,
-                    "Third-party notices",
-                    "Licences of the fonts, icons and libraries in the Editor, ae and Forge.",
-                    Some(ui::button(
-                        theme,
-                        "about-open-notices",
-                        "Open",
-                        ButtonTone::Quiet,
-                        false,
-                        move || emit(ViewAction::OpenNotices),
-                    )),
-                )],
-            ),
-        ))
+        .child(ui::section(theme, "Licences", None, licences))
         .build()
 }
 
-fn hosts(theme: &ArtisanTheme, core: &Core) -> Element {
-    let mut rows: Vec<Element> = core
+fn hosts(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let relay = ui::section(
+        theme,
+        "Artisan Datagram Relay",
+        None,
+        ui::card(
+            theme,
+            vec![ui::row(
+                theme,
+                "Artisan Datagram Relay",
+                "Artisan Street offers this service as a relay and broker for pairing machines and connecting any host without hassle, so you can talk to your machines anywhere in the world, at any time. Artisan Datagram Relay is, to the best of its capabilities, end-to-end encrypted. Artisan Street does not claim this service is trustless.",
+                None,
+            )],
+        ),
+    );
+    let enrolled = core.account().machines();
+    let open: Vec<_> = core
         .hosts()
+        .filter(|(config, _)| !enrolled.iter().any(|machine| machine.id == config.id.0))
         .map(|(config, host)| {
-            let (state, ink) = match &host.status {
-                ConnectionStatus::Live => ("Connected".to_owned(), Ink::Success),
-                ConnectionStatus::Connecting | ConnectionStatus::Reconnecting { .. } => {
-                    ("Connecting…".to_owned(), Ink::Muted)
-                }
-                ConnectionStatus::Offline { reason, .. } => {
-                    (format!("Offline. {}", reason.headline()), Ink::Danger)
-                }
+            let (status, ink) = match &host.status {
+                editor_core::ConnectionStatus::Live => ("Connected", Ink::Success),
+                editor_core::ConnectionStatus::Connecting
+                | editor_core::ConnectionStatus::Reconnecting { .. } => ("Connecting…", Ink::Muted),
+                editor_core::ConnectionStatus::Offline { .. } => ("Disconnected", Ink::Danger),
             };
-            let detail = host
-                .forge_version
-                .as_ref()
-                .map_or_else(String::new, |version| format!("Forge {version}"));
-            let status = UiBox::new()
-                .style(Style::new().max_width(Length::Px(STATUS_WIDTH)))
-                .child(ui::line(theme, TextRole::Label, ink, state))
-                .build();
-            ui::row(theme, config.name.clone(), detail, Some(status))
+            ui::row(
+                theme,
+                config.name.clone(),
+                "",
+                Some(ui::line(theme, TextRole::Label, ink, status)),
+            )
         })
         .collect();
-    if rows.is_empty() {
-        rows.push(ui::row(
-            theme,
-            "No Forges open",
-            "Pair and open Forges on the Account page.",
-            None,
+    let mut content = ui::column()
+        .child(relay)
+        .children(super::account_view::computers(
+            controller, core, theme, emit,
         ));
-    }
-    ui::column()
-        .child(ui::header(
-            theme,
-            SettingsPage::Hosts.label(),
-            page::description(SettingsPage::Hosts),
-        ))
-        .child(ui::section(
+    if !open.is_empty() {
+        content = content.child(ui::section(
             theme,
             "Open Forges",
             None,
-            None,
-            ui::card(theme, rows),
-        ))
-        .build()
+            ui::card(theme, open),
+        ));
+    }
+    content.build()
 }
 
-fn notifications(
-    theme: &ArtisanTheme,
-    core: &Core,
-    emit: Rc<dyn Fn(ViewAction)>,
-    include_header: bool,
-) -> Element {
+fn notifications(theme: &ArtisanTheme, core: &Core, emit: Rc<dyn Fn(ViewAction)>) -> Element {
     let enabled = core.settings().preferences().notifications.on();
     let control = Switch::new("settings-switch-notify", *theme, enabled, "Notify me")
         .on_change(move |enabled| emit(ViewAction::SetNotifications(enabled)))
@@ -678,18 +1107,7 @@ fn notifications(
         "Uses your system's notifications to tell you when a thread finishes, needs attention or fails.",
         Some(control),
     );
-    section_page(
-        theme,
-        SettingsPage::Section(SettingsSection::Notifications),
-        ui::section(
-            theme,
-            "Notifications",
-            None,
-            None,
-            ui::card(theme, vec![row]),
-        ),
-        include_header,
-    )
+    ui::section(theme, "Notifications", None, ui::card(theme, vec![row]))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -698,39 +1116,23 @@ enum ThreadSection {
     Assistance,
 }
 
-impl ThreadSection {
-    const fn page(self) -> SettingsPage {
-        SettingsPage::Section(match self {
-            Self::Automation => SettingsSection::Automation,
-            Self::Assistance => SettingsSection::Assistance,
-        })
-    }
-}
+type ThreadControl = (&'static str, HostSwitch, &'static str, &'static str);
 
-fn thread_section(
-    theme: &ArtisanTheme,
-    host: &HostData,
-    section: ThreadSection,
-    emit: &Rc<dyn Fn(ViewAction)>,
-    include_header: bool,
-) -> Element {
-    let (title, entries): (
-        &str,
-        &[(&'static str, HostSwitch, &'static str, &'static str)],
-    ) = match section {
+fn thread_controls(section: ThreadSection) -> (&'static str, &'static [ThreadControl]) {
+    match section {
         ThreadSection::Automation => (
-            "Recovery & continuation",
+            "Recovery & Continuation",
             &[
                 (
                     "settings-switch-retry-overloaded",
                     HostSwitch::RetryWhenOverloaded,
-                    "Keep retrying when the provider is overloaded",
+                    "Keep retrying when overloaded",
                     "When the model is overloaded, Artisan keeps rescheduling the thread until the turn finishes.",
                 ),
                 (
                     "settings-switch-continue-usage-limit",
                     HostSwitch::ContinueAfterUsageLimit,
-                    "Continue when my usage limit resets",
+                    "Continue when usage limit resets",
                     "A thread that stopped at the usage limit continues once the limit resets.",
                 ),
                 (
@@ -747,7 +1149,7 @@ fn thread_section(
                 (
                     "settings-switch-suggestions",
                     HostSwitch::Suggestions,
-                    "Suggest my next message",
+                    "Suggest next message",
                     "After each turn, the composer offers what you would most likely send next. It is asked of the thread's own engine and reuses its cached conversation, so each one costs a little of that engine's usage.",
                 ),
                 (
@@ -764,71 +1166,221 @@ fn thread_section(
                 ),
             ],
         ),
-    };
+    }
+}
+
+fn thread_section(
+    theme: &ArtisanTheme,
+    host: &HostData,
+    section: ThreadSection,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let (title, entries) = thread_controls(section);
     let rows = entries
         .iter()
-        .map(|&(id, switch, label, description)| {
-            let enabled = host.switch(switch);
-            let key = switch.key();
-            let send = Rc::clone(emit);
-            let host_id = host.id.clone();
-            let instance = host.instance();
-            let control = Switch::new(
-                id,
-                *theme,
-                enabled,
-                id.trim_start_matches("settings-").replace('-', " "),
-            )
-            .on_change(move |enabled| {
-                send(ViewAction::SetHostSetting(
-                    host_id.clone(),
-                    instance,
-                    key,
-                    enabled,
-                ));
-            })
-            .build();
-            ui::row(theme, label, description, Some(control))
-        })
+        .map(|&(id, switch, label, _)| host_switch(theme, host, switch, id, label, emit))
         .collect();
-    section_page(
-        theme,
-        section.page(),
-        ui::section(theme, title, None, None, ui::card(theme, rows)),
-        include_header,
-    )
+    ui::section(theme, title, None, ui::card(theme, rows))
 }
 
-fn skills(theme: &ArtisanTheme, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    let page = SettingsPage::Section(SettingsSection::Skills);
-    ui::column()
-        .child(ui::header(theme, page.label(), page::description(page)))
-        .child(skills_section(theme, emit))
-        .build()
+fn host_switch(
+    theme: &ArtisanTheme,
+    host: &HostData,
+    switch: HostSwitch,
+    id: &str,
+    label: &str,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let send = Rc::clone(emit);
+    let host_id = host.id.clone();
+    let instance = host.instance();
+    let control = Switch::new(id.to_owned(), *theme, host.switch(switch), label.to_owned())
+        .recessed()
+        .on_change(move |enabled| {
+            send(ViewAction::SetHostSetting(
+                host_id.clone(),
+                instance,
+                switch.key(),
+                enabled,
+            ));
+        })
+        .build();
+    ui::row(theme, label, "", Some(control))
 }
 
-fn skills_section(theme: &ArtisanTheme, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    let action = UiBox::new()
-        .child(ui::button(
+fn search_host_controls(
+    controller: &SettingsController,
+    host: &HostData,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+    matches: &impl Fn(&str) -> bool,
+) -> Vec<Element> {
+    let mut sections = Vec::new();
+    for section in [ThreadSection::Automation, ThreadSection::Assistance] {
+        let (title, entries) = thread_controls(section);
+        let rows: Vec<_> = entries
+            .iter()
+            .filter(|&&(_, _, label, description)| {
+                matches(&format!("threads {title} {label} {description}"))
+            })
+            .map(|&(id, switch, label, _)| host_switch(theme, host, switch, id, label, emit))
+            .collect();
+        if !rows.is_empty() {
+            sections.push(ui::section(theme, title, None, ui::card(theme, rows)));
+        }
+    }
+    if matches("threads delete inactive threads retention cleanup archive days") {
+        sections.push(super::archive_view::cleanup(
+            controller,
+            host,
             theme,
-            "settings-manage-skills",
-            "Manage skills in Marketplace",
-            ButtonTone::Quiet,
-            false,
-            move || emit(ViewAction::Navigate(Screen::Marketplace)),
+            Rc::clone(emit),
+        ));
+    }
+    let prompt_label = "System prompt for Artisan Editor";
+    if matches(&format!(
+        "{prompt_label} forge global prompt built-in instructions"
+    )) {
+        let row = host_switch(
+            theme,
+            host,
+            HostSwitch::ArtisanSystemPrompt,
+            "settings-artisan-system-prompt",
+            prompt_label,
+            emit,
+        );
+        sections.push(ui::section(
+            theme,
+            "Global Prompt",
+            None,
+            ui::card(theme, vec![row]),
+        ));
+    }
+    if let Ok(servers) = host.mcp_servers() {
+        let rows: Vec<_> = servers
+            .iter()
+            .filter(|server| matches(&format!("mcp server tool {}", server.name)))
+            .map(|server| {
+                ui::row(
+                    theme,
+                    server.name.clone(),
+                    "",
+                    Some(super::mcp_view::toggle(
+                        controller, host, server, theme, emit,
+                    )),
+                )
+            })
+            .collect();
+        if !rows.is_empty() {
+            sections.push(ui::section(theme, "MCPs", None, ui::card(theme, rows)));
+        }
+    }
+    if let Some(catalog) = host.skill_catalog() {
+        let rows: Vec<_> = catalog
+            .iter()
+            .filter(|skill| {
+                skill.origin != artisan_api::SkillOrigin::Discovered
+                    && matches(&format!("skills marketplace {}", skill.name))
+            })
+            .map(|skill| skill_row(controller, host, skill, theme, emit))
+            .collect();
+        if !rows.is_empty() {
+            sections.push(ui::section(theme, "Skills", None, ui::card(theme, rows)));
+        }
+    }
+    sections
+}
+
+fn skill_row(
+    controller: &SettingsController,
+    host: &HostData,
+    skill: &artisan_api::CatalogSkill,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let instance = host.instance();
+    let send = Rc::clone(emit);
+    let id = skill.id.clone();
+    let control = Switch::new(
+        format!("settings-skill-{}", skill.id),
+        *theme,
+        skill.enabled,
+        skill.name.clone(),
+    )
+    .recessed()
+    .disabled(controller.skill_pending.contains(&skill.id))
+    .on_change(move |enabled| send(ViewAction::SkillToggle(instance, id.clone(), enabled)))
+    .build();
+    let gear = Gear::Skill(skill.id.clone());
+    let open = Rc::clone(emit);
+    let chosen = gear.clone();
+    let controls = ui::actions()
+        .child(control)
+        .child(ui::gear(
+            theme,
+            gear.key(),
+            format!("{} options", skill.name),
+            move || open(ViewAction::Gear(Some(chosen.clone()))),
         ))
         .build();
-    ui::section(
-        theme,
-        "Skills",
-        Some(
-            "Artisan's skills and your own reach every engine on this Forge; the Marketplace turns each on or off.",
-        ),
-        None,
-        action,
-    )
+    ui::row(theme, skill.name.clone(), "", Some(controls))
 }
 
+fn skills_section(
+    controller: &SettingsController,
+    host: &HostData,
+    theme: &ArtisanTheme,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let open = Rc::clone(emit);
+    let action = ui::button(
+        theme,
+        "settings-manage-skills",
+        "Open Marketplace",
+        ButtonTone::Primary,
+        false,
+        move || open(ViewAction::Navigate(Screen::Marketplace)),
+    );
+    let mut rows = Vec::new();
+    if let Some(catalog) = host.skill_catalog() {
+        rows.extend(
+            catalog
+                .iter()
+                .filter(|skill| skill.origin != artisan_api::SkillOrigin::Discovered)
+                .map(|skill| skill_row(controller, host, skill, theme, emit)),
+        );
+    }
+    if let Some(problem) = host.catalog_load().error.as_ref() {
+        let retry = Rc::clone(emit);
+        rows.push(ui::problem(theme, "settings-skills-load", problem).build());
+        rows.push(ui::button(
+            theme,
+            "settings-skills-retry",
+            "Try again",
+            ButtonTone::Quiet,
+            false,
+            move || retry(ViewAction::ReloadSkills),
+        ));
+    } else if rows.is_empty() {
+        rows.push(ui::note(
+            theme,
+            if host.catalog_load().loading {
+                "Loading skills…"
+            } else {
+                "No skills installed."
+            },
+        ));
+    }
+    if let Some(problem) = &controller.skill_error {
+        rows.push(ui::problem(theme, "settings-skills-mutation", problem).build());
+    }
+    ui::section(theme, "Skills", Some(action), ui::card(theme, rows))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the prompt page coordinates load and save controls with the editor"
+)]
 fn prompt(
     controller: &SettingsController,
     core: &Core,
@@ -848,56 +1400,52 @@ fn prompt(
             | EditorEvent::PastedFiles { .. } => {}
         },
     );
-    let mut page = UiBox::new()
-        .layout("column")
+    let built_in = core.active_host().map(|host| {
+        host_switch(
+            theme,
+            host,
+            HostSwitch::ArtisanSystemPrompt,
+            "settings-artisan-system-prompt",
+            "System prompt for Artisan Editor",
+            &emit,
+        )
+    });
+    let setting_failures = core
+        .active_host()
+        .and_then(|host| host_setting_failures(controller, host, theme, &emit));
+    let page = ui::column().children(setting_failures).children(
+        built_in.map(|row| ui::section(theme, "Built-in", None, ui::card(theme, vec![row]))),
+    );
+    let field = Scroll::new()
+        .preserve_offset(true)
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
-        .spaced(Space::S20)
-        .padded(Space::S24)
-        .style(Style::new().min_height(Length::Pct(0.0)))
-        .child(ui::header(
+        .style(Style::new().axis(aqua_ui::style::Axis::Column))
+        .child(editor.element_with_notice_keyed(
+            "settings-global-prompt-editor",
+            Mode::Source,
             theme,
-            SettingsPage::GlobalPrompt.label(),
-            page::description(SettingsPage::GlobalPrompt),
+            if form.loaded {
+                "Instructions shared across every thread…"
+            } else {
+                "Reading the global prompt…"
+            },
+            true,
+            false,
         ))
-        .child(
-            Scroll::new()
-                .width(Length::Pct(100.0))
-                .spaced(Space::S20)
-                .style(
-                    Style::new()
-                        .axis(aqua_ui::style::Axis::Column)
-                        .flex_grow(1.0)
-                        .min_height(Length::Pct(0.0)),
-                )
-                .child(prompt_reconciliation(controller, core, theme, &emit))
-                .child(editor.element_with_notice_keyed(
-                    "settings-global-prompt-editor",
-                    Mode::Document,
-                    theme,
-                    if form.loaded {
-                        "Write your global instructions…"
-                    } else {
-                        "Reading the global prompt…"
-                    },
-                    false,
-                    true,
-                ))
-                .build()
-                .with_key("global-prompt-scroll"),
-        );
+        .build()
+        .with_key("global-prompt-scroll");
+    let mut above = ui::stack_gap(12.0)
+        .width(Length::Pct(100.0))
+        .child(prompt_reconciliation(controller, core, theme, &emit));
     if let Some(problem) = form.error.as_ref().or_else(|| {
         core.active_host()
             .and_then(|host| host.prompt_load().error.as_ref())
     }) {
-        page = page.child(ui::problem(theme, "settings-global-prompt-error", problem).build());
+        above = above.child(ui::problem(theme, "settings-global-prompt-error", problem).build());
     }
-    page = page.child(ui::callout(
-        theme,
-        Tone::Neutral,
-        form.status(controller.prompt_editor.borrow().text()),
-    ));
-    let mut actions = ui::actions().style(Style::new().flex_shrink(0.0));
+    let body = ui::prompt_body(theme, above.build(), field);
+    let mut actions = ui::actions();
     if core
         .active_host()
         .is_some_and(|host| host.prompt_load().error.is_some())
@@ -932,7 +1480,28 @@ fn prompt(
         !form.loaded || !dirty || form.pending || form.newer,
         move || emit(ViewAction::SavePrompt),
     ));
-    page.child(actions.build()).build()
+    let card = ui::card(
+        theme,
+        vec![
+            body,
+            ui::row_of(theme, UiBox::new().build(), Some(actions.build()), true),
+        ],
+    );
+    page.child(ui::section(theme, "Global Prompt", None, card))
+        .build()
+}
+
+fn prompt_preview(theme: &ArtisanTheme, text: String) -> Element {
+    Scroll::new()
+        .preserve_offset(true)
+        .width(Length::Pct(100.0))
+        .style(
+            Style::new()
+                .axis(aqua_ui::style::Axis::Column)
+                .max_height(Length::Px(160.0)),
+        )
+        .child(ui::callout(theme, Tone::Neutral, text))
+        .build()
 }
 
 #[expect(
@@ -971,7 +1540,7 @@ fn prompt_reconciliation(
                     Tone::Info,
                     format!("Prompt found in {engines}"),
                 ))
-                .child(ui::callout(theme, Tone::Neutral, candidate.text.clone()))
+                .child(prompt_preview(theme, candidate.text.clone()))
                 .child(
                     UiBox::new()
                         .child(ui::button(
@@ -1008,7 +1577,7 @@ fn prompt_reconciliation(
                     ),
                 ));
                 if let Some(text) = &engine.external_text {
-                    row = row.child(ui::callout(theme, Tone::Neutral, text.clone()));
+                    row = row.child(prompt_preview(theme, text.clone()));
                 }
                 controls = controls.child(
                     row.child(
@@ -1069,57 +1638,63 @@ fn prompt_reconciliation(
 }
 
 fn performance(
+    controller: &SettingsController,
     theme: &ArtisanTheme,
     core: &Core,
     emit: Rc<dyn Fn(ViewAction)>,
-    include_header: bool,
 ) -> Element {
-    let lowered = core.settings().preferences().lower_refresh_rate.on();
-    let control = Switch::new(
-        "settings-lower-refresh-rate",
-        *theme,
-        lowered,
-        "Lower refresh rate",
-    )
-    .on_change({
-        let emit = Rc::clone(&emit);
-        move |enabled| emit(ViewAction::SetFrameRate(enabled))
-    })
-    .build();
-    let row = ui::row(
+    ui::section(
         theme,
-        "Lower refresh rate",
-        "Caps animation and scrolling at 60 frames per second to save power.",
-        Some(control),
-    );
-    let monitor_sync = core.settings().preferences().graphics_vsync.on();
-    let monitor_control = Switch::new(
-        "settings-monitor-refresh-rate",
-        *theme,
-        monitor_sync,
-        "Match monitor refresh rate",
-    )
-    .on_change(move |enabled| emit(ViewAction::SetVsync(enabled)))
-    .build();
-    let monitor_row = ui::row(
-        theme,
-        "Match monitor refresh rate",
-        "Synchronizes presentation to the current monitor. With both limits off, rendering is uncapped.",
-        Some(monitor_control),
-    );
-    let page = SettingsPage::Section(SettingsSection::Performance);
-    section_page(
-        theme,
-        page,
-        ui::section(
+        "Performance",
+        None,
+        ui::card(
             theme,
-            "Performance",
-            None,
-            None,
-            ui::card(theme, vec![row, monitor_row]),
+            performance_rows(controller, theme, core, emit)
+                .into_iter()
+                .map(|(_, row)| row)
+                .collect(),
         ),
-        include_header,
     )
+}
+
+fn performance_rows(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> [(&'static str, Element); 2] {
+    let preferences = core.settings().preferences();
+    let refresh = Rc::clone(&emit);
+    let rates = SegmentedControl::new(
+        "settings-refresh-rate",
+        *theme,
+        "Refresh rate",
+        preferences.lower_refresh_rate.on(),
+        Segment::new(false, controller.display_rate.label()),
+    )
+    .options([Segment::new(true, "60 Hz")])
+    .carved()
+    .on_change(move |limited| refresh(ViewAction::SetFrameRate(limited)))
+    .build();
+    let vsync = Switch::new(
+        "settings-switch-vsync",
+        *theme,
+        preferences.graphics_vsync.on(),
+        "V-Sync",
+    )
+    .recessed()
+    .on_change(move |on| emit(ViewAction::SetVsync(on)))
+    .build();
+    [
+        (
+            "refresh rate display monitor fps 60 hz",
+            ui::row(theme, "Refresh rate", "", Some(rates)),
+        ),
+        (
+            "vsync v-sync vertical sync gpu",
+            ui::row(theme, "V-Sync", "", Some(vsync)),
+        ),
+    ]
 }
 
 fn streaming_entries() -> Vec<SelectEntry<&'static str>> {
@@ -1159,7 +1734,20 @@ fn streaming(
     theme: &ArtisanTheme,
     core: &Core,
     emit: Rc<dyn Fn(ViewAction)>,
-    include_header: bool,
+) -> Element {
+    ui::section(
+        theme,
+        "Text streaming",
+        None,
+        ui::card(theme, vec![streaming_row(controller, theme, core, emit)]),
+    )
+}
+
+fn streaming_row(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let change = Rc::clone(&emit);
     let select = Select::new(
@@ -1169,30 +1757,71 @@ fn streaming(
         streaming_entries(),
         Rc::clone(&controller.streaming_select),
     )
-    .label("Text Streaming")
+    .label("Text streaming")
     .on_change(move |mode| change(ViewAction::SetStreaming(mode)))
     .on_open_change(move |open| emit(ViewAction::StreamingMenu(open)))
     .build();
-    let control = ui::fixed(select);
-    let row = ui::row(
+    ui::row(theme, "Text streaming", "", Some(ui::fixed(select)))
+}
+
+fn interface(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let rows = interface_rows(controller, theme, core, emit);
+    ui::section(
         theme,
-        "Text Streaming",
-        "Smooth fades new text in briefly as it arrives. Swift shows it immediately without reveal animation.",
-        Some(control),
-    );
-    let page = SettingsPage::Section(SettingsSection::Streaming);
-    section_page(
-        theme,
-        page,
-        ui::section(
-            theme,
-            "Text Streaming",
-            None,
-            None,
-            ui::card(theme, vec![row]),
-        ),
-        include_header,
+        "Interface & Models",
+        None,
+        ui::card(theme, rows.into_iter().map(|(_, row)| row).collect()),
     )
+}
+
+fn interface_rows(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> [(&'static str, Element); 3] {
+    let preferences = core.settings().preferences();
+    let notify = Rc::clone(&emit);
+    let notifications = Switch::new(
+        "settings-switch-notify",
+        *theme,
+        preferences.notifications.on(),
+        "System notifications",
+    )
+    .recessed()
+    .on_change(move |value| notify(ViewAction::SetNotifications(value)))
+    .build();
+    let curated = Switch::new(
+        "settings-switch-models",
+        *theme,
+        !preferences.show_all_models.on() && preferences.hide_bad_model_options.on(),
+        "Curated models",
+    )
+    .recessed()
+    .on_change({
+        let emit = Rc::clone(&emit);
+        move |value| emit(ViewAction::SetCuratedModels(value))
+    })
+    .build();
+    [
+        (
+            "text streaming smooth swift",
+            streaming_row(controller, theme, core, emit),
+        ),
+        (
+            "system notifications notify alerts",
+            ui::row(theme, "System notifications", "", Some(notifications)),
+        ),
+        (
+            "curated models model picker show all",
+            ui::row(theme, "Curated models", "", Some(curated)),
+        ),
+    ]
 }
 
 fn font_entries() -> Vec<SelectEntry<&'static str>> {
@@ -1232,19 +1861,40 @@ fn appearance(
     theme: &ArtisanTheme,
     core: &Core,
     emit: Rc<dyn Fn(ViewAction)>,
-    include_header: bool,
 ) -> Element {
-    let send = Rc::clone(&emit);
-    let dark = Switch::new(
-        "settings-switch-dark-mode",
-        *theme,
-        theme.colors.mode.is_dark(),
-        "Dark mode",
+    let rows = appearance_rows(controller, theme, core, emit);
+    ui::section(
+        theme,
+        "Appearance",
+        None,
+        ui::card(theme, rows.into_iter().map(|(_, row)| row).collect()),
     )
-    .on_change(move |enabled| send(ViewAction::SetDarkMode(enabled)))
-    .build();
+}
+
+fn appearance_rows(
+    controller: &SettingsController,
+    theme: &ArtisanTheme,
+    core: &Core,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> [(&'static str, Element); 5] {
+    let preferences = core.settings().preferences();
     let send = Rc::clone(&emit);
-    let open = Rc::clone(&emit);
+    let appearance = SegmentedControl::new(
+        "settings-theme",
+        *theme,
+        "Theme",
+        preferences.theme,
+        Segment::new(editor_core::ThemePreference::System, "System").glyph(Icon::Laptop),
+    )
+    .options([
+        Segment::new(editor_core::ThemePreference::Light, "Light").glyph(Icon::Sun),
+        Segment::new(editor_core::ThemePreference::Dark, "Dark").glyph(Icon::Moon),
+    ])
+    .carved()
+    .on_change(move |value| send(ViewAction::SetTheme(value)))
+    .build();
+    let font_send = Rc::clone(&emit);
+    let font_open = Rc::clone(&emit);
     let fonts = Select::new(
         "settings-font-set",
         *theme,
@@ -1253,111 +1903,88 @@ fn appearance(
         Rc::clone(&controller.font_select),
     )
     .label("Fonts")
-    .on_change(move |font| send(ViewAction::SetFont(font)))
-    .on_open_change(move |open_state| open(ViewAction::FontMenu(open_state)))
+    .on_change(move |font| font_send(ViewAction::SetFont(font)))
+    .on_open_change(move |open| font_open(ViewAction::FontMenu(open)))
     .build();
-    let fonts = ui::fixed(fonts);
-    let show_models = Rc::clone(&emit);
-    let hide_options = Rc::clone(&emit);
-    let [text_size, high_contrast] = access_rows(controller, theme, core, &emit);
-    let hide_bad = Switch::new(
-        "settings-switch-hide-bad-model-options",
+    let contrast_controls = contrast_switch(theme, preferences.high_contrast, &emit);
+    let render_emit = Rc::clone(&emit);
+    let render_menu = Rc::clone(&emit);
+    let render = Select::new(
+        "settings-text-rendering",
         *theme,
-        core.settings().preferences().hide_bad_model_options.on(),
-        "Hide bad model options",
+        Some(Some(preferences.outline_text.on())),
+        render_entries(),
+        Rc::clone(&controller.contrast_select),
     )
-    .on_change(move |enabled| hide_options(ViewAction::SetHideBadModelOptions(enabled)))
+    .label("Text rendering")
+    .on_change(move |choice| render_emit(ViewAction::SetOutlineText(choice == Some(true))))
+    .on_open_change(move |open| render_menu(ViewAction::ContrastMenu(open)))
     .build();
-    let all_models = Switch::new(
-        "settings-switch-show-all-models",
-        *theme,
-        core.settings().preferences().show_all_models.on(),
-        "Show all models",
-    )
-    .on_change(move |enabled| show_models(ViewAction::SetShowAllModels(enabled)))
-    .build();
-    let outline = Switch::new(
-        "settings-switch-outline-text",
-        *theme,
-        core.settings().preferences().outline_text.on(),
-        "Outline text rendering",
-    )
-    .on_change(move |enabled| emit(ViewAction::SetOutlineText(enabled)))
-    .build();
-    let rows = vec![
-        ui::row(
-            theme,
-            "Dark mode",
-            "Whether to draw Artisan Editor in a dark theme.",
-            Some(dark),
-        ),
-        ui::row(
-            theme,
-            "Fonts",
-            "Choose the fonts Artisan Editor uses.",
-            Some(fonts),
-        ),
-        text_size,
-        high_contrast,
-        ui::row(
-            theme,
-            "Outline text rendering",
-            "Unhinted grayscale glyphs with no gamma or contrast correction, so letters keep their designed shapes. Turn off if text looks too soft or thin.",
-            Some(outline),
-        ),
-        ui::row(
-            theme,
-            "Show all models",
-            "List every Claude and Codex model in the model picker, not only the latest of each class.",
-            Some(all_models),
-        ),
-        ui::row(
-            theme,
-            "Hide bad model options",
-            "Hide Max and Ultra for Claude and Codex, plus Light and Extra High for Opus 5.5. Your current selection is kept.",
-            Some(hide_bad),
-        ),
-    ];
-    let page = SettingsPage::Section(SettingsSection::Appearance);
-    section_page(
-        theme,
-        page,
-        ui::section(theme, "Appearance", None, None, ui::card(theme, rows)),
-        include_header,
-    )
-}
-
-fn access_rows(
-    controller: &SettingsController,
-    theme: &ArtisanTheme,
-    core: &Core,
-    emit: &Rc<dyn Fn(ViewAction)>,
-) -> [Element; 2] {
-    let preferences = core.settings().preferences();
     [
-        ui::row(
-            theme,
-            "Text size",
-            "How large the Editor draws its text. Match system follows the system text size.",
-            Some(ui::fixed(text_size(
-                controller,
-                theme,
-                preferences.text_percent,
-                Rc::clone(emit),
-            ))),
+        (
+            "theme dark light color",
+            ui::row(theme, "Theme", "", Some(appearance)),
         ),
-        ui::row(
-            theme,
-            "High contrast",
-            "Draw text, borders and focus rings with stronger contrast. Match system follows the system's contrast setting.",
-            Some(ui::fixed(high_contrast(
-                controller,
+        (
+            "fonts font family spline typography",
+            ui::row(theme, "Fonts", "", Some(ui::fixed(fonts))),
+        ),
+        (
+            "text size font scale zoom bigger accessibility",
+            ui::row(
                 theme,
-                preferences.high_contrast,
-                Rc::clone(emit),
-            ))),
+                "Text size",
+                "",
+                Some(ui::fixed(text_size(
+                    controller,
+                    theme,
+                    preferences.text_percent,
+                    emit,
+                ))),
+            ),
+        ),
+        (
+            "text rendering outline raster vector system",
+            ui::row(theme, "Text rendering", "", Some(ui::fixed(render))),
+        ),
+        (
+            "higher contrast borders accessibility",
+            ui::row(theme, "Higher contrast", "", Some(contrast_controls)),
         ),
     ]
+}
+
+fn contrast_switch(
+    theme: &ArtisanTheme,
+    chosen: Option<bool>,
+    emit: &Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let contrast_emit = Rc::clone(emit);
+    let higher = Switch::new(
+        "settings-higher-contrast",
+        *theme,
+        chosen.unwrap_or(theme.colors.contrast == editor_ui::theme::Contrast::High),
+        "Higher contrast",
+    )
+    .recessed()
+    .on_change(move |enabled| contrast_emit(ViewAction::SetHighContrast(Some(enabled))))
+    .build();
+    if chosen.is_some() {
+        let follow_system = Rc::clone(emit);
+        ui::actions()
+            .child(ui::button(
+                theme,
+                "settings-contrast-follow-system",
+                "Match system",
+                ButtonTone::Quiet,
+                false,
+                move || follow_system(ViewAction::SetHighContrast(None)),
+            ))
+            .child(higher)
+            .build()
+    } else {
+        higher
+    }
 }
 
 fn text_size_entries() -> Vec<SelectEntry<Option<u32>>> {
@@ -1366,6 +1993,11 @@ fn text_size_entries() -> Vec<SelectEntry<Option<u32>>> {
         .iter()
         .map(|size| match size {
             None => SelectEntry::item(None, "Match system"),
+            Some(80) => SelectEntry::item(Some(80), "Smallest"),
+            Some(90) => SelectEntry::item(Some(90), "Small"),
+            Some(100) => SelectEntry::item(Some(100), "Balanced"),
+            Some(125) => SelectEntry::item(Some(125), "Bigger"),
+            Some(150) => SelectEntry::item(Some(150), "Biggest"),
             Some(percent) => SelectEntry::item(Some(*percent), format!("{percent}%")),
         })
         .collect()
@@ -1410,66 +2042,29 @@ fn text_size(
     .build()
 }
 
-fn high_contrast_entries() -> Vec<SelectEntry<Option<bool>>> {
+fn render_entries() -> Vec<SelectEntry<Option<bool>>> {
     vec![
-        SelectEntry::item(None, "Match system"),
-        SelectEntry::item(Some(true), "On"),
-        SelectEntry::item(Some(false), "Off"),
+        SelectEntry::item(Some(false), "System"),
+        SelectEntry::item(Some(true), "Vector"),
     ]
 }
 
-pub fn high_contrast_menu(
+pub fn text_rendering_menu(
     controller: &SettingsController,
     core: &Core,
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> SelectMenu<Option<bool>> {
-    let chosen = core.settings().preferences().high_contrast;
-    let change = Rc::clone(&emit);
+    let send = Rc::clone(&emit);
     SelectMenu::new(
         *theme,
-        Some(chosen),
-        high_contrast_entries(),
+        Some(Some(core.settings().preferences().outline_text.on())),
+        render_entries(),
         Rc::clone(&controller.contrast_select),
         ui::CONTROL_WIDTH,
     )
-    .on_change(move |choice| change(ViewAction::SetHighContrast(choice)))
+    .on_change(move |choice| send(ViewAction::SetOutlineText(choice == Some(true))))
     .on_open_change(move |open| emit(ViewAction::ContrastMenu(open)))
-}
-
-fn high_contrast(
-    controller: &SettingsController,
-    theme: &ArtisanTheme,
-    chosen: Option<bool>,
-    emit: Rc<dyn Fn(ViewAction)>,
-) -> Element {
-    let change = Rc::clone(&emit);
-    Select::new(
-        "settings-high-contrast",
-        *theme,
-        Some(chosen),
-        high_contrast_entries(),
-        Rc::clone(&controller.contrast_select),
-    )
-    .label("High contrast")
-    .on_change(move |choice| change(ViewAction::SetHighContrast(choice)))
-    .on_open_change(move |open| emit(ViewAction::ContrastMenu(open)))
-    .build()
-}
-
-fn section_page(
-    theme: &ArtisanTheme,
-    page: SettingsPage,
-    section: Element,
-    include_header: bool,
-) -> Element {
-    if !include_header {
-        return section;
-    }
-    ui::column()
-        .child(ui::header(theme, page.label(), page::description(page)))
-        .child(section)
-        .build()
 }
 
 #[derive(PartialEq)]
@@ -1478,6 +2073,7 @@ struct ViewSnapshot {
     account: editor_core::AccountPhase,
     account_error: Option<Problem>,
     local_forge: editor_core::LocalForge,
+    machine_connections: Vec<(String, bool, bool)>,
     device_settings: ShownPreferences,
     device_settings_error: (bool, Option<Problem>),
     host_settings: Vec<Option<serde_json::Value>>,
@@ -1490,6 +2086,9 @@ struct ViewSnapshot {
     engine_cancelling: std::collections::BTreeSet<artisan_api::EngineId>,
     engine_errors: std::collections::HashMap<artisan_api::EngineId, Problem>,
     engine_versions: std::collections::HashSet<artisan_api::EngineId>,
+    api_key_open: bool,
+    skill_pending: std::collections::HashSet<String>,
+    skill_error: Option<Problem>,
     engine_codes: std::collections::HashMap<artisan_api::EngineId, String>,
     mcp_editing: Option<super::extensions::McpEditing>,
     mcp_saving: bool,
@@ -1500,11 +2099,13 @@ struct ViewSnapshot {
     forge_code: String,
     second_factor: String,
     menus: OpenMenus,
+    gear: Option<Gear>,
 }
 
 type ShownPreferences = (
-    [bool; 7],
+    [bool; 6],
     [Option<bool>; 2],
+    editor_core::ThemePreference,
     Option<u32>,
     editor_core::Fonts,
     editor_core::Streaming,
@@ -1514,7 +2115,6 @@ type ShownPreferences = (
 fn shown(preferences: &editor_core::EditorPreferences) -> ShownPreferences {
     (
         [
-            preferences.dark_mode.on(),
             preferences.outline_text.on(),
             preferences.notifications.on(),
             preferences.lower_refresh_rate.on(),
@@ -1523,6 +2123,7 @@ fn shown(preferences: &editor_core::EditorPreferences) -> ShownPreferences {
             preferences.show_all_models.on(),
         ],
         [preferences.reduced_motion, preferences.high_contrast],
+        preferences.theme,
         preferences.text_percent,
         preferences.fonts,
         preferences.streaming,
@@ -1531,6 +2132,10 @@ fn shown(preferences: &editor_core::EditorPreferences) -> ShownPreferences {
 }
 
 impl ViewSnapshot {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the snapshot compares all settings dispatch effects in one state"
+    )]
     fn capture(controller: &SettingsController, core: &Core) -> Self {
         let host = core.active_host();
         let host_keys = [
@@ -1540,24 +2145,40 @@ impl ViewSnapshot {
             "suggestions",
             "you_should_know",
             "summary_titles",
+            "artisan_system_prompt",
             artisan_api::THREAD_RETENTION_DAYS_KEY,
             artisan_api::TRANSPORT_KEY,
         ];
+        let host_keys = host_keys
+            .into_iter()
+            .chain(artisan_api::EngineId::ALL.map(artisan_api::EngineId::enabled_setting));
         Self {
             screen: core.screen().clone(),
             account: core.account().phase().clone(),
             account_error: core.account().last_error().cloned(),
             local_forge: core.account().local_forge(),
+            machine_connections: if matches!(core.screen(), Screen::Settings(SettingsPage::Hosts)) {
+                core.account()
+                    .machines()
+                    .into_iter()
+                    .map(|machine| {
+                        let live = core.machine_live(&machine.id);
+                        let connecting = core.machine_connecting(&machine.id);
+                        (machine.id, live, connecting)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             device_settings: shown(core.settings().preferences()),
             device_settings_error: (
                 core.settings().unreadable().is_some(),
                 controller.editor_setting_error.clone(),
             ),
             host_settings: host_keys
-                .iter()
                 .map(|key| {
                     host.and_then(|host| {
-                        if *key == artisan_api::TRANSPORT_KEY {
+                        if key == artisan_api::TRANSPORT_KEY {
                             Some(serde_json::json!(artisan_api::transport_of(
                                 host.setting(key)
                             )))
@@ -1587,6 +2208,9 @@ impl ViewSnapshot {
             engine_cancelling: controller.engines.cancelling.clone(),
             engine_errors: controller.engines.errors.clone(),
             engine_versions: controller.engines.choosing_version.clone(),
+            api_key_open: controller.engines.api_key.is_some(),
+            skill_pending: controller.skill_pending.clone(),
+            skill_error: controller.skill_error.clone(),
             engine_codes: controller
                 .engines
                 .login_codes
@@ -1630,6 +2254,102 @@ impl ViewSnapshot {
             forge_code: controller.forge_code.borrow().text().to_owned(),
             second_factor: controller.sign_in.second_factor.borrow().text().to_owned(),
             menus: controller.reported_menus.clone(),
+            gear: controller.gear.clone(),
         }
     }
+}
+
+pub fn gear_menu(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Option<(String, ActionMenu<ViewAction>)> {
+    let gear = controller.gear.clone()?;
+    let entries = match &gear {
+        Gear::Computer(id) => {
+            let open = core.machine_live(id).then(|| {
+                [
+                    Entry::Item(MenuItem::new(
+                        ViewAction::ForgeOpen(id.clone()),
+                        "Open computer",
+                        Icon::Laptop,
+                    )),
+                    Entry::Separator,
+                ]
+            });
+            open.into_iter()
+                .flatten()
+                .chain([Entry::Item(
+                    MenuItem::new(
+                        ViewAction::ForgeRemove(id.clone()),
+                        "Delete computer",
+                        Icon::Trash,
+                    )
+                    .danger(),
+                )])
+                .collect()
+        }
+        Gear::Mcp(server) => {
+            let signed_in = core.active_host().is_some_and(|host| {
+                host.settings.mcp_auth().is_ok_and(|auth| {
+                    auth.get(&server.name) == Some(&artisan_api::McpAuthStatus::SignedIn)
+                })
+            });
+            let mut entries = Vec::new();
+            if signed_in {
+                entries.push(Entry::Item(MenuItem::new(
+                    ViewAction::McpSignOut(server.name.clone()),
+                    "Sign out",
+                    Icon::Logout,
+                )));
+            }
+            entries.push(Entry::Item(MenuItem::new(
+                ViewAction::McpOpen(Some(server.clone())),
+                "Edit server",
+                Icon::Pencil,
+            )));
+            entries.push(Entry::Separator);
+            entries.push(Entry::Item(
+                MenuItem::new(
+                    ViewAction::McpRemove(server.clone()),
+                    "Delete server",
+                    Icon::Trash,
+                )
+                .danger(),
+            ));
+            entries
+        }
+        Gear::Skill(_) => vec![Entry::Item(MenuItem::new(
+            ViewAction::Navigate(Screen::Marketplace),
+            "Open Marketplace",
+            Icon::FileText,
+        ))],
+        Gear::Account(_) | Gear::AddAccount(_) => super::engine_view::gear_entries(&gear),
+    };
+    let pick = Rc::clone(&emit);
+    Some((
+        gear.key(),
+        ActionMenu::new(
+            *theme,
+            entries,
+            move |action| pick(action),
+            move || emit(ViewAction::Gear(None)),
+        ),
+    ))
+}
+
+pub fn engine_version_menu(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Option<SelectMenu<String>> {
+    let Screen::Settings(SettingsPage::Engine(engine)) = core.screen() else {
+        return None;
+    };
+    let status = core.active_host()?.engines.get(engine)?;
+    Some(super::engine_view::version_menu(
+        controller, status, theme, emit,
+    ))
 }

@@ -801,6 +801,7 @@ pub(crate) async fn sign_in(binary: &Path, home: &Path) -> SignInState {
     match probe(command, home).await {
         Ok(Probed::SignedIn(_)) => SignInState::SignedIn {
             account: account(home),
+            plan: None,
         },
         Ok(Probed::SignedOut) => SignInState::SignedOut,
         Err(failure) => {

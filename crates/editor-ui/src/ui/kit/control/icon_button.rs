@@ -168,7 +168,9 @@ impl IconButton {
     pub fn build(self) -> Element {
         let theme = self.theme;
         let edge = self.size.edge();
-        let rest = if self.muted {
+        let rest = if self.hover == Hover::Destructive {
+            theme.colors.destructive_text
+        } else if self.muted {
             theme.colors.text_muted
         } else {
             theme.colors.text

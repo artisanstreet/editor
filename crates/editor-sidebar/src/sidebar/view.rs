@@ -152,7 +152,7 @@ pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + 
         (
             core.screen().clone(),
             core.workspace_screen().clone(),
-            core.settings().preferences().dark_mode.on(),
+            core.settings().preferences().theme,
         ),
         (
             sidebar.menu.clone(),

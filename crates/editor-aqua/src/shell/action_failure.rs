@@ -52,9 +52,6 @@ pub enum ActionFailure {
     Search {
         problem: Problem,
     },
-    Notices {
-        problem: Problem,
-    },
     Drafts {
         problem: Problem,
     },
@@ -66,7 +63,6 @@ impl ActionFailure {
             Self::Link { .. } => "Couldn't open the link",
             Self::Copy { .. } => "Couldn't copy to the clipboard",
             Self::Search { .. } => "Couldn't search in the browser",
-            Self::Notices { .. } => "Couldn't open the third-party notices",
             Self::Drafts { .. } => "Couldn't keep unsaved drafts",
         }
     }
@@ -77,7 +73,6 @@ impl ActionFailure {
             Self::Link { problem, .. }
             | Self::Copy { problem, .. }
             | Self::Search { problem }
-            | Self::Notices { problem }
             | Self::Drafts { problem } => problem,
         }
     }
@@ -140,15 +135,6 @@ impl ActionFailureDialog {
         self.failure = Some(ActionFailure::Search { problem });
     }
 
-    pub(crate) fn notices(&mut self, error: &dyn std::error::Error) {
-        let problem = Problem::caused_by("The notices file didn't open.", error);
-        tracing::warn!(
-            error = problem.detail(),
-            "could not open the third-party notices"
-        );
-        self.failure = Some(ActionFailure::Notices { problem });
-    }
-
     pub fn offer_drafts(&mut self, held: Option<crate::composer::persistence::UnkeptDrafts>) {
         match (held, &mut self.failure) {
             (None, Some(ActionFailure::Drafts { .. })) => self.failure = None,
@@ -162,8 +148,7 @@ impl ActionFailureDialog {
                 | Some(
                     ActionFailure::Link { .. }
                     | ActionFailure::Copy { .. }
-                    | ActionFailure::Search { .. }
-                    | ActionFailure::Notices { .. },
+                    | ActionFailure::Search { .. },
                 ),
             ) => {}
         }
@@ -203,7 +188,6 @@ impl ActionFailureDialog {
                     Some(
                         ActionFailure::Copy { .. }
                         | ActionFailure::Search { .. }
-                        | ActionFailure::Notices { .. }
                         | ActionFailure::Drafts { .. },
                     ),
                 )
@@ -212,8 +196,7 @@ impl ActionFailureDialog {
                     Some(
                         ActionFailure::Link { .. }
                         | ActionFailure::Copy { .. }
-                        | ActionFailure::Search { .. }
-                        | ActionFailure::Notices { .. },
+                        | ActionFailure::Search { .. },
                     ),
                 )
                 | (Event::Dismiss, Some(_))
@@ -304,8 +287,6 @@ fn content(
                     .build(),
             )
             .build(),
-        ActionFailure::Copy { .. }
-        | ActionFailure::Search { .. }
-        | ActionFailure::Notices { .. } => column.build(),
+        ActionFailure::Copy { .. } | ActionFailure::Search { .. } => column.build(),
     }
 }

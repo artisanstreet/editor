@@ -18,7 +18,6 @@ pub use control::tab_list::{Orientation, TabList};
 pub use control::trigger::{Lead, Trigger, TriggerSize};
 pub use divider::Divider;
 pub use hover::{Highlight, Hover, live};
-pub use pane::Seam;
 pub use problem::ProblemNotice;
 pub use row::{Density, Pad, Row, RowItem, RowKind};
 pub use surface::{Media, Picker, Surface, Tone, Tooltip};

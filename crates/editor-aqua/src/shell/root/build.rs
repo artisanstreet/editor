@@ -1,6 +1,8 @@
 use super::{ResizeKey, RootViews, overview_shown};
 use crate::core::Screen;
-use crate::shell::{application::BuildError, composer_glide::Route, host::Shell, layout, view};
+use crate::shell::{
+    application::BuildError, composer_glide::Route, host::Shell, layout, settings_frame, view,
+};
 use aqua::prelude::{AquaWindowId, ObservedWindowState};
 use aqua::{AppCtx, UiApp};
 use aqua_ui::element::Element;
@@ -62,7 +64,6 @@ impl RootViews {
             | Screen::Usage) => screen.clone(),
         };
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let size = aqua_core::Size::new(viewport.width, viewport.height);
         let now = shell.core.clock().now();
         self.sidebar_views.sidebar.fit(viewport.width, now, reduced);
         aqua_core::checkpoint::reach();
@@ -278,10 +279,25 @@ impl RootViews {
                 reduced,
                 now,
             );
-            let page = workspace.settings_view(&shell.core, &theme, &shell.build, size, true);
+            let Screen::Settings(current) = shell.core.screen() else {
+                unreachable!("invariant: settings panel requires a Settings screen");
+            };
+            let account_name = shell.core.account().profile().and_then(|profile| {
+                let name = profile.display_name.trim();
+                (!name.is_empty()).then(|| name.to_owned())
+            });
+            let title = settings_frame::settings_title(
+                &theme,
+                current.label(),
+                account_name.as_deref(),
+                account.as_ref(),
+            );
+            let page = workspace.settings_view(&shell.core, &theme, &shell.build, account.as_ref());
             let dismissed = Rc::clone(&self.dialogs.settings_dismissed);
             let dismiss: Rc<dyn Fn()> = Rc::new(move || dismissed.set(true));
-            let panel = view::settings_panel(&theme, viewport, nav, page, &dismiss);
+            let panel = settings_frame::settings_panel_with_title(
+                &theme, viewport, nav, page, title, &dismiss,
+            );
             (panel, settings_layout.size.width)
         });
         aqua_core::checkpoint::reach();
@@ -499,10 +515,17 @@ impl RootViews {
             .retain(|export| Self::source_export_is_current(shell, export));
         self.bind_row_sources(ui, ctx, window);
         (|| {
-            let Some((panel, width)) = self.dialogs.settings_panel.take() else {
+            if !matches!(shell.core.screen(), Screen::Settings(_))
+                || shell.entry.workspace().is_none()
+            {
+                self.dialogs.settings_panel = None;
+                self.dialogs.settings_dismissed.set(false);
                 if let Some(dialog) = self.dialogs.settings.take() {
                     dialog.dispose(ui);
                 }
+                return;
+            }
+            let Some((panel, width)) = self.dialogs.settings_panel.take() else {
                 return;
             };
             if let Some(dialog) = &self.dialogs.settings {
@@ -516,6 +539,7 @@ impl RootViews {
                 self.dialogs.settings = None;
             }
             let Some(owner) = ui.find_debug_selector("workspace-root") else {
+                self.dialogs.settings_panel = Some((panel, width));
                 return;
             };
             let dismissed = Rc::clone(&self.dialogs.settings_dismissed);

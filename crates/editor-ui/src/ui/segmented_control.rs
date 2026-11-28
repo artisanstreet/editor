@@ -15,29 +15,46 @@ use super::theme::{ArtisanTheme, Opacity};
 const SEGMENT: Row = Row::ListItem(Density::Dense);
 const SEGMENT_TEXT: TextRole = TextRole::Caption;
 
-pub(crate) struct Segment<T> {
+#[derive(Debug)]
+pub struct Segment<T> {
     value: T,
     label: String,
+    glyph: Option<super::carved::glyph::Icon>,
 }
 impl<T> Segment<T> {
-    pub(crate) fn new(value: T, label: impl Into<String>) -> Self {
+    pub fn new(value: T, label: impl Into<String>) -> Self {
         Self {
             value,
             label: label.into(),
+            glyph: None,
         }
+    }
+    #[must_use]
+    pub const fn glyph(mut self, glyph: super::carved::glyph::Icon) -> Self {
+        self.glyph = Some(glyph);
+        self
     }
 }
 
 type Change<T> = Rc<dyn Fn(T)>;
 
-pub(crate) struct SegmentedControl<T: Clone + Eq + 'static> {
+pub struct SegmentedControl<T: Clone + Eq + 'static> {
     id: Key,
     theme: ArtisanTheme,
     label: String,
     selected: T,
     options: Vec<Segment<T>>,
     disabled: bool,
+    carved: bool,
     change: Option<Change<T>>,
+}
+
+impl<T: Clone + Eq + 'static> std::fmt::Debug for SegmentedControl<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentedControl")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T: Clone + Eq + 'static> SegmentedControl<T> {
@@ -45,7 +62,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         clippy::large_types_passed_by_value,
         reason = "the segmented control stores this theme copy and paints from it when built"
     )]
-    pub(crate) fn new(
+    pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
         label: impl Into<String>,
@@ -59,10 +76,12 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             selected,
             options: vec![first],
             disabled: false,
+            carved: false,
             change: None,
         }
     }
-    pub(crate) fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
+    #[must_use]
+    pub fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
         for option in options {
             if !self
                 .options
@@ -74,7 +93,13 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         }
         self
     }
-    pub(crate) fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
+    #[must_use]
+    pub const fn carved(mut self) -> Self {
+        self.carved = true;
+        self
+    }
+    #[must_use]
+    pub fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
         self.change = Some(Rc::new(handler));
         self
     }
@@ -83,7 +108,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         clippy::too_many_lines,
         reason = "one segmented control build with its segments and keyboard semantics"
     )]
-    pub(crate) fn build(self) -> Element {
+    pub fn build(self) -> Element {
         let theme = self.theme;
         let segment_height = SEGMENT
             .pad()
@@ -102,11 +127,34 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .map(|option| option.value.clone())
                 .collect::<Vec<_>>(),
         );
+        let carve = super::carved::Carve::of(&theme);
         let mut root = UiBox::new()
             .spaced(Space::S2)
             .style(Style::new().align(aqua_ui::AlignItems::CENTER));
+        if self.carved {
+            root = root.style(super::carved::tabs::well(&carve));
+        }
         for (index, option) in self.options.into_iter().enumerate() {
             let chosen = index == selected;
+            if self.carved {
+                let change = (!self.disabled).then(|| self.change.clone()).flatten();
+                let value = option.value.clone();
+                let item = super::carved::tabs::tab(
+                    &theme,
+                    &carve,
+                    super::carved::tabs::Tab {
+                        index,
+                        label: option.label,
+                        glyph: option.glyph,
+                        chosen,
+                        disabled: self.disabled,
+                    },
+                    change
+                        .map(|change| -> Box<dyn Fn()> { Box::new(move || change(value.clone())) }),
+                );
+                root = root.child(item);
+                continue;
+            }
             let foreground = if chosen {
                 theme.colors.text
             } else {

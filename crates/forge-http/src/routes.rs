@@ -270,6 +270,10 @@ pub(crate) enum Rejected {
     ConfigWithoutModel { engine: EngineId },
     #[error("only Claude signs in to claude.ai, not {engine}")]
     ClaudeAiEngine { engine: EngineId },
+    #[error("{engine} does not support API key sign-in")]
+    ApiKeyUnsupported { engine: EngineId },
+    #[error("invalid API key input for {engine}")]
+    ApiKeyInvalid { engine: EngineId },
     #[error("host home directory unavailable; provide a path")]
     NoHome,
 }
@@ -326,6 +330,12 @@ impl Rejected {
             }
             Self::ClaudeAiEngine { engine } => {
                 Failure::Engine(EngineFailure::ClaudeAiEngine { engine: *engine })
+            }
+            Self::ApiKeyUnsupported { engine } => {
+                Failure::Engine(EngineFailure::ApiKeyUnsupported { engine: *engine })
+            }
+            Self::ApiKeyInvalid { engine } => {
+                Failure::Engine(EngineFailure::ApiKeyInvalid { engine: *engine })
             }
             Self::NoHome => Failure::Resource(ResourceFailure::NoHome),
         }
@@ -1362,6 +1372,7 @@ async fn engine_action(
                         Command::Rollback {} => engines.rollback(engine).await.map(drop),
                         Command::Use { version } => engines.use_version(engine, &version).await,
                         Command::Login { .. }
+                        | Command::LoginApiKey { .. }
                         | Command::LoginCode { .. }
                         | Command::CancelLogin { .. }
                         | Command::Logout { .. }
@@ -1390,6 +1401,19 @@ async fn engine_action(
             });
         }
         Command::Login {} => engines.login(engine)?,
+        Command::LoginApiKey { key } => {
+            if engine != EngineId::Codex {
+                return Err(Rejected::ApiKeyUnsupported { engine }.into());
+            }
+            let value = key.expose();
+            if value.is_empty()
+                || value.len() > 4096
+                || !value.bytes().all(|byte| byte.is_ascii_graphic())
+            {
+                return Err(Rejected::ApiKeyInvalid { engine }.into());
+            }
+            engines.login_codex_api_key(key)?;
+        }
         Command::LoginCode { code } => engines.submit_login_code(engine, &code).await?,
         Command::CancelLogin {} => engines.cancel_login(engine),
         Command::Logout {} => engines.logout(engine)?,

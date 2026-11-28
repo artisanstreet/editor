@@ -15,6 +15,7 @@ pub struct EnginesForm {
     pub cancelling: BTreeSet<EngineId>,
     pub errors: HashMap<EngineId, Problem>,
     pub(crate) choosing_version: HashSet<EngineId>,
+    pub(crate) api_key: Option<Rc<RefCell<Editor>>>,
     generation: u64,
 }
 
@@ -44,6 +45,7 @@ impl EnginesForm {
         self.cancelling.clear();
         self.errors.clear();
         self.choosing_version.clear();
+        self.api_key = None;
     }
 
     pub(crate) fn begin(&mut self, engine: EngineId) -> Option<EngineRequest> {
@@ -92,6 +94,25 @@ impl EnginesForm {
         self.login_codes
             .entry(engine)
             .or_insert_with(|| Rc::new(RefCell::new(Editor::new("", Mode::SingleLine))));
+    }
+
+    pub(crate) fn open_api_key(&mut self) {
+        self.api_key = Some(Rc::new(RefCell::new(Editor::new("", Mode::SingleLine))));
+    }
+
+    pub(crate) fn take_api_key(&mut self) -> Option<artisan_api::Secret> {
+        if self.busy.contains(&EngineId::Codex) {
+            return None;
+        }
+        let field = self.api_key.as_ref()?;
+        let key = field.borrow().text().trim().to_owned();
+        if key.is_empty() {
+            self.errors
+                .insert(EngineId::Codex, Problem::new("Enter a Codex API key."));
+            return None;
+        }
+        self.api_key = None;
+        Some(artisan_api::Secret::new(key))
     }
 
     pub fn login_code(&mut self, engine: EngineId) -> Option<String> {

@@ -18,6 +18,9 @@ pub(crate) type Endpoint = (String, u16);
 type Published = watch::Receiver<Option<Instant>>;
 
 fn endpoint(server: &McpServer) -> Option<Endpoint> {
+    if server.disabled {
+        return None;
+    }
     let url = url::Url::parse(server.url.as_deref()?).ok()?;
     Some((url.host_str()?.to_owned(), url.port_or_known_default()?))
 }

@@ -1,10 +1,6 @@
 use crate::shell::application::BuildError;
-use crate::shell::layout::{self, Size};
-use crate::ui::kit::pane::sheet;
 use crate::ui::kit::surface::frame;
-use crate::ui::kit::{
-    Corners, Finish, IconButton, IconButtonSize, Radius, Seam, Space, Spaced, TextRole, concentric,
-};
+use crate::ui::kit::{Corners, Radius, Space, Spaced, TextRole, concentric};
 use crate::ui::theme::ArtisanTheme;
 use aqua_ui::{
     AlignItems, JustifyContent,
@@ -13,7 +9,6 @@ use aqua_ui::{
 };
 
 const EDGE_INSET: f32 = 2.0;
-const STRIP_PAD: Space = Space::S8;
 const CONVERSATION_WIDTH: f32 = 768.0;
 const FORGES_WIDTH: f32 = 560.0;
 
@@ -24,100 +19,6 @@ pub(crate) struct WorkspaceElements {
     pub resource_preview: Option<Element>,
     pub copy_menu: Option<Element>,
     pub image_preview: Option<Element>,
-}
-
-pub fn settings_dialog(
-    theme: &ArtisanTheme,
-    viewport: Size,
-    sidebar: Element,
-    page: Element,
-    dismiss: std::rc::Rc<dyn Fn()>,
-) -> crate::ui::dialog::Dialog {
-    let dimensions = layout::settings_layout(viewport);
-    let panel = settings_panel(theme, viewport, sidebar, page, &dismiss);
-    crate::ui::dialog::Dialog::new("settings-dialog", *theme, "Settings", panel)
-        .bare()
-        .soft_backdrop()
-        .max_width(dimensions.size.width)
-        .on_dismiss(move |_| dismiss())
-}
-
-pub fn settings_panel(
-    theme: &ArtisanTheme,
-    viewport: Size,
-    sidebar: Element,
-    page: Element,
-    dismiss: &std::rc::Rc<dyn Fn()>,
-) -> Element {
-    let dimensions = layout::settings_layout(viewport);
-    let close = std::rc::Rc::clone(dismiss);
-    let close = IconButton::new(
-        "settings-close",
-        *theme,
-        editor_assets::AssetId::TABLER_X,
-        "Close settings",
-        IconButtonSize::Md,
-        Finish::Plain,
-    )
-    .muted()
-    .on_activate(move |_| close())
-    .build()
-    .debug_selector("settings-close");
-    let page = UiBox::new()
-        .style(
-            Style::new()
-                .flex_grow(1.0)
-                .min_width(Length::Pct(0.0))
-                .min_height(Length::Pct(0.0)),
-        )
-        .style(Corners::TopLeft.style(Radius::Panel.px()))
-        .style(Seam::TopLeft.style(theme))
-        .style(sheet(theme))
-        .clip(true)
-        .child(page)
-        .build();
-    let strip = UiBox::new()
-        .height(layout::TITLEBAR_HEIGHT)
-        .padded(STRIP_PAD)
-        .style(
-            Style::new()
-                .flex_shrink(0.0)
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::END),
-        )
-        .child(close)
-        .build();
-    UiBox::new()
-        .layout("row")
-        .width(Length::Pct(100.0))
-        .height(dimensions.size.height)
-        .clip(true)
-        .style(Radius::Shell.style())
-        .style(frame(theme))
-        .style(Seam::Around.style(theme))
-        .child(
-            UiBox::new()
-                .width(dimensions.navigation_width)
-                .height(Length::Pct(100.0))
-                .style(Style::new().flex_shrink(0.0))
-                .child(sidebar)
-                .build(),
-        )
-        .child(
-            UiBox::new()
-                .layout("column")
-                .height(Length::Pct(100.0))
-                .style(
-                    Style::new()
-                        .flex_grow(1.0)
-                        .min_width(Length::Pct(0.0))
-                        .min_height(Length::Pct(0.0)),
-                )
-                .child(strip)
-                .child(page)
-                .build(),
-        )
-        .build()
 }
 
 pub(crate) fn workspace(

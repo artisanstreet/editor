@@ -63,15 +63,15 @@ fn a_screen_reader_opens_settings_from_the_account_menu_and_flips_a_switch() {
     });
     editor.uia_invoke(&uia, "Settings");
     let before = editor.uia_settle(&uia, "the settings dialog", |tree| {
-        switch(tree, "Show all models").is_some()
+        switch(tree, "Curated models").is_some()
     });
     assert!(
-        toggle(&before, "Show all models").contains("unchecked"),
-        "Show all models starts off:\n{before}"
+        toggle(&before, "Curated models").contains("[checked"),
+        "Curated models starts on:\n{before}"
     );
-    editor.uia_toggle(&uia, "Show all models");
-    editor.uia_settle(&uia, "the switch to turn on", |tree| {
-        switch(tree, "Show all models").is_some_and(|line| line.contains("[checked"))
+    editor.uia_toggle(&uia, "Curated models");
+    editor.uia_settle(&uia, "the switch to turn off", |tree| {
+        switch(tree, "Curated models").is_some_and(|line| line.contains("[unchecked"))
     });
 }
 

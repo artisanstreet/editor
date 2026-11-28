@@ -33,7 +33,13 @@ fn status_probes_classify_recorded_output() {
         .map(|(engine, success, stdout, stderr)| {
             (
                 engine.as_str(),
-                parse_status(*engine, *success, stdout, stderr),
+                parse_status(
+                    *engine,
+                    *success,
+                    stdout,
+                    stderr,
+                    Some("default_claude_max_20x"),
+                ),
             )
         })
         .collect();
@@ -124,7 +130,8 @@ esac
     assert_eq!(
         sign_in.state(),
         SignInState::SignedIn {
-            account: Some("OpenCode Console".to_owned())
+            account: Some("OpenCode Console".to_owned()),
+            plan: None,
         }
     );
     let mut states = sign_in.subscribe();
@@ -224,6 +231,7 @@ fn login_walks_from_signed_out_to_signed_in() {
         Event::LoginEnded { error: None },
         Event::Checked(SignInState::SignedIn {
             account: Some("user@example.com".into()),
+            plan: None,
         }),
         Event::Logout,
         Event::Checked(SignInState::SignedOut),
@@ -239,4 +247,43 @@ fn login_walks_from_signed_out_to_signed_in() {
         ));
     }
     insta::assert_debug_snapshot!(seen);
+}
+
+#[test]
+fn codex_sign_in_names_the_chatgpt_account_and_plan_from_its_identity_token() {
+    use base64::Engine as _;
+    let claims = serde_json::json!({
+        "email": "sander@example.com",
+        "https://api.openai.com/auth": { "chatgpt_plan_type": "prolite" },
+    });
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let token = format!(
+        "{}.{}.{}",
+        encode(br#"{"alg":"RS256"}"#),
+        encode(claims.to_string().as_bytes()),
+        encode(b"signature"),
+    );
+    let home = tempfile::tempdir().expect("a temporary Codex home");
+    std::fs::create_dir_all(home.path().join(".codex")).expect("the Codex folder is created");
+    std::fs::write(
+        home.path().join(".codex/auth.json"),
+        serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "id_token": token, "access_token": "a", "refresh_token": "r" },
+        })
+        .to_string(),
+    )
+    .expect("auth.json is written");
+    let identity = read_codex_identity(home.path()).expect("the account identity is read");
+    assert_eq!(identity.email, "sander@example.com");
+    assert_eq!(identity.plan.as_deref(), Some("ChatGPT Pro 100"));
+    std::fs::write(
+        home.path().join(".codex/auth.json"),
+        serde_json::json!({ "auth_mode": "apikey", "OPENAI_API_KEY": "sk" }).to_string(),
+    )
+    .expect("auth.json is rewritten");
+    assert!(matches!(
+        read_codex_identity(home.path()),
+        Err(CodexAccountError::NoIdentity { .. })
+    ));
 }

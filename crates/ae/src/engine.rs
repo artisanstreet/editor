@@ -452,8 +452,9 @@ fn sign_in_line(sign_in: &SignInState) -> String {
         SignInState::LoggingIn { .. } => "signing in".to_owned(),
         SignInState::SignedIn {
             account: Some(account),
+            ..
         } => format!("signed in as {account}"),
-        SignInState::SignedIn { account: None } => "signed in".to_owned(),
+        SignInState::SignedIn { account: None, .. } => "signed in".to_owned(),
         SignInState::Failed { message } => format!("check failed: {message}"),
     }
 }
@@ -547,7 +548,7 @@ async fn login(engines: &Engines, engine: EngineId) -> Result<(), LoginError> {
                             shown_code = code;
                         }
                     }
-                    SignInState::SignedIn { account } => {
+                    SignInState::SignedIn { account, .. } => {
                         ui::outro(format!("Signed in{}", account.map(|account| format!(" as {account}")).unwrap_or_default()));
                         return Ok(());
                     }

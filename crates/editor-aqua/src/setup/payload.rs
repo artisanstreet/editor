@@ -24,14 +24,6 @@ pub enum WriteNoticesError {
     Write(#[source] WritePayloadError),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum OpenNoticesError {
-    #[error("write the notices to a temporary file")]
-    Write(#[source] WritePayloadError),
-    #[error("open the notices")]
-    Open(#[source] crate::shell::OpenPathError),
-}
-
 pub(super) struct Staged {
     _folder: tempfile::TempDir,
     pub(crate) ae: PathBuf,
@@ -74,11 +66,8 @@ pub(super) fn write_notices() -> Result<(), WriteNoticesError> {
         .map_err(WriteNoticesError::Write)
 }
 
-pub(crate) fn open_notices() -> Result<(), OpenNoticesError> {
-    let path = std::env::temp_dir().join("Artisan Editor NOTICES.txt");
-    NOTICES.write(&path).map_err(OpenNoticesError::Write)?;
-    crate::shell::open_path(&path).map_err(OpenNoticesError::Open)
-}
+pub(crate) static LICENCES: &[artisan_payload::licences::Licence] =
+    artisan_payload::licences!("licences.rs");
 
 #[cfg(test)]
 #[path = "../../tests/setup/payload.rs"]

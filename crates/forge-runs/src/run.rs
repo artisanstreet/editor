@@ -19,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 pub enum PrepareError {
     #[error("{} is not installed", engine.display_name())]
     NotInstalled { engine: EngineId },
+    #[error("{engine} is turned off. Turn it on in Settings to use it.")]
+    EngineDisabled { engine: EngineId },
     #[error(transparent)]
     Gateway(Box<crate::gateway::GatewayError>),
     #[error("prepare the folder of thread {thread}")]
@@ -638,6 +640,11 @@ async fn execute(
     items: &mut Work,
 ) -> Result<Ending, ExecuteError> {
     let engine = run.engine;
+    let key = engine.enabled_setting();
+    let enabled = hub.store().setting(key).await.map_err(PrepareError::from)?;
+    if !artisan_api::switch_decl(key).switch(enabled.as_ref()).on() {
+        return Err(PrepareError::EngineDisabled { engine }.into());
+    }
     let handoff = if launch.resume().is_none() {
         let pending_ids = pending.iter().map(|item| item.id.clone()).collect();
         let switch = previous

@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 pub(crate) const DISABLED_SKILLS_KEY: &str = "disabled_skills";
 const GLOBAL_PROMPT_KEY: &str = "global_prompt";
+const ARTISAN_SYSTEM_PROMPT_KEY: &str = "artisan_system_prompt";
+const ARTISAN_SYSTEM_PROMPT: &str = "";
 pub(crate) const PROMPT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -409,6 +411,8 @@ pub enum MarketplaceInstallError {
 pub enum GlobalPromptError {
     #[error("read Forge's {GLOBAL_PROMPT_KEY} setting")]
     Read(#[source] ReadSettingError),
+    #[error("read Forge's {ARTISAN_SYSTEM_PROMPT_KEY} setting")]
+    ArtisanSystemPrompt(#[source] ReadSettingError),
     #[error("read the engines' global prompt files")]
     Candidates(#[source] HomesError),
     #[error("take over the engines' global prompt")]
@@ -424,9 +428,11 @@ impl GlobalPromptError {
     pub fn class(&self) -> ErrorClass {
         match self {
             Self::TakeOver(source) => error::setting(&source.cause),
-            Self::Read(_) | Self::Candidates(_) | Self::Version(_) | Self::Engines(_) => {
-                ErrorClass::Internal
-            }
+            Self::Read(_)
+            | Self::ArtisanSystemPrompt(_)
+            | Self::Candidates(_)
+            | Self::Version(_)
+            | Self::Engines(_) => ErrorClass::Internal,
         }
     }
 }
@@ -519,9 +525,10 @@ impl Hub {
             .launch_prompt()
             .await
             .map_err(CustomisationError::Prompt)?;
-        let servers = crate::mcp_auth::read_mcp_servers(self.store())
+        let mut servers = crate::mcp_auth::read_mcp_servers(self.store())
             .await
             .map_err(CustomisationError::McpServers)?;
+        servers.retain(|server| !server.disabled);
         Ok(Customisation {
             prompt,
             mcp_servers: self.mcp().with_tokens(servers).await,
@@ -909,11 +916,30 @@ impl Extensions {
     }
 
     async fn launch_prompt(&self) -> Result<Option<String>, GlobalPromptError> {
-        if let Some(text) = self.stored_prompt().await? {
-            return Ok(Some(text));
+        let prompt = if let Some(text) = self.stored_prompt().await? {
+            Some(text)
+        } else {
+            let prompt = self.reconcile_global_prompt().await?;
+            prompt.candidates.is_empty().then_some(prompt.text)
+        };
+        if ARTISAN_SYSTEM_PROMPT.is_empty() {
+            return Ok(prompt);
         }
-        let prompt = self.reconcile_global_prompt().await?;
-        Ok(prompt.candidates.is_empty().then_some(prompt.text))
+        let setting = self
+            .store()
+            .setting(ARTISAN_SYSTEM_PROMPT_KEY)
+            .await
+            .map_err(GlobalPromptError::ArtisanSystemPrompt)?;
+        let enabled = artisan_api::switch_decl(ARTISAN_SYSTEM_PROMPT_KEY)
+            .switch(setting.as_ref())
+            .on();
+        if !enabled {
+            return Ok(prompt);
+        }
+        Ok(Some(match prompt {
+            Some(text) if !text.is_empty() => format!("{ARTISAN_SYSTEM_PROMPT}\n\n{text}"),
+            Some(_) | None => ARTISAN_SYSTEM_PROMPT.to_owned(),
+        }))
     }
 
     async fn stored_prompt(&self) -> Result<Option<String>, GlobalPromptError> {

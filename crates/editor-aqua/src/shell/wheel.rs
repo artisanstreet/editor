@@ -7,6 +7,11 @@ use aqua_core::{InputEvent, NodeId, Point};
 pub(crate) const THREADS: &str = "sidebar-threads";
 pub use crate::ui::scroll::MODEL_MENU;
 const PROJECT_TREE: &str = "artisan-project-tree";
+const SETTINGS_PAGE: &str = "settings-main-scroll";
+const SETTINGS_NAV: &str = "settings-dialog-nav";
+const SETTINGS_LICENCES: &str = "settings-licences";
+const SETTINGS_ARCHIVE: &str = "archived-threads";
+const SETTINGS_PROMPT: &str = "global-prompt-scroll";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
@@ -14,6 +19,11 @@ pub enum Surface {
     Threads,
     Model,
     Tree,
+    SettingsPage,
+    SettingsNav,
+    SettingsLicences,
+    SettingsArchive,
+    SettingsPrompt,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,10 +58,7 @@ impl Advance {
 
 #[derive(Debug, Default)]
 pub struct WheelGlides {
-    transcript: WheelGlide,
-    threads: WheelGlide,
-    model: WheelGlide,
-    tree: WheelGlide,
+    glides: [WheelGlide; Surface::ALL.len()],
 }
 
 pub use crate::ui::scroll::key_hash;
@@ -79,15 +86,48 @@ pub fn kept_offset(ui: &UiApp, key: &str) -> Point {
 }
 
 impl Surface {
-    const ALL: [Self; 4] = [Self::Model, Self::Tree, Self::Threads, Self::Transcript];
+    const ALL: [Self; 9] = [
+        Self::Model,
+        Self::Tree,
+        Self::SettingsLicences,
+        Self::SettingsArchive,
+        Self::SettingsPrompt,
+        Self::SettingsNav,
+        Self::SettingsPage,
+        Self::Threads,
+        Self::Transcript,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Model => 0,
+            Self::Tree => 1,
+            Self::SettingsLicences => 2,
+            Self::SettingsArchive => 3,
+            Self::SettingsPrompt => 4,
+            Self::SettingsNav => 5,
+            Self::SettingsPage => 6,
+            Self::Threads => 7,
+            Self::Transcript => 8,
+        }
+    }
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Transcript => "conversation-transcript",
+            Self::Threads => THREADS,
+            Self::Model => MODEL_MENU,
+            Self::Tree => PROJECT_TREE,
+            Self::SettingsPage => SETTINGS_PAGE,
+            Self::SettingsNav => SETTINGS_NAV,
+            Self::SettingsLicences => SETTINGS_LICENCES,
+            Self::SettingsArchive => SETTINGS_ARCHIVE,
+            Self::SettingsPrompt => SETTINGS_PROMPT,
+        }
+    }
 
     fn node(self, ui: &UiApp) -> Option<NodeId> {
-        match self {
-            Self::Transcript => keyed_node(ui, "conversation-transcript"),
-            Self::Threads => keyed_node(ui, THREADS),
-            Self::Model => keyed_node(ui, MODEL_MENU),
-            Self::Tree => keyed_node(ui, PROJECT_TREE),
-        }
+        keyed_node(ui, self.key())
     }
 
     fn metrics(ui: &UiApp, node: NodeId) -> Option<Metrics> {
@@ -111,8 +151,14 @@ impl Surface {
                 },
                 metrics.x,
             ),
-            Self::Threads => ui.scroll_collection_to(THREADS, Point::new(metrics.x, offset)),
-            Self::Model | Self::Tree => self
+            Self::Threads | Self::SettingsLicences | Self::SettingsArchive => {
+                ui.scroll_collection_to(self.key(), Point::new(metrics.x, offset))
+            }
+            Self::Model
+            | Self::Tree
+            | Self::SettingsPage
+            | Self::SettingsNav
+            | Self::SettingsPrompt => self
                 .node(ui)
                 .is_some_and(|node| ui.tree_mut().scroll_to(node, Point::new(metrics.x, offset))),
         }
@@ -130,14 +176,41 @@ fn under(ui: &UiApp, hit: Option<NodeId>, surface: NodeId) -> bool {
     false
 }
 
+fn can_scroll(metrics: Metrics, delta_y: f32) -> bool {
+    const EPSILON: f32 = 0.5;
+    if metrics.max <= EPSILON {
+        return false;
+    }
+    if delta_y > 0.0 {
+        metrics.offset < metrics.max - EPSILON
+    } else if delta_y < 0.0 {
+        metrics.offset > EPSILON
+    } else {
+        false
+    }
+}
+
+fn closer_scroller(ui: &UiApp, hit: Option<NodeId>, surface: NodeId, delta_y: f32) -> bool {
+    let mut cursor = hit;
+    while let Some(node) = cursor {
+        if node == surface {
+            return false;
+        }
+        if matches!(
+            ui.tree().get(node).map(|record| &record.kind),
+            Some(aqua_ui::tree::NodeKind::Scroll(_))
+        ) && Surface::metrics(ui, node).is_some_and(|metrics| can_scroll(metrics, delta_y))
+        {
+            return true;
+        }
+        cursor = ui.tree().get(node).and_then(|record| record.parent);
+    }
+    false
+}
+
 impl WheelGlides {
     fn glide(&mut self, surface: Surface) -> &mut WheelGlide {
-        match surface {
-            Surface::Transcript => &mut self.transcript,
-            Surface::Threads => &mut self.threads,
-            Surface::Model => &mut self.model,
-            Surface::Tree => &mut self.tree,
-        }
+        &mut self.glides[surface.index()]
     }
 
     pub fn offer(&mut self, ui: &UiApp, input: &InputEvent, now: Instant) -> Option<Surface> {
@@ -148,12 +221,30 @@ impl WheelGlides {
             let _tm = crate::shell::application::Tm::new("wheel.hit");
             aqua_ui::events::hit_test(ui.tree(), *at)
         };
-        let surface = Surface::ALL
-            .into_iter()
-            .find(|surface| surface.node(ui).is_some_and(|node| under(ui, hit, node)))?;
-        let _tm = crate::shell::application::Tm::new("wheel.metrics");
-        let node = surface.node(ui)?;
-        let metrics = Surface::metrics(ui, node)?;
+        let mut fallback = None;
+        let mut chosen = None;
+        for surface in Surface::ALL {
+            let Some(node) = surface.node(ui) else {
+                continue;
+            };
+            if !under(ui, hit, node) {
+                continue;
+            }
+            if closer_scroller(ui, hit, node, delta.y) {
+                return None;
+            }
+            let Some(metrics) = Surface::metrics(ui, node) else {
+                continue;
+            };
+            if fallback.is_none() {
+                fallback = Some((surface, metrics));
+            }
+            if can_scroll(metrics, delta.y) {
+                chosen = Some((surface, metrics));
+                break;
+            }
+        }
+        let (surface, metrics) = chosen.or(fallback)?;
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let glide = self.glide(surface);
         match WheelInput::classify(delta.y) {
@@ -200,13 +291,10 @@ impl WheelGlides {
     }
 
     pub(crate) fn cancel_transcript(&mut self) {
-        self.transcript.cancel();
+        self.glide(Surface::Transcript).cancel();
     }
 
     pub fn active(&self) -> bool {
-        self.transcript.active()
-            || self.threads.active()
-            || self.model.active()
-            || self.tree.active()
+        self.glides.iter().any(WheelGlide::active)
     }
 }

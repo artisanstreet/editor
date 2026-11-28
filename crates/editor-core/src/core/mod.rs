@@ -51,6 +51,7 @@ pub use screen::{DeepLinkError, DraggedThread, Screen, SettingsPage, SettingsSec
 pub use services::{DialRelay, RelayDialRequest, RelayRoute, Services};
 pub use settings::{
     Browser, EditorPreferences, Fonts, SetSettingError, Settings, StoredSettingError, Streaming,
+    ThemePreference,
 };
 pub use settings_writer::{SettingsSave, SettingsShutdown, drain_settings};
 pub use store::{Core, CoreEvent, OpenCoreError};

@@ -2271,6 +2271,7 @@ dependencies = [
  "aqua-core",
  "aqua-ui",
  "artisan-api",
+ "artisan-payload",
  "claude-ai-browser",
  "diagnostics",
  "editor-core",

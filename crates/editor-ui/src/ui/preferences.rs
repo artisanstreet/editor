@@ -29,6 +29,7 @@ pub enum StreamingMode {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SystemAccess {
+    pub theme: aqua_protocol::shell::ColorScheme,
     pub reduced_motion: bool,
     pub high_contrast: bool,
     pub text_scale: f32,
@@ -37,6 +38,7 @@ pub struct SystemAccess {
 impl Default for SystemAccess {
     fn default() -> Self {
         Self {
+            theme: aqua_protocol::shell::ColorScheme::Unknown,
             reduced_motion: false,
             high_contrast: false,
             text_scale: 1.0,
@@ -48,6 +50,7 @@ impl SystemAccess {
     #[must_use]
     pub fn from_os(prefs: &aqua::prelude::OsPreferences) -> Self {
         Self {
+            theme: prefs.theme,
             reduced_motion: prefs.reduce_motion.is_on(),
             high_contrast: prefs.high_contrast.is_on(),
             text_scale: prefs.text_scale.factor(),
@@ -73,10 +76,13 @@ impl Preferences {
     pub fn from_core(core: &Core, system: SystemAccess) -> Self {
         let chosen = core.settings().preferences();
         Self {
-            theme: if chosen.dark_mode.on() {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
+            theme: match (chosen.theme, system.theme) {
+                (editor_core::ThemePreference::Light, _)
+                | (
+                    editor_core::ThemePreference::System,
+                    aqua_protocol::shell::ColorScheme::Light,
+                ) => ThemeMode::Light,
+                _ => ThemeMode::Dark,
             },
             fonts: FontSet::chosen(chosen.fonts),
             outline_text: chosen.outline_text.on(),

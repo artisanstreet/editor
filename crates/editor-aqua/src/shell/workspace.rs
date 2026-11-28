@@ -18,7 +18,7 @@ pub struct NotificationEffects {
 #[derive(Debug)]
 pub enum SettingsPlatformEffect {
     OpenUrl(String),
-    OpenNotices,
+    ExportDiagnostics,
     CopyText(String),
 }
 
@@ -27,15 +27,22 @@ impl SettingsPlatformEffect {
         use crate::settings::view::ViewAction;
         match action {
             ViewAction::OpenUrl(url) => Some(Self::OpenUrl(url.clone())),
-            ViewAction::OpenNotices => Some(Self::OpenNotices),
+            ViewAction::ExportDiagnostics => Some(Self::ExportDiagnostics),
             ViewAction::CopyText(text) => Some(Self::CopyText(text.clone())),
             ViewAction::Navigate(_)
+            | ViewAction::SearchChanged
+            | ViewAction::ToggleLicence(_)
+            | ViewAction::DiagnosticsExported(_)
             | ViewAction::EngineEdited
             | ViewAction::EnginePresentationChanged
             | ViewAction::EngineAction(..)
-            | ViewAction::EngineVersions(_)
+            | ViewAction::VersionMenu(..)
+            | ViewAction::Gear(_)
             | ViewAction::EngineUse(..)
             | ViewAction::EngineCode(_)
+            | ViewAction::OpenApiKey
+            | ViewAction::CancelApiKey
+            | ViewAction::SaveApiKey
             | ViewAction::ClaudeTransport(..)
             | ViewAction::ClaudeSignIn
             | ViewAction::AccountEdited
@@ -60,6 +67,9 @@ impl SettingsPlatformEffect {
             | ViewAction::Unarchive(_)
             | ViewAction::McpOpen(_)
             | ViewAction::McpRemove(_)
+            | ViewAction::McpToggle(..)
+            | ViewAction::SkillToggle(..)
+            | ViewAction::ReloadSkills
             | ViewAction::McpSave
             | ViewAction::McpCancel
             | ViewAction::McpEdited
@@ -76,6 +86,8 @@ impl SettingsPlatformEffect {
             | ViewAction::FontMenu(_)
             | ViewAction::SetFont(_)
             | ViewAction::SetDarkMode(_)
+            | ViewAction::SetTheme(_)
+            | ViewAction::SetCuratedModels(_)
             | ViewAction::SetOutlineText(_)
             | ViewAction::SetShowAllModels(_)
             | ViewAction::SetHideBadModelOptions(_)
@@ -1551,7 +1563,7 @@ impl Workspace {
         reduced_motion: bool,
         now: std::time::Instant,
     ) -> aqua_ui::element::Element {
-        crate::sidebar::view::build(
+        let navigation = crate::sidebar::view::build(
             &self.settings_sidebar,
             core,
             theme,
@@ -1562,6 +1574,11 @@ impl Workspace {
             self.settings_sidebar
                 .thread_visual_factory(theme, reduced_motion),
             &self.sidebar_emit(true),
+        );
+        crate::shell::settings_frame::settings_rail(
+            theme,
+            crate::settings::view::search_editor(&self.settings, theme, self.settings_emit()),
+            navigation,
         )
     }
 
@@ -1616,6 +1633,12 @@ impl Workspace {
         }
         let settings_sidebar = std::mem::take(&mut *self.settings_sidebar_actions.borrow_mut());
         for action in settings_sidebar {
+            if matches!(
+                &action,
+                crate::sidebar::view::ViewAction::Navigate(Screen::Settings(_))
+            ) {
+                changed |= self.settings.clear_search();
+            }
             if let crate::sidebar::view::ViewAction::SetDarkMode(dark) = &action {
                 self.theme_transition = Some(*dark);
             }
@@ -1821,16 +1844,14 @@ impl Workspace {
         core: &Core,
         theme: &crate::ui::theme::ArtisanTheme,
         build: &crate::settings::about::BuildInfo,
-        viewport: aqua_core::Size,
-        visible: bool,
+        account: Option<&crate::ui::chrome::account::Account>,
     ) -> aqua_ui::element::Element {
-        crate::settings::view::build(
+        crate::settings::view::build_with_account(
             &self.settings,
             core,
             theme,
             build,
-            viewport,
-            visible,
+            account,
             self.settings_emit(),
         )
     }

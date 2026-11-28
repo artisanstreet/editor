@@ -52,7 +52,7 @@ impl Row {
     }
 
     #[must_use]
-    pub fn lines(self, theme: &ArtisanTheme) -> f32 {
+    pub(crate) fn lines(self, theme: &ArtisanTheme) -> f32 {
         match self {
             Self::ListItem(Density::Tall) => {
                 TextRole::Label.line_px(theme) + TextRole::Caption.line_px(theme)

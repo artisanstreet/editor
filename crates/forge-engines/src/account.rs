@@ -91,7 +91,19 @@ async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
         EngineId::Antigravity => return antigravity_sign_in(binary, home).await,
     };
     match run_short(engine, binary, home, args, CHECK_TIMEOUT).await {
-        Ok((success, stdout, stderr)) => parse_status(engine, success, &stdout, &stderr),
+        Ok((success, stdout, stderr)) => {
+            let tier = (engine == EngineId::Claude)
+                .then(|| claude_tier(home))
+                .flatten();
+            let state = parse_status(engine, success, &stdout, &stderr, tier.as_deref());
+            if engine == EngineId::Codex
+                && matches!(state, SignInState::SignedIn { account: None, .. })
+            {
+                codex_account(home)
+            } else {
+                state
+            }
+        }
         Err(error) => {
             let error = diagnostics::chain(&error);
             tracing::warn!(engine = %engine, home = %home.display(), error, "sign-in check failed");
@@ -105,7 +117,153 @@ async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState {
     }
 }
 
-fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> SignInState {
+#[derive(Debug, thiserror::Error)]
+enum CodexAccountError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{} holds no ChatGPT identity token", path.display())]
+    NoIdentity { path: PathBuf },
+    #[error("decode the identity token in {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: CodexClaimsError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CodexClaimsError {
+    #[error("the token has no claims segment")]
+    Shape,
+    #[error("the claims are not base64url")]
+    Base64(#[source] base64::DecodeError),
+    #[error("the claims are not JSON")]
+    Json(#[source] serde_json::Error),
+    #[error("the claims carry no email")]
+    NoEmail,
+}
+
+struct Identity {
+    email: String,
+    plan: Option<String>,
+}
+
+fn identity(id_token: &str) -> Result<Identity, CodexClaimsError> {
+    use base64::Engine as _;
+    let claims = id_token.split('.').nth(1).ok_or(CodexClaimsError::Shape)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(claims.trim_end_matches('='))
+        .map_err(CodexClaimsError::Base64)?;
+    let claims: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(CodexClaimsError::Json)?;
+    let email = claims["email"]
+        .as_str()
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_owned)
+        .ok_or(CodexClaimsError::NoEmail)?;
+    let plan = claims["https://api.openai.com/auth"]["chatgpt_plan_type"]
+        .as_str()
+        .and_then(crate::plan::chatgpt)
+        .map(str::to_owned);
+    Ok(Identity { email, plan })
+}
+
+fn read_codex_identity(home: &Path) -> Result<Identity, CodexAccountError> {
+    let path = home.join(".codex").join("auth.json");
+    let text = std::fs::read_to_string(&path).map_err(|source| CodexAccountError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let auth: serde_json::Value =
+        serde_json::from_str(&text).map_err(|source| CodexAccountError::Parse {
+            path: path.clone(),
+            source,
+        })?;
+    let token = auth["tokens"]["id_token"]
+        .as_str()
+        .ok_or_else(|| CodexAccountError::NoIdentity { path: path.clone() })?;
+    identity(token).map_err(|source| CodexAccountError::Decode { path, source })
+}
+
+fn codex_account(home: &Path) -> SignInState {
+    match read_codex_identity(home) {
+        Ok(Identity { email, plan }) => SignInState::SignedIn {
+            account: Some(email),
+            plan,
+        },
+        Err(error) => {
+            tracing::warn!(
+                home = %home.display(),
+                error = %diagnostics::chain(&error),
+                "couldn't read the Codex account email"
+            );
+            SignInState::SignedIn {
+                account: None,
+                plan: None,
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ClaudeTierError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn read_claude_tier(home: &Path) -> Result<Option<String>, ClaudeTierError> {
+    let path = home.join(".claude").join(".credentials.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(ClaudeTierError::Read { path, source }),
+    };
+    let credentials: serde_json::Value =
+        serde_json::from_str(&text).map_err(|source| ClaudeTierError::Parse { path, source })?;
+    Ok(credentials["claudeAiOauth"]["rateLimitTier"]
+        .as_str()
+        .map(str::to_owned))
+}
+
+fn claude_tier(home: &Path) -> Option<String> {
+    read_claude_tier(home).unwrap_or_else(|error| {
+        tracing::warn!(
+            home = %home.display(),
+            error = %diagnostics::chain(&error),
+            "couldn't read the Claude rate-limit tier"
+        );
+        None
+    })
+}
+
+fn parse_status(
+    engine: EngineId,
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+    claude_tier: Option<&str>,
+) -> SignInState {
     let text = strip_ansi(&format!("{stdout}\n{stderr}"));
     let lower = text.to_lowercase();
     if engine == EngineId::Claude {
@@ -117,7 +275,11 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
         if let Some(json) = json {
             return if json["loggedIn"].as_bool() == Some(true) {
                 let account = json["email"].as_str().map(str::to_owned);
-                SignInState::SignedIn { account }
+                let plan = json["subscriptionType"]
+                    .as_str()
+                    .and_then(|kind| crate::plan::claude(kind, claude_tier))
+                    .map(str::to_owned);
+                SignInState::SignedIn { account, plan }
             } else {
                 SignInState::SignedOut
             };
@@ -125,13 +287,22 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
     } else if lower.contains("not logged in") || lower.contains("not authenticated") {
         return SignInState::SignedOut;
     } else if success {
+        if engine == EngineId::Codex && lower.contains("logged in using an api key") {
+            return SignInState::SignedIn {
+                account: Some("API Key".to_owned()),
+                plan: None,
+            };
+        }
         let account = text.lines().find_map(|line| {
             let line = line.trim();
             let at = line.to_ascii_lowercase().find("logged in as ")?;
             let (_, account) = line.split_at(at + "logged in as ".len());
             Some(account.trim().to_owned()).filter(|account| !account.is_empty())
         });
-        return SignInState::SignedIn { account };
+        return SignInState::SignedIn {
+            account,
+            plan: None,
+        };
     }
     let detail = last_line(&text);
     SignInState::Failed {
@@ -183,6 +354,7 @@ async fn opencode_sign_in(binary: &Path, home: &Path) -> SignInState {
             } else {
                 SignInState::SignedIn {
                     account: Some(names.join(", ")),
+                    plan: None,
                 }
             }
         }
@@ -397,6 +569,7 @@ fn strip_ansi(text: &str) -> String {
 enum Event {
     Checked(SignInState),
     Login,
+    LoginApiKey(artisan_api::Secret),
     Prompt {
         url: Option<String>,
         code: Option<String>,
@@ -412,6 +585,7 @@ enum Event {
 enum Effect {
     Check,
     StartLogin,
+    StartApiKey(artisan_api::Secret),
     StopLogin,
     Logout,
 }
@@ -422,6 +596,7 @@ enum State {
     SignedOut {},
     SignedIn {
         account: Option<String>,
+        plan: Option<String>,
     },
     Failed {
         message: String,
@@ -430,6 +605,7 @@ enum State {
         url: Option<String>,
         code: Option<String>,
     },
+    SavingApiKey,
 }
 
 #[derive(Debug)]
@@ -467,37 +643,39 @@ impl Machine {
                 }
                 None
             }
-            (State::LoggingIn { .. }, Event::LoginEnded { error: None }) => {
+            (State::LoggingIn { .. } | State::SavingApiKey, Event::LoginEnded { error: None }) => {
                 effects.push(Effect::Check);
                 Some(State::Unknown {})
             }
             (
-                State::LoggingIn { .. },
+                State::LoggingIn { .. } | State::SavingApiKey,
                 Event::LoginEnded {
                     error: Some(message),
                 },
             ) => Some(State::Failed {
                 message: message.clone(),
             }),
-            (State::LoggingIn { .. }, Event::Checked(SignInState::SignedIn { account })) => {
+            (State::LoggingIn { .. }, Event::Checked(SignInState::SignedIn { account, plan })) => {
                 effects.push(Effect::StopLogin);
                 Some(State::SignedIn {
                     account: account.clone(),
+                    plan: plan.clone(),
                 })
             }
-            (State::LoggingIn { .. }, Event::Cancel) => {
+            (State::LoggingIn { .. } | State::SavingApiKey, Event::Cancel) => {
                 effects.push(Effect::StopLogin);
                 effects.push(Effect::Check);
                 Some(State::Unknown {})
             }
-            (State::LoggingIn { .. }, _) => None,
+            (State::LoggingIn { .. } | State::SavingApiKey, _) => None,
             (State::SignedIn { .. }, Event::Logout) => {
                 effects.push(Effect::Logout);
                 Some(State::Unknown {})
             }
             (_, Event::Checked(probe)) => Some(match probe {
-                SignInState::SignedIn { account } => State::SignedIn {
+                SignInState::SignedIn { account, plan } => State::SignedIn {
                     account: account.clone(),
+                    plan: plan.clone(),
                 },
                 SignInState::SignedOut => State::SignedOut {},
                 SignInState::Failed { message } => State::Failed {
@@ -505,6 +683,10 @@ impl Machine {
                 },
                 SignInState::Unknown | SignInState::LoggingIn { .. } => State::Unknown {},
             }),
+            (_, Event::LoginApiKey(key)) => {
+                effects.push(Effect::StartApiKey(key.clone()));
+                Some(State::SavingApiKey)
+            }
             (_, Event::Login) => {
                 effects.push(Effect::StartLogin);
                 Some(State::LoggingIn {
@@ -524,8 +706,9 @@ fn public_state(state: &State, engine: EngineId) -> SignInState {
     match state {
         State::Unknown {} => SignInState::Unknown,
         State::SignedOut {} => SignInState::SignedOut,
-        State::SignedIn { account } => SignInState::SignedIn {
+        State::SignedIn { account, plan } => SignInState::SignedIn {
             account: account.clone(),
+            plan: plan.clone(),
         },
         State::Failed { message } => SignInState::Failed {
             message: message.clone(),
@@ -534,6 +717,11 @@ fn public_state(state: &State, engine: EngineId) -> SignInState {
             accepts_code: crate::engines::host_spec(engine).accepts_login_code,
             url: url.clone(),
             code: code.clone(),
+        },
+        State::SavingApiKey => SignInState::LoggingIn {
+            accepts_code: false,
+            url: None,
+            code: None,
         },
     }
 }
@@ -603,6 +791,20 @@ impl SignIn {
         let binary = lease.path().to_owned();
         self.lock().lease = Some(Arc::new(lease));
         self.login(&binary);
+    }
+
+    pub(crate) fn api_key_leased(
+        self: &Arc<Self>,
+        lease: crate::BinaryLease,
+        key: artisan_api::Secret,
+    ) {
+        let binary = lease.path().to_owned();
+        {
+            let mut inner = self.lock();
+            inner.binary = Some(binary);
+            inner.lease = Some(Arc::new(lease));
+        }
+        self.handle(&Event::LoginApiKey(key));
     }
 
     pub(crate) fn logout_leased(self: &Arc<Self>, lease: crate::BinaryLease) {
@@ -733,10 +935,16 @@ impl SignIn {
             if generation.is_some_and(|generation| generation != inner.generation) {
                 return;
             }
-            if matches!(event, Event::Login | Event::Logout | Event::Cancel) {
+            if matches!(
+                event,
+                Event::Login | Event::LoginApiKey(_) | Event::Logout | Event::Cancel
+            ) {
                 inner.generation = inner.generation.wrapping_add(1);
             }
             if matches!(event, Event::LoginEnded { .. }) {
+                if matches!(inner.machine.state(), State::SavingApiKey) {
+                    inner.generation = inner.generation.wrapping_add(1);
+                }
                 inner.login = None;
             }
             inner.machine.handle_with_context(event, &mut effects);
@@ -781,7 +989,12 @@ impl SignIn {
             }
             Effect::StartLogin => {
                 if let Some(binary) = binary {
-                    self.start_login(binary, lease, generation);
+                    self.start_login(binary, lease, None);
+                }
+            }
+            Effect::StartApiKey(key) => {
+                if let Some(binary) = binary {
+                    self.start_login(binary, lease, Some(key.clone()));
                 }
             }
             Effect::StopLogin => {
@@ -836,7 +1049,7 @@ impl SignIn {
         self: &Arc<Self>,
         binary: PathBuf,
         lease: Option<Arc<crate::BinaryLease>>,
-        _generation: u64,
+        api_key: Option<artisan_api::Secret>,
     ) {
         let cancel = CancellationToken::new();
         let stdin = Arc::new(tokio::sync::Mutex::new(None));
@@ -849,11 +1062,11 @@ impl SignIn {
         }
         let this = Arc::clone(self);
         tokio::spawn(async move {
-            let error = this
-                .run_login(binary, lease, stdin, cancel.clone())
-                .await
-                .err()
-                .map(|error| diagnostics::chain(&error));
+            let result = match api_key {
+                Some(key) => this.run_api_key_login(&binary, lease, key, &cancel).await,
+                None => this.run_login(binary, lease, stdin, cancel.clone()).await,
+            };
+            let error = result.err().map(|error| diagnostics::chain(&error));
             if !cancel.is_cancelled() {
                 if let Some(error) = &error {
                     tracing::warn!(engine = %this.engine, error, "sign-in failed");
@@ -861,6 +1074,61 @@ impl SignIn {
                 this.handle_login(&Event::LoginEnded { error }, &cancel);
             }
         });
+    }
+
+    async fn run_api_key_login(
+        &self,
+        binary: &Path,
+        _lease: Option<Arc<crate::BinaryLease>>,
+        key: artisan_api::Secret,
+        cancel: &CancellationToken,
+    ) -> Result<(), LoginError> {
+        let engine = self.engine;
+        let usage = crate::install::usage_lock(&self.home)
+            .map_err(|source| LoginError::UsageLock { engine, source })?;
+        fs2::FileExt::lock_shared(&usage).map_err(|source| LoginError::Share { engine, source })?;
+        let mut command = engine_command(engine, binary, &self.home);
+        command
+            .args(["login", "--with-api-key"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child =
+            crate::process::owned_command(command, forge_isolation::Containment::Shared).map_err(
+                |source| LoginError::Start {
+                    engine,
+                    args: "login --with-api-key".into(),
+                    source,
+                },
+            )?;
+        let mut stdin = child
+            .stdin()
+            .take()
+            .expect("invariant: the Codex API key login process has piped stdin");
+        let login = async {
+            stdin
+                .write_all(key.expose().as_bytes())
+                .await
+                .map_err(|source| LoginError::WriteKey { engine, source })?;
+            drop(stdin);
+            drop(key);
+            child
+                .wait()
+                .await
+                .map_err(|source| LoginError::Wait { engine, source })
+        };
+        let completion = tokio::select! {
+            () = cancel.cancelled() => Ok(None),
+            result = tokio::time::timeout(CHECK_TIMEOUT, login) => match result {
+                Ok(result) => result.map(Some),
+                Err(source) => Err(LoginError::KeyTimedOut { engine, source }),
+            },
+        };
+        child.end().await;
+        match completion? {
+            Some(status) if !status.success() => Err(LoginError::RejectedKey { engine, status }),
+            Some(_) | None => Ok(()),
+        }
     }
 
     async fn run_login(
@@ -1017,6 +1285,23 @@ enum LoginError {
         engine: EngineId,
         #[source]
         source: std::io::Error,
+    },
+    #[error("{engine} API key sign-in timed out")]
+    KeyTimedOut {
+        engine: EngineId,
+        #[source]
+        source: tokio::time::error::Elapsed,
+    },
+    #[error("send the API key to the {engine} sign-in")]
+    WriteKey {
+        engine: EngineId,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{engine} did not accept the API key ({status})")]
+    RejectedKey {
+        engine: EngineId,
+        status: std::process::ExitStatus,
     },
     #[error("{} sign-in failed: {detail}", engine.display_name())]
     Failed { engine: EngineId, detail: String },
