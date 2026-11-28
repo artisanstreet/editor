@@ -1,5 +1,6 @@
 use super::*;
-use crate::resources::{ResourceError, Written};
+use crate::resources::{ResourceError, Written, without_verbatim_prefix};
+use std::path::Path;
 
 async fn kept(fixture: &Fixture, item: &ItemId, written: &Written) -> Vec<u8> {
     let thread = fixture
@@ -190,7 +191,7 @@ fn kept_at(fixture: &Fixture, item: &ItemId, path: &str) -> PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_them() {
+async fn a_reply_naming_non_images_outside_its_project_or_denied_files_keeps_none_of_them() {
     let outside = tempfile::tempdir().unwrap();
     let key = outside.path().join("id_ed25519");
     std::fs::write(&key, b"private key").unwrap();
@@ -259,13 +260,82 @@ async fn a_reply_naming_files_outside_its_project_or_denied_to_it_keeps_none_of_
         assert!(
             matches!(
                 shown,
-                Err(ResourceError::Outside { .. }
-                    | ResourceError::Linked { .. }
-                    | ResourceError::Refused { .. })
+                Err(ResourceError::NotAnImage { .. } | ResourceError::Refused { .. })
             ),
             "{path} reached the Editor: {shown:?}"
         );
     }
+}
+
+fn absolute_rule(folder: &Path) -> String {
+    let folder = folder.display().to_string().replace('\\', "/");
+    match folder.split_once(":/") {
+        Some((drive, rest)) => format!("//{drive}/{rest}/**"),
+        None => format!("/{folder}/**"),
+    }
+}
+
+const PNG: &[u8] = b"\x89PNG\r\n\x1a\n a screenshot";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screenshot_saved_outside_the_project_is_shown_and_kept_unless_denied() {
+    let temporary = tempfile::tempdir().unwrap();
+    let outside = without_verbatim_prefix(&std::fs::canonicalize(temporary.path()).unwrap());
+    let shot = outside.join("shot.png");
+    let denied = outside.join("private").join("shot.png");
+    std::fs::write(&shot, PNG).unwrap();
+    std::fs::create_dir_all(denied.parent().unwrap()).unwrap();
+    std::fs::write(&denied, PNG).unwrap();
+    let (shown_shot, shown_denied) = (shot.display().to_string(), denied.display().to_string());
+    let fixture = fixture(Arc::new(move |_, io| {
+        let text =
+            format!("```artisan-image\n{{ \"images\": [{shown_shot:?}, {shown_denied:?}] }}\n```");
+        Box::pin(async move {
+            io.emit(reply("reply", &text)).await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    let project = fixture.dir.path();
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    std::fs::write(
+        project.join(".claude/settings.json"),
+        format!(
+            r#"{{ "permissions": {{ "deny": ["Read({})"] }} }}"#,
+            absolute_rule(denied.parent().unwrap())
+        ),
+    )
+    .unwrap();
+
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("show"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let item = fixture.by_native("reply").await.id;
+    std::fs::remove_file(&shot).unwrap();
+
+    let written = |path: &Path| Written {
+        path: path.display().to_string(),
+        from_home: false,
+    };
+    assert_eq!(kept(&fixture, &item, &written(&shot)).await, PNG);
+    let thread = fixture
+        .hub
+        .store()
+        .thread(&fixture.thread_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let shown = fixture
+        .hub
+        .read_resource(&thread, Some(&item), &written(&denied))
+        .await;
+    assert!(
+        matches!(shown, Err(ResourceError::Refused { .. })),
+        "a denied screenshot reached the Editor: {shown:?}"
+    );
 }
 
 async fn shown_under(settings: &str) -> (Result<Vec<u8>, ResourceError>, bool) {

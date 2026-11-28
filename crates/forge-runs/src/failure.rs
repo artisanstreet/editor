@@ -663,7 +663,7 @@ impl ResourceError {
             Self::Outside { path: file } => {
                 Failure::Resource(ResourceFailure::Outside { path: path(file) })
             }
-            Self::Refused { path: file, .. } => {
+            Self::Refused { path: file, .. } | Self::NotAnImage { path: file } => {
                 Failure::Resource(ResourceFailure::Refused { path: path(file) })
             }
             Self::Linked { path: file, .. } => {
