@@ -8,7 +8,8 @@ use super::{
     questionnaire::QuestionnairePanel,
 };
 use artisan_api::{
-    BlobHash, CreateThread, EngineConfig, ItemId, ProjectId, SendMessage, SignInState, ThreadId,
+    BlobHash, CreateThread, EngineConfig, Item, ItemId, ItemKind, ProjectId, SendMessage,
+    SignInState, Status, ThreadId,
 };
 use editor_core::{
     Core, HostData, HostId, HostInstance, LocalSend, NewThread, delivery::Delivery,
@@ -16,6 +17,16 @@ use editor_core::{
 };
 use editor_ui::text::editor::{Editor, ListKey, Mode};
 use std::{cell::RefCell, num::NonZeroUsize, path::PathBuf, rc::Rc};
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum ReclaimCancelled {
+    #[default]
+    Idle,
+    Waiting,
+    Restored {
+        ids: Vec<ItemId>,
+    },
+}
 
 #[derive(Clone, Copy, Debug)]
 enum TurnCall {
@@ -144,6 +155,7 @@ pub struct Composer {
     host_instance: Option<HostInstance>,
     target_generation: u64,
     pub(crate) cancelling: bool,
+    reclaim: ReclaimCancelled,
     failed_stops: Vec<ThreadId>,
     pub(crate) continuing: bool,
     turn_completions: Delivery<TurnCompletion>,
@@ -212,6 +224,7 @@ impl Composer {
             host_instance,
             target_generation: 0,
             cancelling: false,
+            reclaim: ReclaimCancelled::Idle,
             failed_stops: Vec::new(),
             continuing: false,
             turn_completions: Delivery::new(NonZeroUsize::MIN),
@@ -246,6 +259,7 @@ impl Composer {
         self.target_generation = self.target_generation.wrapping_add(1);
         self.edit_revision = 0;
         self.cancelling = false;
+        self.reclaim = ReclaimCancelled::Idle;
         self.continuing = false;
         {
             let mut editor = self.editor.borrow_mut();
@@ -361,8 +375,18 @@ impl Composer {
         match call {
             TurnCall::Stop if self.cancelling => return None,
             TurnCall::Continue if self.continuing => return None,
-            TurnCall::Stop => self.cancelling = true,
-            TurnCall::Continue => self.continuing = true,
+            TurnCall::Stop => {
+                self.cancelling = true;
+                self.reclaim = if self.has_input() {
+                    ReclaimCancelled::Idle
+                } else {
+                    ReclaimCancelled::Waiting
+                };
+            }
+            TurnCall::Continue => {
+                self.continuing = true;
+                self.reclaim = ReclaimCancelled::Idle;
+            }
             TurnCall::ClearGoal | TurnCall::Unpark => {}
         }
         let thread = thread.clone();
@@ -443,7 +467,14 @@ impl Composer {
                 continue;
             }
             match completion.action {
-                TurnAction::Stop => self.cancelling = false,
+                TurnAction::Stop => {
+                    self.cancelling = false;
+                    if completion.error.is_some()
+                        && matches!(self.reclaim, ReclaimCancelled::Waiting)
+                    {
+                        self.reclaim = ReclaimCancelled::Idle;
+                    }
+                }
                 TurnAction::Continue => self.continuing = false,
                 TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
             }
@@ -735,8 +766,101 @@ impl Composer {
 
     pub fn edited(&mut self) {
         self.send_state = SendState::Idle;
+        self.reclaim = ReclaimCancelled::Idle;
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.save();
+    }
+
+    fn has_input(&self) -> bool {
+        !self.editor.borrow().text().is_empty()
+            || self
+                .attachments
+                .as_ref()
+                .is_some_and(|attachments| !attachments.items.is_empty())
+            || !self.files.is_empty()
+            || self
+                .questionnaire
+                .aside_text()
+                .is_some_and(|text| !text.is_empty())
+    }
+
+    pub fn reclaim_cancelled_item(&mut self, host: &HostId, item: &Item) -> bool {
+        let ComposerTarget::Thread {
+            host: target_host,
+            thread,
+        } = &self.target
+        else {
+            return false;
+        };
+        if target_host != host
+            || item.thread_id != *thread
+            || item.parent_id.is_some()
+            || item.status != Status::Cancelled
+            || item.id.as_str().starts_with("answer-")
+            || !self.draft_editable()
+            || self.draft_busy()
+            || self.questionnaire.active().is_some()
+        {
+            return false;
+        }
+        let ItemKind::UserMessage {
+            text,
+            images,
+            from_agent: None,
+            ..
+        } = &item.kind
+        else {
+            return false;
+        };
+        let inline = text.inline().filter(|text| !text.is_empty());
+        if inline.is_none() && images.is_empty() {
+            return false;
+        }
+        match &mut self.reclaim {
+            ReclaimCancelled::Idle => return false,
+            ReclaimCancelled::Waiting => {
+                if self.has_input() {
+                    self.reclaim = ReclaimCancelled::Idle;
+                    return false;
+                }
+                if let Some(text) = inline {
+                    self.editor.borrow_mut().set_text(text);
+                }
+                if let Some(attachments) = &mut self.attachments {
+                    for hash in images {
+                        attachments.restore(hash.clone());
+                    }
+                }
+                self.reclaim = ReclaimCancelled::Restored {
+                    ids: vec![item.id.clone()],
+                };
+            }
+            ReclaimCancelled::Restored { ids } => {
+                if ids.contains(&item.id) {
+                    return false;
+                }
+                if let Some(text) = inline {
+                    let mut editor = self.editor.borrow_mut();
+                    let existing = editor.text().to_owned();
+                    let combined = if existing.is_empty() {
+                        text.to_owned()
+                    } else {
+                        format!("{existing}\n\n{text}")
+                    };
+                    editor.set_text(&combined);
+                }
+                if let Some(attachments) = &mut self.attachments {
+                    for hash in images {
+                        attachments.restore(hash.clone());
+                    }
+                }
+                ids.push(item.id.clone());
+            }
+        }
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.restore_revision = None;
+        self.save();
+        true
     }
 
     fn draft_body(&self) -> DraftBody {
@@ -941,6 +1065,7 @@ impl Composer {
 
     fn reset_input(&mut self) {
         self.parked.clear();
+        self.reclaim = ReclaimCancelled::Idle;
         self.editor.borrow_mut().set_text("");
         if let Some(attachments) = &mut self.attachments {
             attachments.clear();
@@ -952,6 +1077,7 @@ impl Composer {
 
     fn clear_input(&mut self) {
         self.config = None;
+        self.reclaim = ReclaimCancelled::Idle;
         self.editor.borrow_mut().set_text("");
         if let Some(attachments) = &mut self.attachments {
             attachments.clear();
@@ -962,6 +1088,7 @@ impl Composer {
 
     fn restore_body(&mut self, body: DraftBody) {
         self.parked = body.follow_ups;
+        self.reclaim = ReclaimCancelled::Idle;
         if !self.questionnaire.restore_aside_text(&body.text) {
             self.editor.borrow_mut().set_text(&body.text);
         }

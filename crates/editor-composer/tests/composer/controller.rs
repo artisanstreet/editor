@@ -800,3 +800,100 @@ fn typing_after_sending_while_an_image_uploads_keeps_the_message_unsent() {
         "a message still being written is not sent out from under the writer"
     );
 }
+
+fn cancelled_user_item(
+    id: &str,
+    thread: &str,
+    text: &str,
+    images: Vec<artisan_api::BlobHash>,
+) -> artisan_api::Item {
+    artisan_api::Item {
+        id: artisan_api::ItemId(id.to_owned()),
+        thread_id: ThreadId(thread.to_owned()),
+        run_id: None,
+        parent_id: None,
+        position: 1,
+        status: artisan_api::Status::Cancelled,
+        kind: artisan_api::ItemKind::UserMessage {
+            text: artisan_api::TextContent::Inline(text.to_owned()),
+            images,
+            steer: false,
+            sender: None,
+            from_agent: None,
+        },
+        seq: 10,
+        created_at: 1,
+        updated_at: 1,
+    }
+}
+
+#[test]
+fn stop_reclaims_undelivered_cancelled_message_and_images_into_empty_composer() {
+    use artisan_api::BlobHash;
+    let (mut forge, mut sessions, _directory) = chat_host();
+    let mut composer = super::Composer::new(&forge.core, &mut sessions, chat_target(&forge));
+    load_chat_draft(&mut forge, &mut composer);
+    let host_id = forge.host.clone();
+
+    let item = cancelled_user_item(
+        "m1",
+        "chat",
+        "This should be Add new...",
+        vec![BlobHash("a".repeat(64))],
+    );
+    assert!(
+        !composer.reclaim_cancelled_item(&host_id, &item),
+        "without a stop, cancelled items are not reclaimed"
+    );
+
+    let host = forge.core.host(&host_id).unwrap();
+    assert!(composer.stop(host).is_some());
+    assert!(composer.reclaim_cancelled_item(&host_id, &item));
+    assert_eq!(composer.editor.borrow().text(), "This should be Add new...");
+    assert_eq!(
+        composer
+            .attachments
+            .as_ref()
+            .and_then(|attachments| attachments.ready_hashes()),
+        Some(vec![BlobHash("a".repeat(64))])
+    );
+    assert!(
+        !composer.reclaim_cancelled_item(&host_id, &item),
+        "duplicate cancelled item events are ignored"
+    );
+
+    let second = cancelled_user_item("m2", "chat", "also fix spacing", vec![]);
+    assert!(composer.reclaim_cancelled_item(&host_id, &second));
+    assert_eq!(
+        composer.editor.borrow().text(),
+        "This should be Add new...\n\nalso fix spacing"
+    );
+}
+
+#[test]
+fn stop_does_not_overwrite_existing_or_new_draft_when_reclaiming() {
+    let (mut forge, mut sessions, _directory) = chat_host();
+    let mut composer = super::Composer::new(&forge.core, &mut sessions, chat_target(&forge));
+    load_chat_draft(&mut forge, &mut composer);
+    let host_id = forge.host.clone();
+
+    composer.editor.borrow_mut().set_text("already typing");
+    let host = forge.core.host(&host_id).unwrap();
+    assert!(composer.stop(host).is_some());
+    let item = cancelled_user_item("m1", "chat", "cancelled text", vec![]);
+    assert!(!composer.reclaim_cancelled_item(&host_id, &item));
+    assert_eq!(composer.editor.borrow().text(), "already typing");
+
+    composer.editor.borrow_mut().set_text("");
+    composer.edited();
+    composer.cancelling = false;
+    let host = forge.core.host(&host_id).unwrap();
+    assert!(composer.stop(host).is_some());
+    composer
+        .editor
+        .borrow_mut()
+        .set_text("typed while stopping");
+    composer.edited();
+    assert!(!composer.reclaim_cancelled_item(&host_id, &item));
+    assert_eq!(composer.editor.borrow().text(), "typed while stopping");
+}

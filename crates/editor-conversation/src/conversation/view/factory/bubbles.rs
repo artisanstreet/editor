@@ -44,9 +44,29 @@ pub(super) fn media_width(reading: f32, slot: Slot, lists: usize) -> f32 {
     lists.mul_add(-editor_ui::markdown::LIST_INDENT, width)
 }
 
+pub(super) fn cancelled_note(theme: &ArtisanTheme) -> aqua_ui::element::Element {
+    editor_ui::kit::TextRole::Caption
+        .text(theme, "Not sent")
+        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+        .build()
+}
+
+pub(super) fn dim_cancelled(
+    element: aqua_ui::element::Element,
+    cancelled: bool,
+) -> aqua_ui::element::Element {
+    if cancelled {
+        element.style(
+            aqua_ui::style::Style::new().opacity(editor_ui::theme::Opacity::Disabled.alpha()),
+        )
+    } else {
+        element
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
-    reason = "the user bubble composes content, segment position, attachments, sender and sticker"
+    reason = "the user bubble composes content, segment position, attachments, sender, sticker and cancelled state"
 )]
 pub(super) fn user_bubble(
     content: aqua_ui::element::Element,
@@ -56,6 +76,7 @@ pub(super) fn user_bubble(
     attachments: Option<aqua_ui::element::Element>,
     sender: Option<artisan_api::EngineId>,
     sticker: Option<editor_ui::sticker::Sticker>,
+    cancelled: bool,
     theme: &ArtisanTheme,
 ) -> aqua_ui::element::Element {
     use aqua_ui::element::Box as UiBox;
@@ -67,12 +88,17 @@ pub(super) fn user_bubble(
         .spaced(Space::S8)
         .style(Style::new().align(aqua_ui::AlignItems::END));
     if let Some(attachments) = attachments {
-        root = root.child(attachments);
+        root = root.child(dim_cancelled(attachments, cancelled));
     }
     if empty {
+        if cancelled {
+            root = root.child(cancelled_note(theme));
+        }
         return root.build();
     }
-    let bubble = ChatBubbleSegment::new(*theme, SegmentPosition::for_index(index, count), content)
+    let position = SegmentPosition::for_index(index, count);
+    let bubble = ChatBubbleSegment::new(*theme, position, content)
+        .cancelled(cancelled)
         .sticker(sticker);
     let bubble = match sender {
         Some(engine) => bubble.tinted(match engine {
@@ -83,7 +109,11 @@ pub(super) fn user_bubble(
         }),
         None => bubble,
     };
-    root.child(bubble.build()).build()
+    root = root.child(bubble.build());
+    if cancelled && index + 1 >= count {
+        root = root.child(cancelled_note(theme));
+    }
+    root.build()
 }
 
 pub(super) fn bubble_sender(
