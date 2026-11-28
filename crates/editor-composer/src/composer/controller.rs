@@ -3,6 +3,7 @@ use super::{
     draft_body::{DraftBody, DraftPath, SavedFile},
     draft_session::{DraftSession, LostKey, Submission, Unrecovered},
     mentions::Mentions,
+    model_switch::{Compaction, SwitchChoice, SwitchPrompt},
     persistence::{DraftLease, DraftSessions, SessionEvent},
     picker::{Menu, PickerState},
     questionnaire::QuestionnairePanel,
@@ -23,6 +24,7 @@ enum TurnCall {
     Continue,
     ClearGoal,
     Unpark,
+    Compact,
 }
 
 impl TurnCall {
@@ -32,6 +34,7 @@ impl TurnCall {
             Self::Continue => TurnAction::Continue,
             Self::ClearGoal => TurnAction::ClearGoal,
             Self::Unpark => TurnAction::Unpark,
+            Self::Compact => TurnAction::Compact,
         }
     }
 }
@@ -42,6 +45,7 @@ enum TurnAction {
     Continue,
     ClearGoal,
     Unpark,
+    Compact,
     Permissions,
 }
 struct TurnCompletion {
@@ -138,6 +142,7 @@ pub struct Composer {
     pub(crate) cleared: Option<std::time::Instant>,
     parked: Vec<DraftBody>,
     pub notice: Option<editor_core::Problem>,
+    pub(crate) switch_prompt: Option<SwitchPrompt>,
     pub refused: Option<SendRefusal>,
     send_state: SendState,
     pub session: Option<DraftLease>,
@@ -206,6 +211,7 @@ impl Composer {
             cleared: None,
             parked: Vec::new(),
             notice,
+            switch_prompt: None,
             refused: None,
             send_state: SendState::Idle,
             session,
@@ -260,6 +266,7 @@ impl Composer {
         self.file_shake = None;
         self.restore_revision = Some(0);
         self.notice = None;
+        self.switch_prompt = None;
         self.refused = None;
         self.send_state = SendState::Idle;
         self.config = None;
@@ -363,7 +370,7 @@ impl Composer {
             TurnCall::Continue if self.continuing => return None,
             TurnCall::Stop => self.cancelling = true,
             TurnCall::Continue => self.continuing = true,
-            TurnCall::ClearGoal | TurnCall::Unpark => {}
+            TurnCall::ClearGoal | TurnCall::Unpark | TurnCall::Compact => {}
         }
         let thread = thread.clone();
         let client = host.client.clone();
@@ -376,6 +383,19 @@ impl Composer {
                 TurnCall::Stop | TurnCall::Unpark => client.cancel(&thread).await,
                 TurnCall::Continue => client.continue_turn(&thread).await,
                 TurnCall::ClearGoal => client.clear_goal(&thread).await,
+                TurnCall::Compact => client
+                    .send_message(
+                        &thread,
+                        &SendMessage {
+                            id: ItemId::new(),
+                            text: "/compact".to_owned(),
+                            images: Vec::new(),
+                            config: None,
+                            draft: None,
+                        },
+                    )
+                    .await
+                    .map(drop),
             };
             let error = result.err().map(TurnFailure::Call);
             delivery
@@ -445,7 +465,10 @@ impl Composer {
             match completion.action {
                 TurnAction::Stop => self.cancelling = false,
                 TurnAction::Continue => self.continuing = false,
-                TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
+                TurnAction::ClearGoal
+                | TurnAction::Unpark
+                | TurnAction::Compact
+                | TurnAction::Permissions => {}
             }
             match &completion.error {
                 Some(TurnFailure::Call(error)) => {
@@ -535,9 +558,42 @@ impl Composer {
             return None;
         }
         let config = PickerState::model_config(host, self.effective_config(host), engine, id)?;
+        let prompt = match &self.target {
+            ComposerTarget::Thread { thread, .. } => host.runs.get(thread).and_then(|run| {
+                super::model_switch::prompt(run, host.engines.get(&run.engine), config.clone())
+            }),
+            ComposerTarget::NewThread { .. } => None,
+        };
+        if let Some(prompt) = prompt {
+            self.picker.menu = None;
+            self.switch_prompt = Some(prompt);
+            return None;
+        }
         self.config = Some(config.clone());
         self.edited();
         Some(config)
+    }
+
+    pub(crate) fn resolve_switch(
+        &mut self,
+        host: &HostData,
+        choice: SwitchChoice,
+    ) -> Option<EngineConfig> {
+        let prompt = self.switch_prompt.take()?;
+        if !self.matches_host(host) || !self.draft_editable() {
+            return None;
+        }
+        match (choice, prompt.compaction) {
+            (SwitchChoice::Cancel, _) => return None,
+            (SwitchChoice::CompactFirst, Compaction::Available) => {
+                self.turn_action(host, TurnCall::Compact);
+            }
+            (SwitchChoice::CompactFirst, Compaction::BusyRun) | (SwitchChoice::SwitchAnyway, _) => {
+            }
+        }
+        self.config = Some(prompt.config.clone());
+        self.edited();
+        Some(prompt.config)
     }
 
     pub(crate) fn choose_project(&mut self, id: ProjectId) {
@@ -1450,6 +1506,7 @@ fn turn_problem(
         (TurnAction::Continue, _) => "Couldn't continue.",
         (TurnAction::ClearGoal, _) => "Couldn't clear the goal.",
         (TurnAction::Unpark, _) => "Couldn't cancel the pickup.",
+        (TurnAction::Compact, _) => "Couldn't compact the conversation.",
         (TurnAction::Permissions, _) => "Couldn't change access.",
     };
     Some(editor_core::Problem::calling_forge(headline, error))

@@ -521,6 +521,8 @@ impl<V: SectionViews> ShellApplication<V> {
                     workspace
                         .sync_terminal_dialog(self.ui.ui_mut(), &self.shell.preferences.theme());
                     workspace.inspector.reveal_tail(self.ui.ui_mut());
+                    workspace
+                        .sync_composer_dialog(self.ui.ui_mut(), &self.shell.preferences.theme());
                     if workspace.sync_composer_popups(
                         &self.shell.core,
                         self.ui.ui_mut(),

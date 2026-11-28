@@ -22,6 +22,7 @@ mod popups;
 mod project;
 mod questionnaire;
 mod surface;
+mod switch_dialog;
 pub(crate) use self::model_menu::model_menu;
 use self::model_menu::{
     MODEL_BAR_GAP, MODEL_BAR_HEIGHT, MODEL_EDGE_BOTTOM, MODEL_EDGE_TOP, MODEL_ITEM_GAP,
@@ -83,6 +84,7 @@ pub enum ComposerAction {
     },
     ClosePicker,
     DismissMentions,
+    ResolveSwitch(super::model_switch::SwitchChoice),
     ChooseModel {
         engine: artisan_api::EngineId,
         id: String,
@@ -641,6 +643,7 @@ pub struct ComposerOwner {
     model_tab: std::cell::RefCell<super::sliding_tab::SlidingTab>,
     last_visible: std::cell::RefCell<ComposerVisible>,
     tooltip: std::cell::RefCell<super::picker::PickerTooltip>,
+    switch_dialog: Option<(super::model_switch::SwitchPrompt, editor_ui::dialog::DialogHost)>,
 }
 
 impl std::fmt::Debug for ComposerOwner {
@@ -926,6 +929,7 @@ impl ComposerOwner {
             model_tab: std::cell::RefCell::new(super::sliding_tab::SlidingTab::new(0.0, 0.0)),
             last_visible: std::cell::RefCell::new(last_visible),
             tooltip: std::cell::RefCell::new(super::picker::PickerTooltip::default()),
+            switch_dialog: None,
         }
     }
 
