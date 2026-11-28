@@ -39,6 +39,8 @@ pub enum ResourceError {
     TooLarge { path: PathBuf, bytes: u64 },
     #[error("{} is outside the thread's folder", path.display())]
     Outside { path: PathBuf },
+    #[error("{} isn't an image, and only images are shown from outside the thread's folder", path.display())]
+    NotAnImage { path: PathBuf },
     #[error("{} is reached through a symbolic link", path.display())]
     Linked {
         path: PathBuf,
@@ -504,6 +506,75 @@ impl Access {
     pub(crate) fn read(&self, live: &Path) -> Result<Vec<u8>, ResourceError> {
         self.read_located(&self.locate(live)?)
     }
+
+    pub(crate) fn read_shown(&self, live: &Path) -> Result<Vec<u8>, ResourceError> {
+        match self.read(live) {
+            Err(ResourceError::Outside { .. } | ResourceError::Linked { .. }) => {
+                self.read_loose_image(live)
+            }
+            read => read,
+        }
+    }
+
+    fn read_loose_image(&self, live: &Path) -> Result<Vec<u8>, ResourceError> {
+        let resolved = std::fs::canonicalize(live)
+            .map(|resolved| without_verbatim_prefix(&resolved))
+            .map_err(|error| io_failure(live, error))?;
+        self.may_read(&resolved)?;
+        let file = open_kept(&resolved).map_err(|error| io_failure(&resolved, error))?;
+        #[cfg(windows)]
+        {
+            let opened = beneath::final_path(&file).map_err(|source| ResourceError::Read {
+                path: resolved.clone(),
+                source,
+            })?;
+            self.may_read(&without_verbatim_prefix(&opened))?;
+        }
+        let bytes = read_regular(file, &resolved)?;
+        if is_image(&bytes) {
+            Ok(bytes)
+        } else {
+            Err(ResourceError::NotAnImage { path: resolved })
+        }
+    }
+}
+
+const ISO_MEDIA_IMAGE_BRANDS: [&[u8; 4]; 10] = [
+    b"avif", b"avis", b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1",
+];
+const BMP_HEADER_SIZES: [u32; 7] = [12, 40, 52, 56, 64, 108, 124];
+
+fn is_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    let text = std::str::from_utf8(head).unwrap_or_else(|error| {
+        std::str::from_utf8(&head[..error.valid_up_to()])
+            .expect("invariant: the prefix up to valid_up_to is UTF-8")
+    });
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    text.starts_with('<') && text.contains("<svg")
+}
+
+fn is_image(bytes: &[u8]) -> bool {
+    let at = |start: usize, length: usize| bytes.get(start..start + length);
+    let le_u16 = |start| at(start, 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let le_u32 = |start| at(start, 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || (bytes.starts_with(b"RIFF") && at(8, 4) == Some(b"WEBP"))
+        || (bytes.starts_with(b"BM")
+            && le_u32(14).is_some_and(|size| BMP_HEADER_SIZES.contains(&size)))
+        || bytes.starts_with(b"II*\0")
+        || bytes.starts_with(b"MM\0*")
+        || (bytes.starts_with(&[0, 0, 1, 0]) && le_u16(4).is_some_and(|count| count > 0))
+        || (at(4, 4) == Some(b"ftyp")
+            && at(8, 4).is_some_and(|brand| {
+                ISO_MEDIA_IMAGE_BRANDS
+                    .iter()
+                    .any(|known| known.as_slice() == brand)
+            }))
+        || is_svg(bytes)
 }
 
 fn io_failure(path: &Path, error: std::io::Error) -> ResourceError {
@@ -587,7 +658,7 @@ fn keep(target: &Path, bytes: &[u8]) {
 }
 
 fn snapshot(live: &Path, access: &Access, target: &Path) -> Result<(), ResourceError> {
-    let bytes = access.read(live)?;
+    let bytes = access.read_shown(live)?;
     keep(target, &bytes);
     Ok(())
 }
@@ -629,7 +700,7 @@ impl Hub {
             if let Some(kept) = snapshot.as_deref().filter(|kept| kept.is_file()) {
                 return read_kept(kept);
             }
-            let bytes = hub.resource_access(&folder).read(&live?)?;
+            let bytes = hub.resource_access(&folder).read_shown(&live?)?;
             if let Some(target) = snapshot.as_deref().filter(|_| keep_at_view) {
                 keep(target, &bytes);
             }
