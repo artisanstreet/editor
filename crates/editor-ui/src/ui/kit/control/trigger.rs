@@ -2,11 +2,11 @@ use super::focus_ring;
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::tokens::{IconSize, Radius, Space, TextRole};
-use crate::ui::theme::{ArtisanTheme, Opacity};
+use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
 use aqua_core::{CursorIcon, Insets, Role};
-use aqua_text::overflow::OverflowMode;
+use aqua_text::{StyledSpan, overflow::OverflowMode};
 use aqua_ui::AlignItems;
-use aqua_ui::element::{Box as UiBox, Button, Element, Key, Text};
+use aqua_ui::element::{Button, Element, Key, Text};
 use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 
@@ -106,18 +106,49 @@ impl Trigger {
         self
     }
 
-    fn text(theme: &ArtisanTheme, words: String, muted: bool) -> Element {
-        let color = if muted {
+    fn color_channels(color: Oklch) -> [f32; 4] {
+        let color = color.to_reference_text_color();
+        [
+            color.hue_degrees,
+            color.saturation,
+            color.lightness,
+            color.alpha,
+        ]
+    }
+
+    fn words(theme: &ArtisanTheme, label: &str, detail: Option<&str>, muted: bool) -> Element {
+        let primary = if muted {
             theme.colors.text_muted
         } else {
             theme.colors.text
         };
-        Text::new(words)
-            .text_style(TextRole::Label.style(theme))
-            .overflow(OverflowMode::EndEllipsis)
-            .style(Style::new().min_width(Length::Px(0.0)).text_wrap(false))
-            .gpui_source_color(color.to_reference_text_color())
-            .build()
+        let style = TextRole::Label.style(theme);
+        let box_style = Style::new()
+            .min_width(Length::Px(0.0))
+            .flex_shrink(1.0)
+            .text_wrap(false);
+        match detail {
+            Some(detail) => {
+                let spans = vec![
+                    StyledSpan::new(label, style.clone())
+                        .gpui_source_color(Self::color_channels(primary)),
+                    StyledSpan::new(format!(" {detail}"), style.clone())
+                        .gpui_source_color(Self::color_channels(theme.colors.text_muted)),
+                ];
+                Text::new(format!("{label} {detail}"))
+                    .text_style(style)
+                    .spans(spans)
+                    .overflow(OverflowMode::EndEllipsis)
+                    .style(box_style)
+                    .build()
+            }
+            None => Text::new(label.to_owned())
+                .text_style(style)
+                .overflow(OverflowMode::EndEllipsis)
+                .style(box_style)
+                .gpui_source_color(primary.to_reference_text_color())
+                .build(),
+        }
     }
 
     #[must_use]
@@ -156,23 +187,18 @@ impl Trigger {
             Some(Lead::Avatar(avatar)) => button = button.child(avatar),
             None => {}
         }
-        let mut words = UiBox::new()
-            .gap(Space::S6.px())
-            .style(
-                Style::new()
-                    .min_width(Length::Px(0.0))
-                    .flex_shrink(1.0)
-                    .align(AlignItems::CENTER),
-            )
-            .child(Self::text(&theme, self.label.clone(), self.muted));
-        if let Some(detail) = self.detail {
-            words = words.child(Self::text(&theme, detail, true));
-        }
-        button = button.child(words.build()).child(source_asset_glyph(
-            AssetId::TABLER_SELECTOR,
-            IconSize::Sm.px(),
-            theme.colors.text_muted.to_reference_paint(),
-        ));
+        button = button
+            .child(Self::words(
+                &theme,
+                &self.label,
+                self.detail.as_deref(),
+                self.muted,
+            ))
+            .child(source_asset_glyph(
+                AssetId::TABLER_SELECTOR,
+                IconSize::Sm.px(),
+                theme.colors.text_muted.to_reference_paint(),
+            ));
         if self.disabled {
             button = button.opacity(Opacity::Disabled.alpha());
         } else if let Some(handler) = self.on_activate {

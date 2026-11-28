@@ -617,7 +617,7 @@ fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
         model: Some("gemini-4-argon".into()),
         ..artisan_api::EngineConfig::new(artisan_api::EngineId::Antigravity)
     };
-    let argon_items = super::model_menu::model_menu_items(host, &picker, Some(argon));
+    let argon_items = super::model_menu::model_menu_items(host, &picker, Some(argon.clone()));
     let effort = argon_items
         .iter()
         .find(|item| item.pane == Some(Axis::Thinking))
@@ -630,6 +630,77 @@ fn model_picker_locks_single_option_axes_and_labels_unset_effort_as_default() {
         .unwrap();
     assert_eq!(context.value, "1M");
     assert!(context.locked);
+    assert_locked_axis_and_plain_model_tab(host, &picker, &argon, &argon_items);
+}
+
+fn assert_locked_axis_and_plain_model_tab(
+    host: &editor_core::HostData,
+    picker: &crate::composer::picker::PickerState,
+    current: &artisan_api::EngineConfig,
+    items: &[super::ModelMenuItem],
+) {
+    let context_index = items
+        .iter()
+        .position(|item| item.pane == Some(crate::composer::picker::Axis::Context))
+        .unwrap();
+    let mut mounted = Mounted::new(|dispatch| {
+        super::model_menu::model_menu(
+            &ArtisanTheme::resolved(),
+            host,
+            picker,
+            Some(current),
+            aqua_core::Size::new(600.0, 600.0),
+            super::ModelMenuFrame {
+                items: items.to_vec(),
+                pane: None,
+                scroll: 0.0,
+                spied: Some(artisan_api::EngineId::Antigravity),
+                tab: crate::composer::sliding_tab::SlidingTab::new(0.0, 48.0),
+                engine_light: None,
+            },
+            (host.instance(), 0),
+            &dispatch,
+        )
+    });
+    let has_media = |tree: &aqua_ui::tree::UiTree, root: aqua_core::NodeId| {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            if let Some(node) = tree.get(id) {
+                if matches!(node.kind, aqua_ui::tree::NodeKind::Media(_)) {
+                    return true;
+                }
+                stack.extend(node.children.iter().copied());
+            }
+        }
+        false
+    };
+    let model_tab = mounted
+        .app
+        .tree()
+        .find_by_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+            "composer-pane-0",
+        )))
+        .unwrap();
+    assert!(
+        !has_media(mounted.app.tree(), model_tab),
+        "model label tab must not render a leading icon"
+    );
+    let context_key = format!("composer-pane-{context_index}");
+    let context_tab = mounted
+        .app
+        .tree()
+        .find_by_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+            context_key.as_str(),
+        )))
+        .unwrap();
+    let context_node = mounted.app.tree().get(context_tab).unwrap();
+    assert!(
+        !has_media(mounted.app.tree(), context_tab),
+        "locked axis tab must not render a lock icon"
+    );
+    assert!(context_node.semantics.disabled);
+    assert_eq!(context_node.paint().opacity, None);
+    assert!(!mounted.app.focus_key(context_key.as_str()));
 }
 
 fn card_with(attachments: Option<Element>) -> Element {
