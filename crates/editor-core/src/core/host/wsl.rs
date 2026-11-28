@@ -133,11 +133,15 @@ impl HostData {
             crate::core::ConnectionStatus::Live => None,
             crate::core::ConnectionStatus::Connecting
             | crate::core::ConnectionStatus::Reconnecting { .. } => Some("Connecting…"),
-            crate::core::ConnectionStatus::Offline { .. } => Some(match &self.wsl {
-                Some(wsl) if !wsl.running => "WSL stopped",
-                Some(_) => "Forge stopped",
-                None => "Offline",
-            }),
+            crate::core::ConnectionStatus::Offline { fault, .. } => {
+                Some(match (&self.wsl, fault) {
+                    (Some(wsl), _) if !wsl.running => "WSL stopped",
+                    (Some(_), Some(crate::core::client::ForgeFault::Unreachable)) => {
+                        "Forge stopped"
+                    }
+                    (Some(_) | None, _) => "Offline",
+                })
+            }
         }
     }
     pub fn start_wsl(&mut self) {
